@@ -302,3 +302,9 @@ AI 客户端 ⇄ MCP stdio (薄桥) ⇄ HTTP + Bearer Token ⇄ 开放网关
 ### 桌面客户端版本清单
 
 发布流水线会在每个 Release 附带 `latest.json`(版本号、三平台下载地址、sha256),设置 → 系统设置 → 检查更新即基于它(优先 GitHub API)提示新版本。
+
+---
+
+## 决策工作台
+
+侧栏「决策」接入 daily_stock_analysis 的多市场研报、情报、定时推送、问股和机器人命令。实现和与现有页面的分工见 [dsa-integration.md](./dsa-integration.md)。看板、个股分析、策略、回测、监控和 AI 助手保持原样。

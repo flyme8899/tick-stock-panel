@@ -95,6 +95,11 @@ backend/_desktop_run.log
 reports/tickflow_pro_probe/
 .cursor/debug-*.log
 
+# DSA sidecar 的虚拟环境和本地库（源码快照本身要入库）
+vendor/daily_stock_analysis/.venv/
+vendor/daily_stock_analysis/data/
+vendor/daily_stock_analysis/logs/
+
 # ===== 打包产物 (本地构建的安装包,不入库) =====
 backend/TickFlowStockPanel-win-x64.zip
 backend/TickFlowStockPanel-macos.zip

@@ -650,6 +650,7 @@ PORT=3018                      # 服务端口
 | [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |
 | [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 stock-sdk / fuyao 为参考实现)                  |
 | [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
+| [docs/dsa-integration.md](./docs/dsa-integration.md)                                               | 决策工作台：多市场 AI 研报、情报、定时推送和问股                     |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 
 ---
@@ -685,6 +686,8 @@ PORT=3018                      # 服务端口
 ## 📄 License
 
 [MIT](./LICENSE) © tick-stock-panel contributors
+
+决策工作台引用 [daily_stock_analysis](https://github.com/ZhuLinsen/daily_stock_analysis)（MIT，Copyright (c) 2026 ZhuLinsen）。源码快照和许可文本在 `vendor/daily_stock_analysis/`，说明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
 
 本项目依赖 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 提供数据服务,使用前请遵守其服务条款
 
