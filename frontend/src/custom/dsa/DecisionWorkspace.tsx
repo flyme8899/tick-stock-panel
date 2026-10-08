@@ -339,8 +339,8 @@ function Reports({ sample, reachable, initialCode }: { sample: boolean; reachabl
             记录编号
             <input className={cn(fieldCls, 'ml-1.5 w-24 font-mono')} value={recordId} onChange={event => setRecordId(event.target.value)} aria-label="记录编号" />
           </label>
-          {recordId && recordId !== '1' && <ShareImage recordId={recordId} />}
         </form>
+        {recordId && recordId !== '1' && <ShareImage recordId={recordId} />}
         {analyze.isError && <div className="mt-2"><Failure error={analyze.error} /></div>}
         {analyze.isSuccess && <p className="mt-2 text-xs text-secondary">已提交。任务状态可在调度页查看，完成后用记录编号打开全文。</p>}
       </Panel>
@@ -376,12 +376,12 @@ function ShareImage({ recordId }: { recordId: string }) {
     },
   })
   return (
-    <div className="flex w-full flex-col gap-2">
+    <div className="mt-2 space-y-2">
       <button className={ghostBtn} type="button" disabled={load.isPending} onClick={() => load.mutate()}>
         <Images className="h-3.5 w-3.5" />
         {load.isPending ? '生成中' : '分享图'}
       </button>
-      {message && <p className="max-w-md text-[11px] leading-relaxed text-warning">{message}</p>}
+      {message && <p className="max-w-xl text-[11px] leading-relaxed text-warning">{message}</p>}
       {preview && (
         <a href={preview} download={`dsa-report-${recordId}.png`} className="block max-w-sm">
           <img src={preview} alt="报告分享图" className="rounded-lg border border-border" />
@@ -662,7 +662,7 @@ function Schedule({ reachable }: { reachable: boolean }) {
           <div className="flex flex-wrap items-center gap-2">
             <label className="text-[11px] text-muted">
               上海时间
-              <input className={cn(fieldCls, 'ml-1.5 w-28 font-mono')} type="time" value={time} onChange={event => setTime(event.target.value)} aria-label="定时时刻" required />
+              <input className={cn(fieldCls, 'ml-1.5 w-28 font-mono')} value={time} onChange={event => setTime(event.target.value)} placeholder="18:00" aria-label="定时时刻" inputMode="numeric" maxLength={5} required />
             </label>
             <label className="text-[11px] text-muted">
               复盘市场
