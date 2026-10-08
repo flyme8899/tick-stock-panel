@@ -53,7 +53,12 @@ def enabled() -> bool:
 
 def timeout_for(path: str) -> float:
     raw = os.getenv("DSA_TIMEOUT_SECONDS", "").strip()
-    default = 120.0 if path.split("/", 1)[0] in _LONG_PREFIXES else 20.0
+    if path.endswith("/share-image"):
+        default = 90.0
+    elif path.split("/", 1)[0] in _LONG_PREFIXES:
+        default = 120.0
+    else:
+        default = 20.0
     if not raw:
         return default
     try:

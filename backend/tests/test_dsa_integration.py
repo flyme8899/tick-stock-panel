@@ -1,13 +1,21 @@
 """Integration boundary for the vendored daily_stock_analysis sidecar."""
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.custom.dsa import EXTENSION_API_VERSION, EXTENSION_ID, setup
 from app.custom.dsa.commands import CommandError, execute, parse_command
-from app.custom.dsa.proxy import InvalidUpstreamPathError, UpstreamError, normalize_upstream_path
+from app.custom.dsa.proxy import (
+    InvalidUpstreamPathError,
+    UpstreamError,
+    normalize_upstream_path,
+    timeout_for,
+)
+from app.custom.dsa.schedule import ScheduleSettingsError, schedule_config_items
 from app.extensions.registry import BackendExtensionRegistrar
 
 
@@ -142,3 +150,140 @@ def test_etf_job_does_not_spawn_without_runtime(client: TestClient, monkeypatch:
     assert body["ok"] is False
     assert "DSA_PYTHON" in body["detail"]
     assert body["command"] == "python main.py --etf-rotation --no-notify"
+
+
+def test_schedule_items_cover_shanghai_trading_day_watchlist() -> None:
+    items = {
+        item["key"]: item["value"]
+        for item in schedule_config_items(
+            enabled=True,
+            time="18:05",
+            trading_days_only=True,
+            region="cn",
+            watchlist="600519，000858 600519",
+        )
+    }
+
+    assert items == {
+        "SCHEDULE_ENABLED": "true",
+        "SCHEDULE_TIME": "18:05",
+        "SCHEDULE_TIMES": "18:05",
+        "SCHEDULE_RUN_IMMEDIATELY": "false",
+        "TRADING_DAY_CHECK_ENABLED": "true",
+        "MARKET_REVIEW_ENABLED": "true",
+        "MARKET_REVIEW_REGION": "cn",
+        "STOCK_LIST": "600519,000858",
+    }
+
+
+def test_schedule_items_reject_empty_watchlist_and_bad_clock() -> None:
+    with pytest.raises(ScheduleSettingsError, match="自选"):
+        schedule_config_items(
+            enabled=True,
+            time="18:00",
+            trading_days_only=True,
+            region="cn",
+            watchlist="  ",
+        )
+    with pytest.raises(ScheduleSettingsError, match="HH:MM"):
+        schedule_config_items(
+            enabled=False,
+            time="25:99",
+            trading_days_only=True,
+            region="cn",
+            watchlist="600519",
+        )
+
+
+def test_schedule_put_rejects_bad_clock_without_upstream(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args, **_kwargs):
+        raise AssertionError("invalid schedule must not reach the sidecar")
+
+    monkeypatch.setattr("app.custom.dsa.schedule.forward", fail)
+
+    response = client.put(
+        "/api/dsa/schedule",
+        json={
+            "enabled": True,
+            "time": "25:00",
+            "trading_days_only": True,
+            "region": "cn",
+            "watchlist": "600519",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "HH:MM" in response.json()["detail"]
+
+
+def test_schedule_put_persists_through_system_config(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, bytes | None]] = []
+
+    def fake_forward(method, path, *, params=None, body=None, content_type=None):
+        calls.append((method, path, body))
+        if method == "GET" and path == "system/config":
+            payload = {
+                "config_version": "v1",
+                "items": [
+                    {"key": "SCHEDULE_ENABLED", "value": "true"},
+                    {"key": "SCHEDULE_TIME", "value": "18:05"},
+                    {"key": "SCHEDULE_TIMES", "value": "18:05"},
+                    {"key": "TRADING_DAY_CHECK_ENABLED", "value": "true"},
+                    {"key": "MARKET_REVIEW_REGION", "value": "cn"},
+                    {"key": "STOCK_LIST", "value": "600519,000858"},
+                ],
+            }
+            return 200, json.dumps(payload).encode(), "application/json", {}
+        if method == "PUT" and path == "system/config":
+            return 200, b'{"success": true, "warnings": []}', "application/json", {}
+        if method == "GET" and path == "system/scheduler/status":
+            payload = {
+                "enabled": True,
+                "running": False,
+                "schedule_times": ["18:05"],
+                "next_run_at": "2026-10-09T18:05:00",
+                "last_success_at": None,
+                "last_error": None,
+                "last_skip_reason": "non_trading_day",
+            }
+            return 200, json.dumps(payload).encode(), "application/json", {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr("app.custom.dsa.schedule.forward", fake_forward)
+
+    response = client.put(
+        "/api/dsa/schedule",
+        json={
+            "enabled": True,
+            "time": "18:05",
+            "trading_days_only": True,
+            "region": "cn",
+            "watchlist": "600519,000858",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["saved"] is True
+    assert body["timezone"] == "Asia/Shanghai"
+    assert body["scheduler"]["last_skip_reason"] == "non_trading_day"
+    put = next(call for call in calls if call[0] == "PUT")
+    payload = json.loads(put[2] or b"{}")
+    items = {item["key"]: item["value"] for item in payload["items"]}
+    assert payload["reload_now"] is True
+    assert items["SCHEDULE_ENABLED"] == "true"
+    assert items["MARKET_REVIEW_REGION"] == "cn"
+    assert items["TRADING_DAY_CHECK_ENABLED"] == "true"
+    assert items["STOCK_LIST"] == "600519,000858"
+    assert all(call[1] != "analysis/analyze" for call in calls)
+
+
+def test_share_image_timeout_exceeds_plain_history_reads() -> None:
+    assert timeout_for("history/12/markdown") == 20
+    assert timeout_for("history/12/share-image") == 90

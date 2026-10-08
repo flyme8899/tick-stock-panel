@@ -9,10 +9,16 @@ ENV TZ=Asia/Shanghai \
     WEBUI_PORT=8000 \
     DATABASE_PATH=/app/data/stock_analysis.db
 
+# wkhtmltopdf 的 Debian 包同时提供 wkhtmltoimage。分享图默认走这个引擎。
+# fonts-noto-cjk 提供 "Noto Sans CJK SC"，与分享图 HTML 的中文字体栈一致。
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && apt-get update && apt-get install -y --no-install-recommends \
         gcc curl wkhtmltopdf fontconfig fonts-noto-cjk \
         libjpeg62-turbo libxrender1 libxext6 \
+    && fc-cache -f \
+    && wkhtmltoimage --version \
+    && wkhtmltopdf --version \
+    && fc-list :lang=zh family | grep -q "Noto Sans CJK SC" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

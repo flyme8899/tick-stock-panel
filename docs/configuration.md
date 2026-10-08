@@ -124,7 +124,7 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 ## 决策工作台（可选）
 
-侧栏「决策」调用 vendored daily_stock_analysis。变量、启动方式和与现有页面的分工见 [dsa-integration.md](./dsa-integration.md)。`DSA_BASE_URL` 为空字符串时页面保持未启用；服务没开时仍能打开页面，并显示未连接。
+侧栏「决策」调用 vendored daily_stock_analysis。变量、启动方式、上海时间定时任务和分享图见 [dsa-integration.md](./dsa-integration.md)。`DSA_BASE_URL` 为空字符串时页面保持未启用；服务没开时仍能打开页面，并显示未连接。`SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`STOCK_LIST` 也可在决策页「定时推送」里保存。
 
 ## 配置优先级
 

@@ -8,6 +8,7 @@ if (-not (Test-Path (Join-Path $Dsa 'main.py'))) {
 $Port = if ($env:DSA_PORT) { $env:DSA_PORT } else { '8000' }
 $Bind = if ($env:DSA_HOST) { $env:DSA_HOST } else { '127.0.0.1' }
 if (-not $env:ENV_FILE) { $env:ENV_FILE = Join-Path $Root '.env' }
+if (-not $env:TZ) { $env:TZ = 'Asia/Shanghai' }
 New-Item -ItemType Directory -Force -Path (Join-Path $Root 'data\dsa') | Out-Null
 if (-not $env:DATABASE_PATH) {
     $env:DATABASE_PATH = Join-Path $Root 'data\dsa\stock_analysis.db'

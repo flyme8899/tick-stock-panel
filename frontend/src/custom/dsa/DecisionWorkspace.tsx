@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
@@ -31,7 +31,10 @@ import {
   dsaEtfRotation,
   dsaUpstream,
   fetchDsaCatalog,
+  fetchDsaSchedule,
   fetchDsaStatus,
+  fetchShareImage,
+  saveDsaSchedule,
   isRecord,
   textOf,
   type DsaError,
@@ -233,7 +236,7 @@ function Dashboard({ sample, reachable }: { sample: boolean; reachable: boolean 
       </div>
       <Panel
         title={sample ? '今日决策 · 样例' : '今日决策'}
-        hint="按最近一次分析列出结论。点击代码可在「个股研报」查看全文。"
+        hint="手动分析和定时任务的结论都在这里。定时结果同时按 .env 里的通知渠道推送。"
         extra={<MarketReview reachable={reachable} />}
       >
         {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
@@ -336,12 +339,7 @@ function Reports({ sample, reachable, initialCode }: { sample: boolean; reachabl
             记录编号
             <input className={cn(fieldCls, 'ml-1.5 w-24 font-mono')} value={recordId} onChange={event => setRecordId(event.target.value)} aria-label="记录编号" />
           </label>
-          {recordId && recordId !== '1' && (
-            <a className={ghostBtn} href={`/api/dsa/upstream/history/${encodeURIComponent(recordId)}/share-image`}>
-              <Images className="h-3.5 w-3.5" />
-              分享图
-            </a>
-          )}
+          {recordId && recordId !== '1' && <ShareImage recordId={recordId} />}
         </form>
         {analyze.isError && <div className="mt-2"><Failure error={analyze.error} /></div>}
         {analyze.isSuccess && <p className="mt-2 text-xs text-secondary">已提交。任务状态可在调度页查看，完成后用记录编号打开全文。</p>}
@@ -350,6 +348,45 @@ function Reports({ sample, reachable, initialCode }: { sample: boolean; reachabl
         {report.isError && <Failure error={report.error} onRetry={() => report.refetch()} />}
         {markdown ? <MarkdownRenderer content={markdown} /> : <Notice>输入记录编号后加载 Markdown。样例模式下编号 1 展示版式。</Notice>}
       </Panel>
+    </div>
+  )
+}
+
+function ShareImage({ recordId }: { recordId: string }) {
+  const [preview, setPreview] = useState('')
+  const [message, setMessage] = useState('')
+  const previewRef = useRef('')
+  const replacePreview = (url: string) => {
+    if (previewRef.current) URL.revokeObjectURL(previewRef.current)
+    previewRef.current = url
+    setPreview(url)
+  }
+  useEffect(() => () => {
+    if (previewRef.current) URL.revokeObjectURL(previewRef.current)
+  }, [])
+  const load = useMutation({
+    mutationFn: () => fetchShareImage(recordId),
+    onSuccess: url => {
+      setMessage('')
+      replacePreview(url)
+    },
+    onError: (error: Error) => {
+      replacePreview('')
+      setMessage(error.message || '分享图暂时无法生成。请确认已安装 wkhtmltopdf 和中文字体。')
+    },
+  })
+  return (
+    <div className="flex w-full flex-col gap-2">
+      <button className={ghostBtn} type="button" disabled={load.isPending} onClick={() => load.mutate()}>
+        <Images className="h-3.5 w-3.5" />
+        {load.isPending ? '生成中' : '分享图'}
+      </button>
+      {message && <p className="max-w-md text-[11px] leading-relaxed text-warning">{message}</p>}
+      {preview && (
+        <a href={preview} download={`dsa-report-${recordId}.png`} className="block max-w-sm">
+          <img src={preview} alt="报告分享图" className="rounded-lg border border-border" />
+        </a>
+      )}
     </div>
   )
 }
@@ -563,14 +600,43 @@ function BotConsole({ commands }: { commands: { name: string; usage: string; sum
 }
 
 function Schedule({ reachable }: { reachable: boolean }) {
+  const qc = useQueryClient()
   const query = useQuery({
-    queryKey: QK.dsaUpstream('scheduler'),
-    queryFn: () => dsaUpstream<unknown>('system/scheduler/status'),
+    queryKey: QK.dsaSchedule,
+    queryFn: fetchDsaSchedule,
     enabled: reachable,
     retry: false,
   })
+  const [enabled, setEnabled] = useState(false)
+  const [time, setTime] = useState('18:00')
+  const [tradingDaysOnly, setTradingDaysOnly] = useState(true)
+  const [region, setRegion] = useState('cn')
+  const [watchlist, setWatchlist] = useState('')
+  useEffect(() => {
+    const data = query.data
+    if (!data) return
+    setEnabled(data.enabled)
+    setTime(data.time || '18:00')
+    setTradingDaysOnly(data.trading_days_only)
+    setRegion(data.region || 'cn')
+    setWatchlist(data.watchlist)
+  }, [query.data])
+  const save = useMutation({
+    mutationFn: () => saveDsaSchedule({
+      enabled,
+      time,
+      trading_days_only: tradingDaysOnly,
+      region,
+      watchlist,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.dsaSchedule })
+      qc.invalidateQueries({ queryKey: QK.dsaUpstream('history') })
+    },
+  })
   const run = useMutation({
     mutationFn: () => dsaUpstream('system/scheduler/run-now', { method: 'POST' }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: QK.dsaSchedule }) },
   })
   const [channel, setChannel] = useState('feishu')
   const test = useMutation({
@@ -579,15 +645,67 @@ function Schedule({ reachable }: { reachable: boolean }) {
       body: JSON.stringify({ channel }),
     }),
   })
+  const scheduler = query.data?.scheduler
+  const extraTimes = query.data?.extra_times ?? []
   return (
     <div className="space-y-3">
-      <Panel title="定时任务" hint="交易日调度在 DSA 进程里。TSP 的盘后管道不受这里影响。" extra={
+      <Panel title="定时任务" hint="时钟在决策服务进程里，时区 Asia/Shanghai。只在交易日分析下面的自选，结果进入决策仪表盘，并按已配置的通知渠道推送。TSP 的盘后管道不受这里影响。" extra={
         <button className={primaryBtn} type="button" disabled={!reachable || run.isPending} onClick={() => run.mutate()}>立即跑一轮</button>
       }>
-        {!reachable && <Notice>服务未连接，看不到调度状态。</Notice>}
+        {!reachable && <Notice>服务未连接。可先在 .env 写好 SCHEDULE_ENABLED、SCHEDULE_TIME 和 STOCK_LIST，再用 docker compose --profile dsa up --build 启动。</Notice>}
         {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
-        {query.data != null && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-secondary">{JSON.stringify(query.data, null, 2)}</pre>}
+        <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); save.mutate() }}>
+          <label className="flex items-center gap-2 text-xs text-secondary">
+            <input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} />
+            启用每日定时分析
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-[11px] text-muted">
+              上海时间
+              <input className={cn(fieldCls, 'ml-1.5 w-28 font-mono')} type="time" value={time} onChange={event => setTime(event.target.value)} aria-label="定时时刻" required />
+            </label>
+            <label className="text-[11px] text-muted">
+              复盘市场
+              <select className={cn(fieldCls, 'ml-1.5')} value={region} onChange={event => setRegion(event.target.value)} aria-label="复盘市场">
+                <option value="cn">A 股</option>
+                <option value="hk">港股</option>
+                <option value="us">美股</option>
+                <option value="cn,hk,us">中港美</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2 text-xs text-secondary">
+              <input type="checkbox" checked={tradingDaysOnly} onChange={event => setTradingDaysOnly(event.target.checked)} />
+              仅交易日
+            </label>
+          </div>
+          <label className="block text-[11px] text-muted">
+            自选列表
+            <textarea
+              className="mt-1 min-h-16 w-full rounded-btn border border-border bg-base px-2.5 py-2 font-mono text-xs text-foreground outline-none focus:border-accent"
+              value={watchlist}
+              onChange={event => setWatchlist(event.target.value)}
+              placeholder="600519,000858"
+              aria-label="自选列表"
+            />
+          </label>
+          <button className={primaryBtn} type="submit" disabled={!reachable || save.isPending}>保存定时设置</button>
+        </form>
+        {extraTimes.length > 1 && (
+          <p className="mt-2 text-[11px] leading-relaxed text-secondary">当前文件里还有多个时点：{extraTimes.join('、')}。保存后只保留上面这一个。</p>
+        )}
+        {scheduler && (
+          <dl className="mt-3 grid gap-1 text-[11px] text-secondary sm:grid-cols-2">
+            <div>调度{scheduler.enabled ? '已启动' : '未启动'}{scheduler.running ? '，本轮进行中' : ''}</div>
+            <div>下次 {scheduler.next_run_at ? scheduler.next_run_at.replace('T', ' ').slice(0, 16) : '—'}</div>
+            <div>上次成功 {scheduler.last_success_at ? scheduler.last_success_at.replace('T', ' ').slice(0, 16) : '—'}</div>
+            <div>最近跳过 {textOf(scheduler.last_skip_reason, '—')}</div>
+          </dl>
+        )}
+        {scheduler?.last_error && <p className="mt-2 text-[11px] leading-relaxed text-warning">{scheduler.last_error}</p>}
+        {save.isError && <div className="mt-2"><Failure error={save.error} /></div>}
+        {save.isSuccess && <p className="mt-2 text-xs text-secondary">已写入 .env，并让决策服务重新加载定时任务。启动服务本身不会立刻分析。</p>}
         {run.isError && <div className="mt-2"><Failure error={run.error} /></div>}
+        {run.isSuccess && <p className="mt-2 text-xs text-secondary">已提交本轮。完成后到决策仪表盘查看，通知发往已配置的渠道。</p>}
       </Panel>
       <Panel title="通知渠道试发" hint="渠道密钥写在 .env。这里只发一条测试，不改 TSP 监控推送。">
         <form className="flex gap-2" onSubmit={event => { event.preventDefault(); test.mutate() }}>

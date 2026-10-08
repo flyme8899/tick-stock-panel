@@ -16,10 +16,19 @@ from app.custom.dsa.proxy import (
     forward,
     health,
 )
+from app.custom.dsa.schedule import ScheduleSettingsError, load_schedule, save_schedule
 
 
 class BotCommandRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+
+
+class ScheduleRequest(BaseModel):
+    enabled: bool = False
+    time: str = "18:00"
+    trading_days_only: bool = True
+    region: str = "cn"
+    watchlist: str = ""
 
 
 def build_router() -> APIRouter:
@@ -49,6 +58,30 @@ def build_router() -> APIRouter:
     @router.post("/jobs/etf-rotation")
     def etf_rotation() -> dict:
         return run_etf_rotation()
+
+    @router.get("/schedule")
+    def get_schedule() -> dict:
+        try:
+            return load_schedule()
+        except ScheduleSettingsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except UpstreamError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @router.put("/schedule")
+    def put_schedule(body: ScheduleRequest) -> dict:
+        try:
+            return save_schedule(
+                enabled=body.enabled,
+                time=body.time,
+                trading_days_only=body.trading_days_only,
+                region=body.region,
+                watchlist=body.watchlist,
+            )
+        except ScheduleSettingsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except UpstreamError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @router.api_route(
         "/upstream/{path:path}",

@@ -143,6 +143,7 @@ export const QK = {
   // DSA sidecar。离线时页面仍可读目录；上游键把路径算进去，避免串数据。
   dsaStatus:            ['dsa-status'] as const,
   dsaCatalog:           ['dsa-catalog'] as const,
+  dsaSchedule:          ['dsa-schedule'] as const,
   dsaUpstream:          (key: string) => ['dsa-upstream', key] as const,
 } as const
 

@@ -51,7 +51,9 @@ services:
       - DATABASE_PATH=/app/data/stock_analysis.db
       - WEBUI_HOST=0.0.0.0
       - WEBUI_PORT=8000
+      - TZ=Asia/Shanghai
     volumes:
       - ./data/dsa:/app/data
-      - ./.env:/app/.env:ro
+      # 决策页保存定时设置时会写回这份文件。只读挂载会导致保存失败。
+      - ./.env:/app/.env
     restart: unless-stopped

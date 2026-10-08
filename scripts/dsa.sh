@@ -36,6 +36,7 @@ DSA_PORT="${DSA_PORT:-8000}"
 DSA_HOST="${DSA_HOST:-127.0.0.1}"
 
 export ENV_FILE="${ENV_FILE:-$ROOT/.env}"
+export TZ="${TZ:-Asia/Shanghai}"
 mkdir -p "$ROOT/data/dsa"
 if [[ -z "${DATABASE_PATH:-}" ]]; then
   from_file="$(read_dotenv_value DATABASE_PATH)"

@@ -35,7 +35,28 @@ Docker 在现有 compose 里加了可选服务，不改变原来的单服务启�
 docker compose --profile dsa up --build
 ```
 
-sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。
+sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。镜像时区是 `Asia/Shanghai`，本地 `scripts/dsa.sh` / `dsa.ps1` 在未设置 `TZ` 时也使用这个时区。
+
+## 定时分析
+
+不使用 GitHub Actions。每日任务由 sidecar 进程内的调度器执行：`python main.py --serve-only` 在 `SCHEDULE_ENABLED=true` 时会恢复任务，但不会在启动时立刻分析。
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `SCHEDULE_ENABLED` | `false` | `true` 后按下面的时刻跑 |
+| `SCHEDULE_TIME` | `18:00` | 上海时间，24 小时制 `HH:MM` |
+| `SCHEDULE_RUN_IMMEDIATELY` | `false` | 保持 `false`，避免重启容器就打一轮 |
+| `TRADING_DAY_CHECK_ENABLED` | `true` | 非交易日跳过 |
+| `MARKET_REVIEW_REGION` | `cn` | 大盘复盘市场。自托管 A 股用 `cn` |
+| `STOCK_LIST` | 空 | 要分析的代码，逗号分隔 |
+
+决策页「定时推送」可以改这些值。保存会写回 `.env`，并让 sidecar 重新加载调度，所以 Docker 里该文件是可写挂载。多个时点以页面上的一个时刻为准，保存后 `SCHEDULE_TIMES` 与 `SCHEDULE_TIME` 相同。
+
+结果写入 DSA 历史，决策仪表盘能看到。推送走 `.env` 里的 `FEISHU_WEBHOOK_URL`、`WECHAT_WEBHOOK_URL`、Telegram、Discord、Slack、邮件等，不改 TSP 设置页里的监控渠道。页面上的「生成研报」仍然 `notify=false`；定时任务和「立即跑一轮」按这些渠道发送。
+
+## 分享图
+
+`docker compose --profile dsa up --build` 使用的镜像安装了 `wkhtmltopdf`（含 `wkhtmltoimage`）和 `fonts-noto-cjk`，并执行 `fc-cache`。个股研报里的「分享图」在页内生成 PNG。工具缺失或渲染失败时，按钮下方显示上游返回的原因，不会把浏览器带到一份 JSON。
 
 ## 环境变量
 
@@ -52,7 +73,7 @@ sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis
 
 DSA 读取的密钥和数据源（写在同一个 `.env`，留空则对应能力失败并给出原因）：
 
-`STOCK_LIST`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`AIHUBMIX_KEY`、`ANSPIRE_API_KEYS`、`TUSHARE_TOKEN`、`TICKFLOW_API_KEY`、`SERPAPI_API_KEYS`、`TAVILY_API_KEYS`、`BOCHA_API_KEYS`、`BRAVE_API_KEYS`、`MINIMAX_API_KEYS`、`SEARXNG_BASE_URLS`、`WECHAT_WEBHOOK_URL`、`FEISHU_WEBHOOK_URL`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`DISCORD_WEBHOOK_URL`、`SLACK_BOT_TOKEN`、`SLACK_CHANNEL_ID`、`EMAIL_SENDER`、`EMAIL_PASSWORD`、`ETF_ROTATION_POOL`、`ETF_ROTATION_SAFE_ASSET`。
+`SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`SCHEDULE_RUN_IMMEDIATELY`、`TRADING_DAY_CHECK_ENABLED`、`MARKET_REVIEW_REGION`、`STOCK_LIST`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`AIHUBMIX_KEY`、`ANSPIRE_API_KEYS`、`TUSHARE_TOKEN`、`TICKFLOW_API_KEY`、`SERPAPI_API_KEYS`、`TAVILY_API_KEYS`、`BOCHA_API_KEYS`、`BRAVE_API_KEYS`、`MINIMAX_API_KEYS`、`SEARXNG_BASE_URLS`、`WECHAT_WEBHOOK_URL`、`FEISHU_WEBHOOK_URL`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`DISCORD_WEBHOOK_URL`、`SLACK_BOT_TOKEN`、`SLACK_CHANNEL_ID`、`EMAIL_SENDER`、`EMAIL_PASSWORD`、`ETF_ROTATION_POOL`、`ETF_ROTATION_SAFE_ASSET`。
 
 sidecar 启动时，如果 `OPENAI_API_KEY` 为空且 TSP 已配置 `AI_API_KEY`，会借用 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`。`TICKFLOW_API_KEY` 两边同名，直接共用。
 
@@ -94,7 +115,6 @@ sidecar 启动时，如果 `OPENAI_API_KEY` 为空且 TSP 已配置 `AI_API_KEY`
 
 - DSA 的 Web / 桌面皮肤不会作为第二个产品出现。
 - 上游测试、评测集和文档配图没有放进快照。升级时按 `VENDOR.md` 里的提交重新同步。
-- GitHub Actions 定时工作流没有搬进来。本地和 Docker 用 sidecar 的 `--serve-only` 加 DSA 自己的调度。
 - 决策信号在 `ADMIN_AUTH_ENABLED=true` 时还要上游登录态，通过 `DSA_UPSTREAM_COOKIE` 转发。
-- 分享图依赖 sidecar 镜像里的 `wkhtmltopdf`。只装了 Python 虚拟环境、没装该工具时，接口会返回失败原因。
+- 只跑 `scripts/dsa.sh` 创建的 Python 虚拟环境时，系统里若没有 `wkhtmltoimage` 和中文字体，分享图会在页面上提示失败。Docker 镜像已经带上这两个依赖。
 - AlphaSift、AlphaEvo 是 DSA 文档提到的相关项目，不属于这次快照。

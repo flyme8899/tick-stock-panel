@@ -88,6 +88,64 @@ export function dsaEtfRotation(): Promise<{ ok: boolean; detail: string; command
   return fetch('/api/dsa/jobs/etf-rotation', { method: 'POST' }).then(res => parse(res))
 }
 
+export interface DsaSchedule {
+  enabled: boolean
+  time: string
+  trading_days_only: boolean
+  region: string
+  watchlist: string
+  timezone: string
+  extra_times: string[]
+  saved?: boolean
+  warnings?: string[]
+  scheduler: {
+    enabled: boolean
+    running: boolean
+    schedule_times: string[]
+    next_run_at: string | null
+    last_run_at: string | null
+    last_success_at: string | null
+    last_error: string | null
+    last_skip_reason: string | null
+  }
+}
+
+export interface DsaScheduleInput {
+  enabled: boolean
+  time: string
+  trading_days_only: boolean
+  region: string
+  watchlist: string
+}
+
+const SHARE_IMAGE_FALLBACK = '分享图暂时无法生成。请确认决策服务已安装 wkhtmltopdf 和 Noto CJK 中文字体；Docker 部署执行 docker compose --profile dsa up --build 后重试。'
+
+export function fetchShareImage(recordId: string): Promise<string> {
+  return fetch(`/api/dsa/upstream/history/${encodeURIComponent(recordId)}/share-image`).then(async res => {
+    const contentType = res.headers.get('content-type') ?? ''
+    if (res.ok && contentType.includes('image/')) {
+      const blob = await res.blob()
+      if (blob.size === 0) throw new DsaError(SHARE_IMAGE_FALLBACK, res.status)
+      return URL.createObjectURL(blob)
+    }
+    let data: unknown = null
+    try { data = await res.json() } catch { data = null }
+    throw new DsaError(messageFrom(data, SHARE_IMAGE_FALLBACK), res.status)
+  })
+}
+
+export function fetchDsaSchedule(): Promise<DsaSchedule> {
+  return fetch('/api/dsa/schedule').then(res => parse<DsaSchedule>(res))
+}
+
+export function saveDsaSchedule(body: DsaScheduleInput): Promise<DsaSchedule> {
+  return fetch('/api/dsa/schedule', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(res => parse<DsaSchedule>(res))
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
