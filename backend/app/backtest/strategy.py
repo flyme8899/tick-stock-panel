@@ -543,7 +543,16 @@ def _resolve_base_columns(features: set[str]) -> frozenset[str]:
     if features & {"vol_ma5", "vol_ma10", "vol_ratio_5d"}:
         base.add("volume")
     base.update({"open", "high", "low", "close", "volume"})
-    return frozenset(base & storage)
+    # price_limit_pct 不是 parquet 存储列 —— 它是 matrix 构建期按
+    # symbol / 股票名称 / 交易日现场推导的虚拟列
+    # (见 matrix.py 的 write_numpy_price_limit_matrix: 涨跌幅限制取决于板块与
+    # ST/风险警示状态, 无法预先落盘)。
+    # 上面 `base & storage` 会把它过滤掉, 导致 matrix_columns 里没有它,
+    # 于是 near_limit_up 之类调用 matrix_feature(market, "price_limit_pct")
+    # 的策略直接抛 "unsupported matrix feature: price_limit_pct"。
+    # 构建器本来就支持这个字段, 只是没被传进去 —— 这里单独放行。
+    virtual_columns = features & {"price_limit_pct"}
+    return frozenset((base & storage) | virtual_columns)
 
 
 @dataclass

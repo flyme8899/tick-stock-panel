@@ -878,7 +878,19 @@ class BacktestEngine:
         minute_cache: dict = {}
         if config.minute_fill:
             trigger_times, trigger_assets = np.nonzero(matrix.entry | matrix.exit)
-            dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
+            # 修复: 只收集「信号日」的分钟数据, 而 open_t+1 / signal_next_minute
+            # 等口径的实际成交发生在信号日的下一个交易日, 导致 _refill 查 cache
+            # 必然 miss 并静默降级回日线价 —— minute_fill 形同虚设。
+            # 这里把每个触发日的下一格(下一交易日)也纳入预加载。
+            labels = matrix.timestamp_labels
+            n_times = len(labels)
+            dates = set()
+            for t in trigger_times:
+                ti = int(t)
+                if 0 <= ti < n_times:
+                    dates.add(labels[ti][:10])
+                if 0 <= ti + 1 < n_times:
+                    dates.add(labels[ti + 1][:10])
             symbols = {matrix.symbols[int(a)] for a in trigger_assets}
             if dates and symbols:
                 loaded = self._load_minute_for_fills(self.repo, list(symbols), dates, config.asset_type)
