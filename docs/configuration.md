@@ -122,6 +122,10 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 ---
 
+## 决策工作台（可选）
+
+侧栏「决策」调用 vendored daily_stock_analysis。变量、启动方式和与现有页面的分工见 [dsa-integration.md](./dsa-integration.md)。`DSA_BASE_URL` 为空字符串时页面保持未启用；服务没开时仍能打开页面，并显示未连接。
+
 ## 配置优先级
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`

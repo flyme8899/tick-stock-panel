@@ -5,7 +5,7 @@
 #   .\dev.ps1 -BackendPort 8000 -FrontendPort 5173
 #   $env:BACKEND_PORT='8000'; .\dev.ps1
 #
-# Ctrl-C closes both processes.
+# Ctrl-C closes both processes. DSA_AUTOSTART=1 also starts scripts\dsa.ps1.
 #
 # If you see "running scripts is disabled":
 #   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
@@ -231,6 +231,14 @@ function Read-JobPid($file) {
 $backendChildPid  = Read-JobPid $backendPidFile
 $frontendChildPid = Read-JobPid $frontendPidFile
 
+$DsaAutostart = if ($env:DSA_AUTOSTART) { $env:DSA_AUTOSTART } else { Read-DotEnvValue $EnvFile 'DSA_AUTOSTART' }
+$script:dsaPid = $null
+if ($DsaAutostart -in @('1', 'true', 'TRUE')) {
+    $dsaScript = Join-Path $Root 'scripts\dsa.ps1'
+    $script:dsaPid = (Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', $dsaScript) -PassThru -WindowStyle Hidden).Id
+    Log-Info "dsa sidecar pid $($script:dsaPid)"
+}
+
 # ===== 6. Cleanup =====
 $script:cleaning = $false
 function Cleanup-All {
@@ -239,7 +247,7 @@ function Cleanup-All {
     Write-Host ''
     Log-Info 'shutting down...'
 
-    foreach ($p in @($backendChildPid, $frontendChildPid)) {
+    foreach ($p in @($backendChildPid, $frontendChildPid, $script:dsaPid)) {
         if ($p) {
             # /T kills the whole process tree (the job's powershell + uvicorn/vite)
             $null = & cmd /c "taskkill /F /T /PID $p 2>nul"

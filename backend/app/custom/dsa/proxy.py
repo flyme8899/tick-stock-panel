@@ -1,0 +1,139 @@
+"""HTTP proxy from TSP to the vendored daily_stock_analysis API."""
+from __future__ import annotations
+
+import os
+from urllib.parse import unquote
+
+import httpx
+
+ALLOWED_PREFIXES = frozenset(
+    {
+        "health",
+        "auth",
+        "analysis",
+        "history",
+        "stocks",
+        "agent",
+        "portfolio",
+        "alerts",
+        "decision-signals",
+        "screening",
+        "data",
+        "intelligence",
+        "system",
+        "usage",
+        "backtest",
+    }
+)
+
+_LONG_PREFIXES = frozenset({"analysis", "agent", "screening", "backtest", "intelligence"})
+_MAX_BODY = 2_500_000
+_MAX_RESPONSE = 12_000_000
+
+
+class UpstreamError(Exception):
+    """Sidecar is disabled or cannot be reached. The message is safe to show."""
+
+    def __init__(self, message: str, status_code: int = 503) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class InvalidUpstreamPathError(Exception):
+    pass
+
+
+def base_url() -> str:
+    return os.getenv("DSA_BASE_URL", "http://127.0.0.1:8000").strip().rstrip("/")
+
+
+def enabled() -> bool:
+    return bool(base_url())
+
+
+def timeout_for(path: str) -> float:
+    raw = os.getenv("DSA_TIMEOUT_SECONDS", "").strip()
+    default = 120.0 if path.split("/", 1)[0] in _LONG_PREFIXES else 20.0
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def normalize_upstream_path(path: str) -> str:
+    raw = unquote(path or "").strip()
+    if not raw or raw.startswith(("/", "\\")) or "\\" in raw or "://" in raw:
+        raise InvalidUpstreamPathError("路径无效")
+    parts = [unquote(part) for part in raw.split("/")]
+    if any(part in {"", ".", ".."} for part in parts):
+        raise InvalidUpstreamPathError("路径无效")
+    if parts[0] not in ALLOWED_PREFIXES:
+        raise InvalidUpstreamPathError("未开放的上游路径")
+    if len(raw) > 512:
+        raise InvalidUpstreamPathError("路径过长")
+    return "/".join(parts)
+
+
+def _request_headers(content_type: str | None) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if content_type:
+        headers["content-type"] = content_type
+    cookie = os.getenv("DSA_UPSTREAM_COOKIE", "").strip()
+    if cookie:
+        headers["cookie"] = cookie
+    return headers
+
+
+def forward(
+    method: str,
+    path: str,
+    *,
+    params: list[tuple[str, str]] | None = None,
+    body: bytes | None = None,
+    content_type: str | None = None,
+) -> tuple[int, bytes, str, dict[str, str]]:
+    """Return status, body, media type and a small set of response headers."""
+    if not enabled():
+        raise UpstreamError("未配置 DSA_BASE_URL，决策服务未启用")
+    normalized = normalize_upstream_path(path)
+    if body and len(body) > _MAX_BODY:
+        raise UpstreamError("请求体过大", status_code=413)
+    url = f"{base_url()}/api/v1/{normalized}"
+    try:
+        with httpx.Client(timeout=timeout_for(normalized), follow_redirects=False) as client:
+            response = client.request(
+                method.upper(),
+                url,
+                params=params,
+                content=body if body else None,
+                headers=_request_headers(content_type),
+            )
+    except httpx.TimeoutException as exc:
+        raise UpstreamError("决策服务响应超时") from exc
+    except httpx.HTTPError as exc:
+        raise UpstreamError("决策服务未连接") from exc
+    payload = response.content
+    if len(payload) > _MAX_RESPONSE:
+        raise UpstreamError("上游响应过大", status_code=502)
+    media = response.headers.get("content-type", "application/json")
+    extra: dict[str, str] = {}
+    disposition = response.headers.get("content-disposition")
+    if disposition:
+        extra["content-disposition"] = disposition
+    return response.status_code, payload, media, extra
+
+
+def health() -> tuple[bool, str]:
+    if not enabled():
+        return False, "未配置 DSA_BASE_URL"
+    try:
+        status, payload, _media, _extra = forward("GET", "health")
+    except (UpstreamError, InvalidUpstreamPathError) as exc:
+        return False, str(exc)
+    if status >= 400:
+        text = payload.decode("utf-8", errors="replace")[:180]
+        return False, text or f"HTTP {status}"
+    return True, "已连接"

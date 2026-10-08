@@ -42,6 +42,10 @@ BACKEND_HOST="${HOST:-${ENV_HOST:-0.0.0.0}}"
 # Keep BACKEND_PORT as a backwards-compatible explicit override.
 BACKEND_PORT="${BACKEND_PORT:-${PORT:-${ENV_PORT:-3018}}}"
 FRONTEND_PORT="${FRONTEND_PORT:-3011}"
+ENV_DSA_AUTOSTART="$(read_dotenv_value DSA_AUTOSTART)"
+ENV_DSA_PORT="$(read_dotenv_value DSA_PORT)"
+DSA_AUTOSTART="${DSA_AUTOSTART:-${ENV_DSA_AUTOSTART:-0}}"
+DSA_PORT="${DSA_PORT:-${ENV_DSA_PORT:-8000}}"
 UVICORN_ENV_ARGS=()
 if [[ -f "$ROOT/.env" ]]; then
   UVICORN_ENV_ARGS=(--env-file "$ROOT/.env")
@@ -168,8 +172,14 @@ echo -e "${BLUE}│${NC}  ${GREEN}tickflow-stock-panel${NC}                     
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  backend   ${YELLOW}http://$DISPLAY_HOST:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  frontend  ${YELLOW}http://$DISPLAY_HOST:$FRONTEND_PORT${NC}          ${BLUE}│${NC}"
+if [[ "$DSA_AUTOSTART" == "1" || "$DSA_AUTOSTART" == "true" ]]; then
+echo -e "${BLUE}│${NC}  dsa       ${YELLOW}http://$DISPLAY_HOST:$DSA_PORT${NC}          ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭                              ${BLUE}│${NC}"
+else
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭两端                          ${BLUE}│${NC}"
+fi
 echo -e "${BLUE}╰──────────────────────────────────────────────╯${NC}"
 echo
 
@@ -192,6 +202,15 @@ PIDS+=("$!")
     | prefix_awk "$(printf "${GREEN}[frontend]${NC} ")"
 ) &
 PIDS+=("$!")
+
+if [[ "$DSA_AUTOSTART" == "1" || "$DSA_AUTOSTART" == "true" ]]; then
+  free_port dsa "$DSA_PORT"
+  (
+    "$ROOT/scripts/dsa.sh" 2>&1 \
+      | prefix_awk "$(printf "${YELLOW}[dsa     ]${NC} ")"
+  ) &
+  PIDS+=("$!")
+fi
 
 # 等任一退出(bash 4.3+)或全部退出(老 bash)
 if wait -n 2>/dev/null; then

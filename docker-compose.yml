@@ -32,3 +32,26 @@ services:
       # Windows PowerShell/CMD 下 HOME 常未设置, 可通过 .env 里 CODEX_HOME_HOST 覆盖。
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
     restart: unless-stopped
+
+  # 可选。DSA 的 API 旁路，不托管它自己的前端。
+  # 在 .env 设置 DSA_BASE_URL=http://dsa:8000 后执行:
+  #   docker compose --profile dsa up --build
+  dsa:
+    profiles: ["dsa"]
+    build:
+      context: ./vendor/daily_stock_analysis
+      dockerfile: Dockerfile.tsp
+    container_name: TickFlow_Stock_Panel_DSA
+    ports:
+      - "${DSA_HOST:-127.0.0.1}:${DSA_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - ENV_FILE=/app/.env
+      - DATABASE_PATH=/app/data/stock_analysis.db
+      - WEBUI_HOST=0.0.0.0
+      - WEBUI_PORT=8000
+    volumes:
+      - ./data/dsa:/app/data
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
