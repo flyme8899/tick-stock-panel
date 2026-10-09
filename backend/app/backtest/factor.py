@@ -587,7 +587,14 @@ class FactorBacktestService:
         *,
         regime_by_date: Mapping[object, Any] | None = None,
         market_trading_dates: list[date] | None = None,
+        min_symbols_per_date: int = 0,
     ) -> FactorResult:
+        """IC、分层、换手都在同一张面板上算。
+
+        min_symbols_per_date 默认 0，不改现有检验。大于 0 时，当天股票数
+        达不到的日期整日剔除，避免十几只股票的 Rank IC 进入等权平均。
+        """
+
         def _err(msg: str) -> FactorResult:
             return self._error_result(config, run_id, t0, msg)
 
@@ -612,6 +619,8 @@ class FactorBacktestService:
             .filter((pl.col("date") >= config.start) & (pl.col("date") <= config.end))
             .filter(pl.col("close").is_not_null() & (pl.col("close") > 0))
         )
+        if min_symbols_per_date > 0:
+            price_panel = self._drop_thin_dates(price_panel, min_symbols_per_date)
         total_price_rows = price_panel.height
         panel = price_panel.filter(
             pl.col(factor_col).is_not_null() & pl.col(factor_col).is_finite()
@@ -758,6 +767,17 @@ class FactorBacktestService:
         )
 
     # ── IC 计算 ──
+
+    @staticmethod
+    def _drop_thin_dates(panel: pl.DataFrame, min_symbols: int) -> pl.DataFrame:
+        """去掉当天不同股票数小于 min_symbols 的日期。0 或空表原样返回。"""
+        if min_symbols <= 0 or panel.is_empty() or "symbol" not in panel.columns:
+            return panel
+        counts = panel.group_by("date").agg(pl.col("symbol").n_unique().alias("_n"))
+        keep = counts.filter(pl.col("_n") >= min_symbols).get_column("date").to_list()
+        if not keep:
+            return panel.clear()
+        return panel.filter(pl.col("date").is_in(keep))
 
     @staticmethod
     def _calc_ic(panel: pl.DataFrame, factor_col: str) -> pl.DataFrame:

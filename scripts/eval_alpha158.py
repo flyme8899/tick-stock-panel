@@ -16,6 +16,13 @@
 
     PYTHONPATH=backend backend/.venv/bin/python scripts/eval_alpha158.py \\
         --end 2026-09-30 --label-lag 1 --exclude-limit --exclude-st --min-listed-days 60
+
+默认丢掉截面不足 200 只的交易日。本地 enriched 从 2026-05-13 起才是全市场，
+更早的分区每天只有十几只，等权日均 IC 会被这些日子带偏。
+
+不要在正在服务的 tsp 容器里跑完整 158 因子评估。另开容器并挂上同一数据卷，例如:
+
+    docker run --rm --volumes-from <tsp> ...
 """
 from __future__ import annotations
 
@@ -321,6 +328,74 @@ def _sample_matrix(frame, factor_ids: list[str], *, max_symbols: int, tail_dates
     return out
 
 
+def restrict_evaluation_dates(panel, *, start: date, end: date, min_symbols: int):
+    """统计 [start, end] 每天的股票数，并只把达标日期留作 IC 样本。
+
+    起点之前的行原样保留，滚动窗口的预热不丢。min_symbols <= 0 时不删任何日期。
+    返回 (面板, 参与 IC 的日期, 统计)。统计含 n_dates、median、minimum、n_below、n_kept。
+    """
+    import polars as pl
+
+    window = panel.filter((pl.col("date") >= start) & (pl.col("date") <= end))
+    if window.is_empty():
+        report = {
+            "n_dates": 0,
+            "median": None,
+            "minimum": None,
+            "n_below": 0,
+            "n_kept": 0,
+        }
+        return panel, [], report
+    counts = (
+        window.group_by("date")
+        .agg(pl.col("symbol").n_unique().alias("n"))
+        .sort("date")
+    )
+    sizes = counts.get_column("n")
+    kept_frame = counts.filter(pl.col("n") >= min_symbols) if min_symbols > 0 else counts
+    kept = kept_frame.get_column("date").to_list()
+    report = {
+        "n_dates": counts.height,
+        "median": float(sizes.median()),
+        "minimum": int(sizes.min()),
+        "n_below": counts.height - len(kept),
+        "n_kept": len(kept),
+    }
+    if min_symbols <= 0 or len(kept) == counts.height:
+        return panel, kept, report
+    if not kept:
+        return panel.filter(pl.col("date") < start), [], report
+    return (
+        panel.filter((pl.col("date") < start) | pl.col("date").is_in(kept)),
+        kept,
+        report,
+    )
+
+
+def format_cross_section(report: dict, min_symbols: int) -> list[str]:
+    """给启动日志用的截面摘要。有低于门槛的日期时带上警告。"""
+    if report["n_dates"] == 0:
+        return ["区间内没有交易日。"]
+    lines = [
+        (
+            f"截面: {report['n_dates']} 个交易日，每天股票数中位数 "
+            f"{report['median']:.0f}，最少 {report['minimum']}。"
+        ),
+    ]
+    if min_symbols > 0 and report["n_below"]:
+        lines.append(
+            f"警告: 其中 {report['n_below']} 天不足 {min_symbols} 只。"
+            "这些日子的 Rank IC 是噪声，会主导等权日均。"
+            f"IC、ICIR、换手和衰减只在其余 {report['n_kept']} 天上计算。"
+            "起点之前的预热行仍留在面板里，不参与 IC。"
+        )
+        lines.append(
+            "若本地 enriched 前半段每天只有十几只股票，不要把结果说成更长区间的全市场检验。"
+            "这台数据上全市场分区从 2026-05-13 才开始。"
+        )
+    return lines
+
+
 def _polars_gate() -> str | None:
     try:
         import polars as pl
@@ -355,6 +430,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exclude-limit", action="store_true", help="去掉当天涨停或跌停的股票")
     parser.add_argument("--exclude-st", action="store_true", help="去掉当前名称含 ST 的股票")
     parser.add_argument("--min-listed-days", type=int, default=0, help="去掉上市不足 N 个交易日的股票，例如 60")
+    parser.add_argument(
+        "--min-symbols-per-date",
+        type=int,
+        default=200,
+        help="IC 只用当天股票数不少于 N 的交易日。0 表示不过滤。默认 200",
+    )
     args = parser.parse_args(argv)
 
     gate = _polars_gate()
@@ -369,6 +450,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.min_listed_days < 0:
         print("--min-listed-days 不能为负", file=sys.stderr)
+        return 1
+    if args.min_symbols_per_date < 0:
+        print("--min-symbols-per-date 不能为负", file=sys.stderr)
         return 1
 
     data_dir = _data_dir()
@@ -445,8 +529,24 @@ def main(argv: list[str] | None = None) -> int:
             prior = panel.filter(pl.col("date") < start).get_column("date").n_unique()
             print(f"起点前交易日 {prior} 个。60 日窗口至少需要 61 个；不足时这一档在区间开头为空。")
             if prior < 61:
-                print("预热交易日不够 61，60 日因子的覆盖率会偏低。这和 IC 接近 0 不是一回事，先看覆盖率。")
+                print("预热交易日不够 61，60 日因子的覆盖率会偏低。先看覆盖率，再决定要不要解读 60 日因子。")
+            print(
+                "不要在正在服务的 tsp 容器里跑完整 158 因子评估，会把服务拖重启。"
+                "另开容器并挂上同一数据卷，例如: docker run --rm --volumes-from <tsp> ..."
+            )
             warned_warmup = True
+        panel, market_dates, section = restrict_evaluation_dates(
+            panel,
+            start=start,
+            end=end,
+            min_symbols=args.min_symbols_per_date,
+        )
+        if offset == 0:
+            for line in format_cross_section(section, args.min_symbols_per_date):
+                print(line)
+            if not market_dates:
+                print("没有达到截面门槛的交易日，不计算 IC。")
+                return 1
         if args.exclude_limit and "raw_close" not in panel.columns:
             raw = engine.load_panel(
                 symbols,
@@ -459,10 +559,6 @@ def main(argv: list[str] | None = None) -> int:
                 print("enriched 没有 raw_close，不能按涨跌停过滤。")
                 return 1
             panel = panel.join(raw.select("symbol", "date", "raw_close"), on=["symbol", "date"], how="left")
-        market_dates = sorted(
-            item for item in panel.get_column("date").unique().to_list()
-            if start <= item <= end
-        )
         panel = service._attach_shared_next_return(
             panel, batch_config, trading_dates=market_dates,
         )
@@ -501,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"a158-{offset + index}",
                     0.0,
                     market_trading_dates=market_dates,
+                    min_symbols_per_date=args.min_symbols_per_date,
                 )
             except Exception as exc:  # noqa: BLE001 — 单因子失败不能中止整组
                 rows.append({
@@ -621,6 +718,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"相关聚类跳过: {exc}")
         return 0
     valued = compute_alpha158(probe, chunk_symbols=200)
+    valued, _, _ = restrict_evaluation_dates(
+        valued,
+        start=probe_config.start,
+        end=end,
+        min_symbols=args.min_symbols_per_date,
+    )
     sample = _sample_matrix(
         valued,
         [row["factor_name"] for row in by_ic],

@@ -309,11 +309,12 @@ def test_new_operators_match_numpy_reference_including_ties() -> None:
 
 
 def test_window_60_is_populated_after_120_calendar_days() -> None:
-    """评审里 max_60 的 IC 接近 0。核对是不是 120 个自然日的预热不够。
+    """120 个自然日的预热够不够撑起 60 日窗口。
 
     2025-10-09 往前 120 个自然日里，只扣周末也多于 60 个交易日。
     这段没有春节，再扣大约 10 个假日仍够 60 日窗口。
-    历史被截到 40 个交易日时，max_60 为空、max_30 仍有数，用来对照真正的预热不足。
+    历史被截到 40 个交易日时，max_60 为空、max_30 仍有数。
+    这只证明窗口没被预热算空。60 日因子的 IC 还要等更长的全市场样本，见 docs/alpha158.md。
     """
     from app.strategy.scoring import materialize_scoring_columns
 
@@ -422,6 +423,95 @@ def test_eval_script_gates_and_filters() -> None:
         instruments=instruments,
     )
     assert st_only.is_empty()
+
+
+def test_min_symbols_filter_keeps_warmup_and_drops_thin_dates() -> None:
+    module = _eval_script()
+    warmup = date(2026, 4, 30)
+    thin = date(2026, 5, 6)
+    thick = date(2026, 5, 7)
+    rows: list[dict] = []
+    for day, width in ((warmup, 3), (thin, 2), (thick, 6)):
+        for index in range(width):
+            rows.append({
+                "symbol": f"S{index}",
+                "date": day,
+                "close": 10.0,
+            })
+    panel = pl.DataFrame(rows)
+    filtered, kept, report = module.restrict_evaluation_dates(
+        panel, start=thin, end=thick, min_symbols=4,
+    )
+    assert kept == [thick]
+    assert report["n_dates"] == 2
+    assert report["minimum"] == 2
+    assert report["median"] == pytest.approx(4.0)
+    assert report["n_below"] == 1
+    assert report["n_kept"] == 1
+    remaining = set(filtered.get_column("date").unique().to_list())
+    assert remaining == {warmup, thick}
+    lines = module.format_cross_section(report, 4)
+    assert any("中位数 4" in line and "最少 2" in line for line in lines)
+    assert any("不足 4 只" in line for line in lines)
+
+    untouched, all_dates, open_report = module.restrict_evaluation_dates(
+        panel, start=thin, end=thick, min_symbols=0,
+    )
+    assert all_dates == [thin, thick]
+    assert untouched.height == panel.height
+    assert open_report["n_below"] == 0
+    assert module.format_cross_section(open_report, 0) == [
+        "截面: 2 个交易日，每天股票数中位数 4，最少 2。",
+    ]
+
+
+def test_evaluate_panel_min_symbols_drops_noise_days() -> None:
+    """两只股票那天的 Rank IC 不进入平均。默认 0 仍把两天等权。"""
+    from app.backtest.factor import FactorBacktestService, FactorConfig
+
+    thin = date(2026, 5, 6)
+    thick = date(2026, 5, 7)
+    rows: list[dict] = [
+        {"symbol": "A", "date": thin, "close": 10.0, "factor": 1.0, "_next_return": 0.01},
+        {"symbol": "B", "date": thin, "close": 10.0, "factor": 2.0, "_next_return": 0.02},
+    ]
+    for index, symbol in enumerate("CDEFGH"):
+        rows.append({
+            "symbol": symbol,
+            "date": thick,
+            "close": 10.0,
+            "factor": float(index + 1),
+            "_next_return": float(6 - index) / 100,
+        })
+    panel = pl.DataFrame(rows)
+    service = FactorBacktestService(object())  # type: ignore[arg-type]
+    config = FactorConfig(
+        factor_name="factor",
+        symbols=None,
+        start=thin,
+        end=thick,
+        n_groups=2,
+        rebalance="daily",
+    )
+
+    def _run(min_symbols: int):
+        return service._evaluate_panel(
+            panel,
+            config,
+            "min-xs",
+            0.0,
+            min_symbols_per_date=min_symbols,
+        )
+
+    mixed = _run(0)
+    thick_only = _run(4)
+    assert mixed.error is None
+    assert thick_only.error is None
+    assert mixed.n_dates == 2
+    assert mixed.ic_mean == pytest.approx(0.0)
+    assert thick_only.n_dates == 1
+    assert thick_only.ic_mean == pytest.approx(-1.0)
+    assert FactorBacktestService._drop_thin_dates(panel, 0).height == panel.height
 
 
 def test_signal_whitelist_excludes_alpha158() -> None:
