@@ -1,0 +1,29 @@
+# 可选 override：DSA 用**独立项目**跑（不是主 compose 里的 dsa profile）时使用。
+#
+# 场景：DSA 有自己的仓库和 compose 文件，在别处 `docker compose up` 起了
+# stock-server / analyzer / alphafeed。这时 TSP 的 app 容器不在它的网络里，
+# 按容器名解析不到 stock-server。
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.dsa-external.yml up -d
+#
+# 前置：DSA 那边的项目名必须是 daily-stock-analysis，或者你在这里把
+# networks.dsa_external.name 改成 DSA 实际用的网络名。查实际名字：
+#   docker network ls --filter label=com.docker.compose.project=daily-stock-analysis --format '{{.Name}}'
+#
+# 注意：这张网由 DSA 的项目持有（external），所以：
+#   - DSA 那边 `docker compose down` 删网后，这里再 `up` 会报网络不存在，
+#     需要先把 DSA 起回来。这正是「外部网络」应有的语义，不是 bug。
+#   - 本文件不会创建或删除它，只声明「连上去」。
+services:
+  app:
+    networks:
+      - default
+      - dsa_external
+
+networks:
+  # default 保持不动：app <=> dsa profile 服务仍走 compose 默认网。
+  default:
+  dsa_external:
+    external: true
+    name: ${DSA_NETWORK:-daily-stock-analysis_default}

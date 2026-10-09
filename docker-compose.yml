@@ -37,14 +37,12 @@ services:
       # 复用主机 Codex 登录态；后端只读后复制到单次请求的临时 CODEX_HOME。
       # Windows PowerShell/CMD 下 HOME 常未设置, 可通过 .env 里 CODEX_HOME_HOST 覆盖。
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
-    networks:
-      # 与 DSA 走同一张网，才能用 DSA_BASE_URL=http://dsa:8000 按服务名解析。
-      # 用固定名字的网络、而不是 compose 那份自动命名的默认网：DSA 常常是
-      # 另外单独启动的（./scripts/dsa.sh 或独立容器），默认网名字带项目前缀，
-      # 外面那个容器对不上。固定名之后 `--network dsa-net` 就能加进来。
-      # 名字可用 .env 的 DSA_NETWORK 覆盖。
-      - dsa-net
     restart: unless-stopped
+    #
+    # 如果 DSA 用独立项目跑（不是下面的 dsa profile），app 需要加入它那边的网络
+    # 才能按容器名找到 stock-server。用 override 文件，别写进这里：
+    #   docker compose -f docker-compose.yml -f docker-compose.dsa-external.yml up -d
+    # 见 docs/dsa-integration.md「接入独立 DSA 项目」。
 
   # 可选。DSA 的 API 旁路，不托管它自己的前端。
   # 在 .env 设置 DSA_BASE_URL=http://dsa:8000 后执行:
@@ -68,19 +66,14 @@ services:
       # 容器内路径。覆盖 .env 里可能写成的宿主机路径。设为 off 可关闭注入。
       - TSP_QUANT_EVIDENCE_FILE=/opt/tsp/quant_evidence.yaml
     volumes:
-      # 手工 docker run 起的 sidecar 如果挂在别处（例如 /workspace/dsa/data），
-      # 切到这份 compose 会从空库开始。切换前先核对并搬过来：
-      #   docker inspect stock-server --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}'
-      #   cp -a <旧数据目录>/. ./data/dsa/
+      # DSA 自己的数据目录，与 TSP 的 ./data 分开存。
       - ./data/dsa:/app/data
       # 决策页保存定时设置时会写回这份文件。只读挂载会导致保存失败。
       - ./.env:/app/.env
       - ./backend/app/custom/dsa/dsa_bootstrap.py:/opt/tsp/dsa_bootstrap.py:ro
       - ./backend/app/custom/dsa/quant_evidence.py:/opt/tsp/quant_evidence.py:ro
       - ./backend/app/custom/dsa/quant_evidence.yaml:/opt/tsp/quant_evidence.yaml:ro
-    networks:
-      # 与 app 同网，app 才能用 http://dsa:8000 找到它。
-      - dsa-net
+    # 与 app 同网（compose 默认网络），app 才能用 http://dsa:8000 找到它。
     # 探针是 sidecar 自己的 /api/v1/health（免登录）。不要用恒成功的兜底命令。
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
@@ -91,22 +84,3 @@ services:
     entrypoint: ["python", "/opt/tsp/dsa_bootstrap.py"]
     command: ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
-
-networks:
-  # 固定名字，compose 自己建。名字可用 .env 的 DSA_NETWORK 覆盖，默认 dsa-net。
-  #
-  # 不用 external: true，是因为那样会多一个前置条件：没先
-  # docker network create 的话，裸 `docker compose up` 直接失败——哪怕不启
-  # dsa profile 也一样，因为 app 就挂在这张网上。而这台机器上 dsa-net 是
-  # 手工建的，换台机器就没了。让 compose 建同名网络，裸 up 能直接跑通，
-  # 外面单独起的 sidecar 用 --network dsa-net 也能加进来。
-  #
-  # 代价是 docker compose down 会删掉这张网（已有容器连着则删不掉，只会报警告）。
-  # 下次 up 会重建同名网络，上面这些容器不受影响。
-  #
-  # 注意：如果已有一张同名网是手工 docker network create 建的（没有 compose 标签），
-  # compose 不会接管，会直接报错退出：
-  #   network dsa-net was found but has incorrect label com.docker.compose.network set to "" (expected: "dsa-net")
-  # 此时先 docker network rm dsa-net 再 up，让它重建。
-  dsa-net:
-    name: ${DSA_NETWORK:-dsa-net}

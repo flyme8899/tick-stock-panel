@@ -28,93 +28,102 @@ $env:DSA_AUTOSTART='1'; .\dev.ps1
 .\scripts\dsa.ps1
 ```
 
-Docker 在现有 compose 里加了可选服务，不改变原来的单服务启动：
+Docker 在现有 compose 里加了**可选**服务，不改变原来的单服务启动：
 
 ```bash
 # 在 .env 中设置 DSA_BASE_URL=http://dsa:8000
-docker compose --profile dsa up --build
-```
-
-两个服务都连固定名字的网络 `dsa-net`，app 才能按服务名 `dsa` 解析到 sidecar。
-网络由 compose 自建（不是外部网络），裸 `docker compose up` 就能跑通，不需要
-先手动建网。名字可用 `.env` 里的 `DSA_NETWORK` 覆盖。
-
-用固定名字而不是 compose 那份自动命名的默认网，是因为 sidecar 常常是**另外
-单独启动**的（`./scripts/dsa.sh` 或一个独立容器），默认网名字带项目前缀，外面
-那个容器对不上；固定名之后用 `--network dsa-net` 就能加进来。
-
-切到 compose 管理前，先做两件核对，再执行一条命令。
-
-**第一步：核对 sidecar 数据位置。** 手工跑的 sidecar 和 compose 的 `dsa` 服务
-**挂的不是同一个目录**，直接换会从空库开始：
-
-| | 手工 `docker run` | compose 的 `dsa` 服务 |
-|---|---|---|
-| 数据卷 | `/workspace/dsa/data` → `/app/data` | `./data/dsa` → `/app/data` |
-| 数据库 | 前者下的 `stock_analysis.db` | `data/dsa/stock_analysis.db` |
-
-先核对：
-
-```bash
-docker inspect stock-server --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
-```
-
-如果指向的不是 `./data/dsa`，切换前把旧数据搬过去（先停容器再拷）：
-
-```bash
-docker stop stock-server
-mkdir -p ./data/dsa
-cp -a /workspace/dsa/data/. ./data/dsa/
-```
-
-**第二步：处理同名网络。** 手工 `docker network create dsa-net` 建的网没有
-compose 标签（`Labels` 是空的）。compose 按固定名字自建时会认出它但标签对不上，
-**直接报错退出**，容器一个都不会创建：
-
-```
-network dsa-net was found but has incorrect label com.docker.compose.network set to "" (expected: "dsa-net")
-```
-
-**第三步：执行切换。**
-
-```bash
-docker rm -f tsp stock-server
-docker network rm dsa-net
 docker compose --profile dsa up -d --build
 ```
 
-`--profile dsa` 不能省。`dsa` 服务挂在 `dsa` 这个 profile 下，不带 profile 只会
-起 `app`，决策页会断（`docker compose config --services` 只列出 `app`，
-加上 `--profile dsa` 才同时列出 `app` 和 `dsa`）。
+`--profile dsa` 不能省。`dsa` 服务挂在 `dsa` 这个 profile 下，裸 `docker compose up`
+只会起 `app`，决策页会断（`docker compose config --services` 只列出 `app`，加上
+`--profile dsa` 才同时列出 `app` 和 `dsa`）。
 
-`docker rm -f tsp` 是必须的：compose 里容器名是 `TickFlow_Stock_Panel`，不删会撞
-3018 端口，并且两个实例同时写 `./data`（bind mount 没有卷缓冲）。
-
-**回滚。** compose 起不来时，先 `docker compose down`，再按下面两条恢复原来的跑法:
-
-```bash
-docker network create dsa-net
-
-docker run -d --name tsp --network dsa-net \
-  -p 0.0.0.0:3018:3018 --restart unless-stopped \
-  -e DATA_DIR=/app/data \
-  -e DSA_BASE_URL=http://stock-server:8000 \
-  -e TICKFLOW_ENV_FILE=/app/.env \
-  -e TIERS_YAML=/app/tiers.yaml \
-  -e STATIC_DIR=/app/static \
-  -e TZ=Asia/Shanghai \
-  -v "$PWD/data:/app/data" \
-  -v "$PWD/tiers.yaml:/app/tiers.yaml:ro" \
-  -v "$PWD/.env:/app/.env:ro" \
-  tick-stock-panel:local \
-  uv run uvicorn app.main:app --host 0.0.0.0 --port 3018
-```
-
-sidecar 用 `./scripts/dsa.sh` 起，或换成 compose 的 `dsa` 服务那份参数。
-删容器前把这些参数记下来，否则找不回。
+两个服务走 compose 的默认网络（按项目名自动命名，如 `daily-stock-analysis_default`
+之类的前缀名），app 才能按服务名 `dsa` 解析到 sidecar。**不需要**手工建网，也**不要**
+在 `docker-compose.yml` 里声明固定名字的网络——那会引入一个隐藏前置条件，详见下节。
 
 `.env` 里的 `DSA_BASE_URL` 在 compose 下要填 `http://dsa:8000`（服务名），
 不是 `http://127.0.0.1:8000`——容器里的 `127.0.0.1` 指自己。
+
+## 接入独立 DSA 项目
+
+DSA 有自己的仓库和 compose 文件，实际部署时很可能**不**通过本仓库的 `dsa` profile，
+而是在别处 `docker compose up` 起 `stock-server` / `analyzer` / alphafeed。这时 TSP 的
+`app` 容器不在 DSA 项目的网络里，按容器名解析不到 `stock-server`。
+
+用 override 文件把自己加进去，不要改动主 compose：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dsa-external.yml up -d
+```
+
+`docker-compose.dsa-external.yml` 把 `app` 接到 DSA 项目的网络上（`external: true`，
+声明「连上去」而不创建）。默认网络名是 `daily-stock-analysis_default`，可用 `.env`
+里的 `DSA_NETWORK` 覆盖。查实际名字：
+
+```bash
+docker network ls --filter label=com.docker.compose.project=daily-stock-analysis --format '{{.Name}}'
+```
+
+### 为什么不在主 compose 里写死网络
+
+曾经试过在主 compose 里声明一张固定名字的网络（`name: dsa-net`）让两边共用。这条路
+有三个坑，逐个踩过：
+
+1. **`external: true` 会让裸 `up` 失败。** 没先手工建网时，`docker compose up` 直接
+   报错退出——哪怕不启 `dsa` profile 也一样，因为 `app` 就挂在网上。
+2. **改成本地声明（`name:` + 让 compose 自建）也不行。** 如果机器上已经有一张同名
+   网络是手工 `docker network create` 建的（没有 compose 标签），compose 不会接管，
+   直接报错退出，容器一个都不创建：
+   ```
+   network dsa-net was found but has incorrect label com.docker.compose.network set to "" (expected: "dsa-net")
+   ```
+3. **手工 `docker network connect` 不是长久之计。** 实测：对容器 `stop` + `start`
+   （重启）**保留**连接；对 `rm` + `run`（重建）**丢失**连接。重建容器后要重新
+   `connect`，否则又断。所以要么让部署脚本每次都带上正确的 `--network`，要么尽快
+   上 compose——别指望一次 `connect` 能一直有效。
+
+结论：主 compose 保持「零前置条件、裸 `up` 能跑」；要连外部网络就用 override 文件，
+把额外的前置条件隔离在需要它的人那里。
+
+### 顺序：先接网，再谈拆旧网
+
+机器上曾有一张手工建的 `dsa-net`，TSP 的容器和 DSA 的几个容器都连在上面。这张网
+**不能顺手删**——它承载着 TSP 的行情数据链路：`data/data_sources/alphafeed.yaml` 里
+五类数据集（`daily` / `adj_factor` / `realtime` / `minute` / `full_minute`）全部指向
+`dsa-alphafeed-source:3021`。删网断的是**行情源**，比决策页断严重得多。
+
+安全顺序：
+
+```bash
+# 1. 先把两边接进 DSA 项目的网络
+docker network connect daily-stock-analysis_default tsp
+docker network connect daily-stock-analysis_default dsa-alphafeed-source
+
+# 2. 从 tsp 里验证两条都通（期望都是 200）
+docker exec tsp curl -fsS -o /dev/null -w '%{http_code}\n' http://stock-server:8000/api/v1/health
+docker exec tsp curl -fsS -o /dev/null -w '%{http_code}\n' http://dsa-alphafeed-source:3021/health
+
+# 3. 确认 alphafeed 的部署脚本已改用新网络、或已上 compose 之后，再拆 dsa-net
+```
+
+第 3 步之前 `dsa-net` 留着无害。注意上一条的坑：**这些 `connect` 会被容器重建冲掉**，
+所以第 3 步之前必须先把「重建后自动接网」这件事落到脚本或 compose 里，否则拆网只是
+把问题推迟到下一次重建。
+
+### 回滚
+
+override 起不来时先 `docker compose down`，再按 DSA 自己的 compose 恢复：
+
+```bash
+cd /workspace/dsa/docker && docker compose up -d server analyzer
+```
+
+`.env` 里的 `DSA_BASE_URL` 改回 `http://stock-server:8000`（走 DSA 项目网内的容器名）。
+另外从主 compose 起 `app` 时，容器名是 `TickFlow_Stock_Panel`，如果之前有手工
+`docker run` 起的同名实例（`tsp`），先 `docker rm -f tsp` 再起，否则会撞 3018 端口，
+并且两个实例同时写 `./data`（bind mount 没有卷缓冲）。
 
 sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。镜像时区是 `Asia/Shanghai`，本地 `scripts/dsa.sh` / `dsa.ps1` 在未设置 `TZ` 时也使用这个时区。
 
