@@ -152,6 +152,55 @@ def test_negative_ic_longs_the_low_factor_group() -> None:
     assert result["costs"][0]["long"]["total"] == pytest.approx(1.05 * 1.05 - 1.0)
 
 
+def _printed_row(*, n_periods: int, annual: float | None = 0.1) -> dict:
+    perf = {
+        "annual": annual,
+        "sharpe": 1.0,
+        "max_drawdown": -0.05,
+        "n_periods": n_periods,
+        "total": 0.01,
+    }
+    return {
+        "factor": "a158_vsumd_60",
+        "hold": 5,
+        "ic": -0.1,
+        "direction": "低",
+        "monotonicity": 0.8,
+        "turnover": 0.4,
+        "n_periods": n_periods,
+        "group_means": [0.01, 0.02, 0.03, 0.04, 0.05],
+        "costs": {0.0: {"long": perf, "excess": perf, "long_short": perf}},
+        "error": None,
+    }
+
+
+def test_default_factors_keep_one_volume_signal() -> None:
+    """vsump_60 与 vsumn_60 是 vsumd_60 的仿射变换，默认只留后者。"""
+    module = _script()
+    assert module.DEFAULT_FACTORS == (
+        "a158_vsumd_60",
+        "a158_vstd_20",
+        "a158_vma_20",
+        "a158_std_20",
+    )
+    help_text = module._build_parser().format_help()
+    assert "vsump+vsumn=1" in help_text
+    assert "vsumd=2*vsump-1" in help_text
+
+
+def test_table_prints_periods_and_warns_when_annualization_is_thin() -> None:
+    module = _script()
+    short = module.format_layer_table([_printed_row(n_periods=6)], [0.0])
+    assert "0.1000（6期）" in short
+    assert "样本不足 30 期，不可靠" in short
+    assert "外推" in short
+    enough = module.format_layer_table([_printed_row(n_periods=30)], [0.0])
+    assert "0.1000（30期）" in enough
+    assert "样本不足 30 期" not in enough
+    missing = module.format_layer_table([_printed_row(n_periods=0, annual=None)], [0.0])
+    assert "样本不足 30 期" not in missing
+
+
 def test_hold_steps_rebalance_dates() -> None:
     module = _script()
     days = [date(2026, 5, 6) + timedelta(days=offset) for offset in range(4)]

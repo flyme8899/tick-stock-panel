@@ -27,14 +27,16 @@ from pathlib import Path
 
 import numpy as np
 
+# vsump、vsumn、vsumd 是同一个信号的仿射变换：vsump + vsumn = 1，vsumd = 2*vsump - 1。
+# 默认只留 vsumd_60，不再把 vsump_60 / vsumn_60 各算一遍。
 DEFAULT_FACTORS = (
-    "a158_vsump_60",
-    "a158_vsumn_60",
     "a158_vsumd_60",
     "a158_vstd_20",
     "a158_vma_20",
     "a158_std_20",
 )
+# 年化用 (期数 * 持有天数) / 252。少于此期数时，年化收益和夏普是外推，不可靠。
+_ANNUAL_MIN_PERIODS = 30
 _CONTAINER_WARNING = (
     "不要在正在服务的 tsp 容器里跑分层回测，会把服务拖重启。"
     "另开容器并挂上同一数据卷，例如: docker run --rm --volumes-from <tsp> ..."
@@ -343,11 +345,33 @@ def _fmt(value: float | None, digits: int = 4) -> str:
     return f"{value:.{digits}f}"
 
 
+def _annual_cell(stats: dict) -> str:
+    """年化收益后面带上这条序列的期数。"""
+    periods = int(stats.get("n_periods") or 0)
+    return f"{_fmt(stats.get('annual'))}（{periods}期）"
+
+
+def _annual_warning(long: dict, excess: dict, spread: dict) -> str | None:
+    """有年化数字、但期数不足时，点明这是按 252/持有天数外推的。"""
+    short = [
+        int(item.get("n_periods") or 0)
+        for item in (long, excess, spread)
+        if item.get("annual") is not None
+    ]
+    if not short or min(short) >= _ANNUAL_MIN_PERIODS:
+        return None
+    return (
+        f"{'':<16} 警告：年化收益和夏普按 252/持有天数外推，"
+        f"样本不足 {_ANNUAL_MIN_PERIODS} 期，不可靠"
+    )
+
+
 def format_layer_table(rows: list[dict], cost_bps: list[float]) -> str:
     """紧凑中文表。收益是小数，0.01 表示 1%。"""
     lines = [
         "收益为小数（0.01 = 1%）。组均从 Q1 到 Q5，Q5 是做多的那一端。",
         "多头是 Q5 等权；超额 = 多头 − 等权可交易市场。多空是 Q5 对 Q1 的半仓。换手是相邻调仓的单边换手。",
+        f"年化数字后的期数是该收益序列的长度。少于 {_ANNUAL_MIN_PERIODS} 期时，年化和夏普是外推，不可靠。",
     ]
     header = (
         f"{'因子':<16} {'持有':>4} {'IC':>8} {'方向':>4} {'单调':>6} {'换手':>6} {'期数':>4} "
@@ -372,12 +396,15 @@ def format_layer_table(rows: list[dict], cost_bps: list[float]) -> str:
             spread = stats.get("long_short") or {}
             lines.append(
                 f"{'':<16} {bps:>4.0f}bp "
-                f"多头 {_fmt(long.get('annual'))} 夏普 {_fmt(long.get('sharpe'), 2)} "
+                f"多头 {_annual_cell(long)} 夏普 {_fmt(long.get('sharpe'), 2)} "
                 f"回撤 {_fmt(long.get('max_drawdown'))} | "
-                f"超额 {_fmt(excess.get('annual'))} | "
-                f"多空 {_fmt(spread.get('annual'))} 夏普 {_fmt(spread.get('sharpe'), 2)} "
+                f"超额 {_annual_cell(excess)} | "
+                f"多空 {_annual_cell(spread)} 夏普 {_fmt(spread.get('sharpe'), 2)} "
                 f"回撤 {_fmt(spread.get('max_drawdown'))}"
             )
+            warning = _annual_warning(long, excess, spread)
+            if warning:
+                lines.append(warning)
     return "\n".join(lines)
 
 
@@ -502,7 +529,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--factors",
         default=",".join(DEFAULT_FACTORS),
-        help="逗号分隔的因子 id，默认 6 个量能/波动头部",
+        help=(
+            "逗号分隔的因子 id。默认 4 个彼此独立的量能/波动因子"
+            "（vsumd_60、vstd_20、vma_20、std_20）。"
+            "vsump_60 与 vsumn_60 是 vsumd_60 的仿射变换"
+            "（vsump+vsumn=1，vsumd=2*vsump-1），默认不再重复计算"
+        ),
     )
     parser.add_argument("--groups", type=int, default=5, help="分位组数，默认 5")
     parser.add_argument(
