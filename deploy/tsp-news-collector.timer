@@ -1,0 +1,12 @@
+[Unit]
+Description=Run TSP host news collector every few minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=tsp-news-collector.service
+
+[Install]
+WantedBy=timers.target

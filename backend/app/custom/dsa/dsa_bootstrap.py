@@ -90,11 +90,31 @@ def install() -> None:
     logger.info("已安装量化证据钩子：%s", os.environ.get("TSP_QUANT_EVIDENCE_FILE"))
 
 
+def _install_news_bridge() -> None:
+    """把 TSP 资讯接到 DSA 情报库。文件缺失或补丁失败都不挡住启动。"""
+    import importlib.util
+
+    path = Path(__file__).resolve().with_name("news_bridge.py")
+    if not path.is_file():
+        logger.info("未找到 news_bridge.py，DSA 不拉取 TSP 资讯")
+        return
+    spec = importlib.util.spec_from_file_location("tsp_news_bridge", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install()
+
+
 def main() -> None:
     try:
         install()
     except Exception:
         logger.exception("量化证据钩子未安装，继续启动 DSA")
+    try:
+        _install_news_bridge()
+    except Exception:
+        logger.exception("TSP 资讯桥未安装，继续启动 DSA")
     if len(sys.argv) < 2:
         sys.argv = ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     else:

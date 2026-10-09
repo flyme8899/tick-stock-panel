@@ -195,6 +195,15 @@ export const IconIndices = make(
   </>,
 )
 
+/** 热门事件 — 三档升温柱 */
+export const IconHot = make(
+  <>
+    <rect x="4" y="14" width="4" height="6" />
+    <rect x="10" y="9" width="4" height="11" />
+    <rect x="16" y="4" width="4" height="16" />
+  </>,
+)
+
 /** 数据 — 三层数据存储 */
 export const IconData = make(
   <>

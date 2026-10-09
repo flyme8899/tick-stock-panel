@@ -1,0 +1,11 @@
+[Unit]
+Description=TSP host news collector (DingTalk and Zsxq, read-only)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/tsp
+Environment=DATA_DIR=/opt/tsp/data
+EnvironmentFile=-/opt/tsp/.env
+ExecStart=/usr/bin/python3 /opt/tsp/scripts/news_host_collector.py --data-dir /opt/tsp/data
+# 只读采集。不要改成会发帖、评论或发送消息的命令。

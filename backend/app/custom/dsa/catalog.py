@@ -41,7 +41,7 @@ FEATURES = (
         "section": "intelligence",
         "summary": "新闻与情报源拉取、模板和已入库条目。",
         "upstream": "GET /api/v1/intelligence/items",
-        "overlap": "TSP 没有独立情报流。本页承接 DSA 的情报源，不并入异动监控。",
+        "overlap": "TSP 热门事件页负责多源采集和候选。配好令牌后，这些资讯会写入 DSA 情报库，个股分析和大盘复盘都能读到；本页仍查看 DSA 情报源，不并入异动监控。",
     },
     {
         "id": "markets",

@@ -147,6 +147,9 @@ export const QK = {
   dsaSchedule:          ['dsa-schedule'] as const,
   dsaQuantEvidence:     ['dsa-quant-evidence'] as const,
   dsaUpstream:          (key: string) => ['dsa-upstream', key] as const,
+  newsHot:              (kind: string) => ['news-hot', kind] as const,
+  newsMessages:         (kind: string, key: string) => ['news-messages', kind, key] as const,
+  newsHealth:           ['news-health'] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
