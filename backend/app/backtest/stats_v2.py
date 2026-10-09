@@ -125,6 +125,157 @@ def expected_max_sharpe(n_trials: int, variance_sharpes: float) -> float:
     return math.sqrt(variance_sharpes) * ((1.0 - EULER_GAMMA) * z1 + EULER_GAMMA * z2)
 
 
+def ulcer_index(equity: np.ndarray) -> float | None:
+    """Ulcer Index: 回撤比例 (负数或 0) 的均方根。
+
+    与最大回撤同一比例口径 (0.05 = 5%), 不是百分数点数。权益不足 2 点时返回 None。
+    """
+    values = np.asarray(equity, dtype=float)
+    values = values[np.isfinite(values) & (values > 0)]
+    if values.size < 2:
+        return None
+    peaks = np.maximum.accumulate(values)
+    drawdown = values / peaks - 1.0
+    return float(np.sqrt(np.mean(np.square(drawdown))))
+
+
+def sqn(trade_returns: np.ndarray) -> float | None:
+    """系统质量数 SQN = sqrt(N) * mean(R) / std(R), R 为每笔收益率。
+
+    样本不足 2 笔或标准差为 0 时无定义。
+    """
+    returns = np.asarray(trade_returns, dtype=float)
+    returns = returns[np.isfinite(returns)]
+    n = returns.size
+    if n < 2:
+        return None
+    std = float(returns.std(ddof=1))
+    if std == 0:
+        return None
+    return float(math.sqrt(n) * returns.mean() / std)
+
+
+def kelly_fraction(trade_returns: np.ndarray) -> float | None:
+    """凯利比例 f* = W - (1-W) / R, R = 平均盈利 / 平均亏损绝对值。
+
+    没有亏损样本或没有盈利样本时赔率无定义, 返回 None (不把空样本伪装成 0 或 1)。
+    """
+    returns = np.asarray(trade_returns, dtype=float)
+    returns = returns[np.isfinite(returns)]
+    if returns.size == 0:
+        return None
+    wins = returns[returns > 0]
+    losses = returns[returns <= 0]
+    if wins.size == 0 or losses.size == 0:
+        return None
+    avg_loss = abs(float(losses.mean()))
+    if avg_loss == 0:
+        return None
+    win_rate = wins.size / returns.size
+    payoff = float(wins.mean()) / avg_loss
+    if payoff == 0:
+        return None
+    return float(win_rate - (1.0 - win_rate) / payoff)
+
+
+def cvar_95(returns: np.ndarray) -> float | None:
+    """历史 CVaR 95%: 不超过 5% 分位的收益率均值 (带符号, 亏损为负)。
+
+    分位用线性插值。样本不足 5 个返回 None。
+    """
+    values = np.asarray(returns, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 5:
+        return None
+    threshold = float(np.quantile(values, 0.05, method="linear"))
+    tail = values[values <= threshold + 1e-15]
+    if tail.size == 0:
+        return None
+    return float(tail.mean())
+
+
+def benchmark_relative_metrics(
+    strategy_returns: np.ndarray,
+    benchmark_returns: np.ndarray,
+    *,
+    periods_per_year: int = 252,
+) -> dict[str, float | None]:
+    """跟踪误差、信息比率、beta。输入必须已经按同一交易日对齐。
+
+    跟踪误差 = std(策略-基准) * sqrt(252), 样本标准差 (ddof=1)。
+    信息比率 = 年化超额均值 / 跟踪误差。基准方差为 0 时 beta 为 None。
+    对齐样本不足 3 个交易日时三项都为 None。
+    """
+    strategy = np.asarray(strategy_returns, dtype=float)
+    benchmark = np.asarray(benchmark_returns, dtype=float)
+    empty = {"tracking_error": None, "information_ratio": None, "beta": None}
+    if strategy.shape != benchmark.shape or strategy.ndim != 1:
+        return empty
+    valid = np.isfinite(strategy) & np.isfinite(benchmark)
+    strategy = strategy[valid]
+    benchmark = benchmark[valid]
+    if strategy.size < 3:
+        return empty
+    excess = strategy - benchmark
+    tracking = float(excess.std(ddof=1))
+    annual_tracking = tracking * math.sqrt(periods_per_year)
+    variance = float(benchmark.var(ddof=1))
+    beta = None
+    if variance > 0:
+        covariance = float(np.cov(strategy, benchmark, ddof=1)[0, 1])
+        beta = covariance / variance
+    information = None
+    if annual_tracking > 0:
+        information = float(excess.mean() * math.sqrt(periods_per_year) / tracking) if tracking > 0 else None
+    return {
+        "tracking_error": annual_tracking,
+        "information_ratio": information,
+        "beta": beta,
+    }
+
+
+def align_benchmark_returns(
+    equity_rows: list[dict],
+    benchmark_rows: list[dict],
+) -> tuple[np.ndarray, np.ndarray]:
+    """按权益曲线日期对齐简单收益率。
+
+    策略收益用相邻权益点; 基准收益用同一对日期的收盘价。基准缺任一端则丢掉该对,
+    不用前值填充 (缺数据不假装连续)。
+    """
+    equity = []
+    for row in equity_rows:
+        date = str(row.get("date", ""))[:10]
+        try:
+            value = float(row.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if date and math.isfinite(value) and value > 0:
+            equity.append((date, value))
+    benchmark: dict[str, float] = {}
+    for row in benchmark_rows:
+        date = str(row.get("date", ""))[:10]
+        raw = row.get("close", row.get("value"))
+        try:
+            close = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if date and math.isfinite(close) and close > 0:
+            benchmark[date] = close
+    strategy_returns: list[float] = []
+    benchmark_returns: list[float] = []
+    for index in range(1, len(equity)):
+        prev_date, prev_equity = equity[index - 1]
+        date, value = equity[index]
+        prev_bench = benchmark.get(prev_date)
+        bench = benchmark.get(date)
+        if prev_bench is None or bench is None or prev_equity <= 0 or prev_bench <= 0:
+            continue
+        strategy_returns.append(value / prev_equity - 1.0)
+        benchmark_returns.append(bench / prev_bench - 1.0)
+    return np.asarray(strategy_returns, dtype=float), np.asarray(benchmark_returns, dtype=float)
+
+
 def deflated_sharpe_psr(
     sharpe: float,
     n_obs: int,

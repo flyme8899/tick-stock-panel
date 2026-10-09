@@ -18,6 +18,14 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 
+from app.backtest.liquidity import (
+    is_one_price_limit,
+    is_volume_halt,
+    normalize_volume_limit,
+    participation_fill,
+    prices_flat,
+    volume_near_zero,
+)
 from app.backtest.matrix import (
     MarketDataMatrix,
     MarketMatrix,
@@ -25,6 +33,7 @@ from app.backtest.matrix import (
     build_market_matrix,
     load_market_data_matrix_from_parquet,
 )
+from app.backtest.stats_v2 import cvar_95, kelly_fraction, sqn, ulcer_index
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.parquet import scan_enriched_parquet
@@ -38,6 +47,52 @@ def _matrix_entry_score(matrix: MarketMatrix, time_id: int, asset_id: int) -> fl
     if source_time < 0:
         return 0.0
     return float(matrix.score[source_time, asset_id])
+
+
+def _matrix_one_price(matrix: MarketMatrix, time_id: int, asset_id: int, direction: str) -> bool:
+    prices = (
+        float(matrix.open[time_id, asset_id]),
+        float(matrix.high[time_id, asset_id]),
+        float(matrix.low[time_id, asset_id]),
+        float(matrix.close[time_id, asset_id]),
+    )
+    locked = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
+    return is_one_price_limit(
+        locked=bool(locked[time_id, asset_id]),
+        flat=prices_flat(prices),
+        near_zero_volume=volume_near_zero(float(matrix.volume[time_id, asset_id])),
+    )
+
+
+def _matrix_side_halt(matrix: MarketMatrix, time_id: int, asset_id: int) -> bool:
+    """停牌不可成交。一字板即使成交量为 0 也不算停牌, 只封锁对应方向。"""
+    if bool(matrix.tradable[time_id, asset_id]):
+        return False
+    return not (
+        _matrix_one_price(matrix, time_id, asset_id, "up")
+        or _matrix_one_price(matrix, time_id, asset_id, "down")
+    )
+
+
+def _lot_blocked_by_volume(volume_lots: float, volume_limit: float | None) -> bool:
+    """全量样本固定 1 手: 参与率不足 1 手则整笔不成交。"""
+    if volume_limit is None:
+        return False
+    status, _shares = participation_fill(100.0, volume_lots, volume_limit)
+    return status == "none"
+
+
+def _matrix_volume_limit(matrix: MarketMatrix, volume_limit: float | None) -> float | None:
+    """面板缺成交量时用 1 手占位, 不能拿来裁剪真实下单量。"""
+    if volume_limit is None or not matrix.volume_observed:
+        return None
+    return volume_limit
+
+
+def _round_metric(value: float | None, digits: int) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
 
 
 # ================================================================
@@ -74,6 +129,9 @@ class MatcherConfig:
     minute_fill: bool = False
     # 回测资产类型: 分钟K按资产类型分开存储, 精确成交据此路由分钟分区 (不凭代码格式猜测)。
     asset_type: str = "stock"
+    # 成交量参与率: 单笔成交不超过当根成交量的该比例 (0.1 = 10%)。
+    # None/0 关闭, 关闭时撮合与历史结果一致。余量规则见 liquidity.py。
+    volume_limit: float | None = None
 
     def __post_init__(self) -> None:
         # 解析最终口径: 优先 entry_fill/exit_fill, 否则回退到 matching (向后兼容)。
@@ -81,6 +139,7 @@ class MatcherConfig:
             self.entry_fill = self.matching
         if self.exit_fill is None:
             self.exit_fill = self.matching
+        self.volume_limit = normalize_volume_limit(self.volume_limit)
 
     def _commission_pct(self) -> float:
         # commission_pct 显式给出时优先, 否则回退 fees_pct (向后兼容双边佣金)。
@@ -866,11 +925,15 @@ class BacktestEngine:
             "buy_invalid_price": 0,
             "buy_suspended": 0,
             "buy_limit_up": 0,
+            "buy_volume_limit": 0,
+            "buy_volume_capped": 0,
             "buy_score_filter": 0,
             "buy_no_next_bar": max(raw_candidates - int(matrix.entry.sum()), 0),
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_volume_limit": 0,
+            "sell_volume_capped": 0,
             "sell_no_future": 0,
             "pending_exit": 0,
         }
@@ -927,20 +990,10 @@ class BacktestEngine:
             )
 
         def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
-            if not matrix.tradable[time_id, asset_id]:
-                return False
-            prices = [
-                float(matrix.open[time_id, asset_id]), float(matrix.high[time_id, asset_id]),
-                float(matrix.low[time_id, asset_id]), float(matrix.close[time_id, asset_id]),
-            ]
-            if not all(_valid_price(value) for value in prices):
-                return False
-            same = max(prices) - min(prices) <= max(abs(prices[3]) * 1e-4, 0.01)
-            flags = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
-            return bool(flags[time_id, asset_id]) and same
+            return _matrix_one_price(matrix, time_id, asset_id, direction)
 
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
+            if _matrix_side_halt(matrix, time_id, asset_id):
                 return False, "buy_suspended"
             if not _valid_price(entry_prices[time_id, asset_id]):
                 return False, "buy_invalid_price"
@@ -954,7 +1007,7 @@ class BacktestEngine:
             return True, ""
 
         def _can_sell(time_id: int, asset_id: int, override: float | None) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
+            if _matrix_side_halt(matrix, time_id, asset_id):
                 return False, "sell_suspended"
             price = override if override is not None else exit_prices[time_id, asset_id]
             if not _valid_price(price):
@@ -1052,6 +1105,18 @@ class BacktestEngine:
                 pos["blocked_exit_days"] += 1
                 _count(blocked)
                 return False
+            if not force and _lot_blocked_by_volume(
+                float(matrix.volume[time_id, asset_id]),
+                _matrix_volume_limit(matrix, config.volume_limit),
+            ):
+                if not pos.get("pending_exit_reason"):
+                    pos["pending_exit_reason"] = reason
+                    pos["pending_exit_signal_date"] = signal_date
+                    pos["pending_exit_signal_id"] = signal_id
+                    _count("pending_exit")
+                pos["blocked_exit_days"] += 1
+                _count("sell_volume_limit")
+                return False
             exit_price = float(override) if override is not None else _refill(
                 time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
             )
@@ -1110,6 +1175,12 @@ class BacktestEngine:
                 continue
             if config.score_max is not None and score > config.score_max:
                 _count("buy_score_filter")
+                continue
+            if _lot_blocked_by_volume(
+                float(matrix.volume[time_id, asset_id]),
+                _matrix_volume_limit(matrix, config.volume_limit),
+            ):
+                _count("buy_volume_limit")
                 continue
             future_times = [
                 future for future in range(time_id + 1, matrix.shape[0])
@@ -1335,11 +1406,15 @@ class BacktestEngine:
             "buy_invalid_price": 0,
             "buy_suspended": 0,
             "buy_limit_up": 0,
+            "buy_volume_limit": 0,
+            "buy_volume_capped": 0,
             "buy_score_filter": 0,
             "buy_no_next_bar": max(n_candidates - int(ent.sum()), 0),
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_volume_limit": 0,
+            "sell_volume_capped": 0,
             "sell_no_future": 0,
             "pending_exit": 0,
         }
@@ -1354,33 +1429,44 @@ class BacktestEngine:
                 return False
             return v > 0 and np.isfinite(v)
 
+        def _bar_prices(idx: int) -> tuple[float, float, float, float]:
+            return (
+                float(open_prices[idx]),
+                float(high_prices[idx]),
+                float(low_prices[idx]),
+                float(close_prices[idx]),
+            )
+
+        def _one_flags(idx: int) -> tuple[bool, bool]:
+            prices = _bar_prices(idx)
+            flat = prices_flat(prices)
+            near_zero = volume_near_zero(float(volumes[idx])) if has_volume else False
+            return (
+                is_one_price_limit(
+                    locked=bool(limit_up_flags[idx]), flat=flat, near_zero_volume=near_zero,
+                ),
+                is_one_price_limit(
+                    locked=bool(limit_down_flags[idx]), flat=flat, near_zero_volume=near_zero,
+                ),
+            )
+
         def _is_suspended(idx: int) -> bool:
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            valid_bar = any(_valid_price(x) for x in (o, h, l, c))
-            if not valid_bar:
+            prices = _bar_prices(idx)
+            if not any(_valid_price(value) for value in prices):
                 return True
-            if has_volume and float(volumes[idx] or 0) <= 0:
-                same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-                if same_price:
-                    return True
+            one_up, one_down = _one_flags(idx)
+            if has_volume and is_volume_halt(
+                flat=prices_flat(prices),
+                volume=float(volumes[idx]),
+                one_price_up=one_up,
+                one_price_down=one_down,
+            ):
+                return True
             return False
 
         def _is_one_price_limit(idx: int, direction: str) -> bool:
-            if _is_suspended(idx):
-                return False
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            if not all(_valid_price(x) for x in (o, h, l, c)):
-                return False
-            same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-            if direction == "up":
-                return bool(limit_up_flags[idx]) and same_price
-            return bool(limit_down_flags[idx]) and same_price
+            one_up, one_down = _one_flags(idx)
+            return one_up if direction == "up" else one_down
 
         def _can_buy(idx: int) -> tuple[bool, str]:
             if _is_suspended(idx):
@@ -1476,6 +1562,14 @@ class BacktestEngine:
                 pos["blocked_exit_days"] = int(pos.get("blocked_exit_days", 0)) + 1
                 _count(block_reason)
                 return False
+            if not force and has_volume and _lot_blocked_by_volume(float(volumes[idx]), config.volume_limit):
+                if not pos.get("pending_exit_reason"):
+                    pos["pending_exit_reason"] = reason
+                    pos["pending_exit_signal_date"] = signal_date
+                    _count("pending_exit")
+                pos["blocked_exit_days"] = int(pos.get("blocked_exit_days", 0)) + 1
+                _count("sell_volume_limit")
+                return False
 
             if exit_price_override is not None:
                 exit_price = float(exit_price_override)
@@ -1537,6 +1631,9 @@ class BacktestEngine:
                 continue
             if score_max is not None and score > score_max:
                 _count("buy_score_filter")
+                continue
+            if has_volume and _lot_blocked_by_volume(float(volumes[entry_idx]), config.volume_limit):
+                _count("buy_volume_limit")
                 continue
 
             sym = str(panel_symbols[entry_idx])
@@ -1828,6 +1925,8 @@ class BacktestEngine:
             "buy_invalid_price": 0,
             "buy_suspended": 0,
             "buy_limit_up": 0,
+            "buy_volume_limit": 0,
+            "buy_volume_capped": 0,
             "buy_no_slot": 0,
             "buy_cash": 0,
             "buy_lot_size": 0,
@@ -1837,6 +1936,8 @@ class BacktestEngine:
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_volume_limit": 0,
+            "sell_volume_capped": 0,
             "pending_exit": 0,
         }
 
@@ -1901,22 +2002,10 @@ class BacktestEngine:
             )
 
         def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
-            if not matrix.tradable[time_id, asset_id]:
-                return False
-            prices = (
-                float(matrix.open[time_id, asset_id]),
-                float(matrix.high[time_id, asset_id]),
-                float(matrix.low[time_id, asset_id]),
-                float(matrix.close[time_id, asset_id]),
-            )
-            if not all(_valid_price(value) for value in prices):
-                return False
-            same_price = max(prices) - min(prices) <= max(abs(prices[3]) * 1e-4, 0.01)
-            flag = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
-            return bool(flag[time_id, asset_id]) and same_price
+            return _matrix_one_price(matrix, time_id, asset_id, direction)
 
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
+            if _matrix_side_halt(matrix, time_id, asset_id):
                 return False, "buy_suspended"
             if not _valid_price(entry_prices[time_id, asset_id]):
                 return False, "buy_invalid_price"
@@ -1930,11 +2019,19 @@ class BacktestEngine:
             return True, ""
 
         def _can_sell(time_id: int, asset_id: int, override: float | None = None) -> tuple[bool, str]:
-            if not matrix.tradable[time_id, asset_id]:
+            if _matrix_side_halt(matrix, time_id, asset_id):
                 return False, "sell_suspended"
             price = override if override is not None else exit_prices[time_id, asset_id]
             if not _valid_price(price):
                 return False, "sell_invalid_price"
+            if (
+                override is None
+                and config.exit_fill == "close_t"
+                and bool(matrix.limit_down_locked[time_id, asset_id])
+            ):
+                # 与独立样本路径一致: 收盘封死跌停不能按收盘价卖出。
+                # 日内风控线 (override) 是盘中成交, 不受收盘封板影响。
+                return False, "sell_limit_down"
             if _one_price_limit(time_id, asset_id, "down"):
                 return False, "sell_limit_down"
             return True, ""
@@ -1963,17 +2060,34 @@ class BacktestEngine:
             signal_date: str,
             sold_today: set[int],
             override: float | None = None,
-        ) -> None:
+        ) -> bool:
             nonlocal cash
-            pos = positions.pop(asset_id)
+            pos = positions[asset_id]
+            held = float(pos["shares"])
+            status, fill_shares = participation_fill(
+                held,
+                float(matrix.volume[time_id, asset_id]),
+                _matrix_volume_limit(matrix, config.volume_limit),
+            )
+            if status == "none":
+                return False
+            partial = status == "partial"
+            if partial:
+                _count("sell_volume_capped")
             exit_price = float(override) if override is not None else _refill_price(
                 time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
             )
-            exit_value = pos["shares"] * exit_price * (1 - sell_cost_pct)
+            fraction = fill_shares / held if held else 0.0
+            entry_sold = float(pos["entry_value"]) * fraction
+            exit_value = fill_shares * exit_price * (1 - sell_cost_pct)
             cash += exit_value
-            pnl_amount = exit_value - pos["entry_value"]
-            pnl_pct = pnl_amount / pos["entry_value"] if pos["entry_value"] > 0 else 0.0
+            pnl_amount = exit_value - entry_sold
+            pnl_pct = pnl_amount / entry_sold if entry_sold > 0 else 0.0
             sold_today.add(asset_id)
+            signal_id = (
+                pos.get("pending_exit_signal_id")
+                or _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
+            ) if reason == "signal" else None
             trades.append(TradeRecord(
                 symbol=matrix.symbols[asset_id],
                 name=matrix.names[asset_id],
@@ -1984,10 +2098,10 @@ class BacktestEngine:
                 pnl_pct=round(float(pnl_pct), 6),
                 duration=int(pos["hold_days"]),
                 exit_reason=reason,
-                shares=round(float(pos["shares"]), 4),
-                lots=round(float(pos["lots"]), 2),
-                position_pct=round(float(pos["position_pct"]), 6),
-                entry_value=round(float(pos["entry_value"]), 2),
+                shares=round(float(fill_shares), 4),
+                lots=round(float(fill_shares / 100.0), 2),
+                position_pct=round(float(pos["position_pct"]) * fraction, 6),
+                entry_value=round(float(entry_sold), 2),
                 exit_value=round(float(exit_value), 2),
                 pnl_amount=round(float(pnl_amount), 2),
                 entry_score=round(float(pos["entry_score"]), 2),
@@ -1995,11 +2109,23 @@ class BacktestEngine:
                 exit_signal_date=signal_date,
                 blocked_exit_days=int(pos["blocked_exit_days"]),
                 entry_signal_id=pos["entry_signal_id"],
-                exit_signal_id=(
-                    pos.get("pending_exit_signal_id")
-                    or _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
-                ) if reason == "signal" else None,
+                exit_signal_id=signal_id,
             ))
+            if partial:
+                pos["shares"] = held - fill_shares
+                pos["lots"] = pos["shares"] / 100.0
+                pos["entry_value"] = float(pos["entry_value"]) - entry_sold
+                pos["position_pct"] = float(pos["position_pct"]) * (1.0 - fraction)
+                _mark_pending(
+                    asset_id,
+                    reason,
+                    signal_date,
+                    signal_id,
+                    next_open=config.exit_fill == "signal_next_minute" and reason == "signal",
+                )
+            else:
+                positions.pop(asset_id, None)
+            return True
 
         def _try_sell(
             time_id: int,
@@ -2035,7 +2161,17 @@ class BacktestEngine:
                 )
                 _count(blocked)
                 return False
-            _sell(time_id, asset_id, reason, signal_date, sold_today, override)
+            if not _sell(time_id, asset_id, reason, signal_date, sold_today, override):
+                _mark_pending(
+                    asset_id,
+                    reason,
+                    signal_date,
+                    signal_id,
+                    next_open=minute_trigger,
+                )
+                _count("sell_volume_limit")
+                sold_today.add(asset_id)
+                return False
             return True
 
         for time_id, date_label in enumerate(matrix.timestamp_labels):
@@ -2099,6 +2235,8 @@ class BacktestEngine:
                         _try_sell(time_id, asset_id, "take_profit", date_text, sold_today, take_profit)
 
             for asset_id in list(positions):
+                if asset_id in sold_today:
+                    continue
                 pos = positions.get(asset_id)
                 if pos is None:
                     continue
@@ -2176,6 +2314,18 @@ class BacktestEngine:
                             if shares <= 0:
                                 _count("buy_lot_size")
                                 continue
+                            status, capped_shares = participation_fill(
+                                float(shares),
+                                float(matrix.volume[time_id, asset_id]),
+                                _matrix_volume_limit(matrix, config.volume_limit),
+                            )
+                            if status == "none":
+                                _count("buy_volume_limit")
+                                continue
+                            if status == "partial":
+                                _count("buy_volume_capped")
+                                shares = capped_shares
+                                entry_value = shares * entry_price * (1 + buy_cost_pct)
                             if entry_value > cash + 1e-6:
                                 _count("buy_cash")
                                 continue
@@ -2418,6 +2568,8 @@ class BacktestEngine:
             "buy_invalid_price": 0,
             "buy_suspended": 0,
             "buy_limit_up": 0,
+            "buy_volume_limit": 0,
+            "buy_volume_capped": 0,
             "buy_no_slot": 0,
             "buy_cash": 0,
             "buy_lot_size": 0,
@@ -2427,6 +2579,8 @@ class BacktestEngine:
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_volume_limit": 0,
+            "sell_volume_capped": 0,
             "pending_exit": 0,
         }
 
@@ -2447,33 +2601,44 @@ class BacktestEngine:
                 value += pos["shares"] * mark
             return value
 
+        def _bar_prices(idx: int) -> tuple[float, float, float, float]:
+            return (
+                float(open_prices[idx]),
+                float(high_prices[idx]),
+                float(low_prices[idx]),
+                float(close_prices[idx]),
+            )
+
+        def _one_flags(idx: int) -> tuple[bool, bool]:
+            prices = _bar_prices(idx)
+            flat = prices_flat(prices)
+            near_zero = volume_near_zero(float(volumes[idx])) if has_volume else False
+            return (
+                is_one_price_limit(
+                    locked=bool(limit_up_flags[idx]), flat=flat, near_zero_volume=near_zero,
+                ),
+                is_one_price_limit(
+                    locked=bool(limit_down_flags[idx]), flat=flat, near_zero_volume=near_zero,
+                ),
+            )
+
         def _is_suspended(idx: int) -> bool:
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            valid_bar = any(_valid_price(x) for x in (o, h, l, c))
-            if not valid_bar:
+            prices = _bar_prices(idx)
+            if not any(_valid_price(value) for value in prices):
                 return True
-            if has_volume and float(volumes[idx] or 0) <= 0:
-                same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-                if same_price:
-                    return True
+            one_up, one_down = _one_flags(idx)
+            if has_volume and is_volume_halt(
+                flat=prices_flat(prices),
+                volume=float(volumes[idx]),
+                one_price_up=one_up,
+                one_price_down=one_down,
+            ):
+                return True
             return False
 
         def _is_one_price_limit(idx: int, direction: str) -> bool:
-            if _is_suspended(idx):
-                return False
-            o = float(open_prices[idx])
-            h = float(high_prices[idx])
-            l = float(low_prices[idx])
-            c = float(close_prices[idx])
-            if not all(_valid_price(x) for x in (o, h, l, c)):
-                return False
-            same_price = max(o, h, l, c) - min(o, h, l, c) <= max(abs(c) * 1e-4, 0.01)
-            if direction == "up":
-                return bool(limit_up_flags[idx]) and same_price
-            return bool(limit_down_flags[idx]) and same_price
+            one_up, one_down = _one_flags(idx)
+            return one_up if direction == "up" else one_down
 
         def _can_buy(idx: int) -> tuple[bool, str]:
             if _is_suspended(idx):
@@ -2524,17 +2689,30 @@ class BacktestEngine:
             signal_date: str,
             sold_today: set[str],
             exit_price_override: float | None = None,
-        ) -> None:
+        ) -> bool:
             nonlocal cash
-            pos = positions.pop(sym)
+            pos = positions[sym]
+            held = float(pos["shares"])
+            status, fill_shares = participation_fill(
+                held,
+                float(volumes[idx]),
+                config.volume_limit if has_volume else None,
+            )
+            if status == "none":
+                return False
+            partial = status == "partial"
+            if partial:
+                _count("sell_volume_capped")
             if exit_price_override is not None:
                 exit_price = float(exit_price_override)
             else:
                 exit_price = _refill_price(idx, "sell", float(exit_prices[idx]))
-            exit_value = pos["shares"] * exit_price * (1 - sell_cost_pct)
+            fraction = fill_shares / held if held else 0.0
+            entry_sold = float(pos["entry_value"]) * fraction
+            exit_value = fill_shares * exit_price * (1 - sell_cost_pct)
             cash += exit_value
-            pnl_amount = exit_value - pos["entry_value"]
-            pnl_pct = (exit_value - pos["entry_value"]) / pos["entry_value"] if pos["entry_value"] > 0 else 0.0
+            pnl_amount = exit_value - entry_sold
+            pnl_pct = pnl_amount / entry_sold if entry_sold > 0 else 0.0
             sold_today.add(sym)
             trades.append(TradeRecord(
                 symbol=sym,
@@ -2546,10 +2724,10 @@ class BacktestEngine:
                 pnl_pct=round(float(pnl_pct), 6),
                 duration=int(pos["hold_days"]),
                 exit_reason=reason,
-                shares=round(float(pos["shares"]), 4),
-                lots=round(float(pos["lots"]), 2),
-                position_pct=round(float(pos.get("position_pct", 0.0)), 6),
-                entry_value=round(float(pos["entry_value"]), 2),
+                shares=round(float(fill_shares), 4),
+                lots=round(float(fill_shares / 100.0), 2),
+                position_pct=round(float(pos.get("position_pct", 0.0)) * fraction, 6),
+                entry_value=round(float(entry_sold), 2),
                 exit_value=round(float(exit_value), 2),
                 pnl_amount=round(float(pnl_amount), 2),
                 entry_score=round(float(pos["entry_score"]), 2) if pos.get("entry_score") is not None else None,
@@ -2559,6 +2737,15 @@ class BacktestEngine:
                 entry_signal_id=pos.get("entry_signal_id"),
                 exit_signal_id=_resolve_signal_id(panel, idx, exit_signal_ids) if reason == "signal" else None,
             ))
+            if partial:
+                pos["shares"] = held - fill_shares
+                pos["lots"] = pos["shares"] / 100.0
+                pos["entry_value"] = float(pos["entry_value"]) - entry_sold
+                pos["position_pct"] = float(pos.get("position_pct", 0.0)) * (1.0 - fraction)
+                _mark_pending(sym, reason, signal_date)
+            else:
+                positions.pop(sym, None)
+            return True
 
         def _try_sell(
             sym: str,
@@ -2577,7 +2764,11 @@ class BacktestEngine:
                 _mark_pending(sym, reason, signal_date)
                 _count(block_reason)
                 return False
-            _sell(sym, idx, reason, signal_date, sold_today, exit_price_override)
+            if not _sell(sym, idx, reason, signal_date, sold_today, exit_price_override):
+                _mark_pending(sym, reason, signal_date)
+                _count("sell_volume_limit")
+                sold_today.add(sym)
+                return False
             return True
 
         def _process_scheduled_exits(
@@ -2587,6 +2778,8 @@ class BacktestEngine:
             sold_today: set[str],
         ) -> None:
             for sym in list(positions.keys()):
+                if sym in sold_today:
+                    continue
                 pos = positions.get(sym)
                 if pos is None:
                     continue
@@ -2739,6 +2932,18 @@ class BacktestEngine:
                 if shares <= 0:
                     _count("buy_lot_size")
                     continue
+                status, capped_shares = participation_fill(
+                    float(shares),
+                    float(volumes[idx]),
+                    config.volume_limit if has_volume else None,
+                )
+                if status == "none":
+                    _count("buy_volume_limit")
+                    continue
+                if status == "partial":
+                    _count("buy_volume_capped")
+                    shares = capped_shares
+                    entry_value = shares * entry_price * (1 + buy_cost_pct)
                 if entry_value > cash + 1e-6:
                     _count("buy_cash")
                     continue
@@ -3014,6 +3219,12 @@ class BacktestEngine:
             "avg_pnl": round(float(np.mean(pnls)), 4),
             "avg_win": round(avg_win, 4),
             "avg_loss": round(avg_loss, 4),
+            "ulcer_index": _round_metric(
+                ulcer_index(float(initial_capital) * np.cumprod(1.0 + pnls)), 4,
+            ),
+            "sqn": _round_metric(sqn(pnls), 2),
+            "kelly_fraction": _round_metric(kelly_fraction(pnls), 4),
+            "cvar_95": _round_metric(cvar_95(pnls), 4),
             **BacktestEngine._per_trade_block(pnls, durations),
         }
         if include_monte_carlo:
@@ -3143,6 +3354,10 @@ class BacktestEngine:
             "max_drawdown": round(float(max_drawdown), 4),
             "sharpe": round(float(sharpe), 2),
             "sortino": round(float(sortino), 2) if sortino is not None else None,
+            "ulcer_index": _round_metric(ulcer_index(values), 4),
+            "sqn": _round_metric(sqn(pnls), 2),
+            "kelly_fraction": _round_metric(kelly_fraction(pnls), 4),
+            "cvar_95": _round_metric(cvar_95(daily if daily.size else pnls), 4),
             "execution": execution_stats,
         }
         if options.include_return_distribution:
@@ -3240,6 +3455,10 @@ class BacktestEngine:
             "initial_capital": round(float(initial_capital), 2),
             "avg_exposure": round(float(np.mean(exposures)), 4) if len(exposures) else 0.0,
             "max_exposure": round(float(np.max(exposures)), 4) if len(exposures) else 0.0,
+            "ulcer_index": _round_metric(ulcer_index(values), 4),
+            "sqn": _round_metric(sqn(pnls), 2),
+            "kelly_fraction": _round_metric(kelly_fraction(pnls), 4),
+            "cvar_95": _round_metric(cvar_95(daily), 4),
         }
         if include_monte_carlo:
             stats.update(BacktestEngine._mc_drawdown_percentiles(pnls))

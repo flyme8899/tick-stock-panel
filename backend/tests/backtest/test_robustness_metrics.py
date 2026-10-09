@@ -123,8 +123,13 @@ def _trades(pnls: list[float], durations: list[int]) -> list[TradeRecord]:
 def test_calc_stats_emits_robustness_fields():
     trades = _trades([0.10, -0.05, 0.08, -0.06], [3, 2, 5, 4])
     stats = BacktestEngine._calc_stats(trades, 100_000, date(2024, 1, 1), date(2024, 6, 1))
-    for k in ("sortino", "mc_maxdd_p50", "mc_maxdd_p95", "median_pnl", "best", "worst", "avg_holding_days"):
+    for k in (
+        "sortino", "mc_maxdd_p50", "mc_maxdd_p95", "median_pnl", "best", "worst", "avg_holding_days",
+        "ulcer_index", "sqn", "kelly_fraction", "cvar_95",
+    ):
         assert k in stats, f"缺字段 {k}"
+    assert stats["sqn"] is not None
+    assert stats["kelly_fraction"] is not None
     assert stats["best"] == round(0.10, 4)
     assert stats["worst"] == round(-0.06, 4)
     assert stats["median_pnl"] == round(float(np.median([0.10, -0.05, 0.08, -0.06])), 4)

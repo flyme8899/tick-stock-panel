@@ -808,9 +808,11 @@ def compute_limit_signals(
     elif "turnover_rate" in want and "turnover_rate" not in df.columns:
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("turnover_rate"))
 
-    # 前一日参考收盘价（交易所涨跌停基准价）
-    # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
-    # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
+    # 前一日参考收盘价（交易所涨跌停基准价, 原始价尺度）
+    # 复权因子不变时用原始昨收, 避免浮点误差。
+    # 除权除息日因子跳变: 前复权昨收仍在复权尺度, 必须再除以当日因子
+    # (close/raw_close) 才回到交易所用于涨跌停的原始参考价。
+    # 最新日因子为 1 时, 该式等于前复权昨收, 与旧口径一致。
     if not need_price_limits:
         cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down", "listing_date") if c in df.columns]
         return df.drop(cleanup)
@@ -819,9 +821,9 @@ def compute_limit_signals(
     _adj_yesterday = pl.col("close").shift(1).over("symbol") / pl.col("raw_close").shift(1).over("symbol")
     _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
     df = df.with_columns(
-        pl.when(_adj_changed)
-        .then(pl.col("close").shift(1).over("symbol"))   # 除权: 使用前复权昨收
-        .otherwise(pl.col("raw_close").shift(1).over("symbol"))  # 正常: 使用原始昨收
+        pl.when(_adj_changed & _adj_today.is_not_null() & (_adj_today != 0))
+        .then(pl.col("close").shift(1).over("symbol") / _adj_today)
+        .otherwise(pl.col("raw_close").shift(1).over("symbol"))
         .alias("_prev_raw_close")
     )
 

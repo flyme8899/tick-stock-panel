@@ -26,6 +26,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pads
 
+from app.backtest.liquidity import release_one_price_boards
 from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
 from app.price_limits import (
@@ -51,7 +52,7 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 4
+_DIRECT_MATRIX_LOADER_VERSION = 5
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -444,6 +445,8 @@ class MarketDataMatrix:
     cache_lease: Any | None = field(default=None, compare=False, repr=False)
     vector_fields: frozenset[str] = field(default_factory=frozenset)
     cache_timing_ms: Mapping[str, float] = field(default_factory=dict)
+    # False: 面板没有成交量列, volume 是 1 手占位, 不能用于参与率裁剪。
+    volume_observed: bool = True
     _valid_bars: ValidBarIndex | None = field(
         default=None,
         compare=False,
@@ -554,6 +557,7 @@ class MarketMatrix:
     # 逐格入场价覆盖 (time x asset, NaN=回退 open/close 惯例)。分钟策略回测用:
     # 信号在盘中第 m 根触发, 入场价 = 触发分钟收盘价, 而非当日开盘/收盘。
     entry_price: np.ndarray | None = None
+    volume_observed: bool = True
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -595,6 +599,9 @@ def build_market_data_matrix(
     limit_up_locked = _bool_matrix(panel, "signal_limit_up", shape, time_id, asset_id)
     limit_down_locked = _bool_matrix(panel, "signal_limit_down", shape, time_id, asset_id)
     tradable = _tradable_matrix(open_, high, low, close, volume)
+    release_one_price_boards(
+        tradable, open_, high, low, close, volume, limit_up_locked, limit_down_locked,
+    )
 
     core_columns = {
         timestamp_col,
@@ -674,6 +681,7 @@ def build_market_data_matrix(
         limit_up_locked=limit_up_locked,
         limit_down_locked=limit_down_locked,
         fields=MappingProxyType(fields),
+        volume_observed="volume" in panel.columns,
     )
 
 
@@ -1016,6 +1024,16 @@ def _build_market_data_matrix_from_dataset(
         latest_limits,
         apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
     )
+    release_one_price_boards(
+        tradable,
+        arrays["open"],
+        arrays["high"],
+        arrays["low"],
+        arrays["close"],
+        arrays["volume"],
+        limit_up_locked,
+        limit_down_locked,
+    )
     timestamps, session_ids = _matrix_time_axes(actual_dates)
     _make_read_only(
         timestamps,
@@ -1176,6 +1194,16 @@ def _build_market_data_matrix_cache_from_dataset(
             out_up=arrays["limit_up_locked"],
             out_down=arrays["limit_down_locked"],
             apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
+        )
+        release_one_price_boards(
+            arrays["tradable"],
+            arrays["open"],
+            arrays["high"],
+            arrays["low"],
+            arrays["close"],
+            arrays["volume"],
+            arrays["limit_up_locked"],
+            arrays["limit_down_locked"],
         )
         timing_ms["derived"] = round((time.perf_counter() - stage_started) * 1000, 1)
         _raise_if_matrix_cancelled(cancel_event)
@@ -1833,6 +1861,7 @@ def _slice_and_project_market_data_matrix(
         cache_path=sliced.cache_path,
         cache_lease=sliced.cache_lease,
         vector_fields=frozenset(),
+        volume_observed=sliced.volume_observed,
         cache_timing_ms=sliced.cache_timing_ms,
     )
 
@@ -2200,7 +2229,20 @@ def _limit_lock_matrices(
             & np.isfinite(previous_adjustment)
             & (np.abs(current_adjustment - previous_adjustment) > 1e-6)
         )
-        reference = np.where(adjustment_changed, previous_close, previous_raw)
+        # 除权日: 前复权昨收 / 当日复权因子 = 原始价尺度的交易所参考价。
+        # 因子未变时仍用原始昨收, 避免把复权价和原始价混比 (见 pipeline 同口径)。
+        ex_rights_raw = np.full(shape[1], np.nan, dtype=np.float64)
+        np.divide(
+            previous_close,
+            current_adjustment,
+            out=ex_rights_raw,
+            where=(
+                np.isfinite(previous_close)
+                & np.isfinite(current_adjustment)
+                & (current_adjustment != 0)
+            ),
+        )
+        reference = np.where(adjustment_changed, ex_rights_raw, previous_raw)
         valid = (
             present
             & np.isfinite(reference)
@@ -2411,6 +2453,7 @@ def build_market_matrix_from_signals(
             if entry_price_override is not None
             else None
         ),
+        volume_observed=market.volume_observed,
     )
 
 
@@ -2494,6 +2537,7 @@ def slice_market_data_matrix(market: MarketDataMatrix, start: int, stop: int) ->
         cache_lease=market.cache_lease,
         vector_fields=market.vector_fields,
         cache_timing_ms=market.cache_timing_ms,
+        volume_observed=market.volume_observed,
     )
     _make_read_only(
         result.timestamps,
@@ -2619,6 +2663,7 @@ def _writable_market_copy(market: MarketDataMatrix) -> MarketDataMatrix:
         limit_up_locked=np.array(market.limit_up_locked, copy=True),
         limit_down_locked=np.array(market.limit_down_locked, copy=True),
         fields=MappingProxyType(fields),
+        volume_observed=market.volume_observed,
     )
 
 
@@ -2645,6 +2690,7 @@ def _readonly_market_view(market: MarketDataMatrix) -> MarketDataMatrix:
         limit_up_locked=_readonly_view(market.limit_up_locked),
         limit_down_locked=_readonly_view(market.limit_down_locked),
         fields=MappingProxyType(fields),
+        volume_observed=market.volume_observed,
     )
 
 
@@ -2707,6 +2753,7 @@ def _append_market_row(
         symbols=market.symbols,
         names=market.names,
         fields=MappingProxyType(fields),
+        volume_observed=market.volume_observed and latest.volume_observed,
         **arrays,
     )
 

@@ -39,6 +39,10 @@ export function StrategyNavChart({ result }: Props) {
     }
     const dates = result.equity_curve.map(r => r.date.slice(0, 10))
     const navValues = result.equity_curve.map(r => r.value)
+    const benchmarkLabel = result.benchmark_curve?.[0]?.name
+      || (typeof result.stats?.benchmark_name === 'string' ? result.stats.benchmark_name : '')
+      || '上证指数'
+    const benchmarkSeriesName = `同期${benchmarkLabel}`
     const benchmarkByDate = new Map((result.benchmark_curve ?? []).map(r => [r.date.slice(0, 10), r.close ?? r.value]))
     const benchmarkValues = dates.map(d => benchmarkByDate.get(d) ?? null)
     const hasBenchmark = benchmarkValues.some(v => v != null)
@@ -169,7 +173,7 @@ export function StrategyNavChart({ result }: Props) {
           for (const p of params) {
             if (p.value == null) continue
             const isDrawdown = p.seriesName === '回撤'
-            const isBenchmark = p.seriesName === '同期上证指数'
+            const isBenchmark = p.seriesName === benchmarkSeriesName
             const isPosition = p.seriesName === '仓位'
             html += `<div style="display:flex;justify-content:space-between;gap:16px">
               <span style="color:${p.color}">${p.seriesName}</span>
@@ -205,8 +209,8 @@ export function StrategyNavChart({ result }: Props) {
             } as any,
           },
         },
-        ...(hasBenchmark && !hidden.has('同期上证指数') ? [{
-          name: '同期上证指数',
+        ...(hasBenchmark && !hidden.has(benchmarkSeriesName) ? [{
+          name: benchmarkSeriesName,
           type: 'line',
           xAxisIndex: 0,
           yAxisIndex: 0,
@@ -242,7 +246,7 @@ export function StrategyNavChart({ result }: Props) {
         }] : []),
       ],
     } as any
-  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.run_id, ct, hidden])
+  }, [result.equity_curve, result.drawdown_curve, result.benchmark_curve, result.stats, result.run_id, ct, hidden])
 
   const chartRef = useECharts(option, [result.run_id, ct], containerRef)
 
@@ -273,14 +277,14 @@ export function StrategyNavChart({ result }: Props) {
         {(result.benchmark_curve?.length ?? 0) > 0 && (
           <button
             type="button"
-            onClick={() => toggleLegend('同期上证指数')}
+            onClick={() => toggleLegend(`同期${result.benchmark_curve?.[0]?.name || result.stats?.benchmark_name || '上证指数'}`)}
             title="点击显示/隐藏"
             className={`flex items-center gap-1.5 text-[10px] text-secondary cursor-pointer transition-opacity ${
-              hidden.has('同期上证指数') ? 'opacity-40' : 'opacity-100'
+              hidden.has(`同期${result.benchmark_curve?.[0]?.name || result.stats?.benchmark_name || '上证指数'}`) ? 'opacity-40' : 'opacity-100'
             }`}
           >
             <span className="w-3 h-0.5 rounded border-t border-dashed border-[#64748b]" />
-            同期上证指数
+            同期{result.benchmark_curve?.[0]?.name || result.stats?.benchmark_name || '上证指数'}
           </button>
         )}
         <span className="ml-auto text-[10px] text-muted">滚轮缩放 · 拖动平移</span>

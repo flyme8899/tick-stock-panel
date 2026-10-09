@@ -161,7 +161,7 @@ def test_independent_candidate_pnl_pct_includes_decomposed_costs():
 
 def test_job_key_distinguishes_commission_and_stamp():
     """成本参数不同的两次回测必须得到不同 job_key (避免缓存碰撞与 cancel 失配)。"""
-    from app.api.backtest import _make_job_key
+    from app.api.backtest import _checked_volume_limit, _make_job_key
 
     base_args = ("s", None, None, None, "open_t+1", None, None, 0.0002, 5.0, 10, 1.0, 1e6, "equal", None, None, "position", 5)
     k_none = _make_job_key(*base_args)
@@ -171,3 +171,8 @@ def test_job_key_distinguishes_commission_and_stamp():
     assert k_none != k_comm
     assert k_none != k_stamp
     assert k_comm != k_stamp
+    assert _make_job_key(*base_args, volume_limit=0.1) != k_none
+    assert _make_job_key(*base_args, volume_limit=_checked_volume_limit(0)) == _make_job_key(
+        *base_args, volume_limit=_checked_volume_limit(None),
+    )
+    assert _make_job_key(*base_args, benchmark_symbol="000300.SH") != k_none
