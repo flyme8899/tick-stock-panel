@@ -401,8 +401,11 @@ def test_session_signal_sets_follow_the_same_bands():
     assert sets[1] == {"above_vwap", "near_high"}
     assert sets[2] == {"near_prev_close"}
     default = session_signal_sets(bars, mode="t", symbol="600519.SH", prev_close=10.0)
-    assert "above_vwap" not in default[1]
-    assert "near_high" in default[1]
+    assert default[1] == {"above_vwap", "near_high"}
+    wider_default = session_signal_sets(
+        bars, mode="t", symbol="600519.SH", prev_close=10.0, vwap_band=0.020,
+    )
+    assert "above_vwap" not in wider_default[1]
     wider = session_signal_sets(
         bars, mode="t", symbol="600519.SH", prev_close=10.0, vwap_band=0.025,
     )

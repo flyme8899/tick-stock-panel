@@ -53,7 +53,7 @@ RATE_LIMIT = 20
 RATE_WINDOW_S = 60
 ABNORMAL_CAP = 80
 T_CAP = 40
-VWAP_BAND = 0.020
+VWAP_BAND = 0.015
 RANGE_BAND = 0.003
 RANGE_QUIET_UNTIL = dt_time(10, 0)
 PREV_BAND = 0.003
@@ -110,11 +110,11 @@ def symbol_cooldown_s() -> int:
 
 
 def t_cooldown_s() -> int:
-    return max(60, int(settings.news_push_t_cooldown_min or 120) * 60)
+    return max(60, int(settings.news_push_t_cooldown_min or 60) * 60)
 
 
 def t_range_cooldown_s() -> int:
-    return max(60, int(settings.news_push_t_range_cooldown_min or 120) * 60)
+    return max(60, int(settings.news_push_t_range_cooldown_min or 60) * 60)
 
 
 def t_daily_cap() -> int | None:

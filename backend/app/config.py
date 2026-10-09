@@ -195,8 +195,8 @@ class Settings(BaseSettings):
     news_push_score_jump: float = 0.5
     news_push_hot_cooldown_min: int = 30
     news_push_symbol_cooldown_min: int = 30
-    news_push_t_cooldown_min: int = 120
-    news_push_t_range_cooldown_min: int = 120
+    news_push_t_cooldown_min: int = 60
+    news_push_t_range_cooldown_min: int = 60
     news_push_t_range_once_per_day: str = ""
     news_push_t_daily_cap: int = 20
 
