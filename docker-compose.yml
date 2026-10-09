@@ -68,6 +68,10 @@ services:
       # 容器内路径。覆盖 .env 里可能写成的宿主机路径。设为 off 可关闭注入。
       - TSP_QUANT_EVIDENCE_FILE=/opt/tsp/quant_evidence.yaml
     volumes:
+      # 手工 docker run 起的 sidecar 如果挂在别处（例如 /workspace/dsa/data），
+      # 切到这份 compose 会从空库开始。切换前先核对并搬过来：
+      #   docker inspect stock-server --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}'
+      #   cp -a <旧数据目录>/. ./data/dsa/
       - ./data/dsa:/app/data
       # 决策页保存定时设置时会写回这份文件。只读挂载会导致保存失败。
       - ./.env:/app/.env

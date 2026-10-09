@@ -43,32 +43,75 @@ docker compose --profile dsa up --build
 单独启动**的（`./scripts/dsa.sh` 或一个独立容器），默认网名字带项目前缀，外面
 那个容器对不上；固定名之后用 `--network dsa-net` 就能加进来。
 
-切到 compose 管理时有两步，顺序不能反。
+切到 compose 管理前，先做两件核对，再执行一条命令。
 
-**第一步：处理同名网络。** 之前手工 `docker network create dsa-net` 建的网没有
-compose 标签（`Labels` 是空的）。compose 按固定名字自建时会认出这张网但标签对不上，
+**第一步：核对 sidecar 数据位置。** 手工跑的 sidecar 和 compose 的 `dsa` 服务
+**挂的不是同一个目录**，直接换会从空库开始：
+
+| | 手工 `docker run` | compose 的 `dsa` 服务 |
+|---|---|---|
+| 数据卷 | `/workspace/dsa/data` → `/app/data` | `./data/dsa` → `/app/data` |
+| 数据库 | 前者下的 `stock_analysis.db` | `data/dsa/stock_analysis.db` |
+
+先核对：
+
+```bash
+docker inspect stock-server --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+```
+
+如果指向的不是 `./data/dsa`，切换前把旧数据搬过去（先停容器再拷）：
+
+```bash
+docker stop stock-server
+mkdir -p ./data/dsa
+cp -a /workspace/dsa/data/. ./data/dsa/
+```
+
+**第二步：处理同名网络。** 手工 `docker network create dsa-net` 建的网没有
+compose 标签（`Labels` 是空的）。compose 按固定名字自建时会认出它但标签对不上，
 **直接报错退出**，容器一个都不会创建：
 
 ```
 network dsa-net was found but has incorrect label com.docker.compose.network set to "" (expected: "dsa-net")
 ```
 
-先停掉连在上面的手工容器，删掉这张网，再让 compose 重建：
+**第三步：执行切换。**
 
 ```bash
 docker rm -f tsp stock-server
 docker network rm dsa-net
+docker compose --profile dsa up -d --build
 ```
 
-**第二步：处理容器名冲突。** 手工 `docker run` 起的一般叫 `tsp`，而 compose 里是
-`TickFlow_Stock_Panel`，不先删会撞上同一个端口，并且两个实例同时写 `./data`
-（bind mount 没有卷缓冲）。上面第一条的 `docker rm -f tsp` 已经一并做了。
+`--profile dsa` 不能省。`dsa` 服务挂在 `dsa` 这个 profile 下，不带 profile 只会
+起 `app`，决策页会断（`docker compose config --services` 只列出 `app`，
+加上 `--profile dsa` 才同时列出 `app` 和 `dsa`）。
 
-然后启动：
+`docker rm -f tsp` 是必须的：compose 里容器名是 `TickFlow_Stock_Panel`，不删会撞
+3018 端口，并且两个实例同时写 `./data`（bind mount 没有卷缓冲）。
+
+**回滚。** compose 起不来时，先 `docker compose down`，再按下面两条恢复原来的跑法:
 
 ```bash
-docker compose up -d --build
+docker network create dsa-net
+
+docker run -d --name tsp --network dsa-net \
+  -p 0.0.0.0:3018:3018 --restart unless-stopped \
+  -e DATA_DIR=/app/data \
+  -e DSA_BASE_URL=http://stock-server:8000 \
+  -e TICKFLOW_ENV_FILE=/app/.env \
+  -e TIERS_YAML=/app/tiers.yaml \
+  -e STATIC_DIR=/app/static \
+  -e TZ=Asia/Shanghai \
+  -v "$PWD/data:/app/data" \
+  -v "$PWD/tiers.yaml:/app/tiers.yaml:ro" \
+  -v "$PWD/.env:/app/.env:ro" \
+  tick-stock-panel:local \
+  uv run uvicorn app.main:app --host 0.0.0.0 --port 3018
 ```
+
+sidecar 用 `./scripts/dsa.sh` 起，或换成 compose 的 `dsa` 服务那份参数。
+删容器前把这些参数记下来，否则找不回。
 
 `.env` 里的 `DSA_BASE_URL` 在 compose 下要填 `http://dsa:8000`（服务名），
 不是 `http://127.0.0.1:8000`——容器里的 `127.0.0.1` 指自己。
