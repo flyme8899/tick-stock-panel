@@ -188,7 +188,13 @@ def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
     topics = payload
     page = {"has_more": False, "next_end_time": ""}
     if isinstance(payload, dict):
-        topics = payload.get("topics") or payload.get("items") or payload.get("data") or []
+        topics = (
+            payload.get("topics_brief")
+            or payload.get("topics")
+            or payload.get("items")
+            or payload.get("data")
+            or []
+        )
         page["has_more"] = bool(payload.get("has_more"))
         page["next_end_time"] = str(payload.get("next_end_time") or "")
     if not isinstance(topics, list):
@@ -197,7 +203,7 @@ def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
     for row in topics:
         if not isinstance(row, dict):
             continue
-        text = str(row.get("content") or "")
+        text = str(row.get("content") or row.get("digest") or "")
         title = str(row.get("title") or "")
         owner = row.get("owner") if isinstance(row.get("owner"), dict) else {}
         images = []

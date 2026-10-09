@@ -105,7 +105,13 @@ python scripts/news_host_collector.py --data-dir ./data
 python scripts/news_host_collector.py --data-dir ./data --backfill-since 2025-08-23
 ```
 
-示例 systemd 单元在 `deploy/tsp-news-collector.service` 和 `.timer`，默认每 5 分钟跑一次。单元以用户 `ubuntu` 运行，`HOME=/home/ubuntu`，工作目录是 `/home/ubuntu/tick-stock-panel`。`TimeoutStartSec=3600` 留给知识星球长回补。`ProtectSystem=strict` 下只有 `data/news` 可写。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。
+示例 systemd 单元在 `deploy/tsp-news-collector.service` 和 `.timer`，默认每 5 分钟跑一次。单元以用户 `ubuntu` 运行，`HOME=/home/ubuntu`，工作目录是 `/home/ubuntu/tick-stock-panel`。`TimeoutStartSec=3600` 留给知识星球长回补。`ExecStart` 用 `~/.venvs/tsp-collector` 里的 Python，这个环境要装上 pydantic。`PATH` 带上 `~/.local/bin`，才能找到 `dws` 和 `zsxq-cli`。
+
+`ProtectSystem=strict` 下，`data/news` 必须属于该服务用户，否则收件箱写不进去。dws 大约每 2 小时刷新一次令牌；`ProtectHome` 只读时还要放开 `~/.dws`、`~/.local/share/dws-cli`、`~/.config/zsxq-cli`、`~/.local/share/zsxq-cli`。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。
+
+钉钉游标比本次完成时间早 2 分钟，避免拉取过程中新到的消息被跳过。同一条 `messageId` 不会重复入库。
+
+板块名如果是纯数字，或不足 4 位的纯字母数字（如 `50`、`A50`），不参与正文匹配，并且命中两端不能再贴着数字。ETF 维表不进入个股候选。名称里带 ETF、LOF 或「基金」的标的也不做简称匹配，避免「中证1000」把「中证1000ETF南方」送上个股榜。
 
 `dws` 如果把登录态放在系统钥匙串或 Secret Service，systemd 没有用户的 D-Bus 会话，服务里会看成未登录。部署后在同一单元环境里执行一次 `dws auth status` 确认。Docker 把 `./data` 挂进容器，宿主机写入的收件箱会被面板读到。
 
@@ -141,3 +147,23 @@ SQLite 在 `data/news/news.sqlite`，保留约 45 天。同一来源的 `source_
 Docker：`docker compose --profile dsa` 把桥文件只读挂到 `/opt/tsp/news_bridge.py`，并设置 `TSP_NEWS_BASE_URL=http://app:3018`。本地 `scripts/dsa.sh` 默认访问 `http://127.0.0.1:3018`。
 
 `NEWS_DSA_FEED_TOKEN` 留空时桥直接返回，DSA 照常启动。TSP 未开、网络失败或当前不是 DSA 进程，都只记日志。面板采集不依赖 DSA 是否在跑。
+
+## 钉钉推送
+
+热门事件页可以把结果发到已配置的自定义机器人（`DINGTALK_WEBHOOK_URL`，可选 `DINGTALK_SECRET` 加签）。机器人所在的群由钉钉侧决定。默认关闭：`NEWS_PUSH_ENABLED` 和下面每一类都要打开。环境变量优先于页面上的开关。
+
+页面上的「发送测试消息」只有点击后才发，正文标成【测试】，不含资讯正文。
+
+| 类型 | 环境变量 | 什么时候发 |
+| --- | --- | --- |
+| 热点候选 | `NEWS_PUSH_HOT_ENABLED` | 交易日 `NEWS_PUSH_PREMARKET`（默认 08:45）和 `NEWS_PUSH_POSTCLOSE`（默认 15:40）各一条。候选新进入前 N 且提及数达到 `NEWS_PUSH_MIN_STORIES`，或分数相对上次升高达到 `NEWS_PUSH_SCORE_JUMP`，再补一条，默认 30 分钟内不重复 |
+| 异动监控 | `NEWS_PUSH_ABNORMAL_ENABLED` | 交易日 09:25–11:30、13:00–15:05。只看自选里新出现的涨停、炸板、跌停、翘板、60 日新高、新低。同一标的同一信号默认 30 分钟内不重复 |
+| 做T提醒 | `NEWS_PUSH_T_ENABLED` | 交易日 09:35–11:25、13:05–14:55。只看模拟持仓。偏离当日累计均价 ±1.5%，或贴近日内高低，或从 1% 以外回到昨收。同一理由默认 20 分钟内不重复 |
+
+交易日优先用交易日历；日历不可用时按周一到周五。三类消息标题分别是【热点候选】【异动监控】【做T提醒】。登录失效仍是单独的短文本，不会套进这些标题。
+
+热点消息只写提及数、来源个数、相对基线和最多 3 个出处。财联社、华尔街见闻可以带链接。钉钉、知识星球、ima 只写来源名，不写标题、链接和正文。
+
+异动和做 T 都只读已经算好的 enriched，不额外请求 TickFlow。异动默认最多 80 只自选；做 T 默认最多 40 只持仓。可选 `NEWS_PUSH_ABNORMAL_INCLUDE_HOT` 把热门个股并进异动，`NEWS_PUSH_T_INCLUDE_WATCHLIST` 把自选并进做 T。机器人每分钟最多发 20 条，超出的本轮丢掉、下一轮再试。
+
+放量异动、以及「上穿分时均价」那种需要分钟 K 的边沿，默认不推。

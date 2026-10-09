@@ -287,13 +287,23 @@ _INTRADAY_COLS = ("symbol", "name", "close", "change_pct", "amplitude",
                   "vol_ratio_5d", "turnover_rate", "consecutive_limit_ups")
 
 
-def build_intraday(repo: Any, limit: int = 500) -> dict[str, Any]:
-    """enriched 最新快照 → 当日异动信号命中行 (含各类型计数)。"""
+def build_intraday(repo: Any, limit: int = 500, symbols: set[str] | None = None) -> dict[str, Any]:
+    """enriched 最新快照 → 当日异动信号命中行 (含各类型计数)。
+
+    symbols 给定时只保留这些代码，推送自选时不必整理全市场行。
+    """
     df, cache_date = repo.get_enriched_latest()
     empty = {"cache_date": cache_date.isoformat() if cache_date else None,
              "counts": {}, "rows": []}
     if df.is_empty() or "symbol" not in df.columns:
         return empty
+    if symbols is not None:
+        wanted = [item for item in symbols if item]
+        if not wanted:
+            return empty
+        df = df.filter(pl.col("symbol").is_in(wanted))
+        if df.is_empty():
+            return empty
     present = [(c, k) for c, k in _INTRADAY_SIGNALS if c in df.columns]
     if not present:
         return empty

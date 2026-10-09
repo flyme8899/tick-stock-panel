@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ── 运行环境检测 ──────────────────────────────────────────
@@ -123,10 +123,24 @@ class Settings(BaseSettings):
 
     # 后端自愈看门狗 — 探测 collect 闸与全局写锁, 连续失败即退出交由
     # supervisor 拉起 (见 app/watchdog.py)。误伤防护靠保守阈值。
-    watchdog_enabled: bool = True
-    watchdog_interval_s: float = 30.0
-    watchdog_probe_timeout_s: float = 15.0
-    watchdog_failure_threshold: int = 2
+    # 环境变量 WATCHDOG_FAILURE_THRESHOLD / WATCHDOG_INTERVAL_S /
+    # WATCHDOG_PROBE_TIMEOUT_S / WATCHDOG_ENABLED 由下面的字段读入。
+    watchdog_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("WATCHDOG_ENABLED", "watchdog_enabled"),
+    )
+    watchdog_interval_s: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("WATCHDOG_INTERVAL_S", "watchdog_interval_s"),
+    )
+    watchdog_probe_timeout_s: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices("WATCHDOG_PROBE_TIMEOUT_S", "watchdog_probe_timeout_s"),
+    )
+    watchdog_failure_threshold: int = Field(
+        default=2,
+        validation_alias=AliasChoices("WATCHDOG_FAILURE_THRESHOLD", "watchdog_failure_threshold"),
+    )
 
     # 策略批量执行 (run_all / 策略页全量跑) 的并发 worker 上限。实测 2026-09-07:
     # polars eager 操作内部已多线程并行, 外层再并发 4 worker 属超订, 41 策略
@@ -167,6 +181,21 @@ class Settings(BaseSettings):
     vision_ai_api_key: str = ""
     vision_ai_base_url: str = "https://tokenhub.tencentmaas.com/v1"
     vision_ai_model: str = "deepseek/deepseek-v4-flash-vision-exp"
+    # 钉钉推送默认全关。总开关和每一类都要打开才会发。
+    news_push_enabled: str = ""
+    news_push_hot_enabled: str = ""
+    news_push_abnormal_enabled: str = ""
+    news_push_t_enabled: str = ""
+    news_push_abnormal_include_hot: str = ""
+    news_push_t_include_watchlist: str = ""
+    news_push_premarket: str = "08:45"
+    news_push_postclose: str = "15:40"
+    news_push_top_n: int = 5
+    news_push_min_stories: int = 2
+    news_push_score_jump: float = 0.5
+    news_push_hot_cooldown_min: int = 30
+    news_push_symbol_cooldown_min: int = 30
+    news_push_t_cooldown_min: int = 20
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。

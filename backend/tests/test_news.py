@@ -28,7 +28,13 @@ from app.news.collectors import (
 )
 from app.news.config import feed_matches, group_id, source_configured
 from app.news.extract import Lexicon, StructuredStock, canonical_symbol
-from app.news.host_collector import CommandRejectedError, assert_readonly, run_host
+from app.news.host_collector import (
+    CommandRejectedError,
+    _run_dws,
+    assert_readonly,
+    dws_cursor_stamp,
+    run_host,
+)
 from app.news.scoring import MentionEvent, score_candidates
 from app.news.service import (
     _ima_post,
@@ -131,6 +137,24 @@ def test_extract_codes_names_and_ambiguous():
     assert structured[0].key == "300037.SZ"
     assert canonical_symbol("201234") == ""
     assert not any(item.code.startswith("20") for item in lexicon.extract("代码 201234 无标的"))
+
+
+def test_sector_fragments_and_fund_names_do_not_become_candidates():
+    lexicon = Lexicon(
+        [
+            ("512100.SH", "中证1000ETF南方", "512100"),
+            ("600519.SH", "贵州茅台", "600519"),
+        ],
+        ["50", "A50", "500", "中证500", "半导体"],
+    )
+    text = "350亿、50万吨、标普500、富时A50，中证5000与中证500，还有中证1000ETF南方"
+    mentions = lexicon.extract(text)
+    sectors = {item.key for item in mentions if item.kind == "sector"}
+    stocks = {item.key for item in mentions if item.kind == "stock"}
+    assert sectors == {"中证500"}
+    assert stocks == set()
+    coded = lexicon.extract("代码 512100.SH")
+    assert {item.key for item in coded} == {"512100.SH"}
 
 
 def test_extract_rejects_bare_numbers_and_attributions():
@@ -253,6 +277,23 @@ def test_inbox_parse_and_error_source(tmp_path):
     ])
     assert page["has_more"] is False
     assert topics[0].source_id == "t1"
+    brief, brief_page = parse_zsxq_payload({
+        "topics_brief": [{
+            "topic_id": "8848",
+            "type": "talk",
+            "title": "纳指调研",
+            "digest": "只在 topics_brief 里的正文",
+            "create_time": "2026-10-09T11:00:00.000+0800",
+            "owner": {"name": "作者", "user_id": "1"},
+        }],
+        "has_more": True,
+        "next_end_time": "2026-10-09T11:00:00.000+0800",
+    })
+    assert brief_page["has_more"] is True
+    assert brief_page["next_end_time"] == "2026-10-09T11:00:00.000+0800"
+    assert brief[0].source_id == "8848"
+    assert brief[0].text == "只在 topics_brief 里的正文"
+    assert brief[0].author == "作者"
     folders = latest_date_folders([
         {"name": "2026-10-8", "folder_id": "new"},
         {"name": "20261007", "folder_id": "old"},
@@ -452,6 +493,23 @@ def test_inbox_drops_disabled_files_blocking_the_queue(tmp_path, monkeypatch):
     assert feed_for_source("zsxq")["items"][0]["title"]
 
 
+def test_dws_cursor_overlaps_two_minutes(tmp_path, monkeypatch):
+    moment = datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ)
+    assert dws_cursor_stamp(moment) == "2026-10-09 09:58:00"
+    monkeypatch.setattr("app.news.host_collector.cn_now", lambda: moment)
+    monkeypatch.setattr("app.news.host_collector.group_id", lambda _source: "g1")
+    monkeypatch.setattr("app.news.host_collector.which", lambda _name: "/usr/bin/dws")
+
+    class Proc:
+        returncode = 0
+        stdout = '{"messages":[]}'
+        stderr = ""
+
+    assert _run_dws(tmp_path, lambda _argv: Proc(), "", "") == "ok"
+    cursor = (tmp_path / "news" / "cursors" / "dws.txt").read_text(encoding="utf-8")
+    assert cursor == "2026-10-09 09:58:00"
+
+
 def test_host_collector_rejects_writes():
     assert_readonly(["/usr/local/bin/dws", "auth", "status"])
     assert_readonly(["zsxq-cli", "group", "+topics", "--group-id", "1", "--json"])
@@ -514,6 +572,13 @@ def test_systemd_unit_runs_as_user_with_hardening():
     assert "NoNewPrivileges=yes" in text
     assert "ProtectSystem=strict" in text
     assert "ReadWritePaths=/home/ubuntu/tick-stock-panel/data/news" in text
+    assert "ReadWritePaths=/home/ubuntu/.dws" in text
+    assert "ReadWritePaths=/home/ubuntu/.local/share/dws-cli" in text
+    assert "ReadWritePaths=/home/ubuntu/.config/zsxq-cli" in text
+    assert "ReadWritePaths=/home/ubuntu/.local/share/zsxq-cli" in text
+    assert "Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin" in text
+    assert "ExecStart=/home/ubuntu/.venvs/tsp-collector/bin/python " in text
+    assert "/usr/bin/python3" not in text
     assert "WorkingDirectory=/home/ubuntu/tick-stock-panel" in text
     assert "/opt/tsp" not in text
 
@@ -525,6 +590,9 @@ def test_gateway_keeps_feed_closed():
     assert required_scope("GET", "/api/news/dsa-feed") is None
     assert required_scope("GET", "/api/news/health") is None
     assert required_scope("PUT", "/api/news/sources") is None
+    assert required_scope("GET", "/api/news/push") is None
+    assert required_scope("PUT", "/api/news/push") is None
+    assert required_scope("POST", "/api/news/push/test") is None
 
 
 def _request(path: str, header: str = "", query: bytes = b"") -> Request:

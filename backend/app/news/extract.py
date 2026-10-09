@@ -16,6 +16,8 @@ _EXCHANGE = {"SS": "SH", "SH": "SH", "SZ": "SZ", "BJ": "BJ"}
 # 简称本身就是常用词，正文里出现不等于在说这只股票。结构化标签和代码仍可命中。
 _COMMON_STOCK_NAMES = {"机器人", "太阳能", "农产品"}
 _ATTRIBUTION_SUFFIXES = ("研报", "指出", "认为", "数据", "Choice", "choice")
+_ASCII_ALNUM = re.compile(r"[A-Za-z0-9]+")
+_FUND_NAME = re.compile(r"ETF|LOF|基金", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -78,7 +80,7 @@ class Lexicon:
             name = (name or "").strip()
             if code6 and symbol:
                 self.by_code.setdefault(code6, (symbol, name))
-            if name and len(name) >= 2 and symbol:
+            if name and len(name) >= 2 and symbol and not _is_fund_name(name):
                 name_hits.setdefault(name, set()).add(symbol)
         self._name_symbol: dict[str, str] = {
             name: next(iter(symbols))
@@ -86,7 +88,9 @@ class Lexicon:
             if len(symbols) == 1
         }
         self._names = _index(self._name_symbol)
-        self._sectors = _index({name: name for name in (sectors or []) if name and len(name) >= 2})
+        self._sectors = _index({
+            name: name for name in (sectors or []) if _usable_sector_name(name)
+        })
 
     def resolve(self, raw: str, fallback_name: str = "") -> tuple[str, str, str]:
         code = code6_of(raw)
@@ -124,7 +128,7 @@ class Lexicon:
                 add("stock", symbol, stock.name, code, "structured")
         for sector in structured_sectors or []:
             sector = (sector or "").strip()
-            if sector:
+            if _usable_sector_name(sector):
                 add("sector", sector, sector, "", "structured")
 
         body = text or ""
@@ -142,7 +146,9 @@ class Lexicon:
             code = code6_of(symbol)
             known = self.by_code.get(code)
             add("stock", symbol, known[1] if known and known[1] else name, code, "text-name")
-        for name, _start, _end in _scan(body, self._sectors):
+        for name, start, end in _scan(body, self._sectors):
+            if not _non_digit_boundary(body, start, end):
+                continue
             add("sector", name, name, "", "text")
         return found
 
@@ -164,6 +170,26 @@ def _code_in_text_ok(body: str, match: re.Match, lexicon: Lexicon) -> bool:
     if known_name and rest.startswith(known_name):
         return True
     return any(rest.startswith(name) for name in lexicon._name_symbol)
+
+
+def _usable_sector_name(name: str) -> bool:
+    """纯数字和过短的字母数字板块名会嵌进「350亿」「富时A50」。"""
+    text = (name or "").strip()
+    if len(text) < 2 or text.isdigit():
+        return False
+    return not (_ASCII_ALNUM.fullmatch(text) and len(text) < 4)
+
+
+def _is_fund_name(name: str) -> bool:
+    """ETF / LOF / 基金不进简称索引，避免「中证1000」带出整只 ETF。"""
+    return bool(_FUND_NAME.search(name or ""))
+
+
+def _non_digit_boundary(body: str, start: int, end: int) -> bool:
+    """命中两端不能再贴着数字，避免「中证500」吃进「中证5000」。"""
+    if start and body[start - 1].isdigit():
+        return False
+    return not (end < len(body) and body[end].isdigit())
 
 
 def _skip_name_mention(body: str, start: int, end: int, name: str) -> bool:

@@ -4,7 +4,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.news.config import SOURCE_ORDER, feed_matches, set_source_enabled
+from app.news.config import (
+    SOURCE_ORDER,
+    feed_matches,
+    push_status,
+    set_push_prefs,
+    set_source_enabled,
+)
+from app.news.push import send_test
 from app.news.service import (
     feed_for_source,
     health_payload,
@@ -24,6 +31,15 @@ class SourceToggle(BaseModel):
 
 class SourceUpdate(BaseModel):
     sources: dict[str, SourceToggle] = Field(default_factory=dict)
+
+
+class PushUpdate(BaseModel):
+    enabled: bool | None = None
+    types: dict[str, bool] = Field(default_factory=dict)
+
+
+class PushTest(BaseModel):
+    confirm: bool = False
 
 
 @router.get("/hot")
@@ -96,6 +112,30 @@ def update_sources(body: SourceUpdate):
             raise HTTPException(status_code=400, detail=f"未知来源 {source}")
         applied[source] = set_source_enabled(source, toggle.enabled)
     return {"applied": applied, **health_payload()}
+
+
+@router.get("/push")
+def push_state():
+    return push_status()
+
+
+@router.put("/push")
+def update_push(body: PushUpdate):
+    try:
+        return set_push_prefs(enabled=body.enabled, types=body.types)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/push/test")
+def push_test(body: PushTest):
+    """只有请求体明确 confirm=true 才发。不会在打开页面时自动发送。"""
+    try:
+        return send_test(confirm=body.confirm)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
 
 @router.get("/dsa-feed")

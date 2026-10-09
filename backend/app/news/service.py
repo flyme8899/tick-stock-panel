@@ -92,7 +92,8 @@ def reset_store_for_tests(path: Path | None = None) -> NewsStore:
 def lexicon_from_repo(repo) -> Lexicon:
     stocks: list[tuple[str, str, str]] = []
     if repo is not None:
-        for getter in ("get_instruments", "get_etf_instruments"):
+        # ETF 不进个股候选。名称里的指数片段（中证1000ETF南方）会把指数讨论算到基金上。
+        for getter in ("get_instruments",):
             try:
                 frame = getattr(repo, getter)()
             except Exception as exc:  # noqa: BLE001

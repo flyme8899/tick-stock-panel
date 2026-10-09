@@ -35,6 +35,14 @@ async def _run_watchdog(probe_results, *, threshold=2, interval=0.01, timeout=0.
     return exits
 
 
+def test_failure_threshold_env_is_read(monkeypatch) -> None:
+    monkeypatch.setenv("WATCHDOG_FAILURE_THRESHOLD", "5")
+    from app.config import Settings
+
+    loaded = Settings()
+    assert loaded.watchdog_failure_threshold == 5
+
+
 async def test_consecutive_failures_trigger_exit() -> None:
     exits = await _run_watchdog([RuntimeError("wedge"), TimeoutError("wedge")])
     assert exits == [70]
