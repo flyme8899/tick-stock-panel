@@ -424,6 +424,37 @@ def test_eval_script_gates_and_filters() -> None:
     assert st_only.is_empty()
 
 
+def test_drop_thin_dates_keeps_only_wide_cross_sections() -> None:
+    """横截面门槛: 样本太少的交易日不能进 IC 均值。
+
+    这类日子的 Rank IC 是噪声(只有几只股票时几个点就能算出 ±0.5),
+    数量一多就会主导均值, 把因子强弱排反。
+    """
+    module = _eval_script()
+    days = [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]
+    # 每天样本数: 5 / 2 / 4
+    symbols = (
+        ["00000%d.SZ" % i for i in range(5)]
+        + ["000001.SZ", "000002.SZ"]
+        + ["00000%d.SZ" % i for i in range(4)]
+    )
+    panel = pl.DataFrame({
+        "symbol": symbols,
+        "date": [d for d, n in zip(days, (5, 2, 4)) for _ in range(n)],
+    })
+
+    kept, thick, dropped = module.drop_thin_dates(panel, 3)
+    assert dropped == 1
+    assert sorted(kept.get_column("date").unique().to_list()) == [days[0], days[2]]
+    # 保留下来的表要能报出每天的样本数, 供脚本打印中位/最少
+    assert sorted(thick.get_column("_n").to_list()) == [4, 5]
+
+    # 门槛 0 表示不过滤
+    kept_all, thick_all, dropped_all = module.drop_thin_dates(panel, 0)
+    assert dropped_all == 0
+    assert kept_all.height == panel.height
+
+
 def test_signal_whitelist_excludes_alpha158() -> None:
     from app.strategy.custom_signals import allowed_fields
     from app.strategy.custom_signals_ai import build_messages

@@ -321,6 +321,23 @@ def _sample_matrix(frame, factor_ids: list[str], *, max_symbols: int, tail_dates
     return out
 
 
+def drop_thin_dates(panel, min_symbols: int):
+    """去掉横截面不足 min_symbols 只的交易日。
+
+    返回 (过滤后的 panel, 保留日期的每日样本数表, 剔除的日期数)。
+    分区还没补录全的日子只有几只股票, 这种日子的 Rank IC 是噪声, 会主导均值。
+
+    调用方要把它放在算 market_dates 之前: 被剔除的日子不该参与 next_return,
+    否则它们仍会通过"下一天收益"把标签带回来。
+    """
+    import polars as pl
+
+    counts = panel.group_by("date").agg(pl.len().alias("_n"))
+    thick = counts.filter(pl.col("_n") >= min_symbols)
+    keep = set(thick.get_column("date").to_list())
+    return panel.filter(pl.col("date").is_in(keep)), thick, counts.height - len(keep)
+
+
 def _polars_gate() -> str | None:
     try:
         import polars as pl
@@ -355,6 +372,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exclude-limit", action="store_true", help="去掉当天涨停或跌停的股票")
     parser.add_argument("--exclude-st", action="store_true", help="去掉当前名称含 ST 的股票")
     parser.add_argument("--min-listed-days", type=int, default=0, help="去掉上市不足 N 个交易日的股票，例如 60")
+    parser.add_argument(
+        "--min-symbols-per-date", type=int, default=0,
+        help="去掉横截面不足 N 只的交易日，默认 0 不过滤。分区还没补录全的日子只有几只股票，"
+             "这种日子的 Rank IC 是噪声，会主导均值",
+    )
     args = parser.parse_args(argv)
 
     gate = _polars_gate()
@@ -369,6 +391,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.min_listed_days < 0:
         print("--min-listed-days 不能为负", file=sys.stderr)
+        return 1
+    if args.min_symbols_per_date < 0:
+        print("--min-symbols-per-date 不能为负", file=sys.stderr)
         return 1
 
     data_dir = _data_dir()
@@ -421,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict] = []
     warned_warmup = False
+    warned_thin = False
     for offset in range(0, len(factor_ids), args.chunk):
         batch_ids = factor_ids[offset:offset + args.chunk]
         batch_config = FactorBatchConfig(
@@ -459,6 +485,17 @@ def main(argv: list[str] | None = None) -> int:
                 print("enriched 没有 raw_close，不能按涨跌停过滤。")
                 return 1
             panel = panel.join(raw.select("symbol", "date", "raw_close"), on=["symbol", "date"], how="left")
+        # 横截面门槛要放在算 market_dates 之前: 门槛内的日期不该参与 next_return,
+        # 否则被剔除的日子仍会通过"下一天收益"把标签带进来。
+        if args.min_symbols_per_date > 0:
+            panel, thick, dropped = drop_thin_dates(panel, args.min_symbols_per_date)
+            if not warned_thin:
+                sizes = thick.get_column("_n")
+                print(
+                    f"横截面门槛: 去掉不足 {args.min_symbols_per_date} 只的交易日 {dropped} 个，"
+                    f"剩 {thick.height} 个；每天样本数 中位 {int(sizes.median())}、最少 {int(sizes.min())}。"
+                )
+                warned_thin = True
         market_dates = sorted(
             item for item in panel.get_column("date").unique().to_list()
             if start <= item <= end
