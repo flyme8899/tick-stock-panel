@@ -39,9 +39,9 @@ docker compose --profile dsa up -d --build
 只会起 `app`，决策页会断（`docker compose config --services` 只列出 `app`，加上
 `--profile dsa` 才同时列出 `app` 和 `dsa`）。
 
-两个服务走 compose 的默认网络（按项目名自动命名，如 `daily-stock-analysis_default`
-之类的前缀名），app 才能按服务名 `dsa` 解析到 sidecar。**不需要**手工建网，也**不要**
-在 `docker-compose.yml` 里声明固定名字的网络——那会引入一个隐藏前置条件，详见下节。
+两个服务走这份 compose 的默认网络（按本仓库目录名自动命名，形如 `tick-stock-panel_default`），
+app 才能按服务名 `dsa` 解析到 sidecar。**不需要**手工建网，也**不要**在
+`docker-compose.yml` 里声明固定名字的网络——那会引入一个隐藏前置条件，详见下节。
 
 `.env` 里的 `DSA_BASE_URL` 在 compose 下要填 `http://dsa:8000`（服务名），
 不是 `http://127.0.0.1:8000`——容器里的 `127.0.0.1` 指自己。
@@ -65,6 +65,10 @@ docker compose -f docker-compose.yml -f docker-compose.dsa-external.yml up -d
 ```bash
 docker network ls --filter label=com.docker.compose.project=daily-stock-analysis --format '{{.Name}}'
 ```
+
+**override 和 `--profile dsa` 二选一，不要同时用。** 前者连的是外部项目里的 DSA，
+后者会由本仓库再起一个 `dsa` 服务，同时用等于跑两个 DSA，而 `DSA_BASE_URL` 只能指向
+其中一个，另一个是白跑。
 
 ### 为什么不在主 compose 里写死网络
 
@@ -101,9 +105,11 @@ docker network ls --filter label=com.docker.compose.project=daily-stock-analysis
 docker network connect daily-stock-analysis_default tsp
 docker network connect daily-stock-analysis_default dsa-alphafeed-source
 
-# 2. 从 tsp 里验证两条都通（期望都是 200）
-docker exec tsp curl -fsS -o /dev/null -w '%{http_code}\n' http://stock-server:8000/api/v1/health
-docker exec tsp curl -fsS -o /dev/null -w '%{http_code}\n' http://dsa-alphafeed-source:3021/health
+# 2. 从 TSP 容器里验证两条都通（期望都是 200）
+#    $TSP 换成当前在跑的 TSP 容器名：手工起的是 tsp，compose 起的是 TickFlow_Stock_Panel
+TSP=tsp
+docker exec "$TSP" curl -fsS -o /dev/null -w '%{http_code}\n' http://stock-server:8000/api/v1/health
+docker exec "$TSP" curl -fsS -o /dev/null -w '%{http_code}\n' http://dsa-alphafeed-source:3021/health
 
 # 3. 确认 alphafeed 的部署脚本已改用新网络、或已上 compose 之后，再拆 dsa-net
 ```
@@ -112,18 +118,51 @@ docker exec tsp curl -fsS -o /dev/null -w '%{http_code}\n' http://dsa-alphafeed-
 所以第 3 步之前必须先把「重建后自动接网」这件事落到脚本或 compose 里，否则拆网只是
 把问题推迟到下一次重建。
 
+#### 用 override 起 app 之前，alphafeed 必须已在 DSA 项目网上
+
+上面第 1 步里的 `connect ... tsp` 针对的是**手工**起的 `tsp` 容器。如果改用 override
+新起 `TickFlow_Stock_Panel`，这个新容器只挂在「TSP 默认网 + `daily-stock-analysis_default`」
+上，**不在 `dsa-net`**。而此时 `dsa-alphafeed-source` 若还只在 `dsa-net` 上，两边没有
+共同网络，`alphafeed.yaml` 五类数据集会全部解析不到——决策页能开，但**行情源是断的**，
+而且断得很隐蔽。
+
+所以 override 起 app 之前，先确认 alphafeed 已接到 DSA 项目网：
+
+```bash
+docker network connect daily-stock-analysis_default dsa-alphafeed-source
+```
+
+（重复执行会报 `already exists in network`，无害。）验证时把上面的 `$TSP` 换成
+`TickFlow_Stock_Panel`。
+
 ### 回滚
 
-override 起不来时先 `docker compose down`，再按 DSA 自己的 compose 恢复：
+独立项目模式下，真正可能出问题的是「TSP 从手工 `tsp` 切到 compose 的
+`TickFlow_Stock_Panel`」。切换时**先停不删**，确认新容器决策页和行情都正常后再 `rm`：
+
+```bash
+docker stop tsp
+docker compose -f docker-compose.yml -f docker-compose.dsa-external.yml up -d
+# 确认页面正常、行情同步正常，再清理旧容器
+docker rm tsp
+```
+
+这样回滚就是两条，不用记那条长 `docker run`：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dsa-external.yml down
+docker start tsp
+```
+
+DSA 侧的恢复按它自己的 compose：
 
 ```bash
 cd /workspace/dsa/docker && docker compose up -d server analyzer
 ```
 
 `.env` 里的 `DSA_BASE_URL` 改回 `http://stock-server:8000`（走 DSA 项目网内的容器名）。
-另外从主 compose 起 `app` 时，容器名是 `TickFlow_Stock_Panel`，如果之前有手工
-`docker run` 起的同名实例（`tsp`），先 `docker rm -f tsp` 再起，否则会撞 3018 端口，
-并且两个实例同时写 `./data`（bind mount 没有卷缓冲）。
+不要用 `docker rm -f tsp` 直接切：两个实例同时写 `./data`（bind mount 没有卷缓冲）
+会互相踩，且新旧容器撞 3018 端口。
 
 sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。镜像时区是 `Asia/Shanghai`，本地 `scripts/dsa.sh` / `dsa.ps1` 在未设置 `TZ` 时也使用这个时区。
 
