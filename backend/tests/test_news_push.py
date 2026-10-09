@@ -394,10 +394,15 @@ def test_session_signal_sets_follow_the_same_bands():
         {"open": 10.2, "high": 10.2, "low": 9.9, "close": 10.2, "volume": 10.0, "amount": 10200.0},
         {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1.0, "amount": 1000.0},
     ]
-    sets = session_signal_sets(bars, mode="t", symbol="600519.SH", prev_close=10.0)
+    sets = session_signal_sets(
+        bars, mode="t", symbol="600519.SH", prev_close=10.0, vwap_band=0.015,
+    )
     assert sets[0] == set()
     assert sets[1] == {"above_vwap", "near_high"}
     assert sets[2] == {"near_prev_close"}
+    default = session_signal_sets(bars, mode="t", symbol="600519.SH", prev_close=10.0)
+    assert "above_vwap" not in default[1]
+    assert "near_high" in default[1]
     wider = session_signal_sets(
         bars, mode="t", symbol="600519.SH", prev_close=10.0, vwap_band=0.025,
     )
@@ -630,3 +635,67 @@ def test_replay_counts_edges_on_a_threshold_grid(tmp_path):
     assert wide == []
     assert module.main(["--symbols", "600519.SH", "--days", "1"]) == 2
     assert module.main(["--symbols", "600519.SH", "--days", "2", "--path", str(tmp_path / "missing")]) == 2
+
+
+def _t_push(monkeypatch, tmp_path, *, once="", cap=20, vwap_min=1, range_min=120):
+    monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)
+    monkeypatch.setattr("app.news.push.push_type_enabled", lambda kind: kind == "t_trade")
+    monkeypatch.setattr("app.config.settings.dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test")
+    monkeypatch.setattr("app.config.settings.dingtalk_secret", "")
+    monkeypatch.setattr("app.config.settings.news_push_t_cooldown_min", vwap_min)
+    monkeypatch.setattr("app.config.settings.news_push_t_range_cooldown_min", range_min)
+    monkeypatch.setattr("app.config.settings.news_push_t_range_once_per_day", once)
+    monkeypatch.setattr("app.config.settings.news_push_t_daily_cap", cap)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+
+    def opener(request, timeout=10):
+        sent.append(json.loads(request.data.decode()))
+        return None
+
+    def run(moment, signals, pct=0.02, symbol="600519.SH"):
+        loaded = ({symbol: set(signals)}, {symbol: pct}, {symbol: "贵州茅台"})
+        return tick(moment, state=state, opener=opener, trading=True, t_loader=lambda: loaded)
+
+    return sent, run
+
+
+def test_near_high_waits_until_after_the_open_and_uses_its_own_cooldown(tmp_path, monkeypatch):
+    sent, run = _t_push(monkeypatch, tmp_path)
+    early = datetime(2026, 10, 9, 9, 40, tzinfo=CN_TZ)
+    assert run(early, set()) == []
+    assert run(early + timedelta(seconds=181), {"near_high"}) == []
+    assert sent == []
+    later = datetime(2026, 10, 9, 10, 5, tzinfo=CN_TZ)
+    assert run(later, {"near_high"}) == []
+    fired = later + timedelta(seconds=181)
+    assert run(fired, {"above_vwap", "near_low"}) == ["t_trade"]
+    assert "高于分时均价" in sent[-1]["markdown"]["text"]
+    assert "接近日内低点" in sent[-1]["markdown"]["text"]
+    mid = fired + timedelta(seconds=181)
+    assert run(mid, set()) == []
+    assert run(mid + timedelta(seconds=181), {"above_vwap", "near_low"}) == ["t_trade"]
+    assert "高于分时均价" in sent[-1]["markdown"]["text"]
+    assert "接近日内低点" not in sent[-1]["markdown"]["text"]
+
+
+def test_range_once_per_stock_per_day_still_allows_vwap(tmp_path, monkeypatch):
+    sent, run = _t_push(monkeypatch, tmp_path, once="true", cap=20, range_min=1)
+    start = datetime(2026, 10, 9, 10, 20, tzinfo=CN_TZ)
+    assert run(start, set()) == []
+    assert run(start + timedelta(seconds=181), {"near_high"}) == ["t_trade"]
+    assert run(start + timedelta(seconds=362), set()) == []
+    assert run(start + timedelta(seconds=543), {"near_low"}) == []
+    assert run(start + timedelta(seconds=724), {"above_vwap"}) == ["t_trade"]
+    assert "接近日内高点" in sent[0]["markdown"]["text"]
+    assert "高于分时均价" in sent[1]["markdown"]["text"]
+    assert len(sent) == 2
+
+
+def test_t_daily_cap_counts_messages_across_the_watchlist(tmp_path, monkeypatch):
+    sent, run = _t_push(monkeypatch, tmp_path, cap=1)
+    moment = datetime(2026, 10, 9, 13, 10, tzinfo=CN_TZ)
+    assert run(moment, set(), symbol="600519.SH") == []
+    assert run(moment + timedelta(seconds=181), {"above_vwap"}, symbol="600519.SH") == ["t_trade"]
+    assert run(moment + timedelta(seconds=362), {"above_vwap"}, symbol="000001.SZ") == []
+    assert len(sent) == 1

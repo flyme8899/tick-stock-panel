@@ -43,6 +43,7 @@ T_LABELS = {
     "near_low": "接近日内低点",
     "near_prev_close": "回到昨收附近",
 }
+RANGE_RULES = frozenset({"near_high", "near_low"})
 TYPE_LABELS = {"hot": "热点候选", "abnormal": "异动监控", "t_trade": "做T提醒"}
 
 HOT_CHECK_S = 300
@@ -52,8 +53,9 @@ RATE_LIMIT = 20
 RATE_WINDOW_S = 60
 ABNORMAL_CAP = 80
 T_CAP = 40
-VWAP_BAND = 0.015
+VWAP_BAND = 0.020
 RANGE_BAND = 0.003
+RANGE_QUIET_UNTIL = dt_time(10, 0)
 PREV_BAND = 0.003
 PREV_AWAY = 0.01
 RANGE_MIN = 0.01
@@ -108,7 +110,30 @@ def symbol_cooldown_s() -> int:
 
 
 def t_cooldown_s() -> int:
-    return max(60, int(settings.news_push_t_cooldown_min or 20) * 60)
+    return max(60, int(settings.news_push_t_cooldown_min or 120) * 60)
+
+
+def t_range_cooldown_s() -> int:
+    return max(60, int(settings.news_push_t_range_cooldown_min or 120) * 60)
+
+
+def t_daily_cap() -> int | None:
+    """全自选当天做T消息条数。0 表示不限制。"""
+    try:
+        value = int(settings.news_push_t_daily_cap)
+    except (TypeError, ValueError):
+        value = 20
+    if value <= 0:
+        return None
+    return min(value, 500)
+
+
+def _cooldown_seconds(kind: str, reason: str) -> int:
+    if kind == "abnormal":
+        return symbol_cooldown_s()
+    if reason in RANGE_RULES:
+        return t_range_cooldown_s()
+    return t_cooldown_s()
 
 
 def pick_refs(messages: list[dict], *, limit: int = 3) -> list[dict]:
@@ -701,13 +726,13 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
     if kind == "t_trade":
         old_pct = state.data.get("t_pct") if state.data.get("t_pct_day") == day else {}
         entered = filter_prev_close(entered, old_pct or {}, pct)
-    seconds = symbol_cooldown_s() if kind == "abnormal" else t_cooldown_s()
+        entered = _filter_range_rules(entered, now, state, day)
     fresh = [
         (symbol, reason)
         for symbol, reason in entered
         if not state.cooling(f"{kind}:{symbol}:{reason}", stamp)
     ]
-    if not fresh:
+    if not fresh or (kind == "t_trade" and _t_daily_full(state, day)):
         _store_edges(state, kind, day, current)
         if kind == "t_trade":
             state.data["t_pct"] = pct
@@ -730,8 +755,61 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
         state.data["t_pct"] = pct
         state.data["t_pct_day"] = day
     for symbol, reason in fresh:
-        state.cool_until(f"{kind}:{symbol}:{reason}", stamp, seconds)
+        state.cool_until(f"{kind}:{symbol}:{reason}", stamp, _cooldown_seconds(kind, reason))
+    if kind == "t_trade":
+        _mark_t_sent(state, day, fresh)
     return True
+
+
+def _range_quiet(now: datetime) -> bool:
+    """开盘后 30 分钟内，日内高低还没拉开，贴近高低几乎总会成立。"""
+    clock = now.timetz().replace(tzinfo=None)
+    return clock < RANGE_QUIET_UNTIL
+
+
+def _filter_range_rules(entered, now: datetime, state: PushState, day: str):
+    quiet = _range_quiet(now)
+    once = _flag_on("news_push_t_range_once_per_day")
+    sent = _range_sent(state, day) if once else set()
+    kept = []
+    for symbol, reason in entered:
+        if reason in RANGE_RULES and (quiet or symbol in sent):
+            continue
+        kept.append((symbol, reason))
+    return kept
+
+
+def _range_sent(state: PushState, day: str) -> set[str]:
+    if state.data.get("t_range_day") != day:
+        return set()
+    return set(state.data.get("t_range_sent") or [])
+
+
+def _t_daily_full(state: PushState, day: str) -> bool:
+    cap = t_daily_cap()
+    if cap is None:
+        return False
+    if state.data.get("t_daily_day") != day:
+        return False
+    return int(state.data.get("t_daily_count") or 0) >= cap
+
+
+def _mark_t_sent(state: PushState, day: str, fresh) -> None:
+    if state.data.get("t_daily_day") != day:
+        state.data["t_daily_day"] = day
+        state.data["t_daily_count"] = 0
+    state.data["t_daily_count"] = int(state.data.get("t_daily_count") or 0) + 1
+    ranged = [symbol for symbol, reason in fresh if reason in RANGE_RULES]
+    if not ranged:
+        return
+    if state.data.get("t_range_day") != day:
+        state.data["t_range_day"] = day
+        state.data["t_range_sent"] = []
+    sent = list(state.data.get("t_range_sent") or [])
+    for symbol in ranged:
+        if symbol not in sent:
+            sent.append(symbol)
+    state.data["t_range_sent"] = sent
 
 
 def _split_loader(loaded) -> tuple[dict, dict, dict]:

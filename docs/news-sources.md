@@ -56,6 +56,8 @@ VISION_AI_MODEL=deepseek/deepseek-v4-flash-vision-exp
 
 CNBC、MarketWatch、华尔街日报市场、彭博约 5 分钟一次，SEC 8-K 约 3 分钟一次。这两档固定间隔，不按 A 股交易时段加快或放慢。请求带上次响应的 `ETag` / `Last-Modified`，返回 304 时不再解析。采集只请求 feed 地址，不打开条目链接，也不保存 `content:encoded` 或 Atom `content`。
 
+财联社电报按 `last_time` 往更早翻，直到这一页里出现已经入库的 id，最多 10 页。华尔街见闻两个频道各自用 `next_cursor` 做 `cursor` 翻页，同样见到已入库 id 就停，每个频道最多 10 页。重启或中间停过之后，下一轮用同一套规则补上缺口。
+
 ## 开关
 
 每个来源独立。页面上的开关写到 `data/user_data/preferences.json` 的 `news_sources`。环境变量优先，设了之后页面不能改：
@@ -158,7 +160,7 @@ Docker：`docker compose --profile dsa` 把桥文件只读挂到 `/opt/tsp/news_
 | --- | --- | --- |
 | 热点候选 | `NEWS_PUSH_HOT_ENABLED` | 交易日 `NEWS_PUSH_PREMARKET`（默认 08:45）和 `NEWS_PUSH_POSTCLOSE`（默认 15:40）各一条。候选新进入前 N 且提及数达到 `NEWS_PUSH_MIN_STORIES`，或分数相对上次升高达到 `NEWS_PUSH_SCORE_JUMP`，再补一条，默认 30 分钟内不重复 |
 | 异动监控 | `NEWS_PUSH_ABNORMAL_ENABLED` | 交易日 09:25–11:30、13:00–15:05。只看自选。用实时报价对照昨收和盘前 60 日收盘极值，算涨停、炸板、跌停、翘板、60 日新高、新低。同一标的同一信号默认 30 分钟内不重复 |
-| 做T提醒 | `NEWS_PUSH_T_ENABLED` | 交易日 09:35–11:25、13:05–14:55。默认只看自选。偏离当日累计均价 ±1.5%，或贴近日内高低，或从 1% 以外回到昨收。同一理由默认 20 分钟内不重复 |
+| 做T提醒 | `NEWS_PUSH_T_ENABLED` | 交易日 09:35–11:25、13:05–14:55。默认只看自选。偏离当日累计均价 ±2%，或贴近日内高低 0.3%，或从 1% 以外回到昨收。均价和回到昨收默认 120 分钟内不重复；贴近高低另有 `NEWS_PUSH_T_RANGE_COOLDOWN_MIN`，默认也是 120 分钟。10:00 之前不推贴近高低 |
 
 交易日优先用交易日历；日历不可用时按周一到周五。三类消息标题分别是【热点候选】【异动监控】【做T提醒】。登录失效仍是单独的短文本，不会套进这些标题。
 
@@ -166,9 +168,11 @@ Docker：`docker compose --profile dsa` 把桥文件只读挂到 `/opt/tsp/news_
 
 异动和做 T 用实时报价。行情服务 3 分钟内刚拉过、并且缓存日期是今天时，直接用那份最新价、日内高低和累计成交，不再打 TickFlow。否则按 `quote.batch` 的批量上限补拉自选，Expert 档大约 300 次/分钟，80 只自选一轮通常是 1 次请求。没有新鲜报价就不发，避免把盘后表里的旧信号推出去。
 
-异动默认最多 80 只自选；做 T 默认最多 40 只自选。可选 `NEWS_PUSH_ABNORMAL_INCLUDE_HOT` 把热门个股并进异动，`NEWS_PUSH_T_INCLUDE_POSITIONS` 把模拟持仓并进做 T。涨跌停、炸板、翘板用原始价对照昨收。60 日新高新低用前复权最新价对照盘前已经算好的前 59 个交易日收盘极值，和指标流水线同一口径。机器人每分钟最多发 20 条，超出的本轮丢掉、下一轮再试。
+异动默认最多 80 只自选；做 T 默认最多 40 只自选。可选 `NEWS_PUSH_ABNORMAL_INCLUDE_HOT` 把热门个股并进异动，`NEWS_PUSH_T_INCLUDE_POSITIONS` 把模拟持仓并进做 T。涨跌停、炸板、翘板用原始价对照昨收。60 日新高新低用前复权最新价对照盘前已经算好的前 59 个交易日收盘极值，和指标流水线同一口径。机器人每分钟最多发 20 条，超出的本轮丢掉、下一轮再试。做 T 另有全自选当天条数上限 `NEWS_PUSH_T_DAILY_CAP`，默认 20，设成 0 则不限制。
 
-阈值还没定死。仓库根目录可以回放本地分钟 K，看不同阈值一天会响几次：
+`NEWS_PUSH_T_RANGE_ONCE_PER_DAY=true` 时，接近日内高点和接近日内低点合计起来每只股票每天最多一条。默认关闭，这两条只受各自的冷却约束。
+
+20 只活跃股、20 个交易日的分钟回放里，贴近高低在 30 分钟冷却下仍有大约每天每只 2–3.5 次，而且把区间从 0.3% 放到 0.5% 几乎不变。所以默认改成均价 ±2%、区间 0.3%、冷却 120 分钟，并在开盘后 30 分钟内跳过贴近高低。仓库根目录仍可以回放别的阈值：
 
 ```bash
 PYTHONPATH=backend backend/.venv/bin/python scripts/replay_push_rules.py --symbols 600519.SH,000001.SZ --days 5

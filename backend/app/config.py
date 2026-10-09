@@ -195,7 +195,10 @@ class Settings(BaseSettings):
     news_push_score_jump: float = 0.5
     news_push_hot_cooldown_min: int = 30
     news_push_symbol_cooldown_min: int = 30
-    news_push_t_cooldown_min: int = 20
+    news_push_t_cooldown_min: int = 120
+    news_push_t_range_cooldown_min: int = 120
+    news_push_t_range_once_per_day: str = ""
+    news_push_t_daily_cap: int = 20
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。

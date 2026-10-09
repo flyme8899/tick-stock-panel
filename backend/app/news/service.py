@@ -21,12 +21,14 @@ from app.news.collectors import (
     WSCN_URL,
     Feed,
     Item,
+    cls_next_last_time,
     cls_params,
     ima_headers,
     ima_next_cursor,
     ima_retcode,
     latest_date_folders,
     load_inbox_payload,
+    paginate_until_seen,
     parse_cls,
     parse_dws_payload,
     parse_feed_xml,
@@ -36,6 +38,7 @@ from app.news.collectors import (
     parse_zsxq_payload,
     pick_knowledge_base,
     split_ima_list,
+    wscn_next_cursor,
     wscn_params,
 )
 from app.news.config import (
@@ -343,14 +346,20 @@ def collect_cls(client: httpx.Client | None = None) -> dict:
     own = client is None
     client = client or httpx.Client(timeout=12.0, follow_redirects=True)
     try:
-        response = client.get(
-            CLS_URL,
-            params=cls_params(),
-            headers={"Referer": "https://www.cls.cn/telegraph", "User-Agent": "tsp-news/1.0"},
-        )
-        response.raise_for_status()
-        items = parse_cls(response.json())
-        result = ingest_items(items)
+        def fetch(token):
+            response = client.get(
+                CLS_URL,
+                params=cls_params(token),
+                headers={"Referer": "https://www.cls.cn/telegraph", "User-Agent": "tsp-news/1.0"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            page = parse_cls(payload)
+            ids = [item.source_id for item in page]
+            hit = bool(ids) and bool(get_store().existing_ids("cls", ids))
+            return page, cls_next_last_time(payload), hit
+
+        result = ingest_items(paginate_until_seen(fetch))
         get_store().mark_health("cls", ok=True, auth_state="n/a")
         return result
     except Exception as exc:  # noqa: BLE001
@@ -368,13 +377,20 @@ def collect_wscn(client: httpx.Client | None = None) -> dict:
     try:
         items: list[Item] = []
         for channel in ("global-channel", "a-stock-channel"):
-            response = client.get(
-                WSCN_URL,
-                params=wscn_params(channel),
-                headers={"User-Agent": "tsp-news/1.0"},
-            )
-            response.raise_for_status()
-            items.extend(parse_wscn(response.json(), channel))
+            def fetch(token, channel=channel):
+                response = client.get(
+                    WSCN_URL,
+                    params=wscn_params(channel, token),
+                    headers={"User-Agent": "tsp-news/1.0"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                page = parse_wscn(payload, channel)
+                ids = [item.source_id for item in page]
+                hit = bool(ids) and bool(get_store().existing_ids("wscn", ids))
+                return page, wscn_next_cursor(payload), hit
+
+            items.extend(paginate_until_seen(fetch))
         result = ingest_items(items)
         get_store().mark_health("wscn", ok=True, auth_state="n/a")
         return result

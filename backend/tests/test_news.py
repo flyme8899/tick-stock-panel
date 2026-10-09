@@ -449,6 +449,193 @@ def test_ima_kb_fields_and_pagination(tmp_path, monkeypatch):
     assert len(calls) == 8
 
 
+def test_cls_and_wscn_page_back_until_a_seen_id(tmp_path):
+    from app.news.collectors import (
+        Item,
+        cls_next_last_time,
+        cls_params,
+        paginate_until_seen,
+        parse_cls,
+        parse_wscn,
+        wscn_next_cursor,
+        wscn_params,
+    )
+    from app.news.service import collect_cls, collect_wscn
+
+    cls_page = {
+        "errno": 0,
+        "msg": "ok",
+        "data": {
+            "roll_data": [
+                {
+                    "id": 2500998,
+                    "ctime": 1791585757,
+                    "title": "",
+                    "content": "财联社电报：贵州茅台获机构调研",
+                    "shareurl": "https://www.cls.cn/detail/2500998",
+                    "level": "B",
+                    "is_ad": 0,
+                    "stock_list": [{"name": "贵州茅台", "StockID": "sh600519"}],
+                    "subjects": [{"subject_name": "白酒"}],
+                    "plate_list": [],
+                },
+                {"id": 9, "ctime": 1791500000, "is_ad": 1, "content": "广告"},
+            ],
+        },
+    }
+    assert cls_next_last_time(cls_page) == "1791585757"
+    assert "last_time" not in cls_params()
+    assert cls_params("1791585757")["last_time"] == "1791585757"
+    parsed = parse_cls(cls_page)
+    assert parsed[0].source_id == "2500998"
+    assert parsed[0].stocks[0].code == "sh600519"
+    assert parsed[0].sectors == ["白酒"]
+
+    wscn_page = {
+        "code": 20000,
+        "message": "OK",
+        "data": {
+            "items": [{
+                "id": 3176473,
+                "title": "",
+                "content_text": "华尔街见闻快讯正文",
+                "content": "<p>华尔街见闻快讯正文</p>",
+                "display_time": 1791586996,
+                "uri": "https://wallstreetcn.com/livenews/3176473",
+                "score": 1,
+                "author": {"display_name": "罗俊", "id": 694840},
+                "symbols": [{"name": "贵州茅台", "symbol": "600519.SH"}],
+                "related_themes": [{"name": "白酒"}],
+            }],
+            "next_cursor": "1791586211",
+            "polling_cursor": "3176473",
+        },
+    }
+    assert wscn_next_cursor(wscn_page) == "1791586211"
+    assert "cursor" not in wscn_params("global-channel")
+    assert wscn_params("a-stock-channel", "1791586211")["cursor"] == "1791586211"
+    wscn_item = parse_wscn(wscn_page, "global-channel")[0]
+    assert wscn_item.author == "罗俊"
+    assert wscn_item.url == "https://wallstreetcn.com/livenews/3176473"
+    assert wscn_item.sectors == ["白酒"]
+
+    when = datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ)
+    walked = []
+
+    def walk(token):
+        walked.append(token)
+        if token is None:
+            return [Item("cls", "3", when)], "2", False
+        if token == "2":
+            return [Item("cls", "1", when)], "1", True
+        raise AssertionError(token)
+
+    assert [item.source_id for item in paginate_until_seen(walk)] == ["3", "1"]
+    assert walked == [None, "2"]
+
+    capped = []
+
+    def always_new(token):
+        index = 0 if token is None else int(token)
+        capped.append(index)
+        return [Item("cls", str(index), when)], str(index + 1), False
+
+    assert len(paginate_until_seen(always_new, cap=10)) == 10
+    assert capped == list(range(10))
+
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    store = get_store()
+    store.insert_item(
+        source="cls", source_id="111", published_at=when, author="", title="旧电报",
+        clean_text="已经见过", raw={}, content_hash="cls-111", url="", level="",
+        media_ids=[], extra={}, mentions=[],
+    )
+    store.insert_item(
+        source="wscn", source_id="3176000", published_at=when, author="", title="旧快讯",
+        clean_text="已经见过", raw={}, content_hash="wscn-old", url="", level="",
+        media_ids=[], extra={}, mentions=[],
+    )
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def roll(rows):
+        return {"errno": 0, "data": {"roll_data": [
+            {
+                "id": item_id,
+                "ctime": stamp,
+                "content": f"电报{item_id}",
+                "shareurl": f"https://www.cls.cn/detail/{item_id}",
+                "level": "C",
+            }
+            for item_id, stamp in rows
+        ]}}
+
+    cls_calls = []
+
+    class ClsClient:
+        def get(self, url, params=None, headers=None):
+            cls_calls.append(dict(params or {}))
+            last = (params or {}).get("last_time")
+            if not last:
+                return Response(roll([(2500998, 1791585757), (2500997, 1791585267)]))
+            if last == "1791585267":
+                return Response(roll([(2500996, 1791585160), (111, 1791580000)]))
+            raise AssertionError(last)
+
+    result = collect_cls(ClsClient())
+    assert [call.get("last_time") for call in cls_calls] == [None, "1791585267"]
+    assert result["inserted"] == 3
+    assert result["duplicate"] == 1
+
+    def lives(rows, cursor):
+        return {"code": 20000, "data": {
+            "items": [
+                {
+                    "id": item_id,
+                    "content_text": f"快讯{item_id}",
+                    "display_time": 1791586996,
+                    "uri": f"https://wallstreetcn.com/livenews/{item_id}",
+                    "author": {"display_name": "罗俊"},
+                }
+                for item_id in rows
+            ],
+            "next_cursor": cursor,
+            "polling_cursor": str(rows[0]),
+        }}
+
+    wscn_calls = []
+
+    class WscnClient:
+        def get(self, url, params=None, headers=None):
+            channel = (params or {})["channel"]
+            cursor = (params or {}).get("cursor")
+            wscn_calls.append((channel, cursor))
+            if channel == "global-channel":
+                return Response(lives([3176000], "1791589999"))
+            if cursor is None:
+                return Response(lives([3176456], "1791580518"))
+            if cursor == "1791580518":
+                return Response(lives([3176449, 3176000], "1791579884"))
+            raise AssertionError(cursor)
+
+    result = collect_wscn(WscnClient())
+    assert wscn_calls == [
+        ("global-channel", None),
+        ("a-stock-channel", None),
+        ("a-stock-channel", "1791580518"),
+    ]
+    assert result["inserted"] == 2
+    assert result["duplicate"] == 2
+
+
 def test_inbox_drops_disabled_files_blocking_the_queue(tmp_path, monkeypatch):
     reset_store_for_tests(tmp_path / "news.sqlite")
     monkeypatch.setattr("app.news.service.source_enabled", lambda source: source == "zsxq")

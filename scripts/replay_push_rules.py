@@ -8,6 +8,7 @@
 
 60 日新高、新低依赖盘前日线极值，这个脚本不统计。异动只数涨停、炸板、跌停、翘板。
 按每一分钟走一遍。线上大约每 3 分钟看一次，所以这里的次数是推送次数的上限。
+当前默认是均价偏离 2.0%、贴近高低 0.3%、冷却 120 分钟。网格仍把更密的档位一起打出来。
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from app.news.push import count_rule_edges, session_signal_sets
 
 VWAP_GRID = (0.010, 0.015, 0.020, 0.025)
 RANGE_GRID = (0.003, 0.005)
-COOLDOWN_GRID = (10, 20, 30)
+COOLDOWN_GRID = (10, 20, 30, 120)
 
 
 def default_minute_root() -> Path:
