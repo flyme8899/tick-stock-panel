@@ -182,6 +182,34 @@ def _equal_weights(symbols: list[str]) -> dict[str, float]:
     return {symbol: weight for symbol in symbols}
 
 
+def usable_dates(
+    buckets: dict,
+    dates: list,
+    labels: list[str],
+    *,
+    min_symbols: int = 0,
+) -> tuple[list, int, int]:
+    """挑出分层完整的调仓日，返回 (可用日期, 残缺天数, 样本不足天数)。
+
+    窗口型因子（60 日那批）在开始的那段日子里只有零星几只股票算得出值，
+    分位组是残缺的：Q5 可能是空的，Q1 只有 1 只。这种日子必须整段丢掉，
+    否则组均会被它们拖走，而多空因为做多端为空早就跳过了，两者不是同一批日期。
+    """
+    usable: list = []
+    incomplete = 0
+    thin = 0
+    for day in dates:
+        members = buckets.get(day) or {}
+        if len(members) < len(labels):
+            incomplete += 1
+            continue
+        if min_symbols > 0 and sum(len(v) for v in members.values()) < min_symbols:
+            thin += 1
+            continue
+        usable.append(day)
+    return usable, incomplete, thin
+
+
 def evaluate_layers(
     frame,
     *,
@@ -190,11 +218,13 @@ def evaluate_layers(
     hold: int,
     direction: str,
     cost_bps: list[float],
+    min_symbols: int = 0,
 ) -> dict:
     """在一张已经带好 fwd / entry_up / entry_down 的面板上做分层。
 
     fwd 是 close(t+1+hold) / close(t+1) - 1。entry_up 为真表示买入日涨停，不能买。
     分位只在能交易的股票上做，复用 _add_groups。Q1 是得分最低的一组。
+    min_symbols > 0 时，某个调仓日可交易的样本不足这么多只就整天跳过。
     """
     import polars as pl
     from app.backtest.factor import FactorBacktestService
@@ -235,6 +265,7 @@ def evaluate_layers(
         day.setdefault(str(row["_group"]), []).append((str(row["symbol"]), float(row["fwd"])))
 
     labels = [f"Q{index}" for index in range(1, n_groups + 1)]
+    dates, incomplete, thin = usable_dates(buckets, dates, labels, min_symbols=min_symbols)
     period_group: dict[str, list[float]] = {label: [] for label in labels}
     books: dict[float, dict[str, list[float]]] = {
         bps: {"long": [], "excess": [], "long_short": []} for bps in cost_bps
@@ -298,6 +329,9 @@ def evaluate_layers(
         "group_labels": labels,
         "turnover": float(np.mean(turnovers)) if turnovers else (0.0 if long_periods else None),
         "n_periods": long_periods,
+        "n_dates": len(dates),
+        "dropped_incomplete": incomplete,
+        "dropped_thin": thin,
         "costs": costs,
         "error": None if long_periods else "没有形成持仓",
     }
@@ -489,6 +523,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="单边成本，基点。默认 15，并同时打印 0 成本",
     )
     parser.add_argument("--min-symbols-per-date", type=int, default=200)
+    parser.add_argument(
+        "--min-tradable-per-date",
+        type=int,
+        default=200,
+        help="分层当日至少要有这么多只可交易样本，否则整天跳过。默认 200",
+    )
     parser.add_argument("--min-listed-days", type=int, default=60)
     parser.add_argument("--exclude-limit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--exclude-st", action=argparse.BooleanOptionalAction, default=True)
@@ -543,7 +583,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.groups < 2:
         print("--groups 至少为 2", file=sys.stderr)
         return 1
-    if args.cost_bps < 0 or args.min_symbols_per_date < 0 or args.min_listed_days < 0 or args.days < 1:
+    if (
+        args.cost_bps < 0
+        or args.min_symbols_per_date < 0
+        or args.min_tradable_per_date < 0
+        or args.min_listed_days < 0
+        or args.days < 1
+    ):
         print("天数和成本不能为负", file=sys.stderr)
         return 1
     factor_ids = [item.strip() for item in args.factors.split(",") if item.strip()]
@@ -686,10 +732,16 @@ def main(argv: list[str] | None = None) -> int:
                 hold=hold,
                 direction=args.direction,
                 cost_bps=costs,
+                min_symbols=args.min_tradable_per_date,
             )
             result["label"] = spec.label if spec is not None else factor_id
             results.append(result)
-            print(f"  {factor_id} 持有 {hold} 日完成")
+            print(
+                f"  {factor_id} 持有 {hold} 日完成"
+                f"（{result.get('n_periods', 0)} 期"
+                f"，跳过残缺 {result.get('dropped_incomplete', 0)} 天"
+                f" / 样本不足 {result.get('dropped_thin', 0)} 天）"
+            )
 
     print()
     print(format_layer_table(results, costs))

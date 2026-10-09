@@ -35,6 +35,49 @@ def _panel(days: list[date], *, factor_of, forward_of) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+def _warmup_panel(days: list[date]) -> pl.DataFrame:
+    """第一天的因子只有 S0 算得出来，模拟 60 日窗口的预热日。"""
+    rows = []
+    for offset, day in enumerate(days):
+        for index in range(5):
+            if offset == 0 and index > 0:
+                continue
+            rows.append({
+                "symbol": f"S{index}",
+                "date": day,
+                "factor": float(index),
+                "fwd": 1.0 if offset == 0 else 0.01 * (index + 1),
+                "entry_up": False,
+                "entry_down": False,
+            })
+    return pl.DataFrame(rows)
+
+
+def test_warmup_dates_are_dropped_before_group_means() -> None:
+    """预热日的分位是残缺的，组均和多空必须用同一批日期。"""
+    module = _script()
+    days = [date(2026, 5, 6), date(2026, 5, 7), date(2026, 5, 8)]
+    result = module.evaluate_layers(
+        _warmup_panel(days), factor="factor", n_groups=5, hold=1, direction="ic", cost_bps=[0],
+    )
+    assert result["error"] is None
+    assert result["dropped_incomplete"] == 1
+    assert result["n_periods"] == 2
+    # 预热日那只 fwd=1.0 的股票不能进组均，否则 Q1 会被拉到 0.25 以上
+    assert result["group_means"] == pytest.approx([0.01, 0.02, 0.03, 0.04, 0.05])
+
+
+def test_min_symbols_per_rebalance_date() -> None:
+    module = _script()
+    days = [date(2026, 5, 6), date(2026, 5, 7)]
+    frame = _panel(days, factor_of=lambda index: index, forward_of=lambda index: 0.01 * (index + 1))
+    result = module.evaluate_layers(
+        frame, factor="factor", n_groups=5, hold=1, direction="ic", cost_bps=[0], min_symbols=10,
+    )
+    assert result["dropped_thin"] == 2
+    assert result["error"] == "没有形成持仓"
+
+
 def test_cost_and_turnover_math() -> None:
     module = _script()
     previous = {"A": 0.5, "B": 0.5}
