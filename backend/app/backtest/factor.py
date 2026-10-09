@@ -291,6 +291,12 @@ class FactorBacktestService:
                 asset_type=config.asset_type,
             )
             meta = metadata.get(factor_name, {})
+            if not meta:
+                from app.factors.registry import get_factor
+
+                spec = get_factor(factor_name)
+                if spec is not None:
+                    meta = spec.column_view()
             if factor_name in FUNDAMENTAL_FACTOR_NAMES and fundamentals_missing:
                 items.append(FactorBatchItem(
                     factor_name=factor_name,

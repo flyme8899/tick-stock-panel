@@ -2955,6 +2955,9 @@ export const api = {
   factorColumns: () =>
     request<{ columns: FactorColumn[] }>('/api/backtest/factor/columns'),
 
+  factorColumnsExperimental: () =>
+    request<{ columns: FactorColumn[] }>('/api/backtest/factor/columns?include_experimental=true'),
+
   factorLibrary: (assetType?: 'stock' | 'etf') =>
     request<{ factors: FactorLibraryItem[] }>(
       `/api/factors${assetType ? `?asset_type=${assetType}` : ''}`,

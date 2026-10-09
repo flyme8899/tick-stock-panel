@@ -7,9 +7,9 @@ import logging
 import threading
 from dataclasses import asdict
 from datetime import date, timedelta
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -127,10 +127,13 @@ class FactorColumnsResponse(BaseModel):
 
 
 @router.get("/factor/columns")
-def factor_columns():
-    """返回可用的因子列列表 (含运行期注册的自定义/复合因子)。"""
+def factor_columns(include_experimental: Annotated[bool, Query()] = False):
+    """返回可用的因子列列表 (含运行期注册的自定义/复合因子)。
+
+    Alpha158 实验组默认不返回。include_experimental=true 时才带上。
+    """
     from app.factors.registry import factor_columns_view
-    return {"columns": factor_columns_view()}
+    return {"columns": factor_columns_view(include_experimental=include_experimental)}
 
 
 class FactorBacktestRequest(BaseModel):
@@ -152,7 +155,8 @@ def factor_run(req: FactorBacktestRequest, request: Request):
     from app.backtest.factor import FactorBacktestService, FactorConfig
     from app.factors.registry import factor_columns_view
 
-    if req.factor_name not in {item["id"] for item in factor_columns_view()}:
+    allowed = {item["id"] for item in factor_columns_view(include_experimental=True)}
+    if req.factor_name not in allowed:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {req.factor_name}")
 
     engine = _get_engine(request)
@@ -185,7 +189,8 @@ def factor_run(req: FactorBacktestRequest, request: Request):
 
 
 class FactorBatchRequest(BaseModel):
-    factor_names: list[str] = Field(..., min_length=1, max_length=96)  # 目录 77 + 自定义余量
+    # 稳定目录 77 + Alpha158 实验组 158 + 自定义余量。默认列清单仍不含实验组。
+    factor_names: list[str] = Field(..., min_length=1, max_length=320)
     symbols: list[str] | None = None
     start: date | None = None
     end: date | None = None
@@ -207,7 +212,7 @@ def factor_batch(req: FactorBatchRequest, request: Request):
     from app.factors.registry import factor_columns_view
 
     factor_names = list(dict.fromkeys(req.factor_names))
-    allowed = {item["id"] for item in factor_columns_view()}
+    allowed = {item["id"] for item in factor_columns_view(include_experimental=True)}
     invalid = [name for name in factor_names if name not in allowed]
     if invalid:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")

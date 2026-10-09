@@ -58,13 +58,16 @@ const hasServerVerdict = (results: FactorBatchItem[]): boolean =>
 // 预设场景: 纯前端选择集, 数量按 columns 数据实时计算 (分组名缺失时该项自动为空并禁用)
 type PresetDef = { id: string; label: string; hint: string; groups?: string[]; quick?: boolean }
 const PRESETS: PresetDef[] = [
-  { id: 'all', label: '全面体检', hint: '全部因子，耗时最长' },
-  { id: 'quick', label: '快速体检', hint: '除财务组外每组各取 1 个代表因子' , quick: true },
+  { id: 'all', label: '全面体检', hint: '稳定因子，不含 Alpha158 实验组' },
+  { id: 'quick', label: '快速体检', hint: '除财务组和 Alpha158 外每组各取 1 个代表因子' , quick: true },
   { id: 'trend', label: '趋势动量', hint: '动量组 + 趋势组', groups: ['动量', '趋势'] },
   { id: 'reversal', label: '超跌反转', hint: '超买超卖组 + 价格位置组', groups: ['超买超卖', '价格位置'] },
   { id: 'volume', label: '量价资金', hint: '量价组 + 流动性组', groups: ['量价', '流动性'] },
   { id: 'fundamental', label: '财务价值', hint: '财务组（需财务数据）', groups: ['财务'] },
+  { id: 'alpha158', label: 'Alpha158', hint: 'vnpy/Qlib 实验组，需先打开实验开关', groups: ['Alpha158（实验）'] },
 ]
+
+const isAlpha158 = (id: string) => id.startsWith('a158_')
 
 const INTRO_STORAGE_KEY = 'factors-intro-collapsed'
 
@@ -125,10 +128,11 @@ function BatchDiscovery({ onInspect, focusFactor }: { onInspect: (factorName: st
   const [factorQuery, setFactorQuery] = useState('')
   const [activePreset, setActivePreset] = useState<string | null>(null)
   const [signalFrom, setSignalFrom] = useState<FactorBatchItem | null>(null)
+  const [experimental, setExperimental] = useState(() => isAlpha158(focusFactor ?? ''))
 
   const columns = useQuery({
-    queryKey: QK.factorColumns,
-    queryFn: api.factorColumns,
+    queryKey: experimental ? QK.factorColumnsExperimental : QK.factorColumns,
+    queryFn: experimental ? api.factorColumnsExperimental : api.factorColumns,
   })
   const watchlist = useQuery({
     queryKey: QK.watchlist,
@@ -147,17 +151,24 @@ function BatchDiscovery({ onInspect, focusFactor }: { onInspect: (factorName: st
     return counts
   }, [watchlistEntries])
   useEffect(() => {
-    if (initialized.current || !columns.data?.columns.length) return
-    initialized.current = true
-    // 因子库「去检验」联动: focus 参数命中则只选该因子
+    if (!columns.data?.columns.length) return
+    // 因子库「去检验」联动: a158_ 先打开实验列，列到位后只选该因子一次。
+    if (focusFactor && isAlpha158(focusFactor) && !experimental) {
+      setExperimental(true)
+      return
+    }
+    if (initialized.current) return
     if (focusFactor && columns.data.columns.some(column => column.id === focusFactor)) {
       setSelected([focusFactor])
       setActivePreset(null)
+      initialized.current = true
       return
     }
-    setSelected(columns.data.columns.map(column => column.id))
+    if (focusFactor && isAlpha158(focusFactor)) return
+    initialized.current = true
+    setSelected(columns.data.columns.filter(column => !isAlpha158(column.id)).map(column => column.id))
     setActivePreset('all')
-  }, [columns.data, focusFactor])
+  }, [columns.data, experimental, focusFactor])
 
   const allColumns = useMemo(() => columns.data?.columns ?? [], [columns.data])
   const columnsByGroup = useMemo(() => {
@@ -166,11 +177,11 @@ function BatchDiscovery({ onInspect, focusFactor }: { onInspect: (factorName: st
     return groups
   }, [allColumns])
   const presetIds = (preset: PresetDef): string[] => {
-    if (preset.id === 'all') return allColumns.map(item => item.id)
+    if (preset.id === 'all') return allColumns.filter(item => !isAlpha158(item.id)).map(item => item.id)
     if (preset.quick) {
       // 每组取列表中位代表 (上游按窗口升序排列时即窗口中位数, 如动量组取 20日)
       return Object.entries(columnsByGroup)
-        .filter(([group]) => group !== '财务')
+        .filter(([group]) => group !== '财务' && group !== 'Alpha158（实验）')
         .map(([, items]) => items[Math.floor((items.length - 1) / 2)])
         .filter(item => item != null)
         .map(item => item.id)
@@ -292,6 +303,22 @@ function BatchDiscovery({ onInspect, focusFactor }: { onInspect: (factorName: st
             {allSelected ? '清空' : '全选'}
           </button>
         </div>
+        <label className="flex items-center gap-1.5 text-[10px] text-secondary" title="打开后可选 Alpha158。默认不进入挖掘和全面体检">
+          <input
+            type="checkbox"
+            checked={experimental}
+            onChange={event => {
+              const next = event.target.checked
+              setExperimental(next)
+              if (!next) {
+                setSelected(current => current.filter(id => !isAlpha158(id)))
+                setActivePreset(current => current === 'alpha158' ? null : current)
+              }
+            }}
+            className="h-3 w-3 accent-accent"
+          />
+          显示 Alpha158 实验组
+        </label>
 
         <div>
           <div className="mb-1.5 text-[10px] text-muted">不知道测什么？从预设开始（一键选好因子）：</div>
