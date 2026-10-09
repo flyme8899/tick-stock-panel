@@ -151,10 +151,19 @@ DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
 
 ```ini
 AUTH_PASSWORD='你的密码'  # 至少 6 位;仅首次生效,已设过则不覆盖
+# AUTH_USERS=             # 留空使用 data/users.json;也可填文件路径或内联哈希 JSON
 ```
 
 面板首次设置访问密码时,出于安全考虑**仅允许本机或内网访问**(防公网陌生人抢先设置锁死面板)。公网服务器部署可通过此环境变量预置首个密码。
 密码建议使用单引号包裹，Docker 启动时会把整个原始 `.env` 只读挂载到容器内 `/app/.env`，兼容已有的未加引号配置。容器可以读取其中的密钥但不能修改该文件，请保持主机文件权限为 `600` 并仅运行可信镜像。
+
+登录页有用户名。`AUTH_PASSWORD` 对应旧版共享密码,用户名填 `admin` 或留空。多用户账号写在 `data/users.json`(或 `AUTH_USERS`),密码只存 Argon2id/bcrypt 哈希。添加账号:
+
+```bash
+cd backend && uv run python ../scripts/manage_users.py add alice
+```
+
+命令会生成强密码并只打印一次。各账号权限相同。
 
 详细步骤、SSH 转发方案、重置密码方法见 [deployment.md → 访问密码设置](./deployment.md#访问密码设置公网部署必读)。
 

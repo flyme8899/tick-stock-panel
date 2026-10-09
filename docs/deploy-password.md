@@ -24,7 +24,7 @@ AUTH_PASSWORD='你的密码'
 2. 用 PBKDF2 哈希后写入 `auth.json`(`chmod 600`,只存哈希不存明文)
 3. **之后这个环境变量就不再被读取** —— 是一次性的初始化
 
-设完后即可用公网地址 + 这个密码正常登录。后续改密码请用页面 UI(`设置 → 修改密码`),不受环境变量影响。
+设完后即可用公网地址登录。登录页需要用户名:这份旧版共享密码使用用户名 `admin`,也可以把用户名留空。后续改密码请用页面 UI(`设置 → 修改密码`),不受环境变量影响。
 
 ### 注意事项
 
@@ -98,3 +98,22 @@ ssh -L 8080:127.0.0.1:8080 root@123.45.67.89
 | 后续改密码 | UI(`设置 → 修改密码`) | 同左 |
 
 推荐**方式一(环境变量)**,一次配置即可,Docker 部署尤其方便。
+
+---
+
+## 多用户账号
+
+需要彼此独立的登录时,在服务器上添加账号。密码以 Argon2id 哈希写入 `data/users.json`(`chmod 600`),明文只在命令输出里出现一次。
+
+```bash
+cd backend && uv run python ../scripts/manage_users.py add alice
+cd backend && uv run python ../scripts/manage_users.py reset alice
+cd backend && uv run python ../scripts/manage_users.py remove alice
+cd backend && uv run python ../scripts/manage_users.py list
+```
+
+- 默认文件是 `DATA_DIR/users.json`(开发环境一般为 `data/users.json`)。`AUTH_USERS` 可以改成另一个 JSON 文件路径,或内联 JSON。内联内容只放哈希,并且要用单引号,避免 `$` 被 Docker Compose 插值。
+- 登录失败会限流:同一来源 IP 或同一用户名连续失败 5 次后锁定 5 分钟。
+- 每个账号有自己的会话。退出只注销当前登录,不影响其他人。重置或删除账号后,该账号已有会话失效。
+- 目前所有账号权限相同。
+- `AUTH_PASSWORD` 仍然可用,和账号文件互不覆盖。用户名 `admin` 若没有同名账号,就走这份旧版密码;留空用户名也只校验旧版密码。

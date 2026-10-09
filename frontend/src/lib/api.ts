@@ -2223,16 +2223,18 @@ export const api = {
 
   // ===== Auth (访问认证) =====
   authStatus: () =>
-    request<{ configured: boolean; authenticated: boolean }>('/api/auth/status'),
+    request<{ configured: boolean; authenticated: boolean; username?: string | null }>(
+      '/api/auth/status',
+    ),
   authSetup: (password: string) =>
     request<{ ok: boolean }>('/api/auth/setup', {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),
-  authLogin: (password: string) =>
-    request<{ ok: boolean }>('/api/auth/login', {
+  authLogin: (password: string, username = '') =>
+    request<{ ok: boolean; username?: string | null }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ username, password }),
     }),
   authLogout: () =>
     request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
