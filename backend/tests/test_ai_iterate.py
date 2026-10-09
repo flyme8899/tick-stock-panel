@@ -151,7 +151,7 @@ def test_execute_list_factors(monkeypatch):
     _stub_module(
         monkeypatch,
         "app.factors.registry",
-        all_factors=lambda asset_type=None, stable_only=False: [
+        all_factors=lambda asset_type=None, stable_only=False, include_experimental=False: [
             _FakeFactorSpec("f1"), _FakeFactorSpec("f2"),
         ],
     )

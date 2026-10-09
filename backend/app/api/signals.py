@@ -106,7 +106,7 @@ def get_options():
     from app.factors.registry import all_factors
 
     factor_groups: dict[str, list[dict[str, str]]] = {}
-    for spec in all_factors():
+    for spec in all_factors(include_experimental=False):
         if spec.id in allowed:
             continue
         label = spec.label

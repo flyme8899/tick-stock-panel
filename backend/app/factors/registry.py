@@ -315,19 +315,48 @@ for _spec in _CATALOG:
     register_factor(_spec)
 
 
+_EXPERIMENTAL_LOADED = False
+
+
+def _ensure_experimental() -> None:
+    """实验组在首次读取时注册。
+
+    不能在本模块导入末尾再导入 alpha158：alpha158 反过来要引用本模块，
+    导入期互相调用会停在半初始化状态。
+    """
+    global _EXPERIMENTAL_LOADED
+    if _EXPERIMENTAL_LOADED:
+        return
+    _EXPERIMENTAL_LOADED = True
+    from app.factors.alpha158 import register_alpha158
+
+    register_alpha158()
+
+
 def get_factor(fid: str) -> FactorSpec | None:
+    _ensure_experimental()
     return _REGISTRY.get(fid)
+
+
+_PROTECTED: set[str] = set()
+
+
+def protect_builtin(fid: str) -> None:
+    """内置但未放进 _CATALOG 的因子 (例如默认关闭的实验组) 同样禁止注销。"""
+    _PROTECTED.add(fid)
 
 
 def unregister_factor(fid: str) -> FactorSpec | None:
     """注销动态注册的因子 (内置目录因子不可注销, fail-closed)。"""
-    if any(spec.id == fid for spec in _CATALOG):
+    _ensure_experimental()
+    if fid in _PROTECTED or any(spec.id == fid for spec in _CATALOG):
         raise ValueError(f"内置因子不可注销: {fid}")
     return _REGISTRY.pop(fid, None)
 
 
 def _ordered_specs() -> list[FactorSpec]:
     """内置目录顺序在前, 动态注册因子 (custom/composite) 按注册顺序追加。"""
+    _ensure_experimental()
     ordered: list[FactorSpec] = list(_CATALOG)
     known = {spec.id for spec in _CATALOG}
     ordered.extend(spec for fid, spec in _REGISTRY.items() if fid not in known)
@@ -349,8 +378,13 @@ def _ensure_ext_factors() -> None:
 def all_factors(
     asset_type: str | None = None,
     stable_only: bool = False,
+    *,
+    include_experimental: bool = False,
 ) -> list[FactorSpec]:
     """按目录顺序返回因子; asset_type 过滤适用资产, stable_only 过滤实验/废弃因子。
+
+    带 alpha158 标签的实验组默认不返回。信号白名单、AI 提示词、因子库和工具目录
+    保持这个默认。需要实验组时显式传入 include_experimental=True。挖掘筛选仍用默认排除。
 
     返回前惰性同步扩展表因子 (ext_ 前缀 base 条目), 使信号字段白名单、
     因子库列表和 AI 提示词看到同一份扩展字段清单。
@@ -360,11 +394,13 @@ def all_factors(
         spec for spec in _ordered_specs()
         if (asset_type is None or asset_type in spec.asset_types)
         and (not stable_only or spec.stability == "stable")
+        and (include_experimental or "alpha158" not in spec.tags)
     ]
 
 
 def factor_dependencies(fids) -> frozenset[str]:
     """递归展开依赖到 enriched base 列; 未知 id 原样保留 (与 scoring_dependencies 历史语义一致)。"""
+    _ensure_experimental()
     resolved: set[str] = set()
     for fid in fids:
         spec = _REGISTRY.get(str(fid))
@@ -377,9 +413,16 @@ def factor_dependencies(fids) -> frozenset[str]:
     return frozenset(resolved)
 
 
-def factor_columns_view() -> list[dict]:
-    """历史 FACTOR_COLUMNS 兼容视图 (顺序、键一致; 动态注册因子追加在末尾)。"""
-    return [spec.column_view() for spec in _ordered_specs()]
+def factor_columns_view(*, include_experimental: bool = False) -> list[dict]:
+    """历史 FACTOR_COLUMNS 兼容视图 (顺序、键一致; 动态注册因子追加在末尾)。
+
+    带 alpha158 标签的实验组默认不出现在挖掘候选和检验列里。
+    include_experimental=True 时才追加。
+    """
+    specs = _ordered_specs()
+    if not include_experimental:
+        specs = [spec for spec in specs if "alpha158" not in spec.tags]
+    return [spec.column_view() for spec in specs]
 
 
 def virtual_dependencies() -> dict[str, frozenset[str]]:
@@ -398,3 +441,5 @@ def scoring_warmups() -> dict[str, int]:
         for spec in _CATALOG
         if spec.kind == "virtual" and spec.warmup_bars > 1
     }
+
+

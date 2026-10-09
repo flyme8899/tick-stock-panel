@@ -16,32 +16,39 @@ const KIND_META: Record<FactorLibraryItem['kind'], { label: string; cls: string 
   custom: { label: '自定义', cls: 'bg-amber-400/10 text-amber-500' },
 }
 
+const ALPHA158_GROUP = 'Alpha158（实验）'
+
 export function FactorLibrary({ onInspect, onEdit }: { onInspect: (factorId: string) => void; onEdit?: (factorId: string) => void }) {
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('all')
   const [group, setGroup] = useState('all')
   const [detail, setDetail] = useState<FactorLibraryItem | null>(null)
+  const [showExperimental, setShowExperimental] = useState(false)
 
   const lib = useQuery({
-    queryKey: QK.factorLibrary('all'),
-    queryFn: () => api.factorLibrary(),
+    queryKey: QK.factorLibrary(showExperimental ? 'experimental' : 'all'),
+    queryFn: () => api.factorLibrary(undefined, showExperimental),
   })
   const factors = lib.data?.factors ?? []
+  const listed = useMemo(
+    () => showExperimental ? factors : factors.filter(item => item.group !== ALPHA158_GROUP),
+    [factors, showExperimental],
+  )
 
   const groups = useMemo(
-    () => Array.from(new Set(factors.map(item => item.group))),
-    [factors],
+    () => Array.from(new Set(listed.map(item => item.group))),
+    [listed],
   )
 
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase()
-    return factors.filter(item => {
+    return listed.filter(item => {
       if (kind !== 'all' && item.kind !== kind) return false
       if (group !== 'all' && item.group !== group) return false
       if (keyword && !`${item.id} ${item.label} ${item.formula}`.toLowerCase().includes(keyword)) return false
       return true
     })
-  }, [factors, query, kind, group])
+  }, [listed, query, kind, group])
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-card border border-border bg-surface/80">
@@ -67,7 +74,19 @@ export function FactorLibrary({ onInspect, onEdit }: { onInspect: (factorId: str
           <option value="all">全部分组</option>
           {groups.map(name => <option key={name} value={name}>{name}</option>)}
         </select>
-        <span className="ml-auto text-[10px] text-muted">{lib.isLoading ? '加载中…' : `${filtered.length} / ${factors.length} 个因子`}</span>
+        <label className="inline-flex items-center gap-1.5 text-[10px] text-secondary" title="vnpy/Qlib Alpha158，默认不参与挖掘和检验">
+          <input
+            type="checkbox"
+            checked={showExperimental}
+            onChange={event => {
+              setShowExperimental(event.target.checked)
+              if (!event.target.checked) setGroup('all')
+            }}
+            className="h-3 w-3 accent-accent"
+          />
+          显示 Alpha158 实验组
+        </label>
+        <span className="ml-auto text-[10px] text-muted">{lib.isLoading ? '加载中…' : `${filtered.length} / ${listed.length} 个因子`}</span>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
@@ -163,7 +182,8 @@ function FactorDetailModal({
     },
     onError: (error: Error) => toast(`状态更新失败 · ${error.message}`, 'error'),
   })
-  const isDynamic = item.kind === 'custom' || item.kind === 'composite'
+  const isDynamic = (item.id.startsWith('uf_') || item.id.startsWith('cf_'))
+    && (item.kind === 'custom' || item.kind === 'composite')
   const [groupDraft, setGroupDraft] = useState(item.group)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [blockedRefs, setBlockedRefs] = useState<string[] | null>(null)
@@ -293,7 +313,7 @@ function FactorDetailModal({
             ))}
           </div>
         )}
-        {item.kind === 'custom' && onEdit && (
+        {item.id.startsWith('uf_') && item.kind === 'custom' && onEdit && (
           <button
             type="button"
             onClick={() => { onClose(); onEdit(item.id) }}

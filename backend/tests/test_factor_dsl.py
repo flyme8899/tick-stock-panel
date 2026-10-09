@@ -176,6 +176,43 @@ def test_arithmetic_precedence() -> None:
     assert values[0] == 16.0  # 10 + 6, 而不是 (10+2)*3
 
 
+def test_nested_window_matches_materialized_plan() -> None:
+    """嵌套时序先落成临时列，再做外层窗口。
+
+    旧编译器把 ts_mean(ts_delta(...)) 放进同一条表达式，Polars 会得到全空。
+    这里对的是拆开之后的两步计划，避免以后又并回一条表达式。
+    """
+    panel = _panel()
+    delta = (pl.col("close") - pl.col("close").shift(1)).over("symbol")
+    expected = panel.with_columns(delta.alias("_d")).with_columns(
+        pl.col("_d").rolling_mean(5, min_samples=5).over("symbol").alias("_e"),
+    )["_e"]
+    assert _eval("ts_mean(ts_delta(close, 1), 5)", panel).to_list() == pytest.approx(
+        expected.to_list(), nan_ok=True,
+    )
+
+
+def test_boolean_window_matches_float_mean() -> None:
+    panel = _panel().with_columns((pl.col("close") - 0.5).alias("open"))
+    flag = (pl.col("close") > pl.col("open")).cast(pl.Float64)
+    expected = panel.with_columns(
+        flag.rolling_mean(5, min_samples=5).over("symbol").alias("_e"),
+    )["_e"]
+    assert _eval("ts_mean(close > open, 5)", panel).to_list() == pytest.approx(
+        expected.to_list(), nan_ok=True,
+    )
+
+
+def test_legacy_unary_window_unchanged() -> None:
+    panel = _panel()
+    expected = panel.with_columns(
+        pl.col("close").rolling_mean(5, min_samples=5).over("symbol").alias("_e"),
+    )["_e"]
+    assert _eval("ts_mean(close, 5)", panel).to_list() == pytest.approx(
+        expected.to_list(), nan_ok=True,
+    )
+
+
 def test_decay_linear_weights_recent() -> None:
     values = _eval("decay_linear(close, 3)")
     # A 组第 3 行: (3*12 + 2*11 + 1*10) / 6 = 68/6

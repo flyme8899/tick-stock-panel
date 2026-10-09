@@ -229,7 +229,7 @@ def test_scoring_warmup_snapshot() -> None:
 
 
 def test_catalog_counts_and_kinds() -> None:
-    specs = all_factors()
+    specs = all_factors(stable_only=True)
     assert len(specs) == 77
     assert len({spec.id for spec in specs}) == 77  # id 唯一
     virtual = [spec for spec in specs if spec.kind == "virtual"]
@@ -259,10 +259,10 @@ def test_get_factor_and_dependencies() -> None:
 
 
 def test_asset_type_filter() -> None:
-    stock = all_factors(asset_type="stock")
+    stock = all_factors(asset_type="stock", stable_only=True)
     etf = all_factors(asset_type="etf")
     assert len(stock) == 77
-    assert len(etf) == 70  # 财务 7 项仅股票
+    assert len(etf) == 70  # 财务 7 项仅股票; Alpha158 实验组只覆盖股票且默认另计
 
 
 def test_register_factor_rejects_duplicate() -> None:
@@ -310,6 +310,7 @@ def test_factors_api_contract() -> None:
     payload = response.json()
     factors = payload["factors"]
     assert len(factors) == 77
+    assert not any(item["id"].startswith("a158_") for item in factors)
     first = factors[0]
     assert first["id"] == "momentum_5d"
     assert first["kind"] == "base"
@@ -324,6 +325,17 @@ def test_factors_api_contract() -> None:
     mv = next(item for item in factors if item["id"] == "log_float_mv")
     assert mv["kind"] == "virtual"
     assert mv["scale_free"] is False
+
+
+def test_factors_api_include_experimental() -> None:
+    client = _client()
+    payload = client.get("/api/factors", params={"include_experimental": "true"}).json()
+    factors = payload["factors"]
+    assert len(factors) == 77 + 158
+    assert factors[0]["id"] == "momentum_5d"
+    assert any(item["id"] == "a158_vwap_0" for item in factors)
+    default = client.get("/api/factors").json()["factors"]
+    assert len(default) == 77
 
 
 def test_factors_api_asset_filter_and_validation() -> None:

@@ -2955,10 +2955,18 @@ export const api = {
   factorColumns: () =>
     request<{ columns: FactorColumn[] }>('/api/backtest/factor/columns'),
 
-  factorLibrary: (assetType?: 'stock' | 'etf') =>
-    request<{ factors: FactorLibraryItem[] }>(
-      `/api/factors${assetType ? `?asset_type=${assetType}` : ''}`,
-    ),
+  factorColumnsExperimental: () =>
+    request<{ columns: FactorColumn[] }>('/api/backtest/factor/columns?include_experimental=true'),
+
+  factorLibrary: (assetType?: 'stock' | 'etf', includeExperimental = false) => {
+    const params = new URLSearchParams()
+    if (assetType) params.set('asset_type', assetType)
+    if (includeExperimental) params.set('include_experimental', 'true')
+    const query = params.toString()
+    return request<{ factors: FactorLibraryItem[] }>(
+      `/api/factors${query ? `?${query}` : ''}`,
+    )
+  },
 
   factorValidate: (formula: string) =>
     request<FactorValidateResponse>('/api/factors/validate', {
