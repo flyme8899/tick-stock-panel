@@ -23,6 +23,13 @@ services:
       - DATA_DIR=/app/data
       # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
       - CODEX_DOCKER_HOST=host.docker.internal
+      # 保留 .env 里的原始值供首次密码初始化读取，避免 Compose 展开密码中的 $VAR。
+      # 这一项在下面也以只读方式挂进容器，两处都要有：环境变量给后端读，
+      # 挂载文件给 dsa_bootstrap 那类直接读文件的代码路径。
+      - TICKFLOW_ENV_FILE=/app/.env
+      - TIERS_YAML=/app/tiers.yaml
+      - STATIC_DIR=/app/static
+      - TZ=Asia/Shanghai
     volumes:
       - ./data:/app/data
       - ./tiers.yaml:/app/tiers.yaml:ro
@@ -31,6 +38,12 @@ services:
       # 复用主机 Codex 登录态；后端只读后复制到单次请求的临时 CODEX_HOME。
       # Windows PowerShell/CMD 下 HOME 常未设置, 可通过 .env 里 CODEX_HOME_HOST 覆盖。
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
+    networks:
+      # 与 DSA 走同一张网，才能用 DSA_BASE_URL=http://dsa:8000 按服务名解析。
+      # 用外部网络而不是 compose 自建的默认网：DSA 常常是另外单独启动的
+      # （compose 的 dsa profile 或独立容器），各建各的网就互相看不见。
+      # 首次使用前先建网：docker network create dsa-net
+      - dsa-net
     restart: unless-stopped
 
   # 可选。DSA 的 API 旁路，不托管它自己的前端。
@@ -61,6 +74,9 @@ services:
       - ./backend/app/custom/dsa/dsa_bootstrap.py:/opt/tsp/dsa_bootstrap.py:ro
       - ./backend/app/custom/dsa/quant_evidence.py:/opt/tsp/quant_evidence.py:ro
       - ./backend/app/custom/dsa/quant_evidence.yaml:/opt/tsp/quant_evidence.yaml:ro
+    networks:
+      # 与 app 同网，app 才能用 http://dsa:8000 找到它。
+      - dsa-net
     # 探针是 sidecar 自己的 /api/v1/health（免登录）。不要用恒成功的兜底命令。
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
@@ -71,3 +87,10 @@ services:
     entrypoint: ["python", "/opt/tsp/dsa_bootstrap.py"]
     command: ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
+
+networks:
+  # 外部网络，不由这份 compose 创建或删除，所以 down 不会把它带走。
+  # 名字可在 .env 用 DSA_NETWORK 覆盖，默认 dsa-net。
+  dsa-net:
+    external: true
+    name: ${DSA_NETWORK:-dsa-net}

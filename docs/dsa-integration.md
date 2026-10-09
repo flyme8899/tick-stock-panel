@@ -35,6 +35,17 @@ Docker 在现有 compose 里加了可选服务，不改变原来的单服务启�
 docker compose --profile dsa up --build
 ```
 
+两个服务都连 `dsa-net` 这张外部网络，app 才能按服务名 `dsa` 解析到 sidecar。
+compose 不管这张网的创建和删除，首次使用前先建一次：
+
+```bash
+docker network create dsa-net
+```
+
+名字可用 `.env` 里的 `DSA_NETWORK` 覆盖。用外部网络而不是 compose 自建默认网，
+是因为 sidecar 常常是另外单独启动的（`./scripts/dsa.sh` 或独立容器），
+各建各的网会互相看不见。`docker compose down` 不会删掉它，别的服务不受牵连。
+
 sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。镜像时区是 `Asia/Shanghai`，本地 `scripts/dsa.sh` / `dsa.ps1` 在未设置 `TZ` 时也使用这个时区。
 
 Docker 服务带健康检查：容器内 `curl -fsS http://127.0.0.1:8000/api/v1/health`。这个接口免登录，HTTP 失败或连不上都会让容器变为 unhealthy。决策页徽标每 30 秒请求 TSP 的 `/api/dsa/status`，悬停可看到同样的探测结果。
