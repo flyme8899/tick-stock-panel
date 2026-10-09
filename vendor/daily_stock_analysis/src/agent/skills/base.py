@@ -22,6 +22,106 @@ logger = logging.getLogger(__name__)
 # Built-in skill YAML directory (project_root/strategies/ kept for compatibility)
 _BUILTIN_SKILLS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "strategies"
 
+# 量化回测证据库 (TSP 全市场回测结论 → DSA 策略提示)。
+#
+# 查找顺序(先命中即用):
+#   1) data/quant_evidence.yaml   —— 用户本地覆盖版。该目录被 .gitignore 排除,
+#      不入库, git pull 也不会覆盖, 适合放自己跑出来的结论。
+#   2) config/quant_evidence.yaml —— 随仓库分发的默认版。
+#
+# 不放 strategies/: 那个目录会被全量 glob 当作策略加载, 塞进去会被误识别成
+# 一个叫 quant_evidence 的"策略"。
+_QUANT_EVIDENCE_CANDIDATES = tuple(
+    Path(__file__).resolve().parent.parent.parent.parent / sub / "quant_evidence.yaml"
+    for sub in ("data", "config")
+)
+_quant_evidence_cache: Optional[Dict[str, object]] = None
+
+
+def _load_quant_evidence() -> Dict[str, object]:
+    """读取量化回测证据库。
+
+    任何异常都静默返回空字典 —— 证据是锦上添花的提示,
+    绝不能因为读不到它而让策略加载失败。
+    """
+    global _quant_evidence_cache
+    if _quant_evidence_cache is None:
+        loaded: Dict[str, object] = {}
+        for path in _QUANT_EVIDENCE_CANDIDATES:
+            try:
+                import yaml
+
+                with open(path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                if isinstance(data, dict) and data:
+                    loaded = data
+                    break
+            except FileNotFoundError:
+                continue
+            except Exception as exc:  # noqa: BLE001 - 证据缺失不应影响主流程
+                logger.debug("量化回测证据库读取失败(%s): %s", path.name, exc)
+                continue
+        if not loaded:
+            logger.debug("未找到量化回测证据库, 跳过证据注入")
+        _quant_evidence_cache = loaded
+    return _quant_evidence_cache or {}
+
+
+def _render_quant_evidence(skill_name: str) -> str:
+    """把某个策略的量化回测证据渲染成可注入 system prompt 的自然语言。"""
+    ev = _load_quant_evidence().get(skill_name)
+    if not isinstance(ev, dict):
+        return ""
+
+    matched = ev.get("matched") or []
+    returns = ev.get("returns") or []
+    sizes = ev.get("sample_sizes") or []
+    meta = _load_quant_evidence().get("_meta") or {}
+
+    lines = ["", "---", "", "**量化回测参考**（来自 TSP 全市场机械回测，非本策略自身业绩）"]
+    scope = []
+    if meta.get("period"):
+        scope.append(str(meta["period"]))
+    if meta.get("universe"):
+        scope.append(f"全市场 {meta['universe']} 只")
+    if meta.get("benchmark_return"):
+        scope.append(f"同期基准 {meta['benchmark_return']}")
+    if scope:
+        lines.append(f"- 口径：{'；'.join(scope)}")
+
+    if matched:
+        pairs = []
+        for i, m in enumerate(matched):
+            r = returns[i] if i < len(returns) else None
+            n = sizes[i] if i < len(sizes) else None
+            seg = f"「{m}」"
+            if r is not None:
+                seg += f" {r:+.2f}%"
+            if n is not None:
+                seg += f"（{n} 笔）"
+            pairs.append(seg)
+        lines.append("- 对应 TSP 策略表现：" + "、".join(pairs))
+
+    note = (ev.get("note") or "").strip()
+    if note:
+        lines.append("- 证据：" + note.strip().replace("\n", " ").replace("  ", ""))
+
+    guidance = (ev.get("guidance") or "").strip()
+    if guidance:
+        lines.append("- 使用指引：")
+        for raw in guidance.strip().splitlines():
+            line = raw.strip()
+            if line:
+                lines.append(f"  {line}")
+
+    lines.append("")
+    lines.append(
+        "> 注意：TSP 是「机械执行」（打分选前 N 只 → 次日开盘无脑买 → 等权持有），"
+        "DSA 是「主观精选」。负收益说明该形态在无差别执行下是负期望，"
+        "DSA 的超额必须来自精选本身 —— 这是要跑赢的基准线，不是禁用令。"
+    )
+    return "\n".join(lines)
+
 
 @dataclass
 class Skill:
@@ -173,11 +273,18 @@ def load_skill_from_yaml(filepath: Union[str, Path]) -> Skill:
             f"Skill file {filepath.name} missing required fields: {missing}"
         )
 
+    # 把量化回测证据追加到策略指令末尾。有证据才追加, 没有则原样返回 ——
+    # 保证未收录证据的策略行为完全不变。
+    instructions = str(data["instructions"]).strip()
+    evidence = _render_quant_evidence(str(data["name"]).strip())
+    if evidence:
+        instructions = instructions + "\n\n" + evidence
+
     return Skill(
         name=str(data["name"]).strip(),
         display_name=str(data["display_name"]).strip(),
         description=str(data["description"]).strip(),
-        instructions=str(data["instructions"]).strip(),
+        instructions=instructions,
         category=str(data.get("category", "trend")).strip(),
         core_rules=data.get("core_rules", []) or [],
         required_tools=data.get("required_tools", []) or [],

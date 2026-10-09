@@ -61,6 +61,21 @@ services:
   analyzer:
     <<: *common
     container_name: stock-analyzer
+    # ── 覆盖 Dockerfile 的 HEALTHCHECK ────────────────────────────────
+    # Dockerfile 里那条是给 server 写的: curl http://localhost:8000/...
+    # analyzer 跑的是 `python main.py --schedule` —— 后台调度器, 不监听任何
+    # HTTP 端口。所以那条检查在 analyzer 上恒为 connection refused(exit 7),
+    # 实测连续 1143 次全败, 容器永远 unhealthy, 但服务其实一直在正常工作。
+    # 这里改成检查主进程(PID 1)是否还是 main.py。
+    # 镜像里没有 pgrep/ps(精简 Debian), 用 python 读 /proc 代替。
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'python -c "import sys; sys.exit(0 if ''main.py'' in open(''/proc/1/cmdline'',''rb'').read().decode(''utf8'',''ignore'') else 1)"'
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
 
   # FastAPI 模式
   server:
@@ -68,5 +83,16 @@ services:
     container_name: stock-server
     command: ["python", "main.py", "--serve-only", "--host", "0.0.0.0", "--port", "${API_PORT:-8000}"]
     # 若使用 network_mode: host，则以下 ports 映射无效，端口由 command 中的 --port 指定
+    #
+    # 宿主侧与容器侧端口分开配置，避免和宿主机上直接跑的 webui.py 抢端口：
+    #   - 容器内部固定 ${API_PORT:-8000}（与上面 command 的 --port 一致）
+    #   - 宿主侧默认 8001，与本机 .env 的 WEBUI_PORT=8000 错开，两者可并存
+    # 容器内部必须 bind 0.0.0.0，否则宿主映射连不进去；暴露面由宿主侧这一列控制：
+    #   仅本机能访问（默认）-> "127.0.0.1:${WEBUI_HOST_PORT:-8001}:${API_PORT:-8000}"
+    #   同网段可访问        -> "${WEBUI_HOST_PORT:-8001}:${API_PORT:-8000}"
+    # 默认只绑 127.0.0.1：局域网与公网都摸不到，外部访问走 SSH 隧道
+    #   ssh -L 8001:127.0.0.1:8001 <宿主机>
+    # 即便端口哪天被暴露出去，/api/v1/system/config 等 .env 写入接口也只认
+    # 回环来源（见 system_config._allow_env_backup_access），不会裸奔。
     ports:
-      - "${API_PORT:-8000}:${API_PORT:-8000}"
+      - "127.0.0.1:${WEBUI_HOST_PORT:-8001}:${API_PORT:-8000}"
