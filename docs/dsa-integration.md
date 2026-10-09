@@ -35,16 +35,25 @@ Docker 在现有 compose 里加了可选服务，不改变原来的单服务启�
 docker compose --profile dsa up --build
 ```
 
-两个服务都连 `dsa-net` 这张外部网络，app 才能按服务名 `dsa` 解析到 sidecar。
-compose 不管这张网的创建和删除，首次使用前先建一次：
+两个服务都连固定名字的网络 `dsa-net`，app 才能按服务名 `dsa` 解析到 sidecar。
+网络由 compose 自建（不是外部网络），裸 `docker compose up` 就能跑通，不需要
+先手动建网。名字可用 `.env` 里的 `DSA_NETWORK` 覆盖。
+
+用固定名字而不是 compose 那份自动命名的默认网，是因为 sidecar 常常是**另外
+单独启动**的（`./scripts/dsa.sh` 或一个独立容器），默认网名字带项目前缀，外面
+那个容器对不上；固定名之后用 `--network dsa-net` 就能加进来。
+
+切到 compose 管理时注意容器名：手工 `docker run` 起的一般叫 `tsp`，而 compose
+里是 `TickFlow_Stock_Panel`，直接 `up` 会撞上同一个端口，并且两个实例会同时写
+`./data`（bind mount 没有卷缓冲）。先停掉手工那个再 up：
 
 ```bash
-docker network create dsa-net
+docker rm -f tsp
+docker compose up -d --build
 ```
 
-名字可用 `.env` 里的 `DSA_NETWORK` 覆盖。用外部网络而不是 compose 自建默认网，
-是因为 sidecar 常常是另外单独启动的（`./scripts/dsa.sh` 或独立容器），
-各建各的网会互相看不见。`docker compose down` 不会删掉它，别的服务不受牵连。
+`.env` 里的 `DSA_BASE_URL` 在 compose 下要填 `http://dsa:8000`（服务名），
+不是 `http://127.0.0.1:8000`——容器里的 `127.0.0.1` 指自己。
 
 sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。镜像时区是 `Asia/Shanghai`，本地 `scripts/dsa.sh` / `dsa.ps1` 在未设置 `TZ` 时也使用这个时区。
 

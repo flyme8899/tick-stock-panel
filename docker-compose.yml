@@ -23,9 +23,8 @@ services:
       - DATA_DIR=/app/data
       # 将主机 Codex Desktop 的 loopback local-access 端点映射到 Docker host gateway。
       - CODEX_DOCKER_HOST=host.docker.internal
-      # 保留 .env 里的原始值供首次密码初始化读取，避免 Compose 展开密码中的 $VAR。
-      # 这一项在下面也以只读方式挂进容器，两处都要有：环境变量给后端读，
-      # 挂载文件给 dsa_bootstrap 那类直接读文件的代码路径。
+      # 下面几项手工 docker run 时传过、但这份文件一直漏掉。前三个有代码默认值
+      # 兜底所以没炸，补上只为让配置来源一致、换机器不用再猜。
       - TICKFLOW_ENV_FILE=/app/.env
       - TIERS_YAML=/app/tiers.yaml
       - STATIC_DIR=/app/static
@@ -40,9 +39,10 @@ services:
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
     networks:
       # 与 DSA 走同一张网，才能用 DSA_BASE_URL=http://dsa:8000 按服务名解析。
-      # 用外部网络而不是 compose 自建的默认网：DSA 常常是另外单独启动的
-      # （compose 的 dsa profile 或独立容器），各建各的网就互相看不见。
-      # 首次使用前先建网：docker network create dsa-net
+      # 用固定名字的网络、而不是 compose 那份自动命名的默认网：DSA 常常是
+      # 另外单独启动的（./scripts/dsa.sh 或独立容器），默认网名字带项目前缀，
+      # 外面那个容器对不上。固定名之后 `--network dsa-net` 就能加进来。
+      # 名字可用 .env 的 DSA_NETWORK 覆盖。
       - dsa-net
     restart: unless-stopped
 
@@ -89,8 +89,15 @@ services:
     restart: unless-stopped
 
 networks:
-  # 外部网络，不由这份 compose 创建或删除，所以 down 不会把它带走。
-  # 名字可在 .env 用 DSA_NETWORK 覆盖，默认 dsa-net。
+  # 固定名字，compose 自己建。名字可用 .env 的 DSA_NETWORK 覆盖，默认 dsa-net。
+  #
+  # 不用 external: true，是因为那样会多一个前置条件：没先
+  # docker network create 的话，裸 `docker compose up` 直接失败——哪怕不启
+  # dsa profile 也一样，因为 app 就挂在这张网上。而这台机器上 dsa-net 是
+  # 手工建的，换台机器就没了。让 compose 建同名网络，裸 up 能直接跑通，
+  # 外面单独起的 sidecar 用 --network dsa-net 也能加进来。
+  #
+  # 代价是 docker compose down 会删掉这张网（已有容器连着则删不掉，只会报警告）。
+  # 下次 up 会重建同名网络，上面这些容器不受影响。
   dsa-net:
-    external: true
     name: ${DSA_NETWORK:-dsa-net}
