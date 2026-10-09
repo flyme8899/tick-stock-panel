@@ -2177,6 +2177,46 @@ export interface SectorRotationUniverseItem {
   excluded?: boolean
 }
 
+export interface NewsCandidate {
+  kind: 'stock' | 'sector'
+  key: string
+  name: string
+  score: number
+  story_count: number
+  effective_mentions: number
+  sources: string[]
+  growth: number
+  baseline_effective: number
+}
+
+export interface NewsMessage {
+  source: string
+  source_label: string
+  published_at: string
+  author: string
+  title: string
+  excerpt: string
+  url: string
+  level: string
+}
+
+export interface NewsSourceHealth {
+  id: string
+  label: string
+  enabled: boolean
+  configured: boolean
+  locked: boolean
+  auth_state: string
+  last_ok_at: string | null
+  last_error: string
+  items_ingested: number
+}
+
+export interface NewsHealth {
+  sources: NewsSourceHealth[]
+  as_of: string
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
@@ -4066,6 +4106,24 @@ export const api = {
       method: 'POST',
       timeoutMs: null,
       body: JSON.stringify(payload),
+    }),
+
+  newsHot: (kind: 'all' | 'stock' | 'sector' = 'all') =>
+    request<{ kind: string; window_hours: number; baseline_days: number; candidates: NewsCandidate[] }>(
+      `/api/news/hot?kind=${kind}&limit=20`,
+    ),
+
+  newsMessages: (kind: 'stock' | 'sector', key: string) =>
+    request<{ kind: string; key: string; items: NewsMessage[] }>(
+      `/api/news/messages?kind=${kind}&key=${encodeURIComponent(key)}`,
+    ),
+
+  newsHealth: () => request<NewsHealth>('/api/news/health'),
+
+  newsSetSources: (sources: Record<string, { enabled: boolean }>) =>
+    request<NewsHealth & { applied: Record<string, boolean> }>('/api/news/sources', {
+      method: 'PUT',
+      body: JSON.stringify({ sources }),
     }),
 }
 

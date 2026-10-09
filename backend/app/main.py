@@ -29,6 +29,7 @@ from app.api import (
     market_recap,
     mining,
     monitor_rules,
+    news,
     overview,
     paper,
     pipeline,
@@ -241,6 +242,15 @@ async def _application_lifespan(app: FastAPI):
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
 
+    # 多源资讯采集。来源默认关闭，线程只在开关打开后出网。
+    try:
+        from app.news.scheduler import NewsScheduler
+        news_scheduler = NewsScheduler()
+        news_scheduler.start()
+        app.state.news_scheduler = news_scheduler
+    except Exception as e:  # noqa: BLE001
+        logger.warning("news scheduler init failed: %s", e)
+
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
     app.state.watchdog = start_watchdog(app.state, repo)
@@ -378,6 +388,9 @@ async def _application_lifespan(app: FastAPI):
         fsc = getattr(app.state, "financial_scheduler", None)
         if fsc:
             fsc.stop()
+        news_sched = getattr(app.state, "news_scheduler", None)
+        if news_sched:
+            news_sched.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()
@@ -463,6 +476,14 @@ async def auth_middleware(request: Request, call_next):
     if path.startswith(_AUTH_WHITELIST_PREFIX) or path in _AUTH_WHITELIST_EXACT:
         return await call_next(request)
 
+    # DSA 旁路拉资讯。令牌不对时 404，避免未登录的 401 把内部地址暴露成可探测接口。
+    if path == "/api/news/dsa-feed":
+        from app.news.config import feed_matches
+
+        if feed_matches(request.headers.get("x-news-feed-token", "")):
+            return await call_next(request)
+        return JSONResponse(status_code=404, content={"detail": "未启用"})
+
     # ── API Token 通道 (外部调用方; 与密码会话并行, 见 open-platform-plan §4) ──
     authz = request.headers.get("authorization", "")
     if authz.startswith("Bearer "):
@@ -525,6 +546,7 @@ app.include_router(ext_data.router)
 app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
+app.include_router(news.router)
 app.include_router(settings_api.router)
 app.include_router(strategy.router)
 app.include_router(signals.router)

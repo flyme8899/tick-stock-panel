@@ -45,6 +45,9 @@ _RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/backtest/factor/columns", "read:analysis"),
     ("GET", "/api/regime", "read:analysis"),
     ("GET", "/api/alerts", "read:analysis"),
+    ("GET", "/api/news/hot", "read:analysis"),
+    ("GET", "/api/news/messages", "read:analysis"),
+    ("GET", "/api/news/stocks", "read:analysis"),
     # run:backtest — 触发计算任务
     ("POST", "/api/screener/run", "run:backtest"),
     ("POST", "/api/screener/run_preset", "run:backtest"),

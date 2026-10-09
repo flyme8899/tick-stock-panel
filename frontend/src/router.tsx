@@ -34,6 +34,7 @@ const Indices = lazy(() => import('./pages/Indices').then(m => ({ default: m.Ind
 const Branding = lazy(() => import('./pages/Branding').then(m => ({ default: m.Branding })))
 const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })))
 const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regime })))
+const HotEvents = lazy(() => import('./pages/HotEvents').then(m => ({ default: m.HotEvents })))
 const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
 // Onboarding 只在首次使用时进入, Auth 只在登录页用到 — 均改按需加载
@@ -62,6 +63,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/limit-ladder',
   '/indices',
   '/regime',
+  '/hot-events',
   '/abnormal',
   '/branding',
   '/settings',
@@ -169,6 +171,7 @@ export const router = createBrowserRouter([
       { path: 'limit-ladder', element: <LimitUpLadder /> },
       { path: 'indices', element: <Indices /> },
     { path: 'regime', element: <Regime /> },
+      { path: 'hot-events', element: <HotEvents /> },
       { path: 'abnormal', element: <AbnormalMoves /> },
       { path: 'branding', element: <Branding /> },
       { path: 'settings', element: <Settings /> },

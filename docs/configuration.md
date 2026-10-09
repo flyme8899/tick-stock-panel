@@ -174,6 +174,10 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 侧栏「决策」调用 vendored daily_stock_analysis。变量、启动方式、上海时间定时任务和分享图见 [dsa-integration.md](./dsa-integration.md)。`DSA_BASE_URL` 为空字符串时页面保持未启用；服务没开时仍能打开页面，并显示未连接。`SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`STOCK_LIST` 也可在决策页「定时推送」里保存。
 
+## 多源资讯（可选）
+
+热门事件和 DSA 情报桥的变量、宿主机采集见 [news-sources.md](./news-sources.md)。`NEWS_DWS_ENABLED`、`NEWS_ZSXQ_ENABLED`、`NEWS_IMA_ENABLED`、`NEWS_CLS_ENABLED`、`NEWS_WSCN_ENABLED` 默认留空，来源关闭。`NEWS_DSA_FEED_TOKEN` 留空时 DSA 不拉取。ima 需要 `IMA_CLIENT_ID` 与 `IMA_API_KEY`。
+
 ## 配置优先级
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`
