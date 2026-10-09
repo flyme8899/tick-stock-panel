@@ -67,7 +67,33 @@ docker compose run --rm --no-deps --entrypoint uv \
 
 目录不对时加 `--path`，指向含有 `date=YYYY-MM-DD/part.parquet` 的那一层。ETF 分钟是 `data/kline_etf_minute`。
 
-结论为「有问题」时，不要手改 parquet，本脚本也不会自动修。先停掉实时全量分钟和正在跑的同步。把有问题的 `date=YYYY-MM-DD` 整目录复制到 `kline_minute` 外面做备份，备份不要留在会被 `**/*.parquet` 扫到的位置。`kline_sync._write_minute_partition` 会读入已有 `part.parquet` 再与新数据纵向拼接；`volume` 为 Int64 时这次拼接会失败，所以坏文件还在原处时，调用同步通常改不了类型。备份确认可读之后，把该日的 `part.parquet` 移出分区目录，再用现有接口重拉覆盖这些日期的窗口：全市场 `POST /api/kline/sync_minute`（body `{"days": N}`），或单只 `POST /api/kline/sync_minute_single`（`days` 为 1–30，只补这一只）。整日文件被覆盖过时，缺掉的股票要靠重拉回来，只做类型转换补不回行。重拉后再跑本脚本，结论应为 OK。以后若要做带确认开关的修复命令，应先备份，再用与 `_atomic_write_parquet` 相同的临时文件替换写回。
+结论为「有问题」时，不要手改 parquet。诊断脚本本身不改数据。`kline_sync._write_minute_partition` 会读入已有 `part.parquet` 再与新数据纵向拼接；`volume` 为 Int64 时这次拼接会失败，所以坏文件还在原处时，直接调用同步通常改不了类型。
+
+可选修复是 `scripts/repair_minute_kline.py`。默认只打印计划（日期、文件大小、行数、股票数、备份位置、将调用的重拉、限速估算），不创建备份、不改分区。真正执行要加 `--apply`，并在终端输入 `REPAIR`，或同时加 `--yes`。
+
+它先看本机有没有正在写分钟分区的任务（`job_store` 里近期的 pending/running，以及 `GET /api/settings/minute-refresh/status` 的 `running`）。有的话拒绝执行。接口探不到且任务文件也不能证明空闲时，必须再加 `--force`。执行前应先停掉 `./dev.sh` 或容器里的分钟同步。
+
+备份写到 `data/backup/kline_minute_repair_<时间>/`，在 `kline_minute` 外面，避免被 `**/*.parquet` 扫进去。核对 schema 和行数之后，才把坏的 `part.parquet` 移到备份下的 `displaced/`（不删除）。然后调用 `kline_sync.sync_minute_batch`，段末用 `_write_minute_partition` 原子写回。不走 `sync_and_persist_minute`，以免空时间清理和旧分区迁移碰到其他日期。
+
+TickFlow 付费说明写的是「一年分钟级历史」，单次 `count` 最大 10000，现有同步按默认 20 个交易日切段并限速。一年窗口内的日期计划重拉；更早的日期不重拉，移走后立刻用备份做类型转换写回。重拉没有写回某一天时同样用备份做类型转换（Int64 → Float64）原子写回，不留空洞。仅转换类型补不回被整日覆盖丢掉的股票。结束时会再跑诊断并打印结论。状态在备份目录的 `status.json`，中断后再次 `--apply` 会接着做。`--rollback <备份目录>` 把备份里的原文件写回分区。
+
+```bash
+PYTHONPATH=backend backend/.venv/bin/python scripts/repair_minute_kline.py
+PYTHONPATH=backend backend/.venv/bin/python scripts/repair_minute_kline.py --apply
+PYTHONPATH=backend backend/.venv/bin/python scripts/repair_minute_kline.py --rollback data/backup/kline_minute_repair_<时间>
+```
+
+Docker 镜像不含 `scripts/`，要同时挂上诊断脚本（修复脚本按同目录加载它）。`docker compose run --no-deps` 时本机地址不是正在跑的 app 容器，探针用 `TSP_API_BASE=http://app:3018`（app 容器需要已经在跑；探不到就得加 `--force`）：
+
+```bash
+docker compose run --rm --no-deps --entrypoint uv \
+  -v "$PWD/scripts/check_minute_kline.py:/tmp/check_minute_kline.py:ro" \
+  -v "$PWD/scripts/repair_minute_kline.py:/tmp/repair_minute_kline.py:ro" \
+  -e TSP_API_BASE=http://app:3018 \
+  app run --no-sync python /tmp/repair_minute_kline.py
+```
+
+`--apply`、`--yes`、`--rollback` 加在脚本参数最后。先跑不加 `--apply` 的计划。
 
 ---
 
