@@ -1,14 +1,14 @@
 """钉钉推送框架。热点候选、异动监控、做T提醒各自开关、时段和冷却。
 
 默认全关。登录失效提醒仍走 host_collector 的短文本，不从这里发送。
-行情只读已经算好的 enriched / 资讯库，不额外打 TickFlow。
+异动用实时报价对盘前价位，不读盘后信号列。报价缓存新鲜时不再打 TickFlow。
 """
 from __future__ import annotations
 
 import json
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 
@@ -57,6 +57,8 @@ RANGE_BAND = 0.003
 PREV_BAND = 0.003
 PREV_AWAY = 0.01
 RANGE_MIN = 0.01
+LIMIT_TOL = 0.005
+QUOTE_FRESH_S = 180
 
 _STATE: PushState | None = None
 _STATE_LOCK = threading.Lock()
@@ -228,7 +230,163 @@ def new_edges(previous: dict[str, set[str]] | None, current: dict[str, set[str]]
     return found
 
 
-def t_conditions(row: dict) -> tuple[set[str], float | None]:
+def limit_price(previous: float, limit_pct: float, *, up: bool) -> float:
+    """涨跌停价。与 price_limits.polars_limit_price 同一套分整数算法。"""
+    sign = 1 if up else -1
+    numerator = round((1 + sign * limit_pct) * 100)
+    cents = int((previous * 100 + 0.5) // 1)
+    return ((cents * numerator + 50) // 100) / 100.0
+
+
+def abnormal_signals(row: dict) -> set[str]:
+    """涨跌停用原始价对照昨收。60 日新高新低用前复权价对照盘前 59 日收盘极值。"""
+    price = _num(row.get("raw_close")) or _num(row.get("close")) or _num(row.get("last_price")) or _num(row.get("price"))
+    high = _num(row.get("raw_high")) or _num(row.get("high"))
+    low = _num(row.get("raw_low")) or _num(row.get("low"))
+    opened = _num(row.get("open"))
+    prev = _num(row.get("prev_close"))
+    prior_high = _num(row.get("prior_high"))
+    prior_low = _num(row.get("prior_low"))
+    level_price = _num(row.get("qfq_close"))
+    if level_price is None:
+        level_price = price
+    found: set[str] = set()
+    if level_price and prior_high and level_price >= prior_high:
+        found.add("new_high")
+    if level_price and prior_low and prior_low > 0 and level_price <= prior_low:
+        found.add("new_low")
+    symbol = str(row.get("symbol") or "")
+    if not (price and prev and prev > 0 and symbol):
+        return found
+    when = row.get("trade_date")
+    if isinstance(when, datetime):
+        when = when.date()
+    if not isinstance(when, date):
+        from app.market_time import cn_today
+        when = cn_today()
+    from app.price_limits import is_risk_warning_name, price_limit_pct
+    pct = price_limit_pct(symbol, when, is_risk_warning=is_risk_warning_name(str(row.get("name") or "")))
+    up = limit_price(prev, pct, up=True)
+    down = limit_price(prev, pct, up=False)
+    sealed_up = price >= up - LIMIT_TOL
+    sealed_down = price <= down + LIMIT_TOL
+    if sealed_up:
+        found.add("limit_up")
+    if sealed_down:
+        found.add("limit_down")
+    if high and high >= up - LIMIT_TOL and not sealed_up:
+        found.add("broken")
+    if low and opened and low <= down + LIMIT_TOL and not sealed_down and price > opened:
+        found.add("recovery")
+    return found
+
+
+def t_universe(
+    watchlist: list[str],
+    positions: list[str],
+    *,
+    include_positions: bool,
+    cap: int,
+) -> list[str]:
+    """做T默认只看自选。include_positions 时再把有持仓的代码补进去。"""
+    symbols: list[str] = []
+    for symbol in watchlist:
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    if include_positions:
+        for symbol in positions:
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+    return symbols[:cap]
+
+
+def count_rule_edges(series: list[set[str]], cooldown_min: int) -> dict[str, int]:
+    """按分钟序列数「从无到有」的次数。第一分钟只做基线，冷却期内不重复。"""
+    previous: set[str] | None = None
+    last_fire: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    for index, current in enumerate(series):
+        if previous is None:
+            previous = set(current)
+            continue
+        fresh = []
+        for reason in sorted(current - previous):
+            last = last_fire.get(reason)
+            if last is not None and index - last < cooldown_min:
+                continue
+            fresh.append(reason)
+        previous = set(current)
+        for reason in fresh:
+            counts[reason] = counts.get(reason, 0) + 1
+            last_fire[reason] = index
+    return counts
+
+
+def session_signal_sets(
+    bars: list[dict],
+    *,
+    mode: str,
+    symbol: str,
+    prev_close: float | None,
+    prior_high: float | None = None,
+    prior_low: float | None = None,
+    vwap_band: float = VWAP_BAND,
+    range_band: float = RANGE_BAND,
+    trade_date: date | None = None,
+    name: str = "",
+) -> list[set[str]]:
+    """把一分钟一根的增量 K 收成当天的信号序列。成交量按根累加。"""
+    running_high = None
+    running_low = None
+    opened = None
+    volume = 0.0
+    amount = 0.0
+    previous_pct = None
+    sets: list[set[str]] = []
+    for bar in bars:
+        close = _num(bar.get("close"))
+        high = _num(bar.get("high"))
+        low = _num(bar.get("low"))
+        bar_open = _num(bar.get("open"))
+        if opened is None:
+            opened = bar_open or close
+        if high is not None:
+            running_high = high if running_high is None else max(running_high, high)
+        if low is not None:
+            running_low = low if running_low is None else min(running_low, low)
+        volume += _num(bar.get("volume")) or 0.0
+        amount += _num(bar.get("amount")) or 0.0
+        row = {
+            "symbol": symbol,
+            "name": name,
+            "close": close,
+            "open": opened,
+            "high": running_high,
+            "low": running_low,
+            "volume": volume,
+            "amount": amount,
+            "prev_close": prev_close,
+            "prior_high": prior_high,
+            "prior_low": prior_low,
+            "trade_date": trade_date,
+        }
+        if mode == "abnormal":
+            sets.append(abnormal_signals(row))
+            continue
+        signals, pct = t_conditions(row, vwap_band=vwap_band, range_band=range_band)
+        if "near_prev_close" in signals and (previous_pct is None or abs(previous_pct) < PREV_AWAY):
+            signals.discard("near_prev_close")
+        previous_pct = pct
+        sets.append(signals)
+    return sets
+
+
+def t_conditions(
+    row: dict,
+    *,
+    vwap_band: float = VWAP_BAND,
+    range_band: float = RANGE_BAND,
+) -> tuple[set[str], float | None]:
     """用当日累计均价和日内高低。窗口不够或价格缺失的条件不成立。"""
     price = _num(row.get("close"))
     high = _num(row.get("high"))
@@ -242,14 +400,14 @@ def t_conditions(row: dict) -> tuple[set[str], float | None]:
         vwap = amount / (volume * 100.0)
         if vwap > 0:
             dev = price / vwap - 1
-            if dev >= VWAP_BAND:
+            if dev >= vwap_band:
                 found.add("above_vwap")
-            elif dev <= -VWAP_BAND:
+            elif dev <= -vwap_band:
                 found.add("below_vwap")
     if price and high and low and low > 0 and (high - low) / low >= RANGE_MIN:
-        if high > 0 and price / high - 1 >= -RANGE_BAND:
+        if high > 0 and price / high - 1 >= -range_band:
             found.add("near_high")
-        if price / low - 1 <= RANGE_BAND:
+        if price / low - 1 <= range_band:
             found.add("near_low")
     if price and prev and prev > 0:
         pct = price / prev - 1
@@ -618,8 +776,7 @@ def _attach_refs(sectors: list[dict], stocks: list[dict]) -> None:
 
 
 def _load_abnormal() -> tuple[dict[str, set[str]], dict, dict]:
-    from app.news.service import _repo, hot_candidates
-    from app.services.abnormal_moves import build_intraday
+    from app.news.service import hot_candidates
     from app.services.watchlist import list_symbols
 
     symbols = [str(row.get("symbol") or "") for row in list_symbols()]
@@ -629,15 +786,13 @@ def _load_abnormal() -> tuple[dict[str, set[str]], dict, dict]:
             if item.key not in symbols:
                 symbols.append(item.key)
     symbols = symbols[:ABNORMAL_CAP]
-    repo = _repo()
-    if repo is None or not symbols:
+    if not symbols:
         return {}, {}, {}
-    payload = build_intraday(repo, limit=ABNORMAL_CAP, symbols=set(symbols))
     current: dict[str, set[str]] = {}
     names = {}
-    for row in payload.get("rows") or []:
+    for row in _live_rows(symbols):
         symbol = str(row.get("symbol") or "")
-        signals = {item for item in (row.get("signals") or []) if item in ABNORMAL_SIGNALS}
+        signals = abnormal_signals(row) & ABNORMAL_SIGNALS
         if symbol and signals:
             current[symbol] = signals
             names[symbol] = str(row.get("name") or symbol)
@@ -645,13 +800,32 @@ def _load_abnormal() -> tuple[dict[str, set[str]], dict, dict]:
 
 
 def _load_t() -> tuple[dict[str, set[str]], dict, dict]:
-    import polars as pl
-
-    from app.news.service import _repo
     from app.services.watchlist import list_symbols
+
+    watchlist = [str(row.get("symbol") or "") for row in list_symbols()]
+    positions = _position_symbols() if _flag_on("news_push_t_include_positions") else []
+    symbols = t_universe(watchlist, positions, include_positions=bool(positions), cap=T_CAP)
+    if not symbols:
+        return {}, {}, {}
+    current: dict[str, set[str]] = {}
+    pct: dict[str, float] = {}
+    names = {}
+    for row in _live_rows(symbols):
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        signals, change = t_conditions(row)
+        current[symbol] = signals
+        if change is not None:
+            pct[symbol] = change
+        names[symbol] = str(row.get("name") or symbol)
+    return current, pct, names
+
+
+def _position_symbols() -> list[str]:
     from app.strategy import paper
 
-    symbols: list[str] = []
+    found: list[str] = []
     try:
         accounts = paper.list_accounts(settings.data_dir) or []
     except Exception:  # noqa: BLE001
@@ -665,35 +839,190 @@ def _load_t() -> tuple[dict[str, set[str]], dict, dict]:
         except Exception:  # noqa: BLE001
             continue
         for symbol, pos in positions.items():
-            if int(pos.get("qty") or 0) > 0 and symbol not in symbols:
-                symbols.append(symbol)
-    if _flag_on("news_push_t_include_watchlist"):
-        for row in list_symbols():
-            symbol = str(row.get("symbol") or "")
-            if symbol and symbol not in symbols:
-                symbols.append(symbol)
-    symbols = symbols[:T_CAP]
-    repo = _repo()
-    if repo is None or not symbols:
-        return {}, {}, {}
-    frame, _date = repo.get_enriched_latest()
-    if frame is None or frame.is_empty() or "symbol" not in frame.columns:
-        return {}, {}, {}
+            if int(pos.get("qty") or 0) > 0 and symbol not in found:
+                found.append(symbol)
+    return found
+
+
+def _live_rows(symbols: list[str]) -> list[dict]:
+    """实时报价。缓存还新鲜就用缓存，否则按批量行情接口补拉，不读盘后信号列。"""
+    cached = _cached_live_rows(symbols)
+    rows = cached if cached is not None else _fetch_quote_batch(symbols)
+    _attach_prior(rows, symbols)
+    return rows
+
+
+def _cached_live_rows(symbols: list[str]) -> list[dict] | None:
+    try:
+        from app.main import app
+        from app.market_time import cn_today
+        service = getattr(getattr(app, "state", None), "quote_service", None)
+    except Exception:  # noqa: BLE001
+        return None
+    if service is None:
+        return None
+    try:
+        status = service.status()
+    except Exception:  # noqa: BLE001
+        return None
+    if not status.get("enabled"):
+        return None
+    age = status.get("quote_age_ms")
+    if not isinstance(age, (int, float)) or age < 0 or age > QUOTE_FRESH_S * 1000:
+        return None
+    try:
+        frame, cache_date = service.get_enriched_today()
+    except Exception:  # noqa: BLE001
+        return None
+    if cache_date != cn_today() or frame is None or frame.is_empty() or "symbol" not in frame.columns:
+        return None
+    import polars as pl
     frame = frame.filter(pl.col("symbol").is_in(symbols))
-    cols = [name for name in ("symbol", "name", "close", "high", "low", "volume", "amount", "prev_close") if name in frame.columns]
-    current: dict[str, set[str]] = {}
-    pct: dict[str, float] = {}
-    names = {}
+    cols = [
+        name for name in (
+            "symbol", "name", "close", "open", "high", "low", "volume", "amount",
+            "prev_close", "raw_close", "raw_high", "raw_low",
+        )
+        if name in frame.columns
+    ]
+    return [_cache_quote_view(row) for row in frame.select(cols).to_dicts()]
+
+
+def _fetch_quote_batch(symbols: list[str]) -> list[dict]:
+    try:
+        from app.main import app
+        from app.tickflow.capabilities import Cap
+        from app.tickflow.client import get_client
+        from app.tickflow.rate_limits import resolve_limit
+    except Exception as exc:  # noqa: BLE001
+        logger.info("实时行情客户端不可用: %s", exc)
+        return []
+    client = get_client()
+    if client is None:
+        return []
+    batch = 80
+    capset = getattr(getattr(app, "state", None), "capabilities", None)
+    if capset is not None and capset.has(Cap.QUOTE_BATCH):
+        batch = resolve_limit(capset, Cap.QUOTE_BATCH, default_batch=80).batch or 80
+    elif capset is not None and not capset.has(Cap.QUOTE_BY_SYMBOL):
+        logger.info("当前档位没有批量实时行情，异动和做T本轮跳过")
+        return []
+    batch = max(1, min(int(batch), 500))
+    rows: list[dict] = []
+    for start in range(0, len(symbols), batch):
+        chunk = symbols[start:start + batch]
+        try:
+            payload = client.quotes.get(symbols=chunk) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.info("实时行情批量失败 %s 只: %s", len(chunk), exc)
+            break
+        for item in payload:
+            if isinstance(item, dict):
+                rows.append(_normalize_quote(item))
+    return rows
+
+
+def _cache_quote_view(row: dict) -> dict:
+    """缓存里 close 是前复权，raw_close 是原始价。做T和涨跌停用原始价。"""
+    qfq_close = _num(row.get("close"))
+    raw_close = _num(row.get("raw_close"))
+    adjusted = raw_close is not None and qfq_close not in (None, 0) and raw_close > 0
+    factor = (qfq_close / raw_close) if adjusted else None
+
+    def raw_of(raw_key: str, qfq_key: str) -> float | None:
+        raw = _num(row.get(raw_key))
+        if raw is not None:
+            return raw
+        qfq = _num(row.get(qfq_key))
+        if qfq is None:
+            return None
+        if factor:
+            return qfq / factor
+        return qfq
+
+    prev = _num(row.get("prev_close"))
+    if prev is not None and factor:
+        prev = prev / factor
+    return {
+        "symbol": row.get("symbol"),
+        "name": row.get("name"),
+        "qfq_close": qfq_close,
+        "close": raw_close if raw_close is not None else qfq_close,
+        "open": raw_of("raw_open", "open"),
+        "high": raw_of("raw_high", "high"),
+        "low": raw_of("raw_low", "low"),
+        "volume": row.get("volume"),
+        "amount": row.get("amount"),
+        "prev_close": prev,
+    }
+
+
+def _normalize_quote(item: dict) -> dict:
+    ext = item.get("ext") if isinstance(item.get("ext"), dict) else {}
+    return {
+        "symbol": item.get("symbol"),
+        "name": item.get("name") or ext.get("name"),
+        "close": item.get("last_price", item.get("close")),
+        "open": item.get("open"),
+        "high": item.get("high"),
+        "low": item.get("low"),
+        "volume": item.get("volume"),
+        "amount": item.get("amount"),
+        "prev_close": item.get("prev_close") or ext.get("prev_close"),
+    }
+
+
+def _attach_prior(rows: list[dict], symbols: list[str]) -> None:
+    levels = _prior_levels(symbols)
+    for row in rows:
+        level = levels.get(str(row.get("symbol") or "")) or {}
+        if level.get("prior_high") is not None:
+            row["prior_high"] = level["prior_high"]
+        if level.get("prior_low") is not None:
+            row["prior_low"] = level["prior_low"]
+        factor = _num(level.get("adj_factor"))
+        raw = _num(row.get("close"))
+        if _num(row.get("qfq_close")) is None and raw and factor:
+            row["qfq_close"] = raw * factor
+        if not _num(row.get("prev_close")) and _num(level.get("prev_close")):
+            prev = _num(level["prev_close"])
+            row["prev_close"] = prev / factor if factor else prev
+
+
+def _prior_levels(symbols: list[str]) -> dict[str, dict]:
+    """盘前 60 日收盘极值。来自 live_agg 的前 59 日，不含今天。"""
+    try:
+        from app.news.service import _repo
+        repo = _repo()
+        if repo is None:
+            return {}
+        frame = repo.get_live_agg()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("盘前价位不可用: %s", exc)
+        return {}
+    if frame is None or frame.is_empty() or "symbol" not in frame.columns:
+        return {}
+    if "_high_59d" not in frame.columns or "_low_59d" not in frame.columns:
+        return {}
+    import polars as pl
+    frame = frame.filter(pl.col("symbol").is_in(symbols))
+    cols = ["symbol", "_high_59d", "_low_59d"]
+    if "close" in frame.columns:
+        cols.append("close")
+    if "_adj_factor" in frame.columns:
+        cols.append("_adj_factor")
+    found = {}
     for row in frame.select(cols).to_dicts():
         symbol = str(row.get("symbol") or "")
         if not symbol:
             continue
-        signals, change = t_conditions(row)
-        current[symbol] = signals
-        if change is not None:
-            pct[symbol] = change
-        names[symbol] = str(row.get("name") or symbol)
-    return current, pct, names
+        found[symbol] = {
+            "prior_high": row.get("_high_59d"),
+            "prior_low": row.get("_low_59d"),
+            "prev_close": row.get("close"),
+            "adj_factor": row.get("_adj_factor"),
+        }
+    return found
 
 
 def _flag_on(field: str) -> bool:

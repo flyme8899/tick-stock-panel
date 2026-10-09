@@ -1,8 +1,11 @@
 """钉钉推送：加签、文案、冷却和触发。不访问外网。"""
 from __future__ import annotations
 
+import importlib.util
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,14 +14,23 @@ from app.news.dingtalk import signed_url
 from app.news.host_collector import send_dingtalk
 from app.news.push import (
     PushState,
+    _cached_live_rows,
+    _live_rows,
+    _load_abnormal,
+    _load_t,
+    abnormal_signals,
+    count_rule_edges,
     filter_prev_close,
     format_hot_markdown,
     format_symbol_markdown,
     format_test_markdown,
     hot_material,
+    limit_price,
     new_edges,
     pick_refs,
+    session_signal_sets,
     t_conditions,
+    t_universe,
     tick,
 )
 
@@ -306,3 +318,315 @@ def test_test_message_requires_confirm(monkeypatch):
     monkeypatch.setattr("app.config.settings.dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test")
     with pytest.raises(ValueError, match="确认"):
         send_test(confirm=False)
+
+
+def test_limit_price_matches_polars_integer_cents():
+    import polars as pl
+
+    from app.price_limits import polars_limit_price
+    previous = [10.0, 10.03, 7.77, 20.0]
+    pct = [0.10, 0.10, 0.20, 0.05]
+    frame = pl.DataFrame({"prev": previous, "pct": pct}).with_columns(
+        polars_limit_price(pl.col("prev"), pl.col("pct"), up=True).alias("up"),
+        polars_limit_price(pl.col("prev"), pl.col("pct"), up=False).alias("down"),
+    )
+    for row in frame.to_dicts():
+        assert limit_price(row["prev"], row["pct"], up=True) == row["up"]
+        assert limit_price(row["prev"], row["pct"], up=False) == row["down"]
+
+
+def test_abnormal_signals_use_price_against_prior_levels():
+    when = date(2026, 10, 9)
+    base = {"symbol": "600519.SH", "name": "贵州茅台", "trade_date": when, "open": 10.0}
+    assert abnormal_signals({**base, "close": 11.0, "high": 11.0, "low": 10.0, "prev_close": 10.0}) == {"limit_up"}
+    broken = abnormal_signals({
+        **base, "close": 10.5, "high": 11.0, "low": 10.2, "prev_close": 10.0,
+    })
+    assert broken == {"broken"}
+    recovery = abnormal_signals({
+        **base, "close": 9.5, "open": 9.2, "high": 9.6, "low": 9.0, "prev_close": 10.0,
+    })
+    assert recovery == {"recovery"}
+    assert "new_high" not in abnormal_signals({**base, "close": 10.2, "high": 10.2, "low": 10.0})
+    assert abnormal_signals({
+        **base, "close": 10.2, "qfq_close": 10.2, "high": 10.2, "low": 10.0, "prior_high": 10.0,
+    }) == {"new_high"}
+    # 前复权价创新高，原始价没有封板。两套口径不能混用。
+    split = abnormal_signals({
+        **base,
+        "qfq_close": 21.0,
+        "close": 10.5,
+        "raw_close": 10.5,
+        "high": 10.5,
+        "raw_high": 10.5,
+        "low": 10.0,
+        "raw_low": 10.0,
+        "prev_close": 10.0,
+        "prior_high": 20.5,
+    })
+    assert split == {"new_high"}
+
+
+def test_t_universe_is_watchlist_until_positions_are_requested():
+    assert t_universe(["600519.SH", "600519.SH", ""], ["000001.SZ"], include_positions=False, cap=40) == ["600519.SH"]
+    assert t_universe(["600519.SH"], ["000001.SZ", "600519.SH"], include_positions=True, cap=40) == [
+        "600519.SH", "000001.SZ",
+    ]
+    assert t_universe(["A", "B", "C"], ["D"], include_positions=True, cap=2) == ["A", "B"]
+
+
+def test_count_rule_edges_baselines_and_respects_cooldown():
+    stayed = [
+        set(),
+        {"above_vwap"},
+        set(),
+        {"above_vwap"},
+        {"above_vwap"},
+    ]
+    assert count_rule_edges(stayed, 10) == {"above_vwap": 1}
+    returned = [set(), {"above_vwap"}] + [set()] * 10 + [{"above_vwap"}]
+    assert count_rule_edges(returned, 10) == {"above_vwap": 2}
+
+
+def test_session_signal_sets_follow_the_same_bands():
+    bars = [
+        {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 100.0, "amount": 100000.0},
+        {"open": 10.2, "high": 10.2, "low": 9.9, "close": 10.2, "volume": 10.0, "amount": 10200.0},
+        {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1.0, "amount": 1000.0},
+    ]
+    sets = session_signal_sets(bars, mode="t", symbol="600519.SH", prev_close=10.0)
+    assert sets[0] == set()
+    assert sets[1] == {"above_vwap", "near_high"}
+    assert sets[2] == {"near_prev_close"}
+    wider = session_signal_sets(
+        bars, mode="t", symbol="600519.SH", prev_close=10.0, vwap_band=0.025,
+    )
+    assert "above_vwap" not in wider[1]
+    assert "near_high" in wider[1]
+
+
+def test_t_loader_starts_from_watchlist(monkeypatch):
+    monkeypatch.setattr("app.services.watchlist.list_symbols", lambda: [{"symbol": "600519.SH"}])
+    seen = {}
+
+    def live(symbols):
+        seen["symbols"] = list(symbols)
+        return []
+
+    monkeypatch.setattr("app.news.push._live_rows", live)
+    monkeypatch.setattr("app.news.push._flag_on", lambda field: False)
+    assert _load_t() == ({}, {}, {})
+    assert seen["symbols"] == ["600519.SH"]
+
+    monkeypatch.setattr(
+        "app.news.push._flag_on",
+        lambda field: field == "news_push_t_include_positions",
+    )
+    monkeypatch.setattr("app.news.push._position_symbols", lambda: ["000001.SZ"])
+    _load_t()
+    assert seen["symbols"] == ["600519.SH", "000001.SZ"]
+
+
+def test_abnormal_loader_computes_from_live_price(monkeypatch):
+    monkeypatch.setattr("app.services.watchlist.list_symbols", lambda: [{"symbol": "600519.SH"}])
+    monkeypatch.setattr("app.news.push._flag_on", lambda field: False)
+    monkeypatch.setattr("app.news.push._live_rows", lambda symbols: [{
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "close": 11.0,
+        "high": 11.0,
+        "low": 10.0,
+        "open": 10.0,
+        "prev_close": 10.0,
+        "trade_date": date(2026, 10, 9),
+        "signal_limit_up": False,
+    }])
+    current, pct, names = _load_abnormal()
+    assert current["600519.SH"] == {"limit_up"}
+    assert pct == {}
+    assert names["600519.SH"] == "贵州茅台"
+
+
+def test_fresh_quote_cache_keeps_raw_and_qfq_apart(monkeypatch):
+    import polars as pl
+
+    from app.main import app
+    from app.market_time import cn_today
+
+    frame = pl.DataFrame({
+        "symbol": ["600519.SH"],
+        "name": ["贵州茅台"],
+        "close": [21.0],
+        "open": [20.0],
+        "high": [21.0],
+        "low": [20.0],
+        "raw_close": [10.5],
+        "raw_high": [10.5],
+        "raw_low": [10.0],
+        "volume": [100.0],
+        "amount": [105000.0],
+        "prev_close": [20.0],
+        "signal_limit_up": [True],
+    })
+
+    class Service:
+        def status(self):
+            return {"enabled": True, "quote_age_ms": 1_000}
+
+        def get_enriched_today(self):
+            return frame, cn_today()
+
+    monkeypatch.setattr(app.state, "quote_service", Service(), raising=False)
+    monkeypatch.setattr("app.news.push._prior_levels", lambda symbols: {
+        "600519.SH": {"prior_high": 20.5, "prior_low": 8.0, "prev_close": 20.0, "adj_factor": 2.0},
+    })
+    rows = _live_rows(["600519.SH"])
+    assert "signal_limit_up" not in rows[0]
+    assert rows[0]["close"] == 10.5
+    assert rows[0]["prev_close"] == 10.0
+    assert rows[0]["qfq_close"] == 21.0
+    assert rows[0]["prior_high"] == 20.5
+    signals = abnormal_signals({**rows[0], "trade_date": date(2026, 10, 9), "symbol": "600519.SH"})
+    assert signals == {"new_high"}
+
+
+def test_stale_or_unknown_quote_age_does_not_read_the_cache(monkeypatch):
+    from app.main import app
+
+    class Stale:
+        def status(self):
+            return {"enabled": True, "quote_age_ms": 181_000}
+
+        def get_enriched_today(self):
+            raise AssertionError("过期缓存不能当实时报价")
+
+    monkeypatch.setattr(app.state, "quote_service", Stale(), raising=False)
+    assert _cached_live_rows(["600519.SH"]) is None
+
+    class Unknown:
+        def status(self):
+            return {"enabled": True, "quote_age_ms": -1}
+
+        def get_enriched_today(self):
+            raise AssertionError("没有拉取时间不能当新鲜缓存")
+
+    monkeypatch.setattr(app.state, "quote_service", Unknown(), raising=False)
+    assert _cached_live_rows(["600519.SH"]) is None
+
+
+def test_quote_batch_is_used_when_cache_is_cold(monkeypatch):
+    from app.main import app
+    from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
+
+    class Off:
+        def status(self):
+            return {"enabled": False}
+
+    monkeypatch.setattr(app.state, "quote_service", Off(), raising=False)
+    monkeypatch.setattr("app.news.push._prior_levels", lambda symbols: {
+        "600519.SH": {"prior_high": 12.0, "prior_low": 8.0, "prev_close": None, "adj_factor": 1.0},
+        "000001.SZ": {"prior_high": 12.0, "prior_low": 8.0, "prev_close": None, "adj_factor": 1.0},
+        "601318.SH": {"prior_high": 12.0, "prior_low": 8.0, "prev_close": None, "adj_factor": 1.0},
+    })
+    calls = []
+
+    def get(symbols):
+        calls.append(list(symbols))
+        return [
+            {
+                "symbol": symbol,
+                "last_price": 11.0,
+                "prev_close": 10.0,
+                "open": 10.0,
+                "high": 11.0,
+                "low": 10.0,
+                "volume": 100,
+                "amount": 110000,
+                "ext": {"name": "测试"},
+            }
+            for symbol in symbols
+        ]
+
+    monkeypatch.setattr(
+        "app.tickflow.client.get_client",
+        lambda: SimpleNamespace(quotes=SimpleNamespace(get=get)),
+    )
+    monkeypatch.setattr(
+        app.state,
+        "capabilities",
+        CapabilitySet({Cap.QUOTE_BATCH: CapabilityLimits(rpm=300, batch=2)}),
+        raising=False,
+    )
+    rows = _live_rows(["600519.SH", "000001.SZ", "601318.SH"])
+    assert calls == [["600519.SH", "000001.SZ"], ["601318.SH"]]
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert by_symbol["600519.SH"]["name"] == "测试"
+    assert by_symbol["600519.SH"]["qfq_close"] == 11.0
+    signals = abnormal_signals({**by_symbol["600519.SH"], "trade_date": date(2026, 10, 9)})
+    assert "limit_up" in signals
+    assert "new_high" not in signals
+
+    calls.clear()
+    monkeypatch.setattr(app.state, "capabilities", CapabilitySet({}), raising=False)
+    assert _live_rows(["600519.SH"]) == []
+    assert calls == []
+
+
+def _replay_module():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "replay_push_rules.py"
+    spec = importlib.util.spec_from_file_location("replay_push_rules", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_replay_counts_edges_on_a_threshold_grid(tmp_path):
+    import polars as pl
+    module = _replay_module()
+    bars = [
+        (datetime(2026, 10, 8, 9, 31), 10.0, 10.0, 10.0, 10.0, 100.0, 100000.0),
+        (datetime(2026, 10, 9, 9, 31), 10.0, 10.0, 10.0, 10.0, 100.0, 100000.0),
+        (datetime(2026, 10, 9, 9, 32), 10.2, 10.2, 9.9, 10.2, 10.0, 10200.0),
+        (datetime(2026, 10, 9, 9, 33), 10.0, 10.0, 10.0, 10.0, 1.0, 1000.0),
+    ]
+    rows = [
+        {
+            "symbol": symbol,
+            "datetime": moment,
+            "open": opened,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+            "amount": amount,
+        }
+        for symbol in ("600519.SH", "000001.SZ")
+        for moment, opened, high, low, close, volume, amount in bars
+    ]
+    for day in ("2026-10-08", "2026-10-09"):
+        part = tmp_path / f"date={day}"
+        part.mkdir()
+        pl.DataFrame(rows).filter(
+            pl.col("datetime").dt.date() == date.fromisoformat(day),
+        ).write_parquet(part / "part.parquet")
+    frame = module.load_minutes(tmp_path, ["600519.SH"], date(2026, 10, 8), date(2026, 10, 9))
+    assert set(frame["symbol"].unique().to_list()) == {"600519.SH"}
+    counted = module.replay(frame)
+    picked = [
+        row for row in counted
+        if row["date"] == "2026-10-09"
+        and row["vwap_pct"] == 0.015
+        and row["range_pct"] == 0.003
+        and row["cooldown_min"] == 10
+    ]
+    triggers = {(row["kind"], row["rule"]): row["triggers"] for row in picked}
+    assert triggers[("t_trade", "above_vwap")] == 1
+    assert triggers[("t_trade", "near_high")] == 1
+    assert triggers[("t_trade", "near_prev_close")] == 1
+    wide = [
+        row for row in counted
+        if row["rule"] == "above_vwap" and row["vwap_pct"] == 0.025 and row["cooldown_min"] == 30
+    ]
+    assert wide == []
+    assert module.main(["--symbols", "600519.SH", "--days", "1"]) == 2
+    assert module.main(["--symbols", "600519.SH", "--days", "2", "--path", str(tmp_path / "missing")]) == 2

@@ -187,7 +187,7 @@ class Settings(BaseSettings):
     news_push_abnormal_enabled: str = ""
     news_push_t_enabled: str = ""
     news_push_abnormal_include_hot: str = ""
-    news_push_t_include_watchlist: str = ""
+    news_push_t_include_positions: str = ""
     news_push_premarket: str = "08:45"
     news_push_postclose: str = "15:40"
     news_push_top_n: int = 5

@@ -257,7 +257,7 @@ def push_status() -> dict:
     summaries = {
         "hot": "交易日盘前和收盘后各一次，候选明显变化时再补一条",
         "abnormal": "自选股的涨停、炸板、跌停、新高新低，从无到有才推",
-        "t_trade": "持仓相对分时均价、日内高低和昨收的边沿提醒",
+        "t_trade": "自选相对分时均价、日内高低和昨收的边沿提醒",
     }
     labels = {"hot": "热点候选", "abnormal": "异动监控", "t_trade": "做T提醒"}
     return {
