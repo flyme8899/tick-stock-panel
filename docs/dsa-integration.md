@@ -68,7 +68,8 @@ sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis
 | `DSA_AUTOSTART` | `1` 时 `dev.sh` / `dev.ps1` 拉起 sidecar |
 | `DSA_PORT` | sidecar 端口，默认 8000 |
 | `DSA_PYTHON` | 跑 ETF 轮动所用的解释器。未设置时用 `vendor/daily_stock_analysis/.venv` |
-| `DSA_UPSTREAM_COOKIE` | DSA 打开 `ADMIN_AUTH_ENABLED` 后转发给上游的 Cookie |
+| `DSA_UPSTREAM_COOKIE` | DSA 打开 `ADMIN_AUTH_ENABLED` 后转发给上游的 Cookie。未配置 `DSA_PASSWORD` 时只使用这一项 |
+| `DSA_PASSWORD` | 上游管理密码。配置后由转发层登录并缓存会话，过期时间跟随 Set-Cookie，提前刷新。留空则行为与只配 Cookie 时相同。不要把真实密码写进仓库 |
 | `DSA_TIMEOUT_SECONDS` | 转发超时。分析、问股、选股、回测默认更长 |
 
 DSA 读取的密钥和数据源（写在同一个 `.env`，留空则对应能力失败并给出原因）：
@@ -115,6 +116,6 @@ sidecar 启动时，如果 `OPENAI_API_KEY` 为空且 TSP 已配置 `AI_API_KEY`
 
 - DSA 的 Web / 桌面皮肤不会作为第二个产品出现。
 - 上游测试、评测集和文档配图没有放进快照。升级时按 `VENDOR.md` 里的提交重新同步。
-- 决策信号在 `ADMIN_AUTH_ENABLED=true` 时还要上游登录态，通过 `DSA_UPSTREAM_COOKIE` 转发。
+- 决策信号在 `ADMIN_AUTH_ENABLED=true` 时还要上游登录态。配置 `DSA_PASSWORD` 后转发层会自动登录并在会话过期前刷新；未配置时仍只转发 `DSA_UPSTREAM_COOKIE`。
 - 只跑 `scripts/dsa.sh` 创建的 Python 虚拟环境时，系统里若没有 `wkhtmltoimage` 和中文字体，分享图会在页面上提示失败。Docker 镜像已经带上这两个依赖。
 - AlphaSift、AlphaEvo 是 DSA 文档提到的相关项目，不属于这次快照。
