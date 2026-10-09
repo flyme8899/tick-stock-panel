@@ -99,5 +99,10 @@ networks:
   #
   # 代价是 docker compose down 会删掉这张网（已有容器连着则删不掉，只会报警告）。
   # 下次 up 会重建同名网络，上面这些容器不受影响。
+  #
+  # 注意：如果已有一张同名网是手工 docker network create 建的（没有 compose 标签），
+  # compose 不会接管，会直接报错退出：
+  #   network dsa-net was found but has incorrect label com.docker.compose.network set to "" (expected: "dsa-net")
+  # 此时先 docker network rm dsa-net 再 up，让它重建。
   dsa-net:
     name: ${DSA_NETWORK:-dsa-net}

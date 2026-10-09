@@ -43,12 +43,30 @@ docker compose --profile dsa up --build
 单独启动**的（`./scripts/dsa.sh` 或一个独立容器），默认网名字带项目前缀，外面
 那个容器对不上；固定名之后用 `--network dsa-net` 就能加进来。
 
-切到 compose 管理时注意容器名：手工 `docker run` 起的一般叫 `tsp`，而 compose
-里是 `TickFlow_Stock_Panel`，直接 `up` 会撞上同一个端口，并且两个实例会同时写
-`./data`（bind mount 没有卷缓冲）。先停掉手工那个再 up：
+切到 compose 管理时有两步，顺序不能反。
+
+**第一步：处理同名网络。** 之前手工 `docker network create dsa-net` 建的网没有
+compose 标签（`Labels` 是空的）。compose 按固定名字自建时会认出这张网但标签对不上，
+**直接报错退出**，容器一个都不会创建：
+
+```
+network dsa-net was found but has incorrect label com.docker.compose.network set to "" (expected: "dsa-net")
+```
+
+先停掉连在上面的手工容器，删掉这张网，再让 compose 重建：
 
 ```bash
-docker rm -f tsp
+docker rm -f tsp stock-server
+docker network rm dsa-net
+```
+
+**第二步：处理容器名冲突。** 手工 `docker run` 起的一般叫 `tsp`，而 compose 里是
+`TickFlow_Stock_Panel`，不先删会撞上同一个端口，并且两个实例同时写 `./data`
+（bind mount 没有卷缓冲）。上面第一条的 `docker rm -f tsp` 已经一并做了。
+
+然后启动：
+
+```bash
 docker compose up -d --build
 ```
 
