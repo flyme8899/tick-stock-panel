@@ -3,7 +3,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.custom.dsa.news_bridge import expand_item, hot_news_rows, install, is_tsp_feed_url
+import pytest
+
+from app.custom.dsa.news_bridge import (
+    _fetch_tsp_source,
+    expand_item,
+    hot_news_rows,
+    install,
+    is_tsp_feed_url,
+)
 
 
 def test_feed_url_allowlist(monkeypatch):
@@ -61,3 +69,73 @@ def test_hot_rows_are_bounded():
 def test_install_degrades_without_token(monkeypatch):
     monkeypatch.delenv("NEWS_DSA_FEED_TOKEN", raising=False)
     install()
+
+
+class _Source:
+    def __init__(self, *, enabled: bool):
+        self.id = 3
+        self.name = "财联社"
+        self.url = "http://127.0.0.1:3018/api/news/dsa-feed?source=cls"
+        self.enabled = enabled
+        self.source_type = "tsp"
+
+
+class _Repo:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def upsert_items(self, rows):
+        self.calls.append(("upsert", len(rows)))
+        return len(rows)
+
+    def apply_retention(self, days):
+        self.calls.append(("retention", days))
+        return 4
+
+    def update_source_status(self, source_id, **kwargs):
+        self.calls.append(("status", kwargs.get("status"), source_id))
+
+
+class _Service:
+    def __init__(self):
+        self.repo = _Repo()
+        self.config = type("Config", (), {"news_intel_retention_days": 30})()
+
+
+def test_fetch_keeps_retention_enabled_and_samples(monkeypatch):
+    monkeypatch.setattr(
+        "app.custom.dsa.news_bridge._fetch_json",
+        lambda key: {
+            "items": [{
+                "title": "茅台电报",
+                "summary": "摘录",
+                "url": "https://example.test/a",
+                "source_id": "1",
+                "published_at": "2026-10-09T10:00:00+08:00",
+                "symbols": ["600519.SH"],
+            }],
+        },
+    )
+    service = _Service()
+    result = _fetch_tsp_source(service, _Source(enabled=True), dry_run=False)
+    assert ("retention", 30) in service.repo.calls
+    assert result["retention_deleted"] == 4
+    assert result["saved_count"] == 2
+    sample = result["sample_items"][0]
+    assert sample["title"] == "茅台电报"
+    assert sample["summary"] == "摘录"
+    assert sample["url"] == "https://example.test/a"
+    assert sample["source"] == "财联社"
+    assert sample["published_at"]
+
+    service.repo.calls.clear()
+    dry = _fetch_tsp_source(service, _Source(enabled=True), dry_run=True)
+    assert dry["retention_deleted"] == 0
+    assert dry["sample_items"][0]["title"] == "茅台电报"
+    assert not any(call[0] == "retention" for call in service.repo.calls)
+    assert not any(call[0] == "upsert" for call in service.repo.calls)
+
+    service.repo.calls.clear()
+    with pytest.raises(Exception, match="disabled"):
+        _fetch_tsp_source(service, _Source(enabled=False), dry_run=False)
+    assert service.repo.calls == []

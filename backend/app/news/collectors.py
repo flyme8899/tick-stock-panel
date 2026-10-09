@@ -236,17 +236,31 @@ def pick_knowledge_base(payload: dict, name: str, kb_id: str = "") -> str:
     if kb_id:
         return kb_id
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    rows = data.get("info_list") or data.get("infos") or []
+    rows = (
+        data.get("info_list")
+        or data.get("infos")
+        or data.get("knowledge_base_list")
+        or data.get("list")
+        or []
+    )
     if isinstance(rows, dict):
         rows = [{"id": key, **(value if isinstance(value, dict) else {})} for key, value in rows.items()]
     hint = name or "爱分享"
     for row in rows:
         if not isinstance(row, dict):
             continue
-        title = str(row.get("name") or "")
+        title = str(row.get("kb_name") or row.get("name") or "")
         if title == hint or hint in title or "爱分享" in title:
-            return str(row.get("id") or "")
+            return str(row.get("kb_id") or row.get("id") or "")
     return ""
+
+
+def ima_next_cursor(payload: dict) -> str:
+    """is_end 为真或没有 next_cursor 时停止翻页。"""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if not isinstance(data, dict) or data.get("is_end") is True:
+        return ""
+    return str(data.get("next_cursor") or "").strip()
 
 
 def split_ima_list(payload: dict) -> tuple[list[dict], list[dict]]:
@@ -260,12 +274,21 @@ def split_ima_list(payload: dict) -> tuple[list[dict], list[dict]]:
     for row in data.get("knowledge_list") or []:
         if not isinstance(row, dict):
             continue
-        if row.get("folder_id") and not row.get("media_id") and not row.get("title"):
-            folders.append(row)
-        elif row.get("media_id") or row.get("title"):
+        media_id = str(row.get("media_id") or "")
+        folder_id = str(row.get("folder_id") or "")
+        title = str(row.get("title") or "")
+        name = str(row.get("name") or title)
+        if media_id.startswith("folder_") or (folder_id.startswith("folder_") and not media_id):
+            folders.append({"folder_id": media_id or folder_id, "name": name})
+            continue
+        if folder_id and not media_id and not title:
+            folders.append({"folder_id": folder_id, "name": name})
+            continue
+        if media_id or title:
             files.append(row)
-        elif row.get("folder_id") and row.get("name"):
-            folders.append(row)
+            continue
+        if folder_id and name:
+            folders.append({"folder_id": folder_id, "name": name})
     return folders, files
 
 

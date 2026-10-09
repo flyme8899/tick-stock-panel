@@ -206,24 +206,70 @@ def _find_source(service, name: str):
     return None
 
 
+def _retention_days(service) -> int:
+    config = getattr(service, "config", None)
+    raw = getattr(config, "news_intel_retention_days", 30) if config is not None else 30
+    try:
+        days = int(raw or 30)
+    except (TypeError, ValueError):
+        days = 30
+    return days if days > 0 else 30
+
+
+def _disabled_error(source_id: int) -> Exception:
+    message = f"Intelligence source is disabled: {source_id}"
+    try:
+        from src.services.intelligence_service import IntelligenceServiceError
+    except ImportError:
+        return RuntimeError(message)
+    return IntelligenceServiceError(message)
+
+
+def _feed_samples(items: list[dict], source_name: str) -> list[dict]:
+    samples = []
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        published = item.get("published_at")
+        if isinstance(published, datetime):
+            published = published.isoformat(timespec="seconds")
+        samples.append({
+            "title": title[:300],
+            "summary": str(item.get("summary") or "")[:2000],
+            "url": str(item.get("url") or ""),
+            "source": source_name,
+            "published_at": str(published or ""),
+        })
+        if len(samples) >= 5:
+            break
+    return samples
+
+
 def _fetch_tsp_source(service, source, *, dry_run: bool) -> dict:
+    if not getattr(source, "enabled", False):
+        raise _disabled_error(source.id)
     now = datetime.now()
     try:
         key = _source_key(source.url)
         payload = _fetch_json(key)
+        items = [item for item in (payload.get("items") or []) if isinstance(item, dict)]
         rows = []
-        for item in payload.get("items") or []:
-            if isinstance(item, dict):
-                rows.extend(expand_item(item, source_id=source.id, source_name=source.name, now=now))
+        for item in items:
+            rows.extend(expand_item(item, source_id=source.id, source_name=source.name, now=now))
         saved = 0 if dry_run else service.repo.upsert_items(rows)
+        deleted = 0
         if not dry_run:
+            deleted = int(service.repo.apply_retention(_retention_days(service)) or 0)
             service.repo.update_source_status(source.id, status="success", error=None, fetched_at=now)
         return {
             "ok": True,
             "source_id": source.id,
-            "fetched_count": len(payload.get("items") or []),
+            "fetched_count": len(items),
             "saved_count": saved,
+            "retention_deleted": deleted,
             "dry_run": dry_run,
+            "sample_items": _feed_samples(items, source.name),
         }
     except Exception as exc:
         if not dry_run:

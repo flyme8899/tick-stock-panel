@@ -19,6 +19,7 @@ class MentionEvent:
     source: str
     content_hash: str
     published_at: datetime
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -34,20 +35,28 @@ class Candidate:
     baseline_effective: float
 
 
-def _dampen(count: int) -> float:
-    """第一条故事记 1，同来源后续故事迅速变便宜。"""
-    if count <= 0:
+TEXT_NAME_WEIGHT = 0.5
+
+
+def mention_weight(origin: str) -> float:
+    """正文里的简称比结构化标签和代码更容易误伤，权重减半。"""
+    return TEXT_NAME_WEIGHT if origin == "text-name" else 1.0
+
+
+def _dampen(amount: float) -> float:
+    """第一条故事记满权重，同来源后续故事迅速变便宜。正文名称匹配权重可以小于 1。"""
+    if amount <= 0:
         return 0.0
-    if count == 1:
-        return 1.0
-    return 1.0 + math.log1p(count - 1)
+    if amount <= 1:
+        return amount
+    return 1.0 + math.log1p(amount - 1)
 
 
-def _effective(stories_by_source: dict[str, set[str]]) -> tuple[float, int, tuple[str, ...]]:
+def _effective(stories_by_source: dict[str, dict[str, float]]) -> tuple[float, int, tuple[str, ...]]:
     total = 0.0
     story_ids: set[str] = set()
-    for _source, hashes in stories_by_source.items():
-        total += _dampen(len(hashes))
+    for hashes in stories_by_source.values():
+        total += _dampen(sum(hashes.values()))
         story_ids.update(hashes)
     sources = tuple(sorted(stories_by_source))
     return total, len(story_ids), sources
@@ -65,19 +74,23 @@ def score_candidates(
     window_start = now - timedelta(hours=window_hours)
     baseline_start = window_start - timedelta(days=baseline_days)
 
-    window: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    window: dict[tuple[str, str], dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
     names: dict[tuple[str, str], str] = {}
-    baseline: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    baseline: dict[tuple[str, str], dict[str, dict[str, float]]] = defaultdict(lambda: defaultdict(dict))
 
     for event in events:
         if event.published_at > now:
             continue
         ident = (event.kind, event.key)
         names[ident] = event.name or event.key
+        weight = event.weight if event.weight > 0 else 1.0
         if event.published_at > window_start:
-            window[ident][event.source].add(event.content_hash)
+            slot = window[ident][event.source]
         elif event.published_at > baseline_start:
-            baseline[ident][event.source].add(event.content_hash)
+            slot = baseline[ident][event.source]
+        else:
+            continue
+        slot[event.content_hash] = max(slot.get(event.content_hash, 0.0), weight)
 
     scale = window_hours / (baseline_days * 24)
     ranked: list[Candidate] = []

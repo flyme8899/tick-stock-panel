@@ -478,11 +478,9 @@ async def auth_middleware(request: Request, call_next):
 
     # DSA 旁路拉资讯。令牌不对时 404，避免未登录的 401 把内部地址暴露成可探测接口。
     if path == "/api/news/dsa-feed":
-        from app.news.config import feed_token
+        from app.news.config import feed_matches
 
-        presented = request.headers.get("x-news-feed-token", "") or request.query_params.get("token", "")
-        expected = feed_token()
-        if expected and presented == expected:
+        if feed_matches(request.headers.get("x-news-feed-token", "")):
             return await call_next(request)
         return JSONResponse(status_code=404, content={"detail": "未启用"})
 

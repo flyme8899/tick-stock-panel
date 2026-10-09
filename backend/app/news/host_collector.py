@@ -18,6 +18,7 @@ from pathlib import Path
 
 from app.market_time import cn_now
 from app.news.collectors import parse_time, parse_zsxq_payload
+from app.news.config import group_id
 
 _READONLY = {
     ("dws", "auth", "status"),
@@ -206,6 +207,10 @@ def run_host(data_dir: Path, run, *, backfill_since: str = "") -> dict:
 
 
 def _run_dws(data_dir: Path, run, webhook: str, secret: str) -> str:
+    group = group_id("dws")
+    if not group:
+        write_auth(data_dir, "dws", "missing", "未配置群号")
+        return "unconfigured"
     binary = which("dws")
     if not binary:
         write_auth(data_dir, "dws", "missing", "未找到 dws")
@@ -218,9 +223,8 @@ def _run_dws(data_dir: Path, run, webhook: str, secret: str) -> str:
     if state != "ok":
         alert_expiry(data_dir, "dws", status.stderr or status.stdout, webhook, secret)
         return state
-    group_id = os.environ.get("NEWS_DWS_GROUP_ID", "cid4Ua9gFB3K1KuSaEKnjNrNA==")
     start = read_cursor(data_dir, "dws", (cn_now() - timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S"))
-    proc = run(dws_argv(binary, group_id, start))
+    proc = run(dws_argv(binary, group, start))
     if proc.returncode != 0:
         write_auth(data_dir, "dws", "ok", (proc.stderr or proc.stdout)[:200])
         return "fetch-failed"
@@ -231,6 +235,10 @@ def _run_dws(data_dir: Path, run, webhook: str, secret: str) -> str:
 
 
 def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: str) -> str:
+    group = group_id("zsxq")
+    if not group:
+        write_auth(data_dir, "zsxq", "missing", "未配置星球号")
+        return "unconfigured"
     binary = which("zsxq-cli")
     if not binary:
         write_auth(data_dir, "zsxq", "missing", "未找到 zsxq-cli")
@@ -243,10 +251,9 @@ def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: st
     if state != "ok":
         alert_expiry(data_dir, "zsxq", status.stderr or status.stdout, webhook, secret)
         return state
-    group_id = os.environ.get("NEWS_ZSXQ_GROUP_ID", "51115521812114")
     since = backfill_since or read_cursor(data_dir, "zsxq", (cn_now() - timedelta(days=2)).isoformat())
     pages = 400 if backfill_since else 8
-    topics = collect_zsxq_pages(run, binary, group_id, since=since, max_pages=pages)
+    topics = collect_zsxq_pages(run, binary, group, since=since, max_pages=pages)
     if topics:
         write_inbox(data_dir, "zsxq", topics)
     write_cursor(data_dir, "zsxq", cn_now().isoformat())

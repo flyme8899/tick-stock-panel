@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.news.config import SOURCE_ORDER, feed_token, set_source_enabled
+from app.news.config import SOURCE_ORDER, feed_matches, set_source_enabled
 from app.news.service import (
     feed_for_source,
     health_payload,
@@ -22,11 +22,6 @@ class SourceToggle(BaseModel):
 
 class SourceUpdate(BaseModel):
     sources: dict[str, SourceToggle] = Field(default_factory=dict)
-
-
-def feed_authorized(token: str) -> bool:
-    expected = feed_token()
-    return bool(expected) and token == expected
 
 
 @router.get("/hot")
@@ -105,10 +100,9 @@ def update_sources(body: SourceUpdate):
 def dsa_feed(
     source: str = Query(..., pattern="dws|zsxq|ima|cls|wscn|hot"),
     limit: int = Query(50, ge=1, le=50),
-    token: str = Query(""),
     header_token: str = Header("", alias="X-News-Feed-Token"),
 ):
-    if not feed_authorized(token or header_token):
+    if not feed_matches(header_token):
         raise HTTPException(status_code=404, detail="未启用")
     try:
         return feed_for_source(source, limit=limit)

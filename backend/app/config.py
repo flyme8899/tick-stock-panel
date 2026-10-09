@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     strategy_run_all_first_return_s: float = 15.0
 
     # 资讯采集。来源默认关闭；页面偏好或 NEWS_<来源>_ENABLED 打开。
-    # 未配置凭据的来源（ima）即使打开也保持关闭。
+    # ima 缺凭据、钉钉或知识星球缺群号时，即使打开也保持关闭。
     ima_client_id: str = ""
     ima_api_key: str = ""
     ima_kb_id: str = ""
@@ -153,8 +153,8 @@ class Settings(BaseSettings):
     news_dws_enabled: str = ""
     news_zsxq_enabled: str = ""
     news_llm_extract: str = ""
-    news_dws_group_id: str = "cid4Ua9gFB3K1KuSaEKnjNrNA=="
-    news_zsxq_group_id: str = "51115521812114"
+    news_dws_group_id: str = ""
+    news_zsxq_group_id: str = ""
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。

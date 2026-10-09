@@ -20,6 +20,7 @@ from app.news.collectors import (
     Item,
     cls_params,
     ima_headers,
+    ima_next_cursor,
     ima_retcode,
     latest_date_folders,
     load_inbox_payload,
@@ -42,7 +43,7 @@ from app.news.config import (
     source_locked,
 )
 from app.news.extract import Lexicon, Mention, StructuredStock, parse_llm_payload
-from app.news.scoring import MentionEvent, score_candidates
+from app.news.scoring import MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
 
 logger = logging.getLogger(__name__)
@@ -106,12 +107,23 @@ def get_lexicon(repo=None) -> Lexicon:
 
 def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str, int]:
     store = get_store()
-    lexicon = lexicon or get_lexicon()
+    pending = [item for item in items if item.source_id]
+    known: set[tuple[str, str]] = set()
+    grouped: dict[str, list[str]] = {}
+    for item in pending:
+        grouped.setdefault(item.source, []).append(item.source_id)
+    for source, ids in grouped.items():
+        known.update((source, sid) for sid in store.existing_ids(source, ids))
     inserted = 0
     duplicate = 0
-    for item in items:
-        if not item.source_id:
+    for item in pending:
+        ident = (item.source, item.source_id)
+        if ident in known:
+            duplicate += 1
             continue
+        known.add(ident)
+        if lexicon is None:
+            lexicon = get_lexicon()
         clean = clean_text(item.text)
         title = clean_text(item.title) or _title_from(clean)
         digest = content_hash(clean, item.media_ids)
@@ -192,6 +204,7 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
             source=row["source"],
             content_hash=row["content_hash"],
             published_at=published,
+            weight=mention_weight(str(row["origin"] or "")),
         ))
     ranked = score_candidates(events, now=now, window_hours=window_hours, baseline_days=baseline_days)
     if kind in {"stock", "sector"}:
@@ -350,29 +363,18 @@ def collect_ima(client: httpx.Client | None = None) -> dict:
             kb_id = pick_knowledge_base(found, settings.ima_kb_name)
         if not kb_id:
             raise RuntimeError("没有找到知识库「爱分享」")
-        listing = _ima_post(client, headers, "get_knowledge_list", {
-            "knowledge_base_id": kb_id,
-            "cursor": "",
-            "limit": 50,
-        })
-        folders, _files = split_ima_list(listing)
+        folders, files = _ima_list_pages(client, headers, {"knowledge_base_id": kb_id})
         picked = latest_date_folders(folders, 2)
         items: list[Item] = []
         if not picked:
-            _folders, files = split_ima_list(listing)
             items.extend(parse_ima_titles(files, ""))
         for folder in picked:
             folder_id = str(folder.get("folder_id") or "")
-            body = {
-                "knowledge_base_id": kb_id,
-                "cursor": "",
-                "limit": 50,
-            }
+            body = {"knowledge_base_id": kb_id}
             if folder_id:
                 body["folder_id"] = folder_id
-            page = _ima_post(client, headers, "get_knowledge_list", body)
-            _sub, files = split_ima_list(page)
-            items.extend(parse_ima_titles(files, str(folder.get("name") or "")))
+            _sub, folder_files = _ima_list_pages(client, headers, body)
+            items.extend(parse_ima_titles(folder_files, str(folder.get("name") or "")))
         result = ingest_items(items)
         get_store().mark_health("ima", ok=True, auth_state="ok")
         return result
@@ -389,18 +391,31 @@ def collect_ima(client: httpx.Client | None = None) -> dict:
 def collect_inbox(directory: Path | None = None) -> dict:
     inbox = directory or (settings.data_dir / "news" / "inbox")
     inbox.mkdir(parents=True, exist_ok=True)
+    failed_dir = inbox / "failed"
     inserted = 0
     duplicate = 0
     errors = 0
-    for path in sorted(inbox.glob("*.json"))[:20]:
+    files = [path for path in inbox.glob("*.json") if path.is_file()]
+    files.sort(key=lambda path: (path.stat().st_mtime, path.name))
+    for path in files[:20]:
         try:
             source, payload = load_inbox_payload(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            logger.warning("收件箱 %s 处理失败: %s", path.name, exc)
+            hinted = _inbox_source_hint(path)
+            if hinted:
+                get_store().mark_health(hinted, ok=False, error=f"{path.name}: {exc}"[:300])
+            _move_inbox_failed(path, failed_dir)
+            continue
+        if not source_enabled(source):
+            path.unlink(missing_ok=True)
+            continue
+        try:
             if source == "dws":
                 items = parse_dws_payload(payload)
             else:
                 items, _page = parse_zsxq_payload(payload)
-            if not source_enabled(source):
-                continue
             result = ingest_items(items)
             inserted += result["inserted"]
             duplicate += result["duplicate"]
@@ -412,6 +427,7 @@ def collect_inbox(directory: Path | None = None) -> dict:
             hinted = _inbox_source_hint(path)
             if hinted:
                 get_store().mark_health(hinted, ok=False, error=f"{path.name}: {exc}"[:300])
+            _move_inbox_failed(path, failed_dir)
     _read_host_auth(inbox.parent / "health")
     return {"inserted": inserted, "duplicate": duplicate, "errors": errors}
 
@@ -426,6 +442,36 @@ def run_due(source: str) -> dict:
     if source in {"dws", "zsxq"}:
         return collect_inbox()
     return {}
+
+
+_IMA_MAX_PAGES = 8
+
+
+def _ima_list_pages(client: httpx.Client, headers: dict, body: dict) -> tuple[list[dict], list[dict]]:
+    """按 next_cursor 翻页，最多 8 页，避免游标停在原地时打满额度。"""
+    folders: list[dict] = []
+    files: list[dict] = []
+    cursor = ""
+    seen: set[str] = set()
+    for _page in range(_IMA_MAX_PAGES):
+        page = _ima_post(client, headers, "get_knowledge_list", {**body, "cursor": cursor, "limit": 50})
+        page_folders, page_files = split_ima_list(page)
+        folders.extend(page_folders)
+        files.extend(page_files)
+        nxt = ima_next_cursor(page)
+        if not nxt or nxt in seen:
+            break
+        seen.add(nxt)
+        cursor = nxt
+    return folders, files
+
+
+def _move_inbox_failed(path: Path, failed_dir: Path) -> None:
+    failed_dir.mkdir(parents=True, exist_ok=True)
+    dest = failed_dir / path.name
+    if dest.exists():
+        dest = failed_dir / f"{path.stem}-{int(path.stat().st_mtime)}{path.suffix}"
+    path.replace(dest)
 
 
 def _ima_post(client: httpx.Client, headers: dict, method: str, body: dict) -> dict:

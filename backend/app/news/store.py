@@ -139,6 +139,23 @@ class NewsStore:
             self._conn.commit()
             return "inserted"
 
+    def existing_ids(self, source: str, source_ids: list[str]) -> set[str]:
+        """已经入库的 source_id。调用方据此跳过抽取，避免重复消耗额度。"""
+        wanted = [item for item in source_ids if item]
+        found: set[str] = set()
+        if not wanted:
+            return found
+        with self._lock:
+            for offset in range(0, len(wanted), 400):
+                chunk = wanted[offset:offset + 400]
+                marks = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT source_id FROM news_items WHERE source = ? AND source_id IN ({marks})",
+                    (source, *chunk),
+                )
+                found.update(str(row["source_id"]) for row in rows)
+        return found
+
     def mark_health(self, source: str, *, ok: bool, error: str = "", auth_state: str = "") -> None:
         now = datetime.now(CN_TZ).isoformat(timespec="seconds")
         with self._lock:
@@ -178,7 +195,7 @@ class NewsStore:
         with self._lock:
             return list(self._conn.execute(
                 """
-                SELECT m.kind, m.key, m.name, i.source, i.content_hash, i.published_at
+                SELECT m.kind, m.key, m.name, m.origin, i.source, i.content_hash, i.published_at
                 FROM news_mentions m
                 JOIN news_items i ON i.id = m.item_id
                 WHERE i.published_at >= ?

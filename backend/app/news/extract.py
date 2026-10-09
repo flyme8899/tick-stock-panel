@@ -13,6 +13,9 @@ _CODE_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9])(?:(SH|SZ|BJ|SS)[\.]?)?(\d{6})(?:\.(SH|SZ|BJ|SS))?(?![0-9])"
 )
 _EXCHANGE = {"SS": "SH", "SH": "SH", "SZ": "SZ", "BJ": "BJ"}
+# 简称本身就是常用词，正文里出现不等于在说这只股票。结构化标签和代码仍可命中。
+_COMMON_STOCK_NAMES = {"机器人", "太阳能", "农产品"}
+_ATTRIBUTION_SUFFIXES = ("研报", "指出", "认为", "数据", "Choice", "choice")
 
 
 @dataclass(frozen=True)
@@ -126,20 +129,51 @@ class Lexicon:
 
         body = text or ""
         for match in _CODE_RE.finditer(body):
+            if not _code_in_text_ok(body, match, self):
+                continue
             raw = match.group(0)
             symbol, name, code = self.resolve(raw)
-            if symbol and (code in self.by_code or not code.startswith("20")):
-                if code.startswith("20") and code not in self.by_code:
-                    continue
+            if symbol and code in self.by_code:
                 add("stock", symbol, name, code, "text")
-        for name, _start, _end in _scan(body, self._names):
+        for name, start, end in _scan(body, self._names):
+            if _skip_name_mention(body, start, end, name):
+                continue
             symbol = self._name_symbol[name]
             code = code6_of(symbol)
             known = self.by_code.get(code)
-            add("stock", symbol, known[1] if known and known[1] else name, code, "text")
+            add("stock", symbol, known[1] if known and known[1] else name, code, "text-name")
         for name, _start, _end in _scan(body, self._sectors):
             add("sector", name, name, "", "text")
         return found
+
+
+def _code_in_text_ok(body: str, match: re.Match, lexicon: Lexicon) -> bool:
+    """词典里有的代码才收。裸 6 位数还要有交易所标记、括号，或紧跟股票名。"""
+    code = match.group(2)
+    if code not in lexicon.by_code:
+        return False
+    if match.group(1) or match.group(3):
+        return True
+    start, end = match.span()
+    before = body[start - 1] if start else ""
+    after_char = body[end:end + 1]
+    if before in "(（" and after_char in ")）":
+        return True
+    rest = body[end:]
+    known_name = lexicon.by_code[code][1]
+    if known_name and rest.startswith(known_name):
+        return True
+    return any(rest.startswith(name) for name in lexicon._name_symbol)
+
+
+def _skip_name_mention(body: str, start: int, end: int, name: str) -> bool:
+    """归因句式和常用词简称不计入正文提及。"""
+    if name in _COMMON_STOCK_NAMES:
+        return True
+    if start and body[start - 1] == "据":
+        return True
+    after = body[end:end + 8]
+    return any(after.startswith(suffix) for suffix in _ATTRIBUTION_SUFFIXES)
 
 
 def _index(mapping: dict[str, str]) -> dict[str, list[str]]:

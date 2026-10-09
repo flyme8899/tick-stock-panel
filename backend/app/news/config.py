@@ -1,6 +1,7 @@
-"""每个来源独立开关。未配置凭据时强制关闭，环境变量优先于页面偏好。"""
+"""每个来源独立开关。未配置凭据或群号时强制关闭，环境变量优先于页面偏好。"""
 from __future__ import annotations
 
+import hmac
 import os
 
 from app.config import settings
@@ -38,9 +39,25 @@ def ima_configured() -> bool:
     return bool(settings.ima_client_id.strip() and settings.ima_api_key.strip())
 
 
+def group_id(source: str) -> str:
+    """钉钉群号或知识星球号。留空表示这个来源未配置。"""
+    if source == "dws":
+        env_name, attr = "NEWS_DWS_GROUP_ID", "news_dws_group_id"
+    elif source == "zsxq":
+        env_name, attr = "NEWS_ZSXQ_GROUP_ID", "news_zsxq_group_id"
+    else:
+        return ""
+    raw = os.environ.get(env_name)
+    if raw is not None and raw.strip():
+        return raw.strip()
+    return str(getattr(settings, attr, "") or "").strip()
+
+
 def source_configured(source: str) -> bool:
     if source == "ima":
         return ima_configured()
+    if source in {"dws", "zsxq"}:
+        return bool(group_id(source))
     return source in SOURCE_LABELS
 
 
@@ -69,6 +86,17 @@ def llm_extract_enabled() -> bool:
 
 def feed_token() -> str:
     return (settings.news_dsa_feed_token or os.environ.get("NEWS_DSA_FEED_TOKEN") or "").strip()
+
+
+def feed_matches(presented: str) -> bool:
+    """只比较请求头里的令牌。长度不同时按不匹配处理，避免抛错。"""
+    expected = feed_token()
+    if not expected or not presented:
+        return False
+    try:
+        return hmac.compare_digest(str(presented), str(expected))
+    except (TypeError, ValueError):
+        return False
 
 
 def set_source_enabled(source: str, enabled: bool) -> bool:
