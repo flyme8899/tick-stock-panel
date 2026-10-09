@@ -140,9 +140,10 @@ def ulcer_index(equity: np.ndarray) -> float | None:
 
 
 def sqn(trade_returns: np.ndarray) -> float | None:
-    """系统质量数 SQN = sqrt(N) * mean(R) / std(R), R 为每笔收益率。
+    """系统质量数 SQN = sqrt(N) * mean(R) / std(R), R 为每笔收益率 (不是 R 倍数)。
 
-    样本不足 2 笔或标准差为 0 时无定义。
+    没有把 N 截断到 100, 样本长度差很多时数值不可比。
+    样本不足 2 笔或标准差为 0 时无定义。部分成交必须先合并成一笔逻辑交易再传入。
     """
     returns = np.asarray(trade_returns, dtype=float)
     returns = returns[np.isfinite(returns)]
@@ -158,14 +159,16 @@ def sqn(trade_returns: np.ndarray) -> float | None:
 def kelly_fraction(trade_returns: np.ndarray) -> float | None:
     """凯利比例 f* = W - (1-W) / R, R = 平均盈利 / 平均亏损绝对值。
 
+    收益恰好为 0 的交易不计入胜率分母, 也不算亏损 (否则会稀释平均亏损、压低胜率)。
     没有亏损样本或没有盈利样本时赔率无定义, 返回 None (不把空样本伪装成 0 或 1)。
     """
     returns = np.asarray(trade_returns, dtype=float)
     returns = returns[np.isfinite(returns)]
+    returns = returns[returns != 0]
     if returns.size == 0:
         return None
     wins = returns[returns > 0]
-    losses = returns[returns <= 0]
+    losses = returns[returns < 0]
     if wins.size == 0 or losses.size == 0:
         return None
     avg_loss = abs(float(losses.mean()))
@@ -178,14 +181,19 @@ def kelly_fraction(trade_returns: np.ndarray) -> float | None:
     return float(win_rate - (1.0 - win_rate) / payoff)
 
 
+# 5% 分位在样本很小时只落到一两个点, 20 笔以下不报告。
+CVAR_MIN_SAMPLES = 20
+
+
 def cvar_95(returns: np.ndarray) -> float | None:
     """历史 CVaR 95%: 不超过 5% 分位的收益率均值 (带符号, 亏损为负)。
 
-    分位用线性插值。样本不足 5 个返回 None。
+    分位用线性插值。样本不足 20 个返回 None。调用方必须保证传入的是同一口径
+    (日收益或逐笔收益), 不要把两种序列混进同一个字段。
     """
     values = np.asarray(returns, dtype=float)
     values = values[np.isfinite(values)]
-    if values.size < 5:
+    if values.size < CVAR_MIN_SAMPLES:
         return None
     threshold = float(np.quantile(values, 0.05, method="linear"))
     tail = values[values <= threshold + 1e-15]

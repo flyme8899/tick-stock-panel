@@ -603,23 +603,23 @@ const METRIC_HELP = {
   },
   sqn: {
     title: 'SQN',
-    description: '系统质量数：sqrt(交易数) × 平均每笔收益 ÷ 收益标准差。',
-    note: '交易少于 2 笔或收益完全相同则无定义。',
+    description: '系统质量数：sqrt(交易数) × 平均每笔收益率 ÷ 收益标准差。用的是收益率，不是 R 倍数。',
+    note: '交易少于 2 笔或收益完全相同则无定义。没有把样本截断到 100，交易数差很多时不要横向比较。部分成交合并成一笔逻辑交易。',
   },
   kelly: {
     title: '凯利比例',
     description: '按胜率和盈亏比估计的理论下注比例 f* = 胜率 − (1−胜率) / 赔率。',
-    note: '没有盈利或没有亏损样本时无定义，不显示成 0 或 100%。',
+    note: '收益恰好为 0 的交易不计入。没有盈利或没有亏损样本时无定义，不显示成 0 或 100%。',
   },
   cvar95: {
     title: 'CVaR 95%',
-    description: '最差 5% 收益的平均值，亏损为负。',
-    note: '仓位模式用日收益，全量模式用日均样本收益。样本少于 5 个时无定义。',
+    description: '日收益里最差 5% 的平均值，亏损为负。',
+    note: '只使用日收益。样本少于 20 个交易日时无定义。逐笔口径在 cvar_95_trade，不和这张卡片混用。',
   },
   trackingError: {
     title: '跟踪误差',
     description: '策略日收益与基准日收益之差的年化标准差。',
-    note: '只使用两边都有收盘的交易日，缺数据不前值填充。',
+    note: '只使用两边都有收盘的交易日，缺数据不前值填充。指数未同步时显示为 —。',
   },
   informationRatio: {
     title: '信息比率',
@@ -1357,14 +1357,15 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     for (const [label, key] of [
       ['夏普比率', 'sharpe'], ['索提诺', 'sortino'], ['最大回撤', 'max_drawdown'],
       ['溃疡指数', 'ulcer_index'], ['SQN', 'sqn'], ['凯利比例', 'kelly_fraction'],
-      ['CVaR 95%', 'cvar_95'], ['跟踪误差', 'tracking_error'], ['信息比率', 'information_ratio'],
+      ['CVaR 95%（日收益）', 'cvar_95'], ['CVaR 95%（逐笔）', 'cvar_95_trade'],
+      ['跟踪误差', 'tracking_error'], ['信息比率', 'information_ratio'],
       ['Beta', 'beta'],
       ['胜率', 'win_rate'], ['平均收益', 'avg_return'], ['中位数收益', 'median_return'],
       ['盈亏比', 'profit_factor'], ['最终权益', 'final_equity'], ['平均持仓天数', 'avg_duration'],
     ] as const) {
       const v = s[key as keyof typeof s]
       const asPct = key.includes('return') || key === 'win_rate' || key === 'max_drawdown'
-        || key === 'ulcer_index' || key === 'kelly_fraction' || key === 'cvar_95' || key === 'tracking_error'
+        || key === 'ulcer_index' || key === 'kelly_fraction' || key === 'cvar_95' || key === 'cvar_95_trade' || key === 'tracking_error'
       if (v != null) lines.push(`${label},${asPct ? pct(v) : num(v)}`)
     }
 
@@ -2035,7 +2036,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               placeholder="关闭"
               onChange={e => setVolumeLimitPct(e.target.value)}
               className={INPUT_CLS}
-              title="单笔成交不超过当根成交量的该比例。留空或 0 关闭。买入余量丢弃，卖出余量顺延到下一交易日。"
+              title="收盘成交不超过当日成交量的该比例；开盘和盘中成交用上一交易日成交量，建议从 5%–10% 起。留空或 0 关闭。买入余量丢弃且当天不改派，卖出余量顺延，卖光后合并成一笔。"
             />
           </div>
           <div>
@@ -2440,8 +2441,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                   color={statValueColor(strategyReturn)} />
                 <Stat label={<MetricLabel label="年化" metric="annualReturn" />} value={pick('annual_return') != null ? fmtPct(pick('annual_return') as number) : '—'}
                   color={statValueColor(pick('annual_return') as number)} />
-                <Stat label={<MetricLabel label={`同期${benchmarkShort}`} metric="benchmarkReturn" />} value={benchmarkReturn != null ? fmtPct(benchmarkReturn) : '—'}
-                  color={statValueColor(benchmarkReturn)} />
+                <Stat label={<MetricLabel label={`同期${benchmarkShort}`} metric="benchmarkReturn" />} value={pick('benchmark_missing') ? '未同步' : (benchmarkReturn != null ? fmtPct(benchmarkReturn) : '—')}
+                  color={pick('benchmark_missing') ? undefined : statValueColor(benchmarkReturn)} />
                 <Stat label={<MetricLabel label="超额收益" metric="excessReturn" />} value={excessReturn != null ? fmtPct(excessReturn) : '—'}
                   color={statValueColor(excessReturn)} />
                 <Stat label={<MetricLabel label="夏普" metric="sharpe" />} value={pick('sharpe') != null ? Number(pick('sharpe')).toFixed(2) : '—'} />

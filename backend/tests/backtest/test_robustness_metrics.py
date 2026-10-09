@@ -125,9 +125,10 @@ def test_calc_stats_emits_robustness_fields():
     stats = BacktestEngine._calc_stats(trades, 100_000, date(2024, 1, 1), date(2024, 6, 1))
     for k in (
         "sortino", "mc_maxdd_p50", "mc_maxdd_p95", "median_pnl", "best", "worst", "avg_holding_days",
-        "ulcer_index", "sqn", "kelly_fraction", "cvar_95",
+        "ulcer_index", "sqn", "kelly_fraction", "cvar_95", "cvar_95_trade",
     ):
         assert k in stats, f"缺字段 {k}"
+    assert stats["cvar_95"] is None
     assert stats["sqn"] is not None
     assert stats["kelly_fraction"] is not None
     assert stats["best"] == round(0.10, 4)

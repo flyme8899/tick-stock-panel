@@ -58,6 +58,18 @@ def test_pipeline_limit_signal_matches_raw_ex_rights_reference() -> None:
     })
     result = pipeline.compute_limit_signals(frame, instruments, needed={"signal_limit_up"})
     assert result["signal_limit_up"][1] is False
+    up, _down = _locks("600001.SH", "普通股", [date(2024, 1, 2), date(2024, 1, 3)], [5.0, 5.25], [20.0, 10.50])
+    assert bool(up[1, 0]) is bool(result["signal_limit_up"][1])
+    sealed = frame.with_columns(
+        pl.Series("close", [5.0, 5.50]),
+        pl.Series("raw_close", [20.0, 11.00]),
+    )
+    sealed_signal = pipeline.compute_limit_signals(sealed, instruments, needed={"signal_limit_up"})
+    up_locked, _down = _locks(
+        "600001.SH", "普通股", [date(2024, 1, 2), date(2024, 1, 3)], [5.0, 5.50], [20.0, 11.00],
+    )
+    assert bool(up_locked[1, 0]) is True
+    assert bool(sealed_signal["signal_limit_up"][1]) is True
 
 
 def test_board_limit_pcts_and_st_cutoff() -> None:

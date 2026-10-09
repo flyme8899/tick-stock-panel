@@ -2422,7 +2422,12 @@ class StrategyBacktestService:
         benchmark_curve: list[dict],
         symbol: str,
     ) -> dict:
-        """跟踪误差、信息比率、beta。基准缺数据时三项为 None, 不改绝对收益。"""
+        """跟踪误差、信息比率、beta。基准缺数据时三项为 None, 不改绝对收益。
+
+        需要对齐的日权益曲线。``include_curves=False`` 时曲线为空, 相对指标为 None。
+        同一天多点或非相邻交易日会让 date 去重和 sqrt(252) 年化失真; 全量独立样本的
+        权益是由成交合成的, 相对指标只在组合日权益上有意义。
+        """
         strategy_returns, benchmark_returns = align_benchmark_returns(
             equity_curve, benchmark_curve,
         )
@@ -2431,6 +2436,7 @@ class StrategyBacktestService:
         fields: dict = {
             "benchmark_symbol": symbol,
             "benchmark_name": BENCHMARK_NAMES.get(symbol, symbol),
+            "benchmark_missing": not benchmark_curve,
         }
         for key, places in digits.items():
             value = relative[key]

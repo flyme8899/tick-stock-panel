@@ -13,6 +13,7 @@ from app.backtest.liquidity import (
     participation_fill,
     prices_flat,
     release_one_price_boards,
+    uses_prior_bar_volume,
     volume_near_zero,
 )
 
@@ -76,6 +77,13 @@ def test_one_price_is_directional_and_halt_excludes_it() -> None:
     assert not is_volume_halt(flat=True, volume=0, one_price_up=True, one_price_down=False)
 
 
+def test_prior_bar_volume_only_for_non_close_fills() -> None:
+    assert uses_prior_bar_volume("close_t", None) is False
+    assert uses_prior_bar_volume("close_t", 10.0) is True
+    assert uses_prior_bar_volume("open_t+1", None) is True
+    assert uses_prior_bar_volume("signal_next_minute", None) is True
+
+
 def test_release_one_price_keeps_true_halt() -> None:
     tradable = np.zeros((2, 1), dtype=np.uint8)
     prices = np.array([[11.0], [10.0]], dtype=np.float32)
@@ -85,3 +93,29 @@ def test_release_one_price_keeps_true_halt() -> None:
     release_one_price_boards(tradable, prices, prices, prices, prices, volume, up, down)
     assert tradable[0, 0] == 1
     assert tradable[1, 0] == 0
+
+
+def test_release_one_price_chunk_matches_single_pass() -> None:
+    rng = np.random.default_rng(0)
+    shape = (5, 3)
+    tradable = np.zeros(shape, dtype=np.uint8)
+    prices = rng.normal(10, 0.01, size=shape).astype(np.float32)
+    prices[0] = 11
+    prices[2, 1] = 8
+    volume = rng.uniform(0, 3, size=shape).astype(np.float32)
+    volume[0] = 0
+    up = np.zeros(shape, dtype=np.uint8)
+    down = np.zeros(shape, dtype=np.uint8)
+    up[0] = 1
+    down[2, 1] = 1
+    chunked = tradable.copy()
+    whole = tradable.copy()
+    release_one_price_boards(
+        chunked, prices, prices, prices, prices, volume, up, down, chunk_rows=2,
+    )
+    release_one_price_boards(
+        whole, prices, prices, prices, prices, volume, up, down, chunk_rows=shape[0],
+    )
+    assert np.array_equal(chunked, whole)
+    assert chunked[0, 0] == 1
+    assert chunked[1, 0] == 0

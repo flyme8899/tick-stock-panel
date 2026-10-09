@@ -24,6 +24,7 @@ from app.backtest.liquidity import (
     normalize_volume_limit,
     participation_fill,
     prices_flat,
+    uses_prior_bar_volume,
     volume_near_zero,
 )
 from app.backtest.matrix import (
@@ -93,6 +94,136 @@ def _round_metric(value: float | None, digits: int) -> float | None:
     if value is None:
         return None
     return round(float(value), digits)
+
+
+def _participation_volume_lots(
+    volume_today: float,
+    volume_prior: float | None,
+    *,
+    fill_mode: str | None,
+    price_override: float | None,
+) -> float:
+    """开盘和盘中成交用上一根成交量; 收盘成交用当日成交量。"""
+    if uses_prior_bar_volume(fill_mode, price_override):
+        if volume_prior is None:
+            return float("nan")
+        try:
+            return float(volume_prior)
+        except (TypeError, ValueError):
+            return float("nan")
+    try:
+        return float(volume_today)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _matrix_participation_volume(
+    matrix: MarketMatrix,
+    time_id: int,
+    asset_id: int,
+    *,
+    fill_mode: str | None,
+    price_override: float | None,
+) -> float:
+    prior = float(matrix.volume[time_id - 1, asset_id]) if time_id > 0 else None
+    return _participation_volume_lots(
+        float(matrix.volume[time_id, asset_id]),
+        prior,
+        fill_mode=fill_mode,
+        price_override=price_override,
+    )
+
+
+def _indexed_participation_volume(
+    volumes: np.ndarray,
+    symbols: np.ndarray,
+    index: int,
+    *,
+    fill_mode: str | None,
+    price_override: float | None,
+) -> float:
+    prior = None
+    if index > 0 and str(symbols[index - 1]) == str(symbols[index]):
+        prior = float(volumes[index - 1])
+    return _participation_volume_lots(
+        float(volumes[index]),
+        prior,
+        fill_mode=fill_mode,
+        price_override=price_override,
+    )
+
+
+def _settle_exit_slice(
+    pos: dict,
+    *,
+    symbol: str,
+    name: str,
+    fill_shares: float,
+    exit_price: float,
+    exit_value: float,
+    exit_date: str,
+    reason: str,
+    signal_date: str,
+    signal_id: str | None,
+    partial: bool,
+) -> TradeRecord | None:
+    """记下一次卖出切片。仓位还没卖光时返回 None, 卖光后合并成一条往返。"""
+    held = float(pos["shares"])
+    fraction = fill_shares / held if held else 0.0
+    entry_sold = float(pos["entry_value"]) * fraction
+    position_sold = float(pos.get("position_pct", 0.0)) * fraction
+    fills = pos.setdefault("exit_fills", [])
+    fills.append({
+        "shares": float(fill_shares),
+        "exit_price": float(exit_price),
+        "exit_value": float(exit_value),
+        "entry_sold": entry_sold,
+        "position_sold": position_sold,
+        "exit_date": exit_date,
+        "reason": reason,
+        "signal_date": signal_date,
+        "signal_id": signal_id,
+    })
+    if partial:
+        pos["shares"] = held - fill_shares
+        pos["lots"] = float(pos["shares"]) / 100.0
+        pos["entry_value"] = float(pos["entry_value"]) - entry_sold
+        pos["position_pct"] = float(pos.get("position_pct", 0.0)) * (1.0 - fraction)
+        return None
+    shares = sum(item["shares"] for item in fills)
+    entry_value = sum(item["entry_sold"] for item in fills)
+    exit_value_total = sum(item["exit_value"] for item in fills)
+    weighted_price = (
+        sum(item["shares"] * item["exit_price"] for item in fills) / shares
+        if shares else float(exit_price)
+    )
+    first = fills[0]
+    pnl_amount = exit_value_total - entry_value
+    pnl_pct = pnl_amount / entry_value if entry_value > 0 else 0.0
+    score = pos.get("entry_score")
+    return TradeRecord(
+        symbol=symbol,
+        name=name,
+        entry_date=pos["entry_date"],
+        exit_date=fills[-1]["exit_date"],
+        entry_price=round(float(pos["entry_price"]), 4),
+        exit_price=round(float(weighted_price), 4),
+        pnl_pct=round(float(pnl_pct), 6),
+        duration=int(pos["hold_days"]),
+        exit_reason=str(first["reason"]),
+        shares=round(float(shares), 4),
+        lots=round(float(shares / 100.0), 2),
+        position_pct=round(float(sum(item["position_sold"] for item in fills)), 6),
+        entry_value=round(float(entry_value), 2),
+        exit_value=round(float(exit_value_total), 2),
+        pnl_amount=round(float(pnl_amount), 2),
+        entry_score=round(float(score), 2) if score is not None else None,
+        entry_signal_date=pos.get("entry_signal_date"),
+        exit_signal_date=first["signal_date"],
+        blocked_exit_days=int(pos.get("blocked_exit_days", 0)),
+        entry_signal_id=pos.get("entry_signal_id"),
+        exit_signal_id=first["signal_id"],
+    )
 
 
 # ================================================================
@@ -1106,7 +1237,10 @@ class BacktestEngine:
                 _count(blocked)
                 return False
             if not force and _lot_blocked_by_volume(
-                float(matrix.volume[time_id, asset_id]),
+                _matrix_participation_volume(
+                    matrix, time_id, asset_id,
+                    fill_mode=config.exit_fill, price_override=override,
+                ),
                 _matrix_volume_limit(matrix, config.volume_limit),
             ):
                 if not pos.get("pending_exit_reason"):
@@ -1177,7 +1311,10 @@ class BacktestEngine:
                 _count("buy_score_filter")
                 continue
             if _lot_blocked_by_volume(
-                float(matrix.volume[time_id, asset_id]),
+                _matrix_participation_volume(
+                    matrix, time_id, asset_id,
+                    fill_mode=config.entry_fill, price_override=None,
+                ),
                 _matrix_volume_limit(matrix, config.volume_limit),
             ):
                 _count("buy_volume_limit")
@@ -1562,7 +1699,13 @@ class BacktestEngine:
                 pos["blocked_exit_days"] = int(pos.get("blocked_exit_days", 0)) + 1
                 _count(block_reason)
                 return False
-            if not force and has_volume and _lot_blocked_by_volume(float(volumes[idx]), config.volume_limit):
+            if not force and has_volume and _lot_blocked_by_volume(
+                _indexed_participation_volume(
+                    volumes, panel_symbols, idx,
+                    fill_mode=config.exit_fill, price_override=exit_price_override,
+                ),
+                config.volume_limit,
+            ):
                 if not pos.get("pending_exit_reason"):
                     pos["pending_exit_reason"] = reason
                     pos["pending_exit_signal_date"] = signal_date
@@ -1632,7 +1775,13 @@ class BacktestEngine:
             if score_max is not None and score > score_max:
                 _count("buy_score_filter")
                 continue
-            if has_volume and _lot_blocked_by_volume(float(volumes[entry_idx]), config.volume_limit):
+            if has_volume and _lot_blocked_by_volume(
+                _indexed_participation_volume(
+                    volumes, panel_symbols, entry_idx,
+                    fill_mode=config.entry_fill, price_override=None,
+                ),
+                config.volume_limit,
+            ):
                 _count("buy_volume_limit")
                 continue
 
@@ -2066,7 +2215,10 @@ class BacktestEngine:
             held = float(pos["shares"])
             status, fill_shares = participation_fill(
                 held,
-                float(matrix.volume[time_id, asset_id]),
+                _matrix_participation_volume(
+                    matrix, time_id, asset_id,
+                    fill_mode=config.exit_fill, price_override=override,
+                ),
                 _matrix_volume_limit(matrix, config.volume_limit),
             )
             if status == "none":
@@ -2077,45 +2229,27 @@ class BacktestEngine:
             exit_price = float(override) if override is not None else _refill_price(
                 time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
             )
-            fraction = fill_shares / held if held else 0.0
-            entry_sold = float(pos["entry_value"]) * fraction
             exit_value = fill_shares * exit_price * (1 - sell_cost_pct)
             cash += exit_value
-            pnl_amount = exit_value - entry_sold
-            pnl_pct = pnl_amount / entry_sold if entry_sold > 0 else 0.0
             sold_today.add(asset_id)
             signal_id = (
                 pos.get("pending_exit_signal_id")
                 or _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
             ) if reason == "signal" else None
-            trades.append(TradeRecord(
+            record = _settle_exit_slice(
+                pos,
                 symbol=matrix.symbols[asset_id],
                 name=matrix.names[asset_id],
-                entry_date=pos["entry_date"],
+                fill_shares=fill_shares,
+                exit_price=exit_price,
+                exit_value=exit_value,
                 exit_date=matrix.timestamp_labels[time_id][:10],
-                entry_price=round(float(pos["entry_price"]), 4),
-                exit_price=round(exit_price, 4),
-                pnl_pct=round(float(pnl_pct), 6),
-                duration=int(pos["hold_days"]),
-                exit_reason=reason,
-                shares=round(float(fill_shares), 4),
-                lots=round(float(fill_shares / 100.0), 2),
-                position_pct=round(float(pos["position_pct"]) * fraction, 6),
-                entry_value=round(float(entry_sold), 2),
-                exit_value=round(float(exit_value), 2),
-                pnl_amount=round(float(pnl_amount), 2),
-                entry_score=round(float(pos["entry_score"]), 2),
-                entry_signal_date=pos["entry_signal_date"],
-                exit_signal_date=signal_date,
-                blocked_exit_days=int(pos["blocked_exit_days"]),
-                entry_signal_id=pos["entry_signal_id"],
-                exit_signal_id=signal_id,
-            ))
-            if partial:
-                pos["shares"] = held - fill_shares
-                pos["lots"] = pos["shares"] / 100.0
-                pos["entry_value"] = float(pos["entry_value"]) - entry_sold
-                pos["position_pct"] = float(pos["position_pct"]) * (1.0 - fraction)
+                reason=reason,
+                signal_date=signal_date,
+                signal_id=signal_id,
+                partial=partial,
+            )
+            if record is None:
                 _mark_pending(
                     asset_id,
                     reason,
@@ -2124,6 +2258,7 @@ class BacktestEngine:
                     next_open=config.exit_fill == "signal_next_minute" and reason == "signal",
                 )
             else:
+                trades.append(record)
                 positions.pop(asset_id, None)
             return True
 
@@ -2316,7 +2451,10 @@ class BacktestEngine:
                                 continue
                             status, capped_shares = participation_fill(
                                 float(shares),
-                                float(matrix.volume[time_id, asset_id]),
+                                _matrix_participation_volume(
+                                    matrix, time_id, asset_id,
+                                    fill_mode=config.entry_fill, price_override=None,
+                                ),
                                 _matrix_volume_limit(matrix, config.volume_limit),
                             )
                             if status == "none":
@@ -2695,7 +2833,10 @@ class BacktestEngine:
             held = float(pos["shares"])
             status, fill_shares = participation_fill(
                 held,
-                float(volumes[idx]),
+                _indexed_participation_volume(
+                    volumes, panel_symbols, idx,
+                    fill_mode=config.exit_fill, price_override=exit_price_override,
+                ) if has_volume else 0.0,
                 config.volume_limit if has_volume else None,
             )
             if status == "none":
@@ -2707,43 +2848,27 @@ class BacktestEngine:
                 exit_price = float(exit_price_override)
             else:
                 exit_price = _refill_price(idx, "sell", float(exit_prices[idx]))
-            fraction = fill_shares / held if held else 0.0
-            entry_sold = float(pos["entry_value"]) * fraction
             exit_value = fill_shares * exit_price * (1 - sell_cost_pct)
             cash += exit_value
-            pnl_amount = exit_value - entry_sold
-            pnl_pct = pnl_amount / entry_sold if entry_sold > 0 else 0.0
             sold_today.add(sym)
-            trades.append(TradeRecord(
+            signal_id = _resolve_signal_id(panel, idx, exit_signal_ids) if reason == "signal" else None
+            record = _settle_exit_slice(
+                pos,
                 symbol=sym,
-                name=pos.get("name", ""),
-                entry_date=pos["entry_date"],
+                name=str(pos.get("name", "")),
+                fill_shares=fill_shares,
+                exit_price=exit_price,
+                exit_value=exit_value,
                 exit_date=self._date_str(panel_dates[idx]),
-                entry_price=round(float(pos["entry_price"]), 4),
-                exit_price=round(exit_price, 4),
-                pnl_pct=round(float(pnl_pct), 6),
-                duration=int(pos["hold_days"]),
-                exit_reason=reason,
-                shares=round(float(fill_shares), 4),
-                lots=round(float(fill_shares / 100.0), 2),
-                position_pct=round(float(pos.get("position_pct", 0.0)) * fraction, 6),
-                entry_value=round(float(entry_sold), 2),
-                exit_value=round(float(exit_value), 2),
-                pnl_amount=round(float(pnl_amount), 2),
-                entry_score=round(float(pos["entry_score"]), 2) if pos.get("entry_score") is not None else None,
-                entry_signal_date=pos.get("entry_signal_date"),
-                exit_signal_date=signal_date,
-                blocked_exit_days=int(pos.get("blocked_exit_days", 0)),
-                entry_signal_id=pos.get("entry_signal_id"),
-                exit_signal_id=_resolve_signal_id(panel, idx, exit_signal_ids) if reason == "signal" else None,
-            ))
-            if partial:
-                pos["shares"] = held - fill_shares
-                pos["lots"] = pos["shares"] / 100.0
-                pos["entry_value"] = float(pos["entry_value"]) - entry_sold
-                pos["position_pct"] = float(pos.get("position_pct", 0.0)) * (1.0 - fraction)
+                reason=reason,
+                signal_date=signal_date,
+                signal_id=signal_id,
+                partial=partial,
+            )
+            if record is None:
                 _mark_pending(sym, reason, signal_date)
             else:
+                trades.append(record)
                 positions.pop(sym, None)
             return True
 
@@ -2934,7 +3059,10 @@ class BacktestEngine:
                     continue
                 status, capped_shares = participation_fill(
                     float(shares),
-                    float(volumes[idx]),
+                    _indexed_participation_volume(
+                        volumes, panel_symbols, idx,
+                        fill_mode=config.entry_fill, price_override=None,
+                    ) if has_volume else 0.0,
                     config.volume_limit if has_volume else None,
                 )
                 if status == "none":
@@ -3224,7 +3352,9 @@ class BacktestEngine:
             ),
             "sqn": _round_metric(sqn(pnls), 2),
             "kelly_fraction": _round_metric(kelly_fraction(pnls), 4),
-            "cvar_95": _round_metric(cvar_95(pnls), 4),
+            # 本函数没有日权益序列。cvar_95 只留给日收益, 逐笔尾部放到 cvar_95_trade。
+            "cvar_95": None,
+            "cvar_95_trade": _round_metric(cvar_95(pnls), 4),
             **BacktestEngine._per_trade_block(pnls, durations),
         }
         if include_monte_carlo:
@@ -3357,7 +3487,8 @@ class BacktestEngine:
             "ulcer_index": _round_metric(ulcer_index(values), 4),
             "sqn": _round_metric(sqn(pnls), 2),
             "kelly_fraction": _round_metric(kelly_fraction(pnls), 4),
-            "cvar_95": _round_metric(cvar_95(daily if daily.size else pnls), 4),
+            "cvar_95": _round_metric(cvar_95(daily), 4),
+            "cvar_95_trade": _round_metric(cvar_95(pnls), 4),
             "execution": execution_stats,
         }
         if options.include_return_distribution:
@@ -3459,6 +3590,7 @@ class BacktestEngine:
             "sqn": _round_metric(sqn(pnls), 2),
             "kelly_fraction": _round_metric(kelly_fraction(pnls), 4),
             "cvar_95": _round_metric(cvar_95(daily), 4),
+            "cvar_95_trade": _round_metric(cvar_95(pnls), 4),
         }
         if include_monte_carlo:
             stats.update(BacktestEngine._mc_drawdown_percentiles(pnls))

@@ -128,12 +128,16 @@ def test_ulcer_sqn_kelly_cvar_golden() -> None:
     assert sqn(np.array([0.01, 0.01])) is None
 
     assert kelly_fraction(np.array([0.10, 0.10, -0.05])) == pytest.approx(0.5)
+    assert kelly_fraction(np.array([0.10, 0.0, -0.05])) == pytest.approx(0.25)
     assert kelly_fraction(np.array([0.10, 0.20])) is None
     assert kelly_fraction(np.array([-0.10, -0.20])) is None
+    assert kelly_fraction(np.array([0.0, 0.0])) is None
 
-    tail = np.array([-0.10, -0.04, -0.02, 0.0, 0.01, 0.03, 0.05, 0.08, 0.10, 0.20])
-    assert cvar_95(tail) == pytest.approx(-0.10)
-    assert cvar_95(tail[:4]) is None
+    short = np.array([-0.10, -0.04, -0.02, 0.0, 0.01, 0.03, 0.05, 0.08, 0.10, 0.20])
+    assert cvar_95(short) is None
+    assert cvar_95(np.resize(short, 19)) is None
+    long = np.concatenate([np.array([-0.20]), np.full(19, -0.01)])
+    assert cvar_95(long) == pytest.approx(-0.20)
 
 
 def test_benchmark_relative_aligns_without_forward_fill() -> None:
