@@ -26,8 +26,8 @@ export function FactorLibrary({ onInspect, onEdit }: { onInspect: (factorId: str
   const [showExperimental, setShowExperimental] = useState(false)
 
   const lib = useQuery({
-    queryKey: QK.factorLibrary('all'),
-    queryFn: () => api.factorLibrary(),
+    queryKey: QK.factorLibrary(showExperimental ? 'experimental' : 'all'),
+    queryFn: () => api.factorLibrary(undefined, showExperimental),
   })
   const factors = lib.data?.factors ?? []
   const listed = useMemo(

@@ -53,7 +53,7 @@ def _format_fields() -> str:
     from app.factors.registry import all_factors
 
     factor_groups: dict[str, list[str]] = {}
-    for spec in all_factors():
+    for spec in all_factors(include_experimental=False):
         if spec.id in custom_signals.ALLOWED_FIELDS:
             continue  # 已作为物理列出现在清单里
         label = spec.label

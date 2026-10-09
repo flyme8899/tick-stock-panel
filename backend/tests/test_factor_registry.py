@@ -309,8 +309,8 @@ def test_factors_api_contract() -> None:
     assert response.status_code == 200
     payload = response.json()
     factors = payload["factors"]
-    stable = [item for item in factors if item["stability"] == "stable"]
-    assert len(stable) == 77
+    assert len(factors) == 77
+    assert not any(item["id"].startswith("a158_") for item in factors)
     first = factors[0]
     assert first["id"] == "momentum_5d"
     assert first["kind"] == "base"
@@ -325,6 +325,17 @@ def test_factors_api_contract() -> None:
     mv = next(item for item in factors if item["id"] == "log_float_mv")
     assert mv["kind"] == "virtual"
     assert mv["scale_free"] is False
+
+
+def test_factors_api_include_experimental() -> None:
+    client = _client()
+    payload = client.get("/api/factors", params={"include_experimental": "true"}).json()
+    factors = payload["factors"]
+    assert len(factors) == 77 + 158
+    assert factors[0]["id"] == "momentum_5d"
+    assert any(item["id"] == "a158_vwap_0" for item in factors)
+    default = client.get("/api/factors").json()["factors"]
+    assert len(default) == 77
 
 
 def test_factors_api_asset_filter_and_validation() -> None:

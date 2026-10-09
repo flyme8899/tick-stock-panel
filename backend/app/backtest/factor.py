@@ -415,6 +415,20 @@ class FactorBacktestService:
             for name in factor_names
         ):
             panel_columns.append("consecutive_limit_ups")
+        # 实验因子可能依赖 enriched 里已有、但默认面板没选的基准列（如 raw_close）。
+        from app.factors.registry import get_factor
+
+        base_ready = {
+            "open", "high", "low", "close", "volume", "amount", "turnover_rate",
+            "raw_close", "prev_close",
+        }
+        for name in factor_names:
+            spec = get_factor(name)
+            if spec is None:
+                continue
+            for column in spec.dependencies:
+                if column in base_ready and column not in panel_columns:
+                    panel_columns.append(column)
         load_start = config.start
         if any(name != "turnover_rate" for name in factor_names):
             load_start = config.start - timedelta(days=FACTOR_WARMUP_DAYS)

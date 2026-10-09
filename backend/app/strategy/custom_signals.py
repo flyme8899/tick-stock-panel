@@ -95,7 +95,11 @@ def allowed_fields() -> frozenset[str]:
     """
     from app.factors.registry import all_factors
 
-    return frozenset(ALLOWED_FIELDS | {spec.id for spec in all_factors()} | _string_ext_fields())
+    return frozenset(
+        ALLOWED_FIELDS
+        | {spec.id for spec in all_factors(include_experimental=False)}
+        | _string_ext_fields()
+    )
 
 
 def materialize_factor_columns(
@@ -120,7 +124,7 @@ def materialize_factor_columns(
         return df
     from app.factors.registry import all_factors
 
-    factor_ids = {spec.id for spec in all_factors()}
+    factor_ids = {spec.id for spec in all_factors(include_experimental=False)}
     to_compute = missing & factor_ids
     if not to_compute:
         return df

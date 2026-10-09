@@ -39,6 +39,7 @@ def _ohlcv(
             "high": close if highs is None else highs[index],
             "low": close if lows is None else lows[index],
             "close": close,
+            "raw_close": close,
             "volume": volume,
             "amount": (close * volume * 100.0) if amounts is None else amounts[index],
         })
@@ -81,6 +82,8 @@ def test_default_views_exclude_group_until_opt_in() -> None:
     default_ids = [item["id"] for item in factor_columns_view()]
     experimental_ids = [item["id"] for item in factor_columns_view(include_experimental=True)]
     assert not any(item.startswith("a158_") for item in default_ids)
+    assert not any(spec.id.startswith("a158_") for spec in all_factors())
+    assert any(spec.id == "a158_kmid" for spec in all_factors(include_experimental=True))
     assert all(item in experimental_ids for item in ALPHA158_IDS)
     assert len(experimental_ids) == len(default_ids) + 158
     assert all_factors(asset_type="etf")
@@ -147,15 +150,20 @@ def test_candle_and_vwap_spot_checks() -> None:
         lows=[9.0],
         volumes=[10.0],
         amounts=[11000.0],
-    )
+    ).with_columns(pl.lit(10.0).alias("raw_close"))
     # (11-10)/10 = 0.1；(12-9)/10 = 0.3；上影、下影、重心都是 0.1。
     assert _eval("(close - open) / open", frame) == pytest.approx([0.1])
     assert _eval("(high - low) / open", frame) == pytest.approx([0.3])
     assert _eval("(high - max(open, close)) / open", frame) == pytest.approx([0.1])
     assert _eval("(min(open, close) - low) / open", frame) == pytest.approx([0.1])
     assert _eval("(close * 2 - high - low) / open", frame) == pytest.approx([0.1])
-    # 成交量单位是手：均价 = 11000 / (10 * 100) = 11，再除以收盘 = 1。
-    assert _eval("(amount / (volume * 100)) / close", frame) == pytest.approx([1.0])
+    # 成交量单位是手。均价 = 11000 / (10 * 100) = 11。
+    # close=11 是前复权价，raw_close=10 才是不复权收盘，vwap_0 = 11/10 = 1.1。
+    vwap = get_factor("a158_vwap_0")
+    assert vwap is not None
+    assert "raw_close" in vwap.formula_text
+    assert "raw_close" in vwap.dependencies
+    assert _eval(vwap.formula_text, frame) == pytest.approx([1.1])
 
 
 def test_nested_bool_mean_and_no_lookahead() -> None:
@@ -232,6 +240,7 @@ def test_full_group_sample_stays_bounded() -> None:
                 "high": price * 1.02,
                 "low": price * 0.98,
                 "close": price,
+                "raw_close": price,
                 "volume": volume,
                 "amount": price * volume * 100.0,
             })
@@ -246,3 +255,179 @@ def test_full_group_sample_stays_bounded() -> None:
     assert set(ALPHA158_IDS) <= set(out.columns)
     assert elapsed < 90
     assert peak < 800 * 1024 * 1024
+
+
+def _percentile_rank(window: list[float], score: float) -> float:
+    """scipy.stats.percentileofscore(kind='rank') / 100，不引入 scipy。"""
+    left = sum(value < score for value in window)
+    right = sum(value <= score for value in window)
+    plus = 1 if left < right else 0
+    return (left + right + plus) / (2 * len(window))
+
+
+def test_new_operators_match_numpy_reference_including_ties() -> None:
+    import numpy as np
+
+    rng = np.random.default_rng(158)
+    series = rng.normal(size=90).cumsum() + 20
+    series[70:75] = series[70]
+    frame = _ohlcv(series.tolist())
+    n = 60
+    window = series[-n:]
+    x = np.arange(n, dtype=float)
+    slope, intercept = np.polyfit(x, window, 1)
+    fitted = slope * x + intercept
+    ss_res = float(np.sum((window - fitted) ** 2))
+    ss_tot = float(np.sum((window - window.mean()) ** 2))
+    last = len(series) - 1
+
+    assert _eval(f"ts_std0(close, {n})", frame)[last] == pytest.approx(float(np.std(window, ddof=0)))
+    assert _eval(f"ts_qlinear(close, {n}, 0.8)", frame)[last] == pytest.approx(
+        float(np.quantile(window, 0.8, method="linear")),
+    )
+    assert _eval(f"ts_pctrank(close, {n})", frame)[last] == pytest.approx(
+        _percentile_rank(window.tolist(), float(window[-1])),
+    )
+    assert _eval(f"ts_slope(close, {n})", frame)[last] == pytest.approx(float(slope))
+    assert _eval(f"ts_rsquare(close, {n})", frame)[last] == pytest.approx(1 - ss_res / ss_tot)
+    assert _eval(f"ts_resi(close, {n})", frame)[last] == pytest.approx(
+        float(window[-1] - (slope * (n - 1) + intercept)),
+    )
+
+    # 并列最高出现在窗口下标 3 和 40（0-based），1-based 取最先的 4。
+    tied = np.linspace(1, 10, n)
+    tied[3] = 99
+    tied[40] = 99
+    tied_low = tied.copy()
+    tied_low[5] = -5
+    tied_low[20] = -5
+    tie_frame = _ohlcv(tied.tolist())
+    assert _eval(f"ts_argmax(high, {n})", tie_frame)[n - 1] == pytest.approx(4.0)
+    low_frame = _ohlcv(tied_low.tolist())
+    assert _eval(f"ts_argmin(low, {n})", low_frame)[n - 1] == pytest.approx(6.0)
+    assert _eval(f"ts_argmax(high, {n})", tie_frame)[n - 2] is None
+
+
+def test_window_60_is_populated_after_120_calendar_days() -> None:
+    """评审里 max_60 的 IC 接近 0。核对是不是 120 个自然日的预热不够。
+
+    2025-10-09 往前 120 个自然日里，只扣周末也多于 60 个交易日。
+    这段没有春节，再扣大约 10 个假日仍够 60 日窗口。
+    历史被截到 40 个交易日时，max_60 为空、max_30 仍有数，用来对照真正的预热不足。
+    """
+    from app.strategy.scoring import materialize_scoring_columns
+
+    eval_start = date(2025, 10, 9)
+    warmup_start = eval_start - timedelta(days=120)
+    span = [
+        warmup_start + timedelta(days=offset)
+        for offset in range((eval_start - warmup_start).days + 30)
+    ]
+    weekdays = [day for day in span if day.weekday() < 5]
+    before = [day for day in weekdays if day < eval_start]
+    assert len(before) >= 61
+    assert len(before) - 10 >= 61
+
+    def _frame(days: list[date]) -> pl.DataFrame:
+        rows = []
+        for index, day in enumerate(days):
+            close = 10 + index * 0.1
+            rows.append({
+                "symbol": "AAA",
+                "date": day,
+                "open": close,
+                "high": close + (index % 5),
+                "low": close - 0.2,
+                "close": close,
+                "raw_close": close,
+                "volume": 100.0,
+                "amount": close * 10000,
+            })
+        return pl.DataFrame(rows)
+
+    full = materialize_scoring_columns(_frame(weekdays), ["a158_max_30", "a158_max_60"])
+    on_eval = full.filter(pl.col("date") >= eval_start)
+    assert on_eval.height > 0
+    assert on_eval["a158_max_60"].null_count() == 0
+    assert on_eval["a158_max_30"].null_count() == 0
+
+    short_days = weekdays[:40]
+    short = materialize_scoring_columns(_frame(short_days), ["a158_max_30", "a158_max_60"])
+    assert short["a158_max_60"].null_count() == short.height
+    assert short["a158_max_30"].tail(5).null_count() == 0
+
+
+def _eval_script():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "scripts" / "eval_alpha158.py"
+    spec = importlib.util.spec_from_file_location("eval_alpha158", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_eval_script_gates_and_filters() -> None:
+    module = _eval_script()
+    assert module.polars_matches_project("1.44.2")
+    assert not module.polars_matches_project("1.43.1")
+    assert not module.polars_matches_project("1.45.0")
+    assert not module.polars_matches_project("2.0.1")
+    today = date(2026, 10, 9)
+    assert module.latest_closed_trading_day(
+        [date(2026, 10, 8), today], today,
+    ) == date(2026, 10, 8)
+    assert module.latest_closed_trading_day([today], today) is None
+
+    days = [date(2024, 1, 2) + timedelta(days=offset) for offset in range(4)]
+    closes = [10.0, 11.0, 12.0, 13.0]
+    frame = pl.DataFrame({
+        "symbol": ["000001.SZ"] * 4,
+        "date": days,
+        "close": closes,
+    })
+    labels = module.qlib_forward_return(frame, lag=1, horizon=1, start=days[0], end=days[-1])
+    by_date = dict(zip(labels["date"].to_list(), labels["_qlib_return"].to_list(), strict=True))
+    # close(t+2)/close(t+1)-1 = 12/11-1
+    assert by_date[days[0]] == pytest.approx(12 / 11 - 1)
+    assert by_date[days[-1]] is None
+
+    instruments = pl.DataFrame({
+        "symbol": ["000001.SZ", "000002.SZ"],
+        "name": ["平安银行", "*ST 测试"],
+        "listing_date": [date(2010, 1, 4), date(2024, 1, 2)],
+    })
+    prices = pl.DataFrame({
+        "symbol": ["000001.SZ", "000001.SZ", "000002.SZ"],
+        "date": [days[0], days[1], days[0]],
+        "raw_close": [10.0, 11.0, 8.0],
+        "close": [10.0, 11.0, 8.0],
+        "a158_kmid": [0.1, 0.2, 0.3],
+    })
+    limited = module.apply_row_filters(
+        prices.filter(pl.col("symbol") == "000001.SZ"),
+        exclude_limit=True,
+        exclude_st=False,
+        min_listed_days=0,
+        instruments=instruments,
+    )
+    assert limited["date"].to_list() == [days[0]]
+    st_only = module.apply_row_filters(
+        prices.filter(pl.col("symbol") == "000002.SZ"),
+        exclude_limit=False,
+        exclude_st=True,
+        min_listed_days=0,
+        instruments=instruments,
+    )
+    assert st_only.is_empty()
+
+
+def test_signal_whitelist_excludes_alpha158() -> None:
+    from app.strategy.custom_signals import allowed_fields
+    from app.strategy.custom_signals_ai import build_messages
+
+    assert "a158_kmid" not in allowed_fields()
+    system = build_messages("动量强的票")[0]["content"]
+    assert "a158_" not in system

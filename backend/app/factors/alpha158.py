@@ -1,15 +1,24 @@
 """Alpha158 实验因子组。
 
-公式来自 vnpy 的 Alpha158（MIT License），vnpy 又移植自微软 Qlib 的 Alpha158。
+公式来自 vnpy 的 Alpha158（MIT），vnpy 又移植自微软 Qlib 的 Alpha158（MIT）。
 这里不依赖 vnpy 或 qlib，只把表达式写成 TSP 因子 DSL。
 
-Copyright (c) vnpy contributors and Microsoft Qlib contributors.
+Copyright (c) vnpy contributors
+Copyright (c) Microsoft Corporation
+
 原始实现:
 https://github.com/vnpy/vnpy/blob/master/vnpy/alpha/dataset/datasets/alpha_158.py
-https://github.com/microsoft/qlib (Alpha158)
+https://github.com/microsoft/qlib （Alpha158）
+
+完整 MIT 许可文本见仓库根目录 ``THIRD_PARTY_NOTICES.md`` 的 Alpha158 一节。
+使用说明见 ``docs/alpha158.md``。
 
 不移植 vnpy 的标签 ``ts_delay(close, -3) / ts_delay(close, -1) - 1``。
 负向 shift 用的是未来收盘价，TSP 的 DSL 也会直接拒绝。
+
+方向不预填，单因子使用时以实测 IC 的符号为准。头部的 max / std / qtlu / ma
+在全市场样本上是负 IC：值越大，接下来的收益往往越低。正向打分会把信号用反。
+IC 高也不等于扣费后能赚钱，下单前要看分层多空和换手。
 
 和 vnpy 算子对齐、但不改 TSP 原有算子的地方:
 - 标准差用 ts_std0（总体标准差，ddof=0）。原 ts_std 仍是样本标准差。
@@ -17,7 +26,10 @@ https://github.com/microsoft/qlib (Alpha158)
 - rank 用 ts_pctrank，对齐 percentileofscore(kind="rank")/100。原 ts_rank 不改。
 - 回归、极值位置的时间轴只含当前和过去：x=0 是窗口里最旧的一根。
 - 极值下标从 1 开始，1 表示最旧；并列取最先出现的那个。
-- 成交均价按 TSP 日线口径：成交额 / (成交量 × 100)，成交量单位是手。
+- enriched 的 open/high/low/close 是前复权，amount 和 volume 是不复权。
+  vwap_0 = (amount / (volume * 100)) / raw_close，分子分母都是不复权价格。
+  成交量单位仍是手，且不做复权。vma / vstd / vsum* / corr / cord 在送转除权日
+  会看到成交量跳变，这是现有日线口径，不是另做了一套复权。
 - 1e-12 写成十进制字面量，因为 DSL 不支持科学计数法。
 - 窗口未满时结果为空（min_samples=窗口长度）。vnpy 的部分滚动函数在未满窗口时仍出数；
   满窗之后的定义一致。
@@ -33,7 +45,7 @@ ALPHA158_TAG = "alpha158"
 _EPS = "0.000000000001"
 _WINDOWS = (5, 10, 20, 30, 60)
 _VOLUME = frozenset({"close", "volume"})
-_VWAP = frozenset({"close", "volume", "amount"})
+_VWAP = frozenset({"raw_close", "volume", "amount"})
 _STOCK = frozenset({"stock"})
 
 
@@ -97,8 +109,8 @@ def _bar_specs() -> list[FactorSpec]:
         ("high_0", "HIGH0 最高/收盘", "high / close", frozenset({"high", "close"}), 1),
         ("low_0", "LOW0 最低/收盘", "low / close", frozenset({"low", "close"}), 1),
         (
-            "vwap_0", "VWAP0 均价/收盘",
-            "(amount / (volume * 100)) / close",
+            "vwap_0", "VWAP0 均价/不复权收盘",
+            "(amount / (volume * 100)) / raw_close",
             _VWAP, 1,
         ),
     ]

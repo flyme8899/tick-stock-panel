@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import Annotated
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -15,9 +16,15 @@ router = APIRouter(prefix="/api/factors", tags=["factors"])
 
 
 @router.get("")
-def list_factors(asset_type: str | None = Query(default=None, pattern="^(stock|etf)$")) -> dict:
-    """注册表因子列表; asset_type 过滤适用资产 (财务因子仅股票)。"""
-    specs = all_factors(asset_type=asset_type)
+def list_factors(
+    asset_type: str | None = Query(default=None, pattern="^(stock|etf)$"),
+    include_experimental: Annotated[bool, Query()] = False,
+) -> dict:
+    """注册表因子列表; asset_type 过滤适用资产 (财务因子仅股票)。
+
+    Alpha158 实验组默认不返回。include_experimental=true 时才带上。
+    """
+    specs = all_factors(asset_type=asset_type, include_experimental=include_experimental)
     return {
         "factors": [
             {

@@ -148,7 +148,11 @@ def list_factors(asset_type: str | None = None, stable_only: bool = False) -> di
             "stability": spec.stability,
             "pit": spec.pit,
         }
-        for spec in all_factors(asset_type=asset_type, stable_only=stable_only)
+        for spec in all_factors(
+            asset_type=asset_type,
+            stable_only=stable_only,
+            include_experimental=False,
+        )
     ]
     return {"factors": factors}
 

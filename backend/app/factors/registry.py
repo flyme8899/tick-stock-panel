@@ -378,8 +378,13 @@ def _ensure_ext_factors() -> None:
 def all_factors(
     asset_type: str | None = None,
     stable_only: bool = False,
+    *,
+    include_experimental: bool = False,
 ) -> list[FactorSpec]:
     """按目录顺序返回因子; asset_type 过滤适用资产, stable_only 过滤实验/废弃因子。
+
+    带 alpha158 标签的实验组默认不返回。信号白名单、AI 提示词、因子库和工具目录
+    保持这个默认。需要实验组时显式传入 include_experimental=True。挖掘筛选仍用默认排除。
 
     返回前惰性同步扩展表因子 (ext_ 前缀 base 条目), 使信号字段白名单、
     因子库列表和 AI 提示词看到同一份扩展字段清单。
@@ -389,6 +394,7 @@ def all_factors(
         spec for spec in _ordered_specs()
         if (asset_type is None or asset_type in spec.asset_types)
         and (not stable_only or spec.stability == "stable")
+        and (include_experimental or "alpha158" not in spec.tags)
     ]
 
 
