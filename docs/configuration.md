@@ -47,6 +47,28 @@ TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(
 
 说明:标的池为 A 股股票(CN_Equity_A),ETF 不在内(分时走批量补拉路径);覆盖滞后超阈值或连续空轮会自动再跑修复轮自愈。
 
+### 分钟 K 列类型诊断
+
+`scripts/check_minute_kline.py` 只读检查 `data/kline_minute/date=*/part.parquet`，对照 `kline_sync` 的落盘类型：`symbol` 为字符串，`datetime` 为无时区的 `Datetime(us)`，价格和 `volume` / `amount` 为 Float64。它不写、不删、不改任何数据文件。
+
+开发环境与 `./dev.sh` 共用后端虚拟环境。在仓库根目录执行：
+
+```bash
+PYTHONPATH=backend backend/.venv/bin/python scripts/check_minute_kline.py
+```
+
+Docker 镜像不含 `scripts/`。compose 把宿主机 `./data` 挂到容器 `/app/data`，并强制 `DATA_DIR=/app/data`。在仓库根目录执行：
+
+```bash
+docker compose run --rm --no-deps --entrypoint uv \
+  -v "$PWD/scripts/check_minute_kline.py:/tmp/check_minute_kline.py:ro" \
+  app run --no-sync python /tmp/check_minute_kline.py
+```
+
+目录不对时加 `--path`，指向含有 `date=YYYY-MM-DD/part.parquet` 的那一层。ETF 分钟是 `data/kline_etf_minute`。
+
+结论为「有问题」时，不要手改 parquet，本脚本也不会自动修。先停掉实时全量分钟和正在跑的同步。把有问题的 `date=YYYY-MM-DD` 整目录复制到 `kline_minute` 外面做备份，备份不要留在会被 `**/*.parquet` 扫到的位置。`kline_sync._write_minute_partition` 会读入已有 `part.parquet` 再与新数据纵向拼接；`volume` 为 Int64 时这次拼接会失败，所以坏文件还在原处时，调用同步通常改不了类型。备份确认可读之后，把该日的 `part.parquet` 移出分区目录，再用现有接口重拉覆盖这些日期的窗口：全市场 `POST /api/kline/sync_minute`（body `{"days": N}`），或单只 `POST /api/kline/sync_minute_single`（`days` 为 1–30，只补这一只）。整日文件被覆盖过时，缺掉的股票要靠重拉回来，只做类型转换补不回行。重拉后再跑本脚本，结论应为 OK。以后若要做带确认开关的修复命令，应先备份，再用与 `_atomic_write_parquet` 相同的临时文件替换写回。
+
 ---
 
 ## AI(可选)

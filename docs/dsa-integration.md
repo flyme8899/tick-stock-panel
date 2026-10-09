@@ -37,6 +37,16 @@ docker compose --profile dsa up --build
 
 sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。镜像时区是 `Asia/Shanghai`，本地 `scripts/dsa.sh` / `dsa.ps1` 在未设置 `TZ` 时也使用这个时区。
 
+Docker 服务带健康检查：容器内 `curl -fsS http://127.0.0.1:8000/api/v1/health`。这个接口免登录，HTTP 失败或连不上都会让容器变为 unhealthy。决策页徽标每 30 秒请求 TSP 的 `/api/dsa/status`，悬停可看到同样的探测结果。
+
+## 量化回测证据
+
+`backend/app/custom/dsa/quant_evidence.yaml` 保存 TSP 机械回测对六类 DSA 技能的对照（均线金叉、缩量回踩、放量突破、多头趋势、龙头、底部放量）。窗口是 2026-07-08 至 2026-10-08，全市场 5882 只，同期基准 -4.00%。数字来自当时的回测报告，负收益是无差别执行的基准线，不是禁用令。
+
+`scripts/dsa.sh`、`scripts/dsa.ps1` 和 `docker compose --profile dsa` 会在启动 `main.py` 之前装上钩子，只给同名技能的提示末尾追加一段「量化回测参考」。`wave_theory` 等未收录技能保持原文。本地脚本在变量未设置时使用仓库内文件；`.env` 或环境里写成 `off`，或文件缺失时，不追加，也不影响 sidecar 启动。Compose 把该变量固定成容器内的 `/opt/tsp/quant_evidence.yaml`，避免 `.env` 里的宿主机路径进容器；要在 Docker 里关闭，把这一项改成 `off`。证据文件不放进 `vendor/daily_stock_analysis/strategies/`，那个目录会被当成策略加载。
+
+决策仪表盘读取 `GET /api/dsa/quant-evidence` 展示同一份摘要。直接在 vendor 目录里执行 `python main.py` 不会经过这个钩子。
+
 ## 定时分析
 
 不使用 GitHub Actions。每日任务由 sidecar 进程内的调度器执行：`python main.py --serve-only` 在 `SCHEDULE_ENABLED=true` 时会恢复任务，但不会在启动时立刻分析。
@@ -70,6 +80,7 @@ sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis
 | `DSA_PYTHON` | 跑 ETF 轮动所用的解释器。未设置时用 `vendor/daily_stock_analysis/.venv` |
 | `DSA_UPSTREAM_COOKIE` | DSA 打开 `ADMIN_AUTH_ENABLED` 后转发给上游的 Cookie。未配置 `DSA_PASSWORD` 时只使用这一项 |
 | `DSA_PASSWORD` | 上游管理密码。配置后由转发层登录并缓存会话，过期时间跟随 Set-Cookie，提前刷新。留空则行为与只配 Cookie 时相同。不要把真实密码写进仓库 |
+| `TSP_QUANT_EVIDENCE_FILE` | 机械回测证据 YAML。启动脚本和 compose 默认指向仓库内文件。`off` 关闭注入 |
 | `DSA_TIMEOUT_SECONDS` | 转发超时。分析、问股、选股、回测默认更长 |
 
 DSA 读取的密钥和数据源（写在同一个 `.env`，留空则对应能力失败并给出原因）：

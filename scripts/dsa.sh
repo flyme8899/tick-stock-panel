@@ -43,6 +43,16 @@ if [[ -z "${DATABASE_PATH:-}" ]]; then
   export DATABASE_PATH="${from_file:-$ROOT/data/dsa/stock_analysis.db}"
 fi
 
+# 未单独指定时，把随仓库分发的机械回测证据交给 sidecar。设为 off 则不注入。
+if [[ -z "${TSP_QUANT_EVIDENCE_FILE+x}" ]]; then
+  from_evidence="$(read_dotenv_value TSP_QUANT_EVIDENCE_FILE)"
+  if [[ -n "$from_evidence" ]]; then
+    export TSP_QUANT_EVIDENCE_FILE="$from_evidence"
+  else
+    export TSP_QUANT_EVIDENCE_FILE="$ROOT/backend/app/custom/dsa/quant_evidence.yaml"
+  fi
+fi
+
 # 已有 TSP 模型配置、又没单独填 DSA 的 OpenAI 兼容密钥时，直接借用。
 if [[ -z "${OPENAI_API_KEY:-}" ]]; then
   borrowed="$(read_dotenv_value AI_API_KEY)"
@@ -67,4 +77,5 @@ if [[ ! -x "$DSA/.venv/bin/python" ]]; then
 fi
 
 cd "$DSA"
-exec "$DSA/.venv/bin/python" main.py --serve-only --host "$DSA_HOST" --port "$DSA_PORT"
+exec "$DSA/.venv/bin/python" "$ROOT/backend/app/custom/dsa/dsa_bootstrap.py" \
+  main.py --serve-only --host "$DSA_HOST" --port "$DSA_PORT"

@@ -13,6 +13,9 @@ New-Item -ItemType Directory -Force -Path (Join-Path $Root 'data\dsa') | Out-Nul
 if (-not $env:DATABASE_PATH) {
     $env:DATABASE_PATH = Join-Path $Root 'data\dsa\stock_analysis.db'
 }
+if (-not $env:TSP_QUANT_EVIDENCE_FILE) {
+    $env:TSP_QUANT_EVIDENCE_FILE = Join-Path $Root 'backend\app\custom\dsa\quant_evidence.yaml'
+}
 $Python = Join-Path $Dsa '.venv\Scripts\python.exe'
 if (-not (Test-Path $Python)) {
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
@@ -21,5 +24,6 @@ if (-not (Test-Path $Python)) {
     & uv venv --python 3.11 (Join-Path $Dsa '.venv')
     & uv pip install --python $Python -r (Join-Path $Dsa 'requirements.txt')
 }
+$Bootstrap = Join-Path $Root 'backend\app\custom\dsa\dsa_bootstrap.py'
 Set-Location $Dsa
-& $Python main.py --serve-only --host $Bind --port $Port
+& $Python $Bootstrap main.py --serve-only --host $Bind --port $Port

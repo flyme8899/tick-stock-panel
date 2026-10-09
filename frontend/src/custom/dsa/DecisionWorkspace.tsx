@@ -31,6 +31,7 @@ import {
   dsaEtfRotation,
   dsaUpstream,
   fetchDsaCatalog,
+  fetchDsaQuantEvidence,
   fetchDsaSchedule,
   fetchDsaStatus,
   fetchShareImage,
@@ -123,6 +124,14 @@ export function DecisionWorkspace() {
   const status = useQuery({ queryKey: QK.dsaStatus, queryFn: fetchDsaStatus, refetchInterval: 30_000, retry: false })
   const catalog = useQuery({ queryKey: QK.dsaCatalog, queryFn: fetchDsaCatalog, staleTime: 60_000, retry: false })
   const reachable = status.data?.reachable === true
+  const healthDetail = status.data?.detail?.trim() ?? ''
+  const healthLabel = status.isLoading
+    ? '检测中'
+    : reachable
+      ? '服务已连接'
+      : healthDetail && healthDetail.length <= 28
+        ? `未连接 · ${healthDetail}`
+        : '服务未连接'
   const [showSample, setShowSample] = useState(true)
   const sample = !reachable && showSample
 
@@ -138,11 +147,14 @@ export function DecisionWorkspace() {
         title="决策"
         subtitle="多市场 AI 研报、情报、定时推送和问股。行情与策略回测仍走原来的页面。"
         titleExtra={
-          <span className={cn(
-            'rounded-full px-2 py-0.5 text-[10px]',
-            reachable ? 'bg-bear/15 text-bear' : 'bg-warning/15 text-warning',
-          )}>
-            {status.isLoading ? '检测中' : reachable ? '服务已连接' : '服务未连接'}
+          <span
+            title={status.data?.detail || undefined}
+            className={cn(
+              'rounded-full px-2 py-0.5 text-[10px]',
+              reachable ? 'bg-bear/15 text-bear' : 'bg-warning/15 text-warning',
+            )}
+          >
+            {healthLabel}
           </span>
         }
         right={!reachable ? (
@@ -234,6 +246,7 @@ function Dashboard({ sample, reachable }: { sample: boolean; reachable: boolean 
         <Stat label="观望" value={counts.hold} tone="text-warning" />
         <Stat label="卖出" value={counts.sell} tone="text-bear" />
       </div>
+      <QuantEvidence />
       <Panel
         title={sample ? '今日决策 · 样例' : '今日决策'}
         hint="手动分析和定时任务的结论都在这里。定时结果同时按 .env 里的通知渠道推送。"
@@ -266,6 +279,45 @@ function Dashboard({ sample, reachable }: { sample: boolean; reachable: boolean 
         </div>
       </Panel>
     </div>
+  )
+}
+
+function formatSignedPercent(value: number): string {
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function QuantEvidence() {
+  const query = useQuery({
+    queryKey: QK.dsaQuantEvidence,
+    queryFn: fetchDsaQuantEvidence,
+    staleTime: 300_000,
+    retry: false,
+  })
+  const data = query.data
+  if (!data?.available) return null
+  const scope = [
+    data.meta.period,
+    data.meta.universe != null ? `全市场 ${data.meta.universe} 只` : '',
+    data.meta.benchmark_return ? `同期基准 ${data.meta.benchmark_return}` : '',
+  ].filter(Boolean).join('，')
+  return (
+    <Panel
+      title="量化回测参考"
+      hint={scope ? `${scope}。同名技能的提示里会附上这些机械回测结果。` : '同名技能的提示里会附上这些机械回测结果。'}
+    >
+      <Notice>{data.caveat}</Notice>
+      <ul className="mt-3 space-y-2">
+        {data.skills.map(skill => (
+          <li key={skill.name} className="text-xs leading-relaxed text-secondary">
+            <span className="font-mono text-foreground">{skill.name}</span>
+            {skill.matched.length > 0 && <span className="text-muted"> · {skill.matched.join('、')}</span>}
+            {skill.returns.length > 0 && (
+              <span className="num ml-2 text-foreground">{skill.returns.map(formatSignedPercent).join(' / ')}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Panel>
   )
 }
 

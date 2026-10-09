@@ -67,6 +67,34 @@ export function fetchDsaCatalog(): Promise<DsaCatalog> {
   return fetch('/api/dsa/catalog').then(res => parse<DsaCatalog>(res))
 }
 
+export interface DsaQuantSkill {
+  name: string
+  matched: string[]
+  returns: number[]
+  sample_sizes: number[]
+  verdict: string
+  note: string
+  guidance: string
+}
+
+export interface DsaQuantEvidence {
+  available: boolean
+  meta: {
+    source: string
+    report: string
+    period: string
+    universe: number | null
+    benchmark_return: string
+    updated: string
+  }
+  caveat: string
+  skills: DsaQuantSkill[]
+}
+
+export function fetchDsaQuantEvidence(): Promise<DsaQuantEvidence> {
+  return fetch('/api/dsa/quant-evidence').then(res => parse<DsaQuantEvidence>(res))
+}
+
 export function dsaUpstream<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers)
   if (init?.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {

@@ -16,6 +16,7 @@ from app.custom.dsa.proxy import (
     forward,
     health,
 )
+from app.custom.dsa.quant_evidence import evidence_summary
 from app.custom.dsa.schedule import ScheduleSettingsError, load_schedule, save_schedule
 
 
@@ -47,6 +48,10 @@ def build_router() -> APIRouter:
     @router.get("/catalog")
     def catalog() -> dict:
         return catalog_payload()
+
+    @router.get("/quant-evidence")
+    def quant_evidence() -> dict:
+        return evidence_summary()
 
     @router.post("/bot/command")
     def bot_command(body: BotCommandRequest) -> dict:

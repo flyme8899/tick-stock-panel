@@ -169,6 +169,7 @@ ENV_VARS = (
     {"name": "DSA_PYTHON", "required": False, "purpose": "运行 ETF 轮动的解释器。未设置时使用 vendor 目录里的 .venv"},
     {"name": "DSA_UPSTREAM_COOKIE", "required": False, "purpose": "DSA 打开管理登录后，转发给上游的 Cookie。未配置 DSA_PASSWORD 时只使用这一项"},
     {"name": "DSA_PASSWORD", "required": False, "purpose": "上游管理密码。配置后自动登录并按 Set-Cookie 续期；留空则与只配 Cookie 时相同。不要写入仓库"},
+    {"name": "TSP_QUANT_EVIDENCE_FILE", "required": False, "purpose": "机械回测证据 YAML。scripts/dsa.sh 与 Docker 默认指向随仓库分发的文件，并追加到同名 DSA 技能提示。设为 off 则关闭"},
     {"name": "STOCK_LIST", "required": False, "purpose": "定时分析的自选代码，如 600519,000858。页面保存会写回 .env"},
     {"name": "SCHEDULE_ENABLED", "required": False, "purpose": "true 时 sidecar 按 SCHEDULE_TIME 恢复每日任务，启动时不立刻分析"},
     {"name": "SCHEDULE_TIME", "required": False, "purpose": "每日时刻，24 小时制 HH:MM。容器时区是 Asia/Shanghai"},

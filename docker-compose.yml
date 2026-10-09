@@ -52,8 +52,22 @@ services:
       - WEBUI_HOST=0.0.0.0
       - WEBUI_PORT=8000
       - TZ=Asia/Shanghai
+      # 容器内路径。覆盖 .env 里可能写成的宿主机路径。设为 off 可关闭注入。
+      - TSP_QUANT_EVIDENCE_FILE=/opt/tsp/quant_evidence.yaml
     volumes:
       - ./data/dsa:/app/data
       # 决策页保存定时设置时会写回这份文件。只读挂载会导致保存失败。
       - ./.env:/app/.env
+      - ./backend/app/custom/dsa/dsa_bootstrap.py:/opt/tsp/dsa_bootstrap.py:ro
+      - ./backend/app/custom/dsa/quant_evidence.py:/opt/tsp/quant_evidence.py:ro
+      - ./backend/app/custom/dsa/quant_evidence.yaml:/opt/tsp/quant_evidence.yaml:ro
+    # 探针是 sidecar 自己的 /api/v1/health（免登录）。不要用恒成功的兜底命令。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    entrypoint: ["python", "/opt/tsp/dsa_bootstrap.py"]
+    command: ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped

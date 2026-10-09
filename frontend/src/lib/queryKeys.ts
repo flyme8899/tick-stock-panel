@@ -144,6 +144,7 @@ export const QK = {
   dsaStatus:            ['dsa-status'] as const,
   dsaCatalog:           ['dsa-catalog'] as const,
   dsaSchedule:          ['dsa-schedule'] as const,
+  dsaQuantEvidence:     ['dsa-quant-evidence'] as const,
   dsaUpstream:          (key: string) => ['dsa-upstream', key] as const,
 } as const
 
