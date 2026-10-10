@@ -7,7 +7,7 @@ from datetime import datetime
 from datetime import time as dt_time
 
 from app.market_time import cn_now
-from app.news.collectors import FOREIGN_RSS_SOURCES
+from app.news.collectors import FOREIGN_RSS_SOURCES, FOREIGN_SLOW_SOURCES
 from app.news.config import SOURCE_ORDER, source_enabled
 from app.news.etf_flow import etf_wait_seconds
 from app.news.service import backfill_mentions, collect_inbox, get_lexicon, run_due
@@ -31,6 +31,8 @@ def interval_seconds(source: str, now: datetime | None = None) -> int:
         return 900 if daytime else 1800
     if source == "ima":
         return 6 * 3600
+    if source in FOREIGN_SLOW_SOURCES:
+        return 900
     if source in FOREIGN_RSS_SOURCES:
         return 300
     if source == "sec":

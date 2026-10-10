@@ -18,6 +18,8 @@ from app.news.collectors import (
     FOREIGN_FEEDS,
     FOREIGN_SOURCES,
     IMA_BASE,
+    REUTERS_GOOGLE_NEWS,
+    REUTERS_SITEMAP_INDEX,
     WSCN_URL,
     Feed,
     Item,
@@ -27,12 +29,15 @@ from app.news.collectors import (
     ima_next_cursor,
     ima_retcode,
     latest_date_folders,
+    latest_reuters_news_sitemaps,
     load_inbox_payload,
     paginate_until_seen,
     parse_cls,
     parse_dws_payload,
     parse_feed_xml,
     parse_ima_titles,
+    parse_reuters_google_news,
+    parse_reuters_news_sitemap,
     parse_time,
     parse_wscn,
     parse_zsxq_payload,
@@ -549,6 +554,8 @@ def run_due(source: str) -> dict:
         return collect_inbox()
     if source == "etf_flow":
         return collect_etf_flow()
+    if source == "reuters":
+        return collect_reuters()
     if source in FOREIGN_FEEDS:
         return collect_foreign(source)
     return {}
@@ -566,27 +573,119 @@ def _foreign_headers(source: str) -> dict[str, str]:
     }
 
 
-def _pull_feed(client: httpx.Client, feed: Feed, headers: dict[str, str]) -> tuple[list[Item], int]:
-    store = get_store()
-    etag, modified = store.get_feed_cache(feed.url)
+def _conditional_get(client: httpx.Client, url: str, headers: dict[str, str]):
+    etag, modified = get_store().get_feed_cache(url)
     request_headers = dict(headers)
     if etag:
         request_headers["If-None-Match"] = etag
     if modified:
         request_headers["If-Modified-Since"] = modified
-    response = client.get(feed.url, headers=request_headers)
+    return client.get(url, headers=request_headers)
+
+
+def _remember_feed(url: str, response) -> None:
+    get_store().save_feed_cache(
+        url,
+        _header(getattr(response, "headers", None), "etag"),
+        _header(getattr(response, "headers", None), "last-modified"),
+    )
+
+
+def _pull_feed(client: httpx.Client, feed: Feed, headers: dict[str, str]) -> tuple[list[Item], int]:
+    response = _conditional_get(client, feed.url, headers)
     status = int(getattr(response, "status_code", 200))
     if status == 304:
         return [], 304
     response.raise_for_status()
     items = parse_feed_xml(response.text, feed.source, feed_url=feed.url)
     # 解析失败时保留上一份校验值，下一轮仍拉完整响应，而不是把坏正文记成已同步。
-    store.save_feed_cache(
-        feed.url,
-        _header(getattr(response, "headers", None), "etag"),
-        _header(getattr(response, "headers", None), "last-modified"),
-    )
+    _remember_feed(feed.url, response)
     return items, status
+
+
+def collect_reuters(client: httpx.Client | None = None) -> dict:
+    """路透官网返回 401，不打开文章。先读 sitemap index 的最新 news sitemap。
+
+    索引或这一页失败时改拉 Google News，只留标题和链接。
+    索引返回 304 表示清单没变，不再解析，也不改走备用源。
+    """
+    own = client is None
+    client = client or httpx.Client(timeout=15.0, follow_redirects=True)
+    headers = _foreign_headers("reuters")
+    try:
+        items, primary_error = _reuters_primary(client, headers)
+        if primary_error is not None:
+            logger.warning("路透 sitemap 失败，改用 Google News: %s", primary_error)
+            items, fallback_error = _reuters_google(client, headers)
+            if fallback_error is not None:
+                message = f"{primary_error}; {fallback_error}"
+                get_store().mark_health("reuters", ok=False, error=message, auth_state="n/a")
+                return {"inserted": 0, "duplicate": 0, "error": message[:200]}
+        result = ingest_items(items) if items else {"inserted": 0, "duplicate": 0}
+        get_store().mark_health("reuters", ok=True, auth_state="n/a")
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("路透采集失败: %s", exc)
+        get_store().mark_health("reuters", ok=False, error=str(exc), auth_state="n/a")
+        return {"inserted": 0, "duplicate": 0, "error": str(exc)[:200]}
+    finally:
+        if own:
+            client.close()
+
+
+def _reuters_primary(client: httpx.Client, headers: dict[str, str]) -> tuple[list[Item], str | None]:
+    """成功时错误是 None，包括 304 和过滤后没有条目。失败时不写入索引的校验值。"""
+    index_url = REUTERS_SITEMAP_INDEX
+    try:
+        response = _conditional_get(client, index_url, headers)
+        status = int(getattr(response, "status_code", 200))
+        if status == 304:
+            cached_etag, cached_modified = get_store().get_feed_cache(index_url)
+            if cached_etag or cached_modified:
+                return [], None
+            return [], "sitemap index 返回 304"
+        response.raise_for_status()
+        pages = latest_reuters_news_sitemaps(response.text)
+    except Exception as exc:  # noqa: BLE001
+        return [], str(exc)[:180]
+    if not pages:
+        return [], "sitemap index 没有 news sitemap"
+    items: list[Item] = []
+    errors: list[str] = []
+    ok_pages = 0
+    for page_url in pages:
+        try:
+            page = _conditional_get(client, page_url, headers)
+            page_status = int(getattr(page, "status_code", 200))
+            if page_status != 304:
+                page.raise_for_status()
+                parsed, _saw_title = parse_reuters_news_sitemap(page.text, feed_url=page_url)
+                _remember_feed(page_url, page)
+                items.extend(parsed)
+            ok_pages += 1
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{page_url}: {exc}"[:180])
+    if ok_pages == 0:
+        return [], "; ".join(errors) or "news sitemap 请求失败"
+    _remember_feed(index_url, response)
+    if errors:
+        logger.warning("路透部分 news sitemap 失败: %s", errors[0])
+    return items, None
+
+
+def _reuters_google(client: httpx.Client, headers: dict[str, str]) -> tuple[list[Item], str | None]:
+    url = REUTERS_GOOGLE_NEWS
+    try:
+        response = _conditional_get(client, url, headers)
+        status = int(getattr(response, "status_code", 200))
+        if status == 304:
+            return [], None
+        response.raise_for_status()
+        items = parse_reuters_google_news(response.text, feed_url=url)
+    except Exception as exc:  # noqa: BLE001
+        return [], str(exc)[:180]
+    _remember_feed(url, response)
+    return items, None
 
 
 def _header(headers, name: str) -> str:

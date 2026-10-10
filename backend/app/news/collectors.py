@@ -1,4 +1,4 @@
-"""财联社、华尔街见闻、外文 RSS、SEC Atom、ima 与宿主机收件箱的解析。
+"""财联社、华尔街见闻、外文 RSS、路透 sitemap、SEC Atom、ima 与宿主机收件箱的解析。
 
 网络调用由 service 注入，这里只负责请求参数和响应归一，方便离线测试。
 外文源只取标题、摘要、链接、guid 和发布时间，不读 content:encoded 或 Atom content。
@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from urllib.parse import parse_qs, urlparse
 from xml.etree import ElementTree as ET
 
 from app.market_time import CN_TZ
@@ -434,9 +435,24 @@ _SEC_8K = (
     "https://www.sec.gov/cgi-bin/browse-edgar"
     "?action=getcurrent&type=8-K&count=40&output=atom"
 )
+# 没有结尾斜杠时 scmp.com 返回 301。只请求带斜杠的地址。
+_SCMP_BUSINESS = "https://www.scmp.com/rss/92/feed/"
+_SCMP_CHINA_ECONOMY = "https://www.scmp.com/rss/318421/feed/"
+# 路透官网对普通抓取返回 401。主源从 sitemap index 进入最新 news sitemap。
+REUTERS_SITEMAP_INDEX = (
+    "https://www.reuters.com/arc/outboundfeeds/sitemap-index/?outputType=xml"
+)
+REUTERS_GOOGLE_NEWS = (
+    "https://news.google.com/rss/search?q=site:reuters.com+when:1d"
+    "&hl=en-US&gl=US&ceid=US:en"
+)
+REUTERS_SECTIONS = frozenset({"business", "markets", "world"})
+_REUTERS_TITLE_SUFFIX = re.compile(r"\s+[-–—]\s+Reuters\s*$")
 
 FOREIGN_RSS_SOURCES = frozenset({"cnbc", "marketwatch", "wsj", "bloomberg"})
-FOREIGN_SOURCES = FOREIGN_RSS_SOURCES | {"sec"}
+# 南华早报和路透固定 15 分钟，不跟 CNBC 那一档的 5 分钟。
+FOREIGN_SLOW_SOURCES = frozenset({"scmp", "reuters"})
+FOREIGN_SOURCES = FOREIGN_RSS_SOURCES | FOREIGN_SLOW_SOURCES | {"sec"}
 _SUMMARY_LIMIT = 2000
 _TAG = re.compile(r"<[^>]+>")
 
@@ -457,6 +473,10 @@ FOREIGN_FEEDS: dict[str, tuple[Feed, ...]] = {
     "bloomberg": (
         Feed("bloomberg", _BBG_MARKETS),
         Feed("bloomberg", _BBG_TECH),
+    ),
+    "scmp": (
+        Feed("scmp", _SCMP_BUSINESS),
+        Feed("scmp", _SCMP_CHINA_ECONOMY),
     ),
     "sec": (Feed("sec", _SEC_8K),),
 }
@@ -481,20 +501,24 @@ def parse_feed_time(value: str) -> datetime | None:
     return parsed_rfc.astimezone(CN_TZ)
 
 
+def _xml_root(xml_text: str, *, empty: str, invalid: str) -> ET.Element:
+    raw_xml = (xml_text or "").lstrip("\ufeff").strip()
+    if not raw_xml:
+        raise ValueError(empty)
+    try:
+        # 带 encoding 声明的 Unicode 字符串不能直接交给 ElementTree。
+        return ET.fromstring(raw_xml.encode("utf-8"))
+    except ET.ParseError as exc:
+        raise ValueError(invalid) from exc
+
+
 def parse_feed_xml(xml_text: str, source: str, *, feed_url: str = "") -> list[Item]:
     """解析 RSS 2.0 或 Atom。没有 guid 时用链接做 source_id。
 
-    故意不读 content:encoded 和 Atom content。华尔街日报、彭博的正文在付费墙后，
+    故意不读 content:encoded 和 Atom content。华尔街日报、彭博、南华早报的正文在付费墙后，
     feed 里的长正文也不能入库。
     """
-    raw_xml = (xml_text or "").lstrip("\ufeff").strip()
-    if not raw_xml:
-        raise ValueError("RSS/Atom 为空")
-    try:
-        # 带 encoding 声明的 Unicode 字符串不能直接交给 ElementTree。
-        root = ET.fromstring(raw_xml.encode("utf-8"))
-    except ET.ParseError as exc:
-        raise ValueError("RSS/Atom 解析失败") from exc
+    root = _xml_root(xml_text, empty="RSS/Atom 为空", invalid="RSS/Atom 解析失败")
     items: list[Item] = []
     for node in root.iter():
         if _local(node.tag) not in {"item", "entry"}:
@@ -556,6 +580,160 @@ def _entry_link(node: ET.Element) -> str:
         elif not fallback:
             fallback = candidate
     return alternate or fallback
+
+
+def strip_reuters_suffix(title: str) -> str:
+    """Google News 标题以 ' - Reuters' 结尾。只去掉这一处，不改标题中间的词。"""
+    return _REUTERS_TITLE_SUFFIX.sub("", title or "").strip()
+
+
+def latest_reuters_news_sitemaps(xml_text: str) -> list[str]:
+    """从 sitemap index 选出最新一页 news sitemap。
+
+    路透的 sitemap-index 列出的是分页普通 sitemap，标题在同偏移的 news-sitemap。
+    索引里已经是 news-sitemap 的地址保持不变。`from` 缺省或最小的那页是最新。
+    只接受 reuters.com 上的 https 地址。
+    """
+    root = _xml_root(xml_text, empty="sitemap index 为空", invalid="sitemap index 解析失败")
+    locs: list[str] = []
+    for node in root.iter():
+        if _local(node.tag) != "sitemap":
+            continue
+        loc = ""
+        for child in list(node):
+            if _local(child.tag) == "loc" and (child.text or "").strip():
+                loc = child.text.strip()
+                break
+        if not loc:
+            continue
+        news_url = _as_reuters_news_sitemap(loc)
+        if news_url:
+            locs.append(news_url)
+    if not locs:
+        return []
+    latest = min(_sitemap_from(url) for url in locs)
+    picked: list[str] = []
+    seen: set[str] = set()
+    for url in locs:
+        if _sitemap_from(url) != latest or url in seen:
+            continue
+        seen.add(url)
+        picked.append(url)
+    return picked
+
+
+def parse_reuters_news_sitemap(xml_text: str, *, feed_url: str = "") -> tuple[list[Item], bool]:
+    """只取 news:title、文章链接和 publication_date。
+
+    保留 business / markets / world。不读图片地址。
+    有 url 但没有任何标题时抛错，避免把普通 sitemap 当成已经解析成功。
+    返回 (条目, 是否见到标题)。
+    """
+    root = _xml_root(xml_text, empty="news sitemap 为空", invalid="news sitemap 解析失败")
+    if _local(root.tag) != "urlset":
+        raise ValueError("不是 news sitemap")
+    items: list[Item] = []
+    saw_url = False
+    saw_title = False
+    for node in root.iter():
+        if _local(node.tag) != "url":
+            continue
+        saw_url = True
+        link = ""
+        lastmod = ""
+        title = ""
+        published_raw = ""
+        for child in list(node):
+            name = _local(child.tag)
+            if name == "loc" and not link:
+                link = "".join(child.itertext()).strip()
+            elif name == "lastmod" and not lastmod:
+                lastmod = "".join(child.itertext()).strip()
+            elif name == "news":
+                for sub in child.iter():
+                    sub_name = _local(sub.tag)
+                    if sub_name == "title" and not title:
+                        title = _plain("".join(sub.itertext()))
+                    elif sub_name == "publication_date" and not published_raw:
+                        published_raw = "".join(sub.itertext()).strip()
+        if title:
+            saw_title = True
+        link = link[:500]
+        if not _reuters_article(link):
+            continue
+        section = _reuters_section(link)
+        published = parse_feed_time(published_raw or lastmod)
+        if not title or published is None or section not in REUTERS_SECTIONS:
+            continue
+        items.append(Item(
+            source="reuters",
+            source_id=link,
+            published_at=published,
+            title=title[:180],
+            text=title,
+            url=link,
+            raw={"guid": link, "feed": feed_url},
+        ))
+    if saw_url and not saw_title:
+        raise ValueError("news sitemap 没有标题")
+    return items, saw_title
+
+
+def parse_reuters_google_news(xml_text: str, *, feed_url: str = "") -> list[Item]:
+    """备用源只留标题和链接。去掉 ' - Reuters'，不保存 description。"""
+    root = _xml_root(xml_text, empty="Google News RSS 为空", invalid="Google News RSS 解析失败")
+    items: list[Item] = []
+    for node in root.iter():
+        if _local(node.tag) not in {"item", "entry"}:
+            continue
+        title = strip_reuters_suffix(_plain(_first(node, ("title",))))
+        link = _entry_link(node)[:500]
+        guid = _first(node, ("guid", "id")).strip()[:500]
+        published = parse_feed_time(_first(node, ("pubDate", "published", "updated")))
+        if not title or not link or published is None:
+            continue
+        items.append(Item(
+            source="reuters",
+            source_id=guid or link,
+            published_at=published,
+            title=title[:180],
+            text=title,
+            url=link,
+            raw={"guid": guid, "feed": feed_url},
+        ))
+    return items
+
+
+def _as_reuters_news_sitemap(url: str) -> str:
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host not in {"reuters.com", "www.reuters.com"}:
+        return ""
+    path = parsed.path or ""
+    if "/arc/outboundfeeds/news-sitemap" in path:
+        return url.strip()
+    if "/arc/outboundfeeds/sitemap" not in path:
+        return ""
+    return url.strip().replace("/arc/outboundfeeds/sitemap", "/arc/outboundfeeds/news-sitemap", 1)
+
+
+def _sitemap_from(url: str) -> int:
+    raw = (parse_qs(urlparse(url).query).get("from") or ["0"])[0]
+    try:
+        return max(int(raw), 0)
+    except ValueError:
+        return 0
+
+
+def _reuters_article(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme in {"http", "https"} and host in {"reuters.com", "www.reuters.com"}
+
+
+def _reuters_section(url: str) -> str:
+    path = urlparse(url).path.strip("/")
+    return path.split("/", 1)[0] if path else ""
 
 
 def _plain(value: str, limit: int = 2000) -> str:

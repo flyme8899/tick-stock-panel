@@ -10,7 +10,7 @@ from app.config import settings
 
 SOURCE_ORDER = (
     "dws", "zsxq", "ima", "cls", "wscn", "etf_flow",
-    "cnbc", "marketwatch", "wsj", "bloomberg", "sec",
+    "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "sec",
 )
 
 SOURCE_LABELS = {
@@ -24,6 +24,8 @@ SOURCE_LABELS = {
     "marketwatch": "MarketWatch",
     "wsj": "华尔街日报市场",
     "bloomberg": "彭博",
+    "scmp": "南华早报",
+    "reuters": "路透",
     "sec": "SEC 8-K",
     "hot": "TSP热门候选",
 }

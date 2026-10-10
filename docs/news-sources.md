@@ -18,6 +18,8 @@
 | MarketWatch | TSP 进程 | 头条 RSS。只存标题、摘要、链接和时间 |
 | 华尔街日报市场 | TSP 进程 | 市场 RSS。只存标题和摘要，不抓付费正文 |
 | 彭博 | TSP 进程 | 市场、科技 RSS。只存标题和摘要，不抓付费正文 |
+| 南华早报 | TSP 进程 | 商业、中国经济 RSS。只存标题、摘要和链接，不抓付费正文 |
+| 路透 | TSP 进程 | 商业、市场、国际 sitemap。只存标题和链接。主源失败时用 Google News |
 | SEC 8-K | TSP 进程 | 最新 8-K Atom。只存标题、摘要和申报链接 |
 
 钉钉和知识星球的登录态在宿主机，不在容器里。宿主机脚本把 JSON 写到 `data/news/inbox/`，TSP 再入库。不开放无鉴权的 HTTP 写入接口。
@@ -54,7 +56,11 @@ VISION_AI_MODEL=deepseek/deepseek-v4-flash-vision-exp
 
 进程如果在 09:00 之后才起来，当天补看一次，然后等到下一个 07:35。
 
-CNBC、MarketWatch、华尔街日报市场、彭博约 5 分钟一次，SEC 8-K 约 3 分钟一次。这两档固定间隔，不按 A 股交易时段加快或放慢。请求带上次响应的 `ETag` / `Last-Modified`，返回 304 时不再解析。采集只请求 feed 地址，不打开条目链接，也不保存 `content:encoded` 或 Atom `content`。
+CNBC、MarketWatch、华尔街日报市场、彭博约 5 分钟一次，南华早报和路透约 15 分钟一次，SEC 8-K 约 3 分钟一次。这三档固定间隔，不按 A 股交易时段加快或放慢。请求带上次响应的 `ETag` / `Last-Modified`，返回 304 时不再解析。采集只请求 feed 地址，不打开条目链接，也不保存 `content:encoded` 或 Atom `content`。
+
+南华早报的地址必须带结尾斜杠：<https://www.scmp.com/rss/92/feed/>（商业）和 <https://www.scmp.com/rss/318421/feed/>（中国经济）。没有斜杠会 301。摘要用 RSS 的 `description`，付费正文不入库。
+
+路透官网对普通抓取返回 401，所以不打开文章。主源先请求 <https://www.reuters.com/arc/outboundfeeds/sitemap-index/?outputType=xml>，再取最新一页 news sitemap。`from` 缺省或最小的那页是最新；索引里若给出的是普通 sitemap，改读同一偏移的 `news-sitemap`，因为标题在那里。只保留路径第一节是 `business`、`markets`、`world` 的条目，字段是标题、链接和 `news:publication_date`。索引或这一页失败时，才改拉 Google News RSS <https://news.google.com/rss/search?q=site:reuters.com+when:1d&hl=en-US&gl=US&ceid=US:en>，去掉标题末尾的 ` - Reuters`，只存标题和链接。这条 RSS 的 `<source url>` 只是路透首页，条目链接是 Google News 地址，不再逐条打开。主源返回 304 时不改走备用源。最新 news sitemap 还没成功之前，不记录索引的 `ETag`，下一轮仍会重试主源。
 
 财联社电报按 `last_time` 往更早翻，直到这一页里出现已经入库的 id，最多 10 页。华尔街见闻两个频道各自用 `next_cursor` 做 `cursor` 翻页，同样见到已入库 id 就停，每个频道最多 10 页。重启或中间停过之后，下一轮用同一套规则补上缺口。
 
@@ -73,6 +79,8 @@ NEWS_CNBC_ENABLED=false
 NEWS_MARKETWATCH_ENABLED=false
 NEWS_WSJ_ENABLED=false
 NEWS_BLOOMBERG_ENABLED=false
+NEWS_SCMP_ENABLED=false
+NEWS_REUTERS_ENABLED=false
 NEWS_SEC_ENABLED=false
 ```
 
@@ -89,7 +97,7 @@ NEWS_ZSXQ_GROUP_ID=
 
 登录失效时，若配置了 `DINGTALK_WEBHOOK_URL`（可选 `DINGTALK_SECRET`），6 小时内对同一来源只发一条提醒，正文不含资讯内容。
 
-可选 `NEWS_LLM_EXTRACT=true` 时，词典抽不到股票或板块才会调用现有 AI 客户端，每小时最多 10 次，并且只接受词典里已有的名称或代码。外文来源用同一次调用补一句中文摘要，模型只看到标题和 feed 摘要；同一次轮询最多处理 10 条新资讯，其余只存标题和摘要。默认关闭。这是文本模型，和 ETF 申赎的 `VISION_AI_*` 不是同一套。
+可选 `NEWS_LLM_EXTRACT=true` 时，词典抽不到股票或板块才会调用现有 AI 客户端，每小时最多 10 次，并且只接受词典里已有的名称或代码。外文来源（含南华早报和路透）用同一次调用补一句中文摘要，模型只看到标题和 feed 摘要。路透没有摘要时，送进去的就是标题。同一次轮询最多处理 10 条新资讯，其余只存标题和摘要。默认关闭。这是文本模型，和 ETF 申赎的 `VISION_AI_*` 不是同一套。
 
 ## 宿主机采集
 
@@ -140,7 +148,7 @@ SQLite 在 `data/news/news.sqlite`，保留约 45 天。同一来源的 `source_
 
 - 增加情报源类型 `tsp`。
 - 只放行指向 `/api/news/dsa-feed`、且主机在允许名单里的地址（`localhost`、`127.0.0.1`、`::1`、`host.docker.internal`、`app`、`tsp`，以及 `TSP_NEWS_BASE_URL` 的主机）。
-- 为每个采集源（含 ETF领航者和外文 RSS）和「TSP热门候选」各建一个情报源。外文源同样只传标题和摘要。
+- 为每个采集源（含 ETF领航者、外文 RSS、南华早报和路透）和「TSP热门候选」各建一个情报源。外文源同样只传标题和摘要。路透没有摘要时，摘要位置是标题。
 - 每条资讯写成市场范围一行，再按股票（最多 8 个，规范代码如 `600519.SH`）和板块（最多 6 个）各写一行，个股分析才能按标签命中。
 - 情报源关闭时拒绝拉取，不把状态记成失败。写入后按 DSA 的 `news_intel_retention_days` 删过期行，返回值带最多 5 条 `sample_items`。
 - 大盘复盘合并本地情报时，把最多 4 条热门候选插到前面，避免电报占满 6 条窗口。

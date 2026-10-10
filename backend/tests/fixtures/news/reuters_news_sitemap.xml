@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://www.reuters.com/business/environment/category-3-hurricane-isaias-makes-landfall-near-destin-florida-nhc-says-2026-10-10/</loc>
+    <lastmod>2026-10-10T05:40:15.722Z</lastmod>
+    <news:news>
+      <news:publication>
+        <news:name>Reuters</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-10-10T01:49:10.295Z</news:publication_date>
+      <news:title>Isaias weakens to Category 1 hurricane after Florida landfall, NHC says</news:title>
+    </news:news>
+    <image:image>
+      <image:loc>https://cloudfront-us-east-2.images.arcpublishing.com/reuters/WHE2HHV7GJMWDMZ7MZMSAOHIVQ.jpg?width=1920</image:loc>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://www.reuters.com/markets/europe/global-markets-technicals-2026-10-09/</loc>
+    <lastmod>2026-10-09T10:03:46.705Z</lastmod>
+    <news:news>
+      <news:publication>
+        <news:name>Reuters</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-10-09T10:03:46.523Z</news:publication_date>
+      <news:title>Mapping the Market: Citigroup shares set to deepen losses</news:title>
+    </news:news>
+    <image:image>
+      <image:loc>https://cloudfront-us-east-2.images.arcpublishing.com/reuters/3STQA5TY6JM65JIE7LB5OCVEYE.jpg?width=1920</image:loc>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://www.reuters.com/world/india/india-poll-chief-gyanesh-kumar-under-pressure-over-alleged-manipulation-2026-09-28/</loc>
+    <lastmod>2026-10-10T05:36:09.842Z</lastmod>
+    <news:news>
+      <news:publication>
+        <news:name>Reuters</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-09-28T13:02:42.57Z</news:publication_date>
+      <news:title>Pressure mounts on India poll chief Gyanesh Kumar over voter list changes</news:title>
+    </news:news>
+    <image:image>
+      <image:loc>https://cloudfront-us-east-2.images.arcpublishing.com/reuters/FLLFJZGFTFN4BFWR7AACYI2DOY.jpg?width=1920</image:loc>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://www.reuters.com/sports/rangers-g-igor-shesterkin-lower-body-wont-return-vs-caps--flm-2026-10-10/</loc>
+    <lastmod>2026-10-10T05:32:04.799Z</lastmod>
+    <news:news>
+      <news:publication>
+        <news:name>Reuters</news:name>
+        <news:language>en</news:language>
+      </news:publication>
+      <news:publication_date>2026-10-10T01:16:39.662Z</news:publication_date>
+      <news:title>Rangers G Igor Shesterkin exits vs. Capitals with lower-body injury</news:title>
+    </news:news>
+    <image:image>
+      <image:loc>https://cloudfront-us-east-2.images.arcpublishing.com/reuters/73VTLA7VGVL37FCHBYEL7ZACII.jpg?width=1920</image:loc>
+    </image:image>
+  </url>
+</urlset>

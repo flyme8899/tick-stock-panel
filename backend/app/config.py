@@ -170,6 +170,8 @@ class Settings(BaseSettings):
     news_marketwatch_enabled: str = ""
     news_wsj_enabled: str = ""
     news_bloomberg_enabled: str = ""
+    news_scmp_enabled: str = ""
+    news_reuters_enabled: str = ""
     news_sec_enabled: str = ""
     # 例：TSP-News ops@example.com。不含邮箱时 SEC 来源保持未配置。
     sec_user_agent: str = ""

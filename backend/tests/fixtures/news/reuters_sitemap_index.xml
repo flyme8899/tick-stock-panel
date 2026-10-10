@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://www.reuters.com/arc/outboundfeeds/sitemap/?outputType=xml</loc>
+    <lastmod>2026-10-10T05:27:57.456Z</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.reuters.com/arc/outboundfeeds/sitemap/?outputType=xml&amp;from=100</loc>
+    <lastmod>2026-10-10T05:27:57.456Z</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://www.reuters.com/arc/outboundfeeds/sitemap/?outputType=xml&amp;from=200</loc>
+    <lastmod>2026-10-10T05:27:57.456Z</lastmod>
+  </sitemap>
+</sitemapindex>
