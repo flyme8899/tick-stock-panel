@@ -3008,10 +3008,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ confirm: true }),
     }),
-  extendHistory: (value: number, unit: 'day' | 'month' | 'year') =>
+  extendHistory: (value: number, unit: 'day' | 'month' | 'year', assetType: 'stock' | 'etf' | 'index' = 'stock') =>
     request<{ status: string; job_id: string }>('/api/kline/extend_history', {
       method: 'POST',
-      body: JSON.stringify({ value, unit }),
+      body: JSON.stringify({ value, unit, asset_type: assetType }),
     }),
   repairDaily: (startDate: string) =>
     request<{ status: string; job_id: string }>('/api/kline/repair_daily', {

@@ -1,15 +1,18 @@
 """向前扩展历史数据 — 完全独立于 daily_pipeline 的盘后管道。
 
 用户从日 K 卡片手动触发,指定往前补的时长 (x 天/月/年)。
+支持三种资产: stock / etf / index — 各自独立落盘, 深度需分别补。
+
 流程:
-  1. 获取当前最早日期
+  1. 获取当前最早日期 (按资产族)
   2. 向前拉日 K batch (start = 最早日期 - offset, end = 最早日期)
-  3. 向前拉除权因子 (同范围)
-  4. 全量重算 enriched
+  3. 向前拉除权因子 (同范围, 仅股票族)
+  4. 全量重算 enriched (股票族) / 增量 enriched (ETF、指数族)
   5. 刷新视图 + 缓存
 
 ⚠️ 本模块不导入 daily_pipeline 的任何函数,只复用基础设施:
   - kline_sync.sync_and_persist_daily_batch / sync_adj_factor
+  - index_sync.sync_and_persist_etf_daily / sync_and_persist_index_daily
   - indicators.pipeline.run_pipeline
   - pipeline_jobs.JobStore
   - tickflow.repository.KlineRepository
@@ -26,6 +29,16 @@ from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
+
+# 支持的资产类型 (与挖掘 availability 的 asset_type 口径一致)。
+ASSET_TYPES = ("stock", "etf", "index")
+
+# 资产类型 → 日K/enriched 分区目录名, 用于统计扩展后的天数。
+_ASSET_DIRS = {
+    "stock": ("kline_daily", "kline_daily_enriched"),
+    "etf": ("kline_etf_daily", "kline_etf_enriched"),
+    "index": ("kline_index_daily", "kline_index_enriched"),
+}
 
 
 def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:  # noqa: ARG001
@@ -105,39 +118,87 @@ def run_extend_history(
     value: int,
     unit: str,
     on_progress: Callable | None = None,
+    asset_type: str = "stock",
 ) -> dict:
     """向前扩展历史数据的主函数。
+
+    asset_type: stock / etf / index。三族各自独立落盘, 深度需分别补 ——
+    例如只补过股票时, ETF 仍停在近一年, ETF 的 balanced 挖掘会照样卡门槛。
 
     完全独立于 daily_pipeline.run_now(),不调用其任何逻辑。
     返回结果 dict 供 job_store 记录。
     """
+    if asset_type not in ASSET_TYPES:
+        return {"error": f"不支持的资产类型: {asset_type}"}
+
     emit = on_progress or _noop
 
     # 0. 计算时间偏移
     offset = compute_offset(value, unit)
     today = date.today()
 
-    # 1. 获取当前最早日期
+    # 1. 获取当前最早日期 (按资产族, 各表深度可能不同)
     emit("extend_history", 2, "检查当前数据范围…")
-    earliest = repo.earliest_daily_date()
+    earliest = repo.earliest_daily_date_for(asset_type)
 
     if not earliest:
-        return {"error": "本地无日K数据,请先执行一次完整同步"}
+        label = {"stock": "股票", "etf": "ETF", "index": "指数"}[asset_type]
+        return {"error": f"本地无{label}日K数据,请先执行一次完整同步"}
 
     new_start = earliest - offset
     # 不能超过今天
     if new_start >= earliest:
         return {"error": "扩展范围无效,请增大时间跨度"}
 
+    start_str = new_start.strftime("%Y-%m-%d")
+    end_str = earliest.strftime("%Y-%m-%d")
+
+    if asset_type == "stock":
+        written_daily, written_adj, universe_size = _extend_stock(
+            repo, capset, new_start, earliest, today, start_str, end_str, emit,
+        )
+    else:
+        written_daily, written_adj, universe_size = _extend_index_or_etf(
+            repo, capset, asset_type, new_start, earliest, start_str, end_str, emit,
+        )
+
+    daily_dirname, enriched_dirname_ = _ASSET_DIRS[asset_type]
+    enriched_dir = repo.store.data_dir / enriched_dirname_
+    enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
+    daily_dir = repo.store.data_dir / daily_dirname
+    daily_days = len(list(daily_dir.glob("date=*"))) if daily_dir.exists() else 0
+
+    emit("extend_history", 100, f"完成,已扩展至 {new_start}")
+
+    return {
+        "asset_type": asset_type,
+        "earliest_before": earliest.isoformat(),
+        "earliest_after": new_start.isoformat(),
+        "daily_rows": written_daily,
+        "daily_days": daily_days,
+        "adj_factor_rows": written_adj,
+        "enriched_days": enriched_days,
+        "universe_size": universe_size,
+    }
+
+
+def _extend_stock(
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    new_start: date,
+    earliest: date,
+    today: date,
+    start_str: str,
+    end_str: str,
+    emit: Callable,
+) -> tuple[int, int, int]:
+    """股票族: 日K batch + 除权因子 + 全量重建 enriched。返回 (日K行, 除权因子行, 标的数)。"""
     # 2. 解析标的池
     emit("extend_history", 5, "解析标的池…")
     universe = _resolve_universe(capset)
     if not universe:
-        return {"error": "标的池为空"}
+        return 0, 0, 0
     emit("extend_history", 8, f"标的池: {len(universe)} 只")
-
-    start_str = new_start.strftime("%Y-%m-%d")
-    end_str = earliest.strftime("%Y-%m-%d")
 
     # 3. 拉日 K
     emit("extend_history", 10, f"获取日K [{start_str} ~ {end_str}]…")
@@ -194,12 +255,8 @@ def run_extend_history(
     logger.info("extend_history: full enriched rebuild start")
 
     from app.indicators.pipeline import run_pipeline
-    written_enriched = run_pipeline()
+    run_pipeline()
 
-    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
-    enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
-    emit("extend_history", 92, f"enriched 完成,覆盖 {enriched_days} 天")
-    logger.info("extend_history: enriched done, %d days", enriched_days)
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
 
@@ -210,18 +267,89 @@ def run_extend_history(
     _refresh_single_view(repo, "adj_factor")
     _invalidate(None)
 
-    # 7. 统计结果
-    daily_dir = repo.store.data_dir / "kline_daily"
-    daily_days = len(list(daily_dir.glob("date=*"))) if daily_dir.exists() else 0
+    return written_daily, written_adj, len(universe)
 
-    emit("extend_history", 100, f"完成,已扩展至 {new_start}")
 
-    return {
-        "earliest_before": earliest.isoformat(),
-        "earliest_after": new_start.isoformat(),
-        "daily_rows": written_daily,
-        "daily_days": daily_days,
-        "adj_factor_rows": written_adj,
-        "enriched_days": enriched_days,
-        "universe_size": len(universe),
-    }
+def _extend_index_or_etf(
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    asset_type: str,
+    new_start: date,
+    earliest: date,
+    start_str: str,
+    end_str: str,
+    emit: Callable,
+) -> tuple[int, int, int]:
+    """ETF / 指数族: 走 index_sync 的区间同步 (自带 enriched 增量重算)。
+
+    返回 (日K行, 除权因子行=0, 标的数)。除权因子不适用于指数; ETF 的
+    除权由 sync_and_persist_etf_daily 内部用 adj_factor_etf 处理。
+    """
+    from app.services import index_sync
+
+    label = "ETF" if asset_type == "etf" else "指数"
+
+    # 解析标的池用于上报规模 (同步函数内部会自行取 instruments)。
+    symbols = _resolve_index_universe(repo, asset_type)
+    emit("extend_history", 8, f"{label}标的池: {len(symbols)} 只")
+    if not symbols:
+        return 0, 0, 0
+
+    emit("extend_history", 10, f"获取{label}日K [{start_str} ~ {end_str}]…")
+    logger.info("extend_history: %s daily K [%s ~ %s], %d symbols",
+                asset_type, start_str, end_str, len(symbols))
+
+    def _chunk(cur: int, tot: int) -> None:
+        emit("extend_history", 10 + int(55 * cur / tot),
+             f"{label}日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+
+    start_dt = datetime.combine(new_start, datetime.min.time())
+    end_dt = datetime.combine(earliest, datetime.min.time())
+
+    if asset_type == "etf":
+        written_daily = index_sync.sync_and_persist_etf_daily(
+            repo, capset,
+            start_date=start_dt, end_date=end_dt,
+            on_chunk_done=_chunk,
+        )
+        view = "kline_etf_daily"
+        enriched_view = "kline_etf_enriched"
+    else:
+        written_daily = index_sync.sync_and_persist_index_daily(
+            repo, capset,
+            start_date=start_dt, end_date=end_dt,
+            on_chunk_done=_chunk,
+        )
+        view = "kline_index_daily"
+        enriched_view = "kline_index_enriched"
+
+    emit("extend_history", 70, f"{label}日K 完成,写入 {written_daily} 行")
+    logger.info("extend_history: %s daily K done, %d rows", asset_type, written_daily)
+
+    # 刷新视图与缓存
+    emit("extend_history", 90, "刷新视图…")
+    _refresh_single_view(repo, view)
+    _refresh_single_view(repo, enriched_view)
+    if hasattr(repo, "refresh_index_views"):
+        repo.refresh_index_views()
+    _invalidate(None)
+
+    return written_daily, 0, len(symbols)
+
+
+def _resolve_index_universe(repo: KlineRepository, asset_type: str) -> list[str]:
+    """取 ETF 或指数的本地标的代码, 仅用于上报规模。"""
+    try:
+        if asset_type == "etf":
+            df = repo.get_etf_instruments()
+        else:
+            df = repo.get_index_instruments()
+        if df is not None and not df.is_empty() and "symbol" in df.columns:
+            if asset_type == "index" and "asset_type" in df.columns:
+                # index_instruments 合并存了指数+ETF, 取指数族时排掉 ETF。
+                df = df.filter(df["asset_type"] != "etf")
+            return sorted(set(df["symbol"].to_list()))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("resolve %s universe failed: %s", asset_type, e)
+    return []
+

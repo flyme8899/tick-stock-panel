@@ -339,6 +339,7 @@ export function Data() {
   } : null
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
   const indexEarliestDate = s?.index_daily?.earliest_date ?? s?.index_enriched?.earliest_date ?? null
+  const etfEarliestDate = etfOverviewStats?.earliest_date ?? null
   const indexOffsetDays = indexExtendUnit === 'month' ? indexExtendValue * 30 : indexExtendValue * 365
   const indexTargetDate = (() => {
     const d = indexEarliestDate ? new Date(indexEarliestDate) : new Date()
@@ -526,6 +527,8 @@ export function Data() {
               { label: '指标', table: 'etf_enriched' },
             ] as FieldTab[]}
             onShowFields={(t) => setSchemaTable(t ?? 'etf_daily')}
+            onSettings={hasData ? () => setOpenSettings(v => v === 'etf' ? null : 'etf') : undefined}
+            settingsOpen={openSettings === 'etf'}
           />
         )
       case 'minute':
@@ -1017,6 +1020,28 @@ export function Data() {
               hasCap={hasDailyBatchCap}
               isRunning={!!activeJobId}
               earliestDate={s?.daily?.earliest_date ?? null}
+              onStart={() => setOpenSettings(null)}
+            />
+          </SettingsModal>
+        )}
+        {openSettings === 'etf' && (
+          <SettingsModal title="ETF 日 K · 向前扩展历史" onClose={() => setOpenSettings(null)}>
+            <ExtendHistoryPanel
+              hasCap={hasDailyBatchCap}
+              isRunning={!!activeJobId}
+              earliestDate={etfEarliestDate}
+              assetType="etf"
+              onStart={() => setOpenSettings(null)}
+            />
+          </SettingsModal>
+        )}
+        {openSettings === 'index' && (
+          <SettingsModal title="指数日 K · 向前扩展历史" onClose={() => setOpenSettings(null)}>
+            <ExtendHistoryPanel
+              hasCap={hasDailyBatchCap}
+              isRunning={!!activeJobId}
+              earliestDate={indexEarliestDate}
+              assetType="index"
               onStart={() => setOpenSettings(null)}
             />
           </SettingsModal>
