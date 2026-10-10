@@ -89,6 +89,23 @@ def test_hot_markdown_keeps_private_sources_as_names_only():
     assert "电报正文" not in text
 
 
+def test_verified_confirmation_labels_auction_and_lag():
+    from app.news.push import _confirm_label, event_is_verified
+
+    assert _confirm_label({"phase": "auction", "strength": "强", "horizon": "主线"}) == "竞价验证 强·主线"
+    assert _confirm_label({"lagged": True, "strength": "无"}) == "消息滞后确认"
+    assert event_is_verified({"strength": "中"}) is True
+    assert event_is_verified({"strength": "无"}) is False
+    packed = format_hot_markdown([], [], heading="【热点候选】盘前", events=[{
+        "name": "平安银行回购",
+        "story_count": 1,
+        "source_count": 1,
+        "confirmation": {"phase": "auction", "strength": "强", "horizon": "主线"},
+    }])
+    assert packed is not None
+    assert "竞价验证 强·主线" in packed[1]
+
+
 def test_symbol_messages_are_labeled_by_type():
     abnormal = format_symbol_markdown("abnormal", [{
         "symbol": "600519.SH",

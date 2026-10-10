@@ -17,6 +17,7 @@ from app.news.config import (
     SOURCE_LABELS,
     push_master_enabled,
     push_type_enabled,
+    push_type_saved,
     webhook_configured,
 )
 from app.news.dingtalk import send_markdown
@@ -171,6 +172,61 @@ def _ref_text(ref: dict) -> str:
     return str(ref.get("label") or "")
 
 
+def _confirm_label(confirm: dict) -> str:
+    strength = str(confirm.get("strength") or "")
+    phase = str(confirm.get("phase") or "")
+    name = "竞价验证" if phase == "auction" else "盘面验证"
+    horizon = str(confirm.get("horizon") or "")
+    if horizon not in {"主线", "一日游"}:
+        horizon = str(confirm.get("persistence") or "")
+        if horizon in {"", "无"}:
+            horizon = ""
+    if confirm.get("lagged") and strength in {"", "无"}:
+        return "消息滞后确认"
+    if strength in {"", "无"}:
+        return ""
+    text = f"{name} {strength}"
+    if horizon:
+        text += f"·{horizon}"
+    if confirm.get("lagged"):
+        text = f"消息滞后确认·{text}"
+    return text
+
+
+def event_is_verified(confirm: dict | None) -> bool:
+    if not isinstance(confirm, dict):
+        return False
+    return str(confirm.get("strength") or "") not in {"", "无"}
+
+
+def _verified_event_names() -> dict[str, str]:
+    """已验证事件映射到的个股。同一标的多条时保留先出现的。"""
+    from app.news.service import hot_event_listing
+
+    found: dict[str, str] = {}
+    try:
+        listing = hot_event_listing(limit=20)
+    except Exception:  # noqa: BLE001
+        logger.debug("读取已验证事件失败", exc_info=True)
+        return found
+    for event in listing.get("events") or []:
+        if not isinstance(event, dict) or not event_is_verified(event.get("confirmation")):
+            continue
+        name = str(event.get("name") or "").strip()
+        if not name:
+            continue
+        phase = str((event.get("confirmation") or {}).get("phase") or "")
+        prefix = "竞价验证" if phase == "auction" else "盘面验证"
+        label = f"{prefix} {name}"
+        for stock in event.get("stocks") or []:
+            if not isinstance(stock, dict):
+                continue
+            key = str(stock.get("key") or "").strip()
+            if key and key not in found:
+                found[key] = label
+    return found
+
+
 def format_hot_markdown(
     sectors: list[dict],
     stocks: list[dict],
@@ -192,11 +248,7 @@ def format_hot_markdown(
             direction = str(row.get("direction") or "").strip()
             level = str(row.get("importance") or "").strip()
             confirm = row.get("confirmation") if isinstance(row.get("confirmation"), dict) else {}
-            checked = ""
-            if str(confirm.get("strength") or "") not in {"", "无"}:
-                checked = f"盘面验证 {confirm.get('strength')}"
-                if str(confirm.get("persistence") or "") not in {"", "无"}:
-                    checked += f"·{confirm.get('persistence')}"
+            checked = _confirm_label(confirm)
             label = "".join(f" · {part}" for part in (level, checked, tag, direction) if part)
             lines.append(
                 f"{index}. {row.get('name') or row.get('key')}{label}{concept_text} · "
@@ -747,6 +799,8 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         return False
     limit = top_n()
     events = [row for row in snapshot if row["kind"] == "event"][:limit]
+    if push_type_saved("hot_verified"):
+        events = [row for row in events if event_is_verified(row.get("confirmation"))]
     sectors = [row for row in snapshot if row["kind"] == "sector"][:limit]
     stocks = [row for row in snapshot if row["kind"] == "stock"][:limit]
     etfs = [row for row in snapshot if row["kind"] == "etf"][:limit]
@@ -798,14 +852,18 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
             state.data["t_pct_day"] = day
         return False
     detail_of = _detail_lookup(kind, fresh)
-    rows = [
-        {
+    linked = _verified_event_names() if kind == "abnormal" and push_type_saved("abnormal_verified") else {}
+    rows = []
+    for symbol, reason in fresh[:15]:
+        detail = detail_of.get((symbol, reason), "")
+        event_name = linked.get(symbol)
+        if event_name:
+            detail = f"{detail} · {event_name}" if detail else event_name
+        rows.append({
             "symbol": symbol,
             "name": names.get(symbol) or symbol,
-            "detail": detail_of.get((symbol, reason), ""),
-        }
-        for symbol, reason in fresh[:15]
-    ]
+            "detail": detail,
+        })
     packed = format_symbol_markdown(kind, rows)
     if packed is None or not _send(kind, packed[0], packed[1], opener, stamp, state):
         return False

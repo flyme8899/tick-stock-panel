@@ -15,6 +15,18 @@ import { QK } from '@/lib/queryKeys'
 
 type Pick = { type: string; id: string }
 
+function confirmSourceLabel(confirm?: {
+  strength?: string
+  phase?: string
+  lagged?: boolean
+} | null): string | undefined {
+  if (!confirm) return undefined
+  if (confirm.lagged && (!confirm.strength || confirm.strength === '无')) return '消息滞后确认'
+  if (!confirm.strength || confirm.strength === '无') return undefined
+  const name = confirm.phase === 'auction' ? '竞价验证' : '盘面验证'
+  return confirm.lagged ? `消息滞后确认 · ${name} ${confirm.strength}` : `${name} ${confirm.strength}`
+}
+
 const STRATEGY_TAG = 'inline-block rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-px text-[10px] font-medium leading-tight text-amber-600 dark:text-amber-400'
 
 function optionalNumber(raw: string): number | undefined {
@@ -207,9 +219,7 @@ export function StockPicker() {
               category: item.category,
               direction: item.direction,
               importance: item.importance,
-              confirmationLabel: item.confirmation?.strength && item.confirmation.strength !== '无'
-                ? `盘面验证 ${item.confirmation.strength}`
-                : undefined,
+              confirmationLabel: confirmSourceLabel(item.confirmation),
               mappedStocks: item.mapped_stocks,
             }))}
             selectedIds={idsOf(picks, 'hot_events')}

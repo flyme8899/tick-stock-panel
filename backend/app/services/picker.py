@@ -851,11 +851,16 @@ def _confirmation_brief(raw) -> dict | None:
     label = str(raw.get("label") or "")
     if not strength and not label:
         return None
+    phase = str(raw.get("phase") or "")
+    horizon = str(raw.get("horizon") or "")
     return {
         "strength": strength,
         "persistence": persistence,
         "label": label,
         "live": bool(raw.get("live")),
+        "phase": phase if phase in {"auction", "intraday", "session"} else "",
+        "lagged": bool(raw.get("lagged")),
+        "horizon": horizon if horizon in {"主线", "一日游"} else "",
     }
 
 

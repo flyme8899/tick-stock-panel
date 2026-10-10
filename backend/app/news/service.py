@@ -461,6 +461,12 @@ def _public_confirmation(raw) -> dict:
     persistence = str(payload.get("persistence") or "无")
     if persistence not in {"持续", "短暂", "无"}:
         persistence = "无"
+    phase = str(payload.get("phase") or "session")
+    if phase not in {"auction", "intraday", "session"}:
+        phase = "session"
+    horizon = str(payload.get("horizon") or "")
+    if horizon not in {"主线", "一日游"}:
+        horizon = ""
     return {
         "label": str(payload.get("label") or "暂无行情"),
         "session": payload.get("session") or None,
@@ -469,6 +475,9 @@ def _public_confirmation(raw) -> dict:
         "abnormal": bool(payload.get("abnormal")),
         "strength": strength,
         "persistence": persistence,
+        "phase": phase,
+        "lagged": bool(payload.get("lagged")),
+        "horizon": horizon,
         "detail": {
             "excess_pct": _optional_score(detail.get("excess_pct")),
             "breadth": _optional_score(detail.get("breadth")),
@@ -478,6 +487,14 @@ def _public_confirmation(raw) -> dict:
             "sector_net_inflow": _optional_score(detail.get("sector_net_inflow")),
             "windows": int(detail.get("windows") or 0),
             "windows_hit": int(detail.get("windows_hit") or 0),
+            "pre_return": _optional_score(detail.get("pre_return")),
+            "auction_open_pct": _optional_score(detail.get("auction_open_pct")),
+            "auction_vol_ratio": _optional_score(detail.get("auction_vol_ratio")),
+            "high_open_breadth": _optional_score(detail.get("high_open_breadth")),
+            "window_5": _optional_score(detail.get("window_5")),
+            "window_15": _optional_score(detail.get("window_15")),
+            "window_30": _optional_score(detail.get("window_30")),
+            "share": _optional_score(detail.get("share")),
         },
     }
 

@@ -215,12 +215,14 @@ def feed_matches(presented: str) -> bool:
         return False
 
 
-PUSH_TYPES = ("hot", "abnormal", "t_trade")
+PUSH_TYPES = ("hot", "abnormal", "t_trade", "hot_verified", "abnormal_verified")
 
 _PUSH_ENV = {
     "hot": "NEWS_PUSH_HOT_ENABLED",
     "abnormal": "NEWS_PUSH_ABNORMAL_ENABLED",
     "t_trade": "NEWS_PUSH_T_ENABLED",
+    "hot_verified": "NEWS_PUSH_HOT_VERIFIED",
+    "abnormal_verified": "NEWS_PUSH_ABNORMAL_VERIFIED",
 }
 
 
@@ -298,8 +300,16 @@ def push_status() -> dict:
         "hot": "交易日盘前和收盘后各一次，候选明显变化时再补一条",
         "abnormal": "自选股的涨停、炸板、跌停、新高新低，从无到有才推",
         "t_trade": "自选相对分时均价、日内高低和昨收的边沿提醒",
+        "hot_verified": "开启后，热点候选只保留已经竞价或盘面验证的事件",
+        "abnormal_verified": "开启后，异动监控附上同一标的已经验证的事件名",
     }
-    labels = {"hot": "热点候选", "abnormal": "异动监控", "t_trade": "做T提醒"}
+    labels = {
+        "hot": "热点候选",
+        "abnormal": "异动监控",
+        "t_trade": "做T提醒",
+        "hot_verified": "热点只推已验证",
+        "abnormal_verified": "异动附带已验证事件",
+    }
     return {
         "configured": webhook_configured(),
         "master_enabled": push_master_enabled(),

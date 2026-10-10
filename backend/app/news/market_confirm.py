@@ -1,8 +1,9 @@
-"""热门事件的盘面验证。只使用首见时刻之后的行情和资金，避免用到消息出来之前的涨跌。
+"""热门事件的盘面验证。只使用当时已经能看到的行情和资金。
 
-异动沿用推送里的涨跌停、炸板和新高新低判断。力度看超额涨跌、上涨家数占比和主力净流入。
-持续度看首见之后有几个分时窗口或交易日仍顺着事件方向走。
-周末和盘后没有当时的行情时，改用最近一个交易日，并在结果里标明。
+隔夜消息（上一交易日收盘后到下一交易日 9:25，含周末）在 9:25 集合竞价出来之后按竞价验证计分。
+盘中消息看发布后 5、15、30 分钟相对发布前的增量，用来区分消息推动和本来就在涨的标的。
+已经验证的事件再看下午和下一交易日，分成一日游和主线。异动若发生在消息之前，标成消息滞后确认。
+同一窗口里多条事件映射到同一标的时，按时间和映射强弱分配，不重复计算同一段涨跌。
 """
 from __future__ import annotations
 
@@ -47,7 +48,7 @@ def latest_session_day(now: datetime) -> date:
 def attach_confirmations(events: list[dict], now: datetime) -> None:
     tape = load_market_tape(now, events)
     for event in events:
-        event["confirmation"] = score_confirmation(event, tape, now)
+        event["confirmation"] = score_confirmation(event, tape, now, peers=events)
 
 
 def load_market_tape(now: datetime, events: list[dict]) -> dict:
@@ -59,8 +60,8 @@ def load_market_tape(now: datetime, events: list[dict]) -> dict:
         return _blank_tape(session, live=in_continuous_session(now))
 
 
-def score_confirmation(event: dict, tape: dict, now: datetime) -> dict:
-    """给一条事件打盘面分。tape 里早于首见的 bar 和资金不算。"""
+def score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[dict] | None = None) -> dict:
+    """给一条事件打盘面分。首见之前的成交不计入验证分，只用来判断消息是否滞后。"""
     first = _first_at(event)
     session = _session_date(tape)
     live = bool(tape.get("live")) and in_continuous_session(now)
@@ -78,13 +79,34 @@ def score_confirmation(event: dict, tape: dict, now: datetime) -> dict:
         row = (tape.get("stocks") or {}).get(symbol)
         if isinstance(row, dict):
             stock_rows.append((symbol, row))
-    index_bars = [bar for bar in (tape.get("index_bars") or []) if _usable(bar, first)]
+    lagged, pre_excess = _preceding_move(stock_rows, first, bull)
+    deadline = _auction_deadline(first)
+    if deadline is not None and now.astimezone(CN_TZ) < deadline:
+        return _result(
+            0, False, "无", "无", "等待竞价", deadline.date(), False,
+            {"pre_return": round(pre_excess, 4)},
+            phase="auction", lagged=lagged, horizon="",
+        )
+    if deadline is not None and _has_auction_bars(stock_rows, deadline.date()):
+        return _score_auction(
+            event, tape, stock_rows, first, deadline.date(), bull, session, live, peers or [],
+            lagged, pre_excess,
+        )
+    if _is_intraday(first):
+        return _score_intraday(
+            event, tape, stock_rows, first, bull, session, live, peers or [], lagged, pre_excess,
+        )
+    index_bars = [
+        bar for bar in (tape.get("index_bars") or [])
+        if _usable(bar, first) and _on_day(bar, _confirm_day(first))
+    ]
     flows = _concept_flows(event, tape, first)
     nets = _stock_flows(stock_rows, first)
     if not stock_rows and not flows:
         waited = _after_session(first, session)
         return _result(
             0, False, "无", "无", _session_text(session, live, waited=waited), session, live and not waited, {},
+            phase="session", lagged=lagged,
         )
     returns = []
     limit_count = 0
@@ -92,13 +114,20 @@ def score_confirmation(event: dict, tape: dict, now: datetime) -> dict:
     volumes: list[float] = []
     baselines: list[float] = []
     minutes: list[float] = []
+    shares: list[float] = []
     for symbol, row in stock_rows:
-        bars = [bar for bar in (row.get("bars") or []) if _usable(bar, first)]
+        end = _clip_end(event, peers or [], symbol, tape)
+        share = _overlap_share(event, peers or [], symbol, tape)
+        bars = [
+            bar for bar in (row.get("bars") or [])
+            if _usable(bar, first) and _before(bar, end) and _on_day(bar, _confirm_day(first))
+        ]
         if not bars:
             continue
+        shares.append(share)
         ret = _return_since(bars, row.get("prev_close"), first)
         if ret is not None:
-            returns.append(ret)
+            returns.append(ret * share)
         signals = _signals(symbol, row, bars, first)
         wanted = _BULL_SIGNALS if bull else _BEAR_SIGNALS
         if signals & wanted:
@@ -125,8 +154,8 @@ def score_confirmation(event: dict, tape: dict, now: datetime) -> dict:
         expected = sum(base * minute / 240.0 for base, minute in zip(baselines, minutes, strict=True))
         if expected > 0:
             vol_ratio = sum(volumes) / expected
-    sector_net = sum(flows) if flows else None
-    main_net = sum(nets) if nets else None
+    sector_net = _scale_flow(sum(flows) if flows else None, shares)
+    main_net = _scale_flow(sum(nets) if nets else None, shares)
     move = _move_points(excess, vol_ratio, limit_count, sector_net, bull)
     strength_points = _strength_points(excess, breadth, main_net, bull)
     hits, observed = _persistence(stock_rows, first, bull)
@@ -134,10 +163,18 @@ def score_confirmation(event: dict, tape: dict, now: datetime) -> dict:
     if move > 0 or limit_count or (vol_ratio or 0) >= 2 or _flow_confirms(sector_net, bull):
         abnormal = True
     if _after_session(first, session) and not returns and not flows and not nets:
-        return _result(0, False, "无", "无", "尚无首见之后的盘面", session, False, {})
+        return _result(
+            0, False, "无", "无", "尚无首见之后的盘面", session, False, {},
+            phase="session", lagged=lagged,
+        )
     total = min(_CONFIRM_MAX, move + strength_points + persist_points)
     strength = "强" if strength_points >= 20 else "中" if strength_points >= 10 else "弱" if strength_points > 0 else "无"
     persistence = "持续" if hits >= 2 else "短暂" if hits == 1 else "无"
+    verified = strength != "无" or abnormal
+    horizon = _horizon(stock_rows, first, bull, verified)
+    if horizon == "一日游":
+        persist_points = min(persist_points, 6)
+        total = min(_CONFIRM_MAX, move + strength_points + persist_points)
     detail = {
         "excess_pct": round(excess, 4),
         "breadth": round(breadth, 4),
@@ -147,10 +184,13 @@ def score_confirmation(event: dict, tape: dict, now: datetime) -> dict:
         "sector_net_inflow": round(sector_net, 2) if sector_net is not None else None,
         "windows": observed,
         "windows_hit": hits,
+        "pre_return": round(pre_excess, 4),
+        "share": round(min(shares) if shares else 1.0, 4),
     }
     return _result(
         total, abnormal, strength, persistence,
         _session_text(session, live, waited=False), session, live, detail,
+        phase="session", lagged=lagged, horizon=horizon,
     )
 
 
@@ -171,11 +211,15 @@ def _load_market_tape(now: datetime, events: list[dict]) -> dict:
     stocks: dict[str, dict] = {}
     for symbol in symbols:
         stocks[symbol] = {"bars": [], "flows": []}
-    _fill_daily(data_dir, session, stocks)
-    _fill_minutes(data_dir, session, stocks)
-    _fill_stock_flow(data_dir, session, stocks)
-    index_bars = _index_bars(data_dir, session)
-    concept_flows = _concept_flow_map(data_dir, session, concepts)
+    index_bars: list[dict] = []
+    concept_flows: dict[str, list[dict]] = {name: [] for name in concepts}
+    for day in _tape_days(now, events):
+        _fill_daily(data_dir, day, stocks)
+        _fill_minutes(data_dir, day, stocks)
+        _fill_stock_flow(data_dir, day, stocks)
+        index_bars.extend(_index_bars(data_dir, day))
+        for name, rows in _concept_flow_map(data_dir, day, concepts).items():
+            concept_flows.setdefault(name, []).extend(rows)
     return {
         "session": session.isoformat(),
         "live": live,
@@ -206,6 +250,10 @@ def _result(
     session: date | None,
     live: bool,
     detail: dict,
+    *,
+    phase: str = "session",
+    lagged: bool = False,
+    horizon: str = "",
 ) -> dict:
     return {
         "label": label,
@@ -215,6 +263,9 @@ def _result(
         "abnormal": abnormal,
         "strength": strength,
         "persistence": persistence,
+        "phase": phase if phase in {"auction", "intraday", "session"} else "session",
+        "lagged": bool(lagged),
+        "horizon": horizon if horizon in {"主线", "一日游"} else "",
         "detail": {
             "excess_pct": detail.get("excess_pct"),
             "breadth": detail.get("breadth"),
@@ -224,8 +275,519 @@ def _result(
             "sector_net_inflow": detail.get("sector_net_inflow"),
             "windows": int(detail.get("windows") or 0),
             "windows_hit": int(detail.get("windows_hit") or 0),
+            "pre_return": detail.get("pre_return"),
+            "auction_open_pct": detail.get("auction_open_pct"),
+            "auction_vol_ratio": detail.get("auction_vol_ratio"),
+            "high_open_breadth": detail.get("high_open_breadth"),
+            "window_5": detail.get("window_5"),
+            "window_15": detail.get("window_15"),
+            "window_30": detail.get("window_30"),
+            "share": detail.get("share"),
         },
     }
+
+
+def _auction_deadline(first: datetime) -> datetime | None:
+    """上一收盘到下一 9:25 的消息，确认时点是下一集合竞价。盘中消息返回 None。"""
+    local = first.astimezone(CN_TZ)
+    if local.weekday() >= 5 or local.time() > dt_time(15, 0):
+        day = local.date() + timedelta(days=1)
+        while day.weekday() >= 5:
+            day += timedelta(days=1)
+        return datetime.combine(day, dt_time(9, 25), CN_TZ)
+    if local.time() <= dt_time(9, 25):
+        return datetime.combine(local.date(), dt_time(9, 25), CN_TZ)
+    return None
+
+
+def _confirm_day(first: datetime) -> date:
+    deadline = _auction_deadline(first)
+    if deadline is not None:
+        return deadline.date()
+    if first.weekday() >= 5:
+        day = first.date() + timedelta(days=1)
+        while day.weekday() >= 5:
+            day += timedelta(days=1)
+        return day
+    return first.date()
+
+
+def _is_intraday(first: datetime) -> bool:
+    if _auction_deadline(first) is not None or first.weekday() >= 5:
+        return False
+    clock = first.time()
+    return dt_time(9, 25) < clock <= dt_time(15, 0)
+
+
+def _next_weekday(day: date) -> date:
+    cursor = day + timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor += timedelta(days=1)
+    return cursor
+
+
+def _tape_days(now: datetime, events: list[dict]) -> list[date]:
+    latest = latest_session_day(now)
+    days = {latest}
+    for event in events:
+        first = _first_at(event)
+        if first is None:
+            continue
+        day = _confirm_day(first)
+        if day <= latest:
+            days.add(day)
+        nxt = _next_weekday(day)
+        if nxt <= latest:
+            days.add(nxt)
+    return sorted(days)
+
+
+def _on_day(bar: dict, day: date) -> bool:
+    at = _parse_at(bar.get("at"))
+    return at is not None and at.date() == day
+
+
+def _before(bar: dict, end: datetime | None) -> bool:
+    if end is None:
+        return True
+    at = _parse_at(bar.get("at"))
+    return at is not None and at < end
+
+
+def _auction_bars(row: dict, day: date) -> list[dict]:
+    found = []
+    for bar in row.get("bars") or []:
+        at = _parse_at(bar.get("at"))
+        if at is None or at.date() != day or bar.get("kind") == "day":
+            continue
+        if dt_time(9, 15) <= at.time() <= dt_time(9, 25):
+            found.append(bar)
+    return found
+
+
+def _has_auction_bars(stock_rows: list[tuple[str, dict]], day: date) -> bool:
+    return any(_auction_bars(row, day) for _symbol, row in stock_rows)
+
+
+def _add_trading_minutes(start: datetime, minutes: int) -> datetime:
+    cursor = start.astimezone(CN_TZ).replace(second=0, microsecond=0)
+    left = minutes
+    guard = 0
+    while left > 0 and guard < 2000:
+        guard += 1
+        cursor += timedelta(minutes=1)
+        if cursor.weekday() >= 5:
+            cursor = datetime.combine(_next_weekday(cursor.date()), dt_time(9, 30), CN_TZ)
+            continue
+        clock = cursor.time()
+        if dt_time(11, 30) < clock < dt_time(13, 0):
+            cursor = datetime.combine(cursor.date(), dt_time(13, 0), CN_TZ)
+            continue
+        if dt_time(9, 30) <= clock <= dt_time(11, 30) or dt_time(13, 0) <= clock <= dt_time(15, 0):
+            left -= 1
+    return cursor
+
+
+def _weight(event: dict, symbol: str) -> float:
+    for stock in event.get("mentioned_stocks") or []:
+        if isinstance(stock, dict) and str(stock.get("key") or "") == symbol:
+            return 3.0
+    try:
+        mapping = float(event.get("mapping") or 0)
+    except (TypeError, ValueError):
+        mapping = 0.0
+    return 1.0 + min(max(mapping, 0.0), 35.0) / 35.0
+
+
+def _competitors(event: dict, peers: list[dict], symbol: str, tape: dict) -> list[dict]:
+    first = _first_at(event)
+    if first is None:
+        return [event]
+    deadline = _auction_deadline(first)
+    found = []
+    for other in peers or [event]:
+        other_first = _first_at(other)
+        if other_first is None or symbol not in _event_symbols(other, tape):
+            continue
+        if deadline is not None:
+            if _auction_deadline(other_first) == deadline:
+                found.append(other)
+            continue
+        if _auction_deadline(other_first) is not None or other_first.date() != first.date():
+            continue
+        found.append(other)
+    return found or [event]
+
+
+def _clip_end(event: dict, peers: list[dict], symbol: str, tape: dict) -> datetime | None:
+    first = _first_at(event)
+    if first is None or _auction_deadline(first) is not None:
+        return None
+    cut = None
+    for other in _competitors(event, peers, symbol, tape):
+        if other is event:
+            continue
+        other_first = _first_at(other)
+        if other_first is None or other_first <= first + timedelta(seconds=60):
+            continue
+        if cut is None or other_first < cut:
+            cut = other_first
+    return cut
+
+
+def _overlap_share(event: dict, peers: list[dict], symbol: str, tape: dict) -> float:
+    """同一分钟里的事件按映射强弱分；竞价则同一开盘由全部隔夜事件分。"""
+    first = _first_at(event)
+    group = _competitors(event, peers, symbol, tape)
+    if _auction_deadline(first) is not None:
+        weights = [_weight(item, symbol) for item in group]
+        total = sum(weights)
+        return (_weight(event, symbol) / total) if total else 1.0
+    close = []
+    for other in group:
+        other_first = _first_at(other)
+        if first is not None and other_first is not None and abs((other_first - first).total_seconds()) <= 60:
+            close.append(other)
+    if len(close) <= 1:
+        return 1.0
+    weights = [_weight(item, symbol) for item in close]
+    total = sum(weights)
+    return (_weight(event, symbol) / total) if total else 1.0
+
+
+def _scale_flow(value: float | None, shares: list[float]) -> float | None:
+    if value is None or not shares:
+        return value
+    factor = min(shares)
+    if factor >= 1:
+        return value
+    return value * factor
+
+
+def _preceding_move(stock_rows: list[tuple[str, dict]], first: datetime, bull: bool) -> tuple[bool, float]:
+    """首见之前的涨跌停或已有明显涨跌，说明这段行情不是消息推出来的。"""
+    returns = []
+    limited = False
+    wanted = _BULL_SIGNALS if bull else _BEAR_SIGNALS
+    for symbol, row in stock_rows:
+        pre = []
+        for bar in row.get("bars") or []:
+            at = _parse_at(bar.get("at"))
+            if at is None or at >= first or bar.get("kind") == "day":
+                continue
+            pre.append(bar)
+        if not pre:
+            continue
+        ordered = sorted(pre, key=lambda item: _parse_at(item.get("at")) or first)
+        last = _num(ordered[-1].get("close"))
+        prev = _num(row.get("prev_close"))
+        base = prev if prev and prev > 0 else (_num(ordered[0].get("open")) or last)
+        if last and base and base > 0:
+            change = last / base - 1
+            returns.append(change if bull else -change)
+        if _signals(symbol, row, ordered, first) & wanted:
+            limited = True
+    excess = sum(returns) / len(returns) if returns else 0.0
+    return limited or excess >= 0.02, excess
+
+
+def _horizon(stock_rows: list[tuple[str, dict]], first: datetime, bull: bool, verified: bool) -> str:
+    if not verified:
+        return ""
+    day = _confirm_day(first)
+    afternoon: list[dict] = []
+    later: list[dict] = []
+    for _symbol, row in stock_rows:
+        for bar in row.get("bars") or []:
+            at = _parse_at(bar.get("at"))
+            if at is None or bar.get("kind") == "day" or at < first:
+                continue
+            if at.date() == day and at.time() >= dt_time(13, 0):
+                afternoon.append(bar)
+            elif at.date() > day:
+                later.append(bar)
+    hold = False
+    fade = False
+    observed = False
+    for bars in (afternoon, later):
+        if len(bars) < 1:
+            continue
+        observed = True
+        ret = _series_return(sorted(bars, key=lambda item: _parse_at(item.get("at")) or first))
+        if (ret > 0) == bull and abs(ret) >= 0.002:
+            hold = True
+        elif (ret > 0) != bull and abs(ret) >= 0.003:
+            fade = True
+    if hold:
+        return "主线"
+    if observed and fade:
+        return "一日游"
+    return ""
+
+
+def _score_auction(
+    event: dict,
+    tape: dict,
+    stock_rows: list[tuple[str, dict]],
+    first: datetime,
+    day: date,
+    bull: bool,
+    session: date | None,
+    live: bool,
+    peers: list[dict],
+    lagged: bool,
+    pre_excess: float,
+) -> dict:
+    opens = []
+    limit_count = 0
+    volumes = 0.0
+    baselines = []
+    shares = []
+    wanted = _BULL_SIGNALS if bull else _BEAR_SIGNALS
+    for symbol, row in stock_rows:
+        bars = _auction_bars(row, day)
+        if not bars:
+            continue
+        share = _overlap_share(event, peers, symbol, tape)
+        shares.append(share)
+        ordered = sorted(bars, key=lambda item: _parse_at(item.get("at")) or first)
+        price = _num(ordered[-1].get("close"))
+        prev = _num(row.get("prev_close"))
+        if price and prev and prev > 0:
+            opens.append((price / prev - 1) * share)
+        if _signals(symbol, row, ordered, first) & wanted:
+            if "limit_up" in _signals(symbol, row, ordered, first) and bull:
+                limit_count += 1
+            if "limit_down" in _signals(symbol, row, ordered, first) and not bull:
+                limit_count += 1
+        for bar in ordered:
+            volumes += _num(bar.get("volume")) or 0.0
+        baseline = _num(row.get("prior_volume")) or _num(row.get("baseline_volume"))
+        if baseline and baseline > 0:
+            baselines.append(baseline)
+    index_bars = [
+        bar for bar in (tape.get("index_bars") or [])
+        if _on_day(bar, day) and _auction_bars({"bars": [bar]}, day)
+    ]
+    index_ret = 0.0
+    if index_bars:
+        ordered = sorted(index_bars, key=lambda item: _parse_at(item.get("at")) or first)
+        base = _num(ordered[0].get("open")) or _num(ordered[0].get("close"))
+        last = _num(ordered[-1].get("close"))
+        if base and last and base > 0:
+            index_ret = last / base - 1
+    basket = sum(opens) / len(opens) if opens else 0.0
+    excess = (basket - index_ret) if bull else (index_ret - basket)
+    high_open = 0.0
+    if opens:
+        high_open = len([item for item in opens if (item > 0) == bull and abs(item) >= 0.01]) / len(opens)
+    vol_ratio = None
+    if volumes and baselines:
+        expected = sum(base * 10 / 240.0 for base in baselines)
+        if expected > 0:
+            vol_ratio = volumes / expected
+    flows = []
+    for name in event.get("concepts") or []:
+        for item in (tape.get("concepts") or {}).get(str(name)) or []:
+            at = _parse_at(item.get("at")) if isinstance(item, dict) else None
+            if at is None or at.date() != day or not (dt_time(9, 15) <= at.time() <= dt_time(9, 25)):
+                continue
+            number = _num(item.get("value"))
+            if number is not None:
+                flows.append(number)
+    sector_net = _scale_flow(sum(flows) if flows else None, shares)
+    move = _move_points(excess, vol_ratio, limit_count, sector_net, bull)
+    strength_points = _strength_points(excess, high_open, None, bull)
+    hits, observed = _persistence(stock_rows, datetime.combine(day, dt_time(9, 25), CN_TZ), bull)
+    persist_points = 20 if hits >= 3 else 14 if hits >= 2 else 6 if hits == 1 else 0
+    abnormal = move > 0 or limit_count > 0 or (vol_ratio or 0) >= 2 or _flow_confirms(sector_net, bull)
+    total = min(_CONFIRM_MAX, move + strength_points + persist_points)
+    strength = "强" if strength_points >= 20 else "中" if strength_points >= 10 else "弱" if strength_points > 0 else "无"
+    persistence = "持续" if hits >= 2 else "短暂" if hits == 1 else "无"
+    horizon = _horizon(stock_rows, first, bull, strength != "无" or abnormal)
+    if horizon == "一日游":
+        persist_points = min(persist_points, 6)
+        total = min(_CONFIRM_MAX, move + strength_points + persist_points)
+    detail = {
+        "excess_pct": round(excess, 4),
+        "breadth": round(high_open, 4),
+        "limit_count": limit_count,
+        "vol_ratio": round(vol_ratio, 4) if vol_ratio is not None else None,
+        "main_net": None,
+        "sector_net_inflow": round(sector_net, 2) if sector_net is not None else None,
+        "windows": observed,
+        "windows_hit": hits,
+        "pre_return": round(pre_excess, 4),
+        "auction_open_pct": round(basket, 4),
+        "auction_vol_ratio": round(vol_ratio, 4) if vol_ratio is not None else None,
+        "high_open_breadth": round(high_open, 4),
+        "share": round(min(shares) if shares else 1.0, 4),
+    }
+    return _result(
+        total, abnormal, strength, persistence,
+        _session_text(session, live, waited=False), session, live, detail,
+        phase="auction", lagged=lagged, horizon=horizon,
+    )
+
+
+def _score_intraday(
+    event: dict,
+    tape: dict,
+    stock_rows: list[tuple[str, dict]],
+    first: datetime,
+    bull: bool,
+    session: date | None,
+    live: bool,
+    peers: list[dict],
+    lagged: bool,
+    pre_excess: float,
+) -> dict:
+    day = first.date()
+    index_all = [bar for bar in (tape.get("index_bars") or []) if _on_day(bar, day)]
+    window_excess = {5: [], 15: [], 30: []}
+    limit_count = 0
+    volumes: list[float] = []
+    baselines: list[float] = []
+    span_minutes: list[float] = []
+    shares: list[float] = []
+    post_returns = []
+    wanted = _BULL_SIGNALS if bull else _BEAR_SIGNALS
+    for symbol, row in stock_rows:
+        end = _clip_end(event, peers, symbol, tape)
+        share = _overlap_share(event, peers, symbol, tape)
+        day_bars = [bar for bar in (row.get("bars") or []) if _on_day(bar, day) and bar.get("kind") != "day"]
+        pre = [bar for bar in day_bars if (_parse_at(bar.get("at")) or first) < first]
+        pre_limited = bool(_signals(symbol, row, pre, first) & wanted) if pre else False
+        pre_price = _num(pre[-1].get("close")) if pre else None
+        if pre_price is None and first.time() <= dt_time(9, 30):
+            pre_price = _num(row.get("prev_close"))
+        scored_window = None
+        for minutes in (30, 15, 5):
+            stop = _add_trading_minutes(first, minutes)
+            if end is not None and end < stop:
+                stop = end
+            window = [
+                bar for bar in day_bars
+                if first <= (_parse_at(bar.get("at")) or first) < stop
+            ]
+            if not window:
+                continue
+            ordered = sorted(window, key=lambda item: _parse_at(item.get("at")) or first)
+            last = _num(ordered[-1].get("close"))
+            base = pre_price or _num(ordered[0].get("open")) or last
+            if not last or not base or base <= 0:
+                continue
+            ret = (last / base - 1) * share
+            idx = [
+                bar for bar in index_all
+                if first <= (_parse_at(bar.get("at")) or first) < stop
+            ]
+            index_ret = _series_return(idx) if idx else 0.0
+            excess = (ret - index_ret) if bull else (index_ret - ret)
+            window_excess[minutes].append(excess)
+            if scored_window is None:
+                scored_window = (ordered, excess, ret)
+        if scored_window is None:
+            continue
+        shares.append(share)
+        ordered, excess, ret = scored_window
+        post_returns.append(ret if bull else -ret)
+        if not pre_limited and _signals(symbol, row, ordered, first) & wanted:
+            if bull and "limit_up" in _signals(symbol, row, ordered, first):
+                limit_count += 1
+            if not bull and "limit_down" in _signals(symbol, row, ordered, first):
+                limit_count += 1
+        volume, minute = _volume_span(ordered)
+        baseline = _num(row.get("baseline_volume"))
+        if volume and baseline and baseline > 0:
+            volumes.append(volume)
+            baselines.append(baseline)
+            span_minutes.append(minute)
+    def _mean(values: list[float]) -> float | None:
+        if not values:
+            return None
+        return sum(values) / len(values)
+
+    excess = _mean(window_excess[30] or window_excess[15] or window_excess[5]) or 0.0
+    # 发布前已经走出的行情不再算作这条消息的验证。
+    already = pre_excess >= 0.01 and excess < 0.003
+    breadth = 0.0
+    if post_returns and not already:
+        breadth = len([item for item in post_returns if item >= 0.001]) / len(post_returns)
+    vol_ratio = None
+    if volumes and not already:
+        expected = sum(base * minute / 240.0 for base, minute in zip(baselines, span_minutes, strict=True))
+        if expected > 0:
+            vol_ratio = sum(volumes) / expected
+    stop = _add_trading_minutes(first, 30)
+    nets = []
+    for _symbol, row in stock_rows:
+        for item in row.get("flows") or []:
+            if not isinstance(item, dict) or item.get("kind") == "day":
+                continue
+            at = _parse_at(item.get("at"))
+            if at is None or at < first or at >= stop:
+                continue
+            number = _num(item.get("value"))
+            if number is not None:
+                nets.append(number)
+    main_net = _scale_flow(sum(nets) if nets else None, shares)
+    if already:
+        excess = 0.0
+        limit_count = 0
+        main_net = None
+        vol_ratio = None
+    move = 0 if already else _move_points(excess, vol_ratio, limit_count, None, bull)
+    strength_points = 0 if already else _strength_points(excess, breadth, main_net, bull)
+    hits = 0
+    observed = 0
+    for minutes in (5, 15, 30):
+        value = _mean(window_excess[minutes])
+        if value is None:
+            continue
+        observed += 1
+        if abs(value) >= 0.002 and (value > 0) == bull:
+            hits += 1
+    if already:
+        hits = 0
+        observed = 0
+    persist_points = 20 if hits >= 3 else 14 if hits >= 2 else 6 if hits == 1 else 0
+    abnormal = (not already) and (
+        move > 0 or limit_count > 0 or (vol_ratio or 0) >= 2 or _flow_confirms(main_net, bull)
+    )
+    total = min(_CONFIRM_MAX, move + strength_points + persist_points)
+    strength = "强" if strength_points >= 20 else "中" if strength_points >= 10 else "弱" if strength_points > 0 else "无"
+    persistence = "持续" if hits >= 2 else "短暂" if hits == 1 else "无"
+    horizon = _horizon(stock_rows, first, bull, strength != "无" or abnormal)
+    if horizon == "一日游":
+        persist_points = min(persist_points, 6)
+        total = min(_CONFIRM_MAX, move + strength_points + persist_points)
+    detail = {
+        "excess_pct": round(excess, 4),
+        "breadth": round(breadth, 4),
+        "limit_count": limit_count,
+        "vol_ratio": round(vol_ratio, 4) if vol_ratio is not None else None,
+        "main_net": round(main_net, 2) if main_net is not None else None,
+        "sector_net_inflow": None,
+        "windows": observed,
+        "windows_hit": hits,
+        "pre_return": round(pre_excess, 4),
+        "window_5": _mean(window_excess[5]),
+        "window_15": _mean(window_excess[15]),
+        "window_30": _mean(window_excess[30]),
+        "share": round(min(shares) if shares else 1.0, 4),
+    }
+    if detail["window_5"] is not None:
+        detail["window_5"] = round(detail["window_5"], 4)
+    if detail["window_15"] is not None:
+        detail["window_15"] = round(detail["window_15"], 4)
+    if detail["window_30"] is not None:
+        detail["window_30"] = round(detail["window_30"], 4)
+    return _result(
+        total, abnormal, strength, persistence,
+        _session_text(session, live, waited=False), session, live, detail,
+        phase="intraday", lagged=lagged, horizon=horizon,
+    )
 
 
 def _after_session(first: datetime, session: date | None) -> bool:
@@ -533,7 +1095,13 @@ def _fill_minutes(data_dir: Path, session: date, stocks: dict[str, dict]) -> Non
         if bar is not None:
             grouped.setdefault(symbol, []).append(bar)
     for symbol, bars in grouped.items():
-        stocks[symbol]["bars"] = bars
+        kept = []
+        for old in stocks[symbol]["bars"]:
+            at = _parse_at(old.get("at"))
+            if old.get("kind") == "day" and at is not None and at.date() == session:
+                continue
+            kept.append(old)
+        stocks[symbol]["bars"] = kept + bars
 
 
 def _fill_daily(data_dir: Path, session: date, stocks: dict[str, dict]) -> None:
@@ -554,11 +1122,18 @@ def _fill_daily(data_dir: Path, session: date, stocks: dict[str, dict]) -> None:
         if slot is None:
             continue
         before = prior.get(symbol) or {}
-        slot["name"] = str(row.get("name") or slot.get("name") or "")
-        slot["prev_close"] = _num(row.get("prev_close"))
-        slot["prior_high"] = _num(before.get("high_60d")) or _num(before.get("high"))
-        slot["prior_low"] = _num(before.get("low_60d")) or _num(before.get("low"))
-        slot["baseline_volume"] = _num(before.get("vol_ma5")) or _num(row.get("vol_ma5"))
+        if not slot.get("name"):
+            slot["name"] = str(row.get("name") or "")
+        if slot.get("prev_close") is None:
+            slot["prev_close"] = _num(row.get("prev_close"))
+        if slot.get("prior_high") is None:
+            slot["prior_high"] = _num(before.get("high_60d")) or _num(before.get("high"))
+        if slot.get("prior_low") is None:
+            slot["prior_low"] = _num(before.get("low_60d")) or _num(before.get("low"))
+        if slot.get("prior_volume") is None:
+            slot["prior_volume"] = _num(before.get("volume"))
+        if slot.get("baseline_volume") is None:
+            slot["baseline_volume"] = _num(before.get("vol_ma5")) or _num(row.get("vol_ma5"))
         bar = _bar_from(row, kind="day", on=session)
         if bar is not None:
             slot["bars"].append(bar)

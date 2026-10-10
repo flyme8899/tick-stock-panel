@@ -271,3 +271,110 @@ def test_confirmed_move_outranks_an_unconfirmed_major(tmp_path, monkeypatch):
     assert public["confirmation"]["label"] == "最近交易日 10月9日"
     assert "confirmation" in public["breakdown"]
     assert "item_ids" not in public
+
+
+def test_overnight_auction_confirms_after_925_and_not_before():
+    auction = [
+        _bar(9, 20, 10.4, volume=50_000),
+        _bar(9, 25, 11.0, volume=50_000),
+        _bar(14, 0, 11.05, volume=1_000),
+        _bar(14, 40, 11.2, volume=1_000),
+    ]
+    event = _event("平安银行回购", "利好", 21, 0)
+    event["_first"] = datetime(2026, 10, 8, 21, 0, tzinfo=CN_TZ)
+    ready = score_confirmation(event, _tape(auction), NOW)
+    assert ready["phase"] == "auction"
+    assert ready["strength"] == "强"
+    assert ready["horizon"] == "主线"
+    assert ready["detail"]["limit_count"] == 1
+    assert ready["detail"]["auction_open_pct"] >= 0.09
+    assert ready["score"] >= 40
+    assert ready["lagged"] is False
+
+    early = score_confirmation(
+        event,
+        _tape(auction),
+        datetime(2026, 10, 8, 22, 0, tzinfo=CN_TZ),
+    )
+    assert early["score"] == 0
+    assert early["label"] == "等待竞价"
+    assert early["phase"] == "auction"
+    assert early["detail"]["auction_open_pct"] is None
+
+
+def test_auction_gap_that_fades_in_the_afternoon_is_a_one_day_move():
+    bars = [
+        _bar(9, 20, 10.6, volume=40_000),
+        _bar(9, 25, 11.0, volume=40_000),
+        _bar(14, 0, 10.6, volume=1_000),
+        _bar(14, 40, 10.2, volume=1_000),
+    ]
+    event = _event("平安银行回购", "利好", 21, 0)
+    event["_first"] = datetime(2026, 10, 8, 21, 0, tzinfo=CN_TZ)
+    scored = score_confirmation(event, _tape(bars), NOW)
+    assert scored["phase"] == "auction"
+    assert scored["horizon"] == "一日游"
+    assert scored["strength"] == "强"
+
+
+def test_intraday_windows_use_the_move_after_publish():
+    bars = [
+        _bar(9, 40, 10.0, volume=1_000),
+        _bar(10, 4, 10.3, volume=20_000),
+        _bar(10, 12, 10.6, volume=20_000),
+        _bar(10, 28, 10.9, volume=20_000),
+    ]
+    scored = score_confirmation(_event("创新药临床获批", "利好", 10, 0), _tape(bars), NOW)
+    assert scored["phase"] == "intraday"
+    assert scored["lagged"] is False
+    assert scored["strength"] in {"强", "中"}
+    assert scored["detail"]["window_5"] > 0
+    assert scored["detail"]["window_30"] > scored["detail"]["window_5"]
+    assert scored["detail"]["pre_return"] < 0.01
+
+
+def test_move_before_the_news_is_lagged_not_event_driven():
+    bars = [
+        _bar(9, 40, 10.8, volume=80_000),
+        _bar(10, 6, 10.81, volume=100),
+    ]
+    scored = score_confirmation(_event("创新药临床获批", "利好", 10, 0), _tape(bars), NOW)
+    assert scored["lagged"] is True
+    assert scored["strength"] == "无"
+    assert scored["score"] == 0
+    assert scored["phase"] == "intraday"
+
+
+def test_shared_symbol_is_split_by_time_then_by_mapping_weight():
+    bars = [
+        _bar(9, 50, 10.0, volume=1_000),
+        _bar(10, 10, 10.4, volume=20_000),
+        _bar(10, 30, 11.0, volume=20_000),
+    ]
+    tape = _tape(bars)
+    earlier = _event("先发布", "利好", 10, 0)
+    later = _event("后发布", "利好", 10, 20)
+    first = score_confirmation(earlier, tape, NOW, peers=[earlier, later])
+    second = score_confirmation(later, tape, NOW, peers=[earlier, later])
+    assert first["detail"]["excess_pct"] < 0.05
+    assert second["detail"]["excess_pct"] > first["detail"]["excess_pct"]
+    assert first["detail"]["window_30"] < 0.05
+
+    same_time = _event("直接映射", "利好", 10, 0)
+    concept_only = {
+        "name": "只映射概念",
+        "direction": "利好",
+        "concepts": ["保险"],
+        "mentioned_stocks": [],
+        "_first": datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ),
+    }
+    shared = _tape([
+        _bar(9, 50, 10.0, volume=1_000),
+        _bar(10, 10, 11.0, volume=20_000),
+    ])
+    shared["members"] = {"保险": ["601318.SH"]}
+    direct = score_confirmation(same_time, shared, NOW, peers=[same_time, concept_only])
+    indirect = score_confirmation(concept_only, shared, NOW, peers=[same_time, concept_only])
+    assert direct["detail"]["share"] == 0.75
+    assert indirect["detail"]["share"] == 0.25
+    assert direct["detail"]["excess_pct"] > indirect["detail"]["excess_pct"] * 2

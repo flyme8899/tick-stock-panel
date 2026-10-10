@@ -25,6 +25,18 @@ const CATEGORIES = [
 
 type HotTab = (typeof TABS)[number]['key']
 
+function confirmBadge(confirm: NonNullable<NewsHotEvent['confirmation']>): string {
+  const session = confirm.label && !confirm.live ? confirm.label : ''
+  const horizon = confirm.horizon
+    || (confirm.persistence && confirm.persistence !== '无' ? confirm.persistence : '')
+  if (confirm.lagged && (!confirm.strength || confirm.strength === '无')) {
+    return ['消息滞后确认', session].filter(Boolean).join(' · ')
+  }
+  const name = confirm.phase === 'auction' ? '竞价验证' : '盘面验证'
+  const head = confirm.lagged ? `消息滞后确认 · ${name} ${confirm.strength}` : `${name} ${confirm.strength}`
+  return [head, horizon, session].filter(Boolean).join(' · ')
+}
+
 function fundFlowText(item: NewsCandidate): string {
   const flow = item.fund_flow
   if (!flow) return ''
@@ -205,10 +217,7 @@ export function HotEvents() {
                           'rounded px-1 text-[10px] leading-4',
                           item.confirmation.strength === '强' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
                         )}>
-                          盘面验证 {item.confirmation.strength}
-                          {item.confirmation.persistence && item.confirmation.persistence !== '无'
-                            ? ` · ${item.confirmation.persistence}` : ''}
-                          {item.confirmation.label && !item.confirmation.live ? ` · ${item.confirmation.label}` : ''}
+                          {confirmBadge(item.confirmation)}
                         </span>
                       )}
                       {item.category && (

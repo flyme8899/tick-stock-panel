@@ -2247,6 +2247,9 @@ export interface NewsHotConfirmation {
   abnormal?: boolean
   strength: '强' | '中' | '弱' | '无' | string
   persistence: '持续' | '短暂' | '无' | string
+  phase?: 'auction' | 'intraday' | 'session' | string
+  lagged?: boolean
+  horizon?: '主线' | '一日游' | '' | string
   detail?: {
     excess_pct?: number | null
     breadth?: number | null
@@ -2256,6 +2259,14 @@ export interface NewsHotConfirmation {
     sector_net_inflow?: number | null
     windows?: number
     windows_hit?: number
+    pre_return?: number | null
+    auction_open_pct?: number | null
+    auction_vol_ratio?: number | null
+    high_open_breadth?: number | null
+    window_5?: number | null
+    window_15?: number | null
+    window_30?: number | null
+    share?: number | null
   }
 }
 
@@ -2335,7 +2346,7 @@ export interface NewsHealth {
 }
 
 export interface NewsPushType {
-  id: 'hot' | 'abnormal' | 't_trade'
+  id: 'hot' | 'abnormal' | 't_trade' | 'hot_verified' | 'abnormal_verified'
   label: string
   enabled: boolean
   saved: boolean
@@ -2364,7 +2375,15 @@ export interface PickerSourceItem {
   category?: string
   direction?: string
   importance?: string
-  confirmation?: { strength?: string; persistence?: string; label?: string; live?: boolean } | null
+  confirmation?: {
+    strength?: string
+    persistence?: string
+    label?: string
+    live?: boolean
+    phase?: string
+    lagged?: boolean
+    horizon?: string
+  } | null
   mapped_stocks?: string[]
 }
 
