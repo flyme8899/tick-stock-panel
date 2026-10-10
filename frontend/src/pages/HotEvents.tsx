@@ -10,7 +10,8 @@ const POLL_MS = 60_000
 const TABS = [
   { key: 'event' as const, label: '具体事件' },
   { key: 'sector' as const, label: '板块热度' },
-  { key: 'stock' as const, label: '个股热度' },
+  { key: 'stock' as const, label: '热门个股' },
+  { key: 'etf' as const, label: '热门ETF' },
 ]
 
 type HotTab = (typeof TABS)[number]['key']
@@ -96,7 +97,7 @@ export function HotEvents() {
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="热门事件"
-        subtitle="当天资讯收成的具体事件。板块和个股热度仍按近 24 小时相对前 4 日基线，放在后面。只展示摘录，供内部研究。"
+        subtitle="当天资讯收成的具体事件。板块、个股和 ETF 热度仍按近 24 小时相对前 4 日基线，放在后面。只展示摘录，供内部研究。"
       />
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_280px]">
         <section className="min-w-0">
@@ -131,7 +132,7 @@ export function HotEvents() {
           )}
           {hot.isSuccess && tab !== 'event' && candidates.length === 0 && (
             <p className="text-sm text-muted">
-              还没有候选。打开右侧来源并等待采集后，这里会列出升温的板块和个股。
+              还没有候选。打开右侧来源并等待采集后，这里会列出升温的板块、个股和 ETF。
             </p>
           )}
           {tab === 'event' && hot.data?.hint && events.length > 0 && (
@@ -209,6 +210,11 @@ export function HotEvents() {
               {(eventDetail.data?.stocks ?? pickedEvent.stocks).length > 0 && (
                 <p className="mb-2 text-xs text-muted">
                   相关个股：{(eventDetail.data?.stocks ?? pickedEvent.stocks).map(stock => stock.name || stock.key).join('、')}
+                </p>
+              )}
+              {(eventDetail.data?.etfs ?? pickedEvent.etfs ?? []).length > 0 && (
+                <p className="mb-2 text-xs text-muted">
+                  相关ETF：{(eventDetail.data?.etfs ?? pickedEvent.etfs ?? []).map(stock => stock.name || stock.key).join('、')}
                 </p>
               )}
               {eventDetail.isLoading && <p className="text-sm text-muted">加载摘录…</p>}

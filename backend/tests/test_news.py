@@ -1003,3 +1003,106 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     opened = news_api.messages(kind="event", key=head["key"], window_hours=24, limit=30)
     assert len(opened["items"]) == 2
     assert opened["stocks"][0]["key"] == "600519.SH"
+    assert opened["etfs"] == []
+
+
+def test_asset_kind_trusts_universe_before_fund_prefix(monkeypatch):
+    from app.news.service import asset_kind_of
+
+    monkeypatch.setattr("app.news.service.known_asset_types", lambda: {
+        "510300.SH": "stock",
+        "600519.SH": "etf",
+    })
+    assert asset_kind_of("510300.SH", "沪深300ETF") == "stock"
+    assert asset_kind_of("600519.SH", "贵州茅台") == "etf"
+    assert asset_kind_of("510300", "沪深300ETF") == "stock"
+
+    monkeypatch.setattr("app.news.service.known_asset_types", lambda: {})
+    for code in ("510300", "560050", "588000", "159915", "161226", "501018"):
+        assert asset_kind_of(code, "普通名称") == "etf"
+    assert asset_kind_of("600519.SH", "贵州茅台") == "stock"
+    assert asset_kind_of("000001.SZ", "易方达某基金") == "etf"
+    assert asset_kind_of("000001.SZ", "平安银行") == "stock"
+
+
+def test_hot_stocks_exclude_funds_and_events_list_them_apart(tmp_path, monkeypatch):
+    from datetime import time as dt_time
+
+    from app.api import news as news_api
+    from app.market_time import current_trading_day
+    from app.news.push import format_hot_markdown
+    from app.news.service import event_detail, hot_event_listing
+
+    monkeypatch.setattr("app.news.service.known_asset_types", lambda: {})
+    reset_store_for_tests(tmp_path / "funds.sqlite")
+    day = current_trading_day(cn_now())
+    lexicon = Lexicon([], [])
+    funds = [
+        StructuredStock(name="沪深300ETF", code="510300"),
+        StructuredStock(name="创业板ETF易方达", code="159915"),
+        StructuredStock(name="南方原油", code="501018"),
+        StructuredStock(name="中证500LOF", code="161226"),
+    ]
+    ingest_items([
+        Item(
+            source="cls",
+            source_id="mix-event",
+            published_at=datetime.combine(day, dt_time(14, 40), CN_TZ),
+            title="沪深300ETF放量，贵州茅台跟涨",
+            text="沪深300ETF放量，贵州茅台跟涨，正文写长一些以免被当成短讯。",
+            stocks=[StructuredStock(name="贵州茅台", code="600519"), *funds],
+        ),
+        Item(
+            source="cls",
+            source_id="mix-hot",
+            published_at=cn_now() - timedelta(minutes=20),
+            title="资金涌入宽基基金",
+            text="资金涌入宽基基金，这条用来把基金和个股同时送进近24小时热度榜。",
+            stocks=[StructuredStock(name="贵州茅台", code="600519"), *funds],
+        ),
+    ], lexicon)
+
+    stock_keys = {item.key for item in hot_candidates(kind="stock", window_hours=24, baseline_days=1)}
+    etf_keys = {item.key for item in hot_candidates(kind="etf", window_hours=24, baseline_days=1)}
+    assert stock_keys == {"600519.SH"}
+    assert etf_keys == {"510300.SH", "159915.SZ", "501018.SH", "161226.SZ"}
+
+    listing = hot_event_listing(cn_now(), limit=20)
+    head = next(item for item in listing["events"] if item["name"] == "沪深300ETF放量，贵州茅台跟涨")
+    assert [item["key"] for item in head["stocks"]] == ["600519.SH"]
+    assert {item["key"] for item in head["etfs"]} == etf_keys
+
+    detail = event_detail(head["key"], now=cn_now())
+    assert [item["key"] for item in detail["stocks"]] == ["600519.SH"]
+    assert {item["key"] for item in detail["etfs"]} == etf_keys
+
+    listed = news_api.hot(kind="stock", window_hours=24, baseline_days=1, limit=20)
+    assert {item["key"] for item in listed["candidates"]} == {"600519.SH"}
+    etf_listed = news_api.hot(kind="etf", window_hours=24, baseline_days=1, limit=20)
+    assert {item["key"] for item in etf_listed["candidates"]} == etf_keys
+    excerpts = news_api.messages(kind="etf", key="510300.SH", window_hours=24, limit=10)
+    assert excerpts["items"][0]["title"] == "资金涌入宽基基金"
+
+    packed = format_hot_markdown(
+        [],
+        [{"name": "贵州茅台", "key": "600519.SH", "story_count": 1, "source_count": 1, "growth": 1.2}],
+        heading="【热点候选】盘前",
+        etfs=[{"name": "沪深300ETF", "key": "510300.SH", "story_count": 2, "source_count": 1, "growth": 1.4}],
+    )
+    assert packed is not None
+    text = packed[1]
+    assert text.index("热门个股") < text.index("热门ETF")
+    assert "贵州茅台" in text.split("热门ETF")[0]
+    assert "沪深300ETF" in text.split("热门ETF", 1)[1]
+    assert "沪深300ETF" not in text.split("热门个股")[1].split("热门ETF")[0]
+
+    monkeypatch.setattr("app.news.service.known_asset_types", lambda: {
+        "510300.SH": "stock",
+        "600519.SH": "etf",
+    })
+    overridden_stocks = {item.key for item in hot_candidates(kind="stock", window_hours=24, baseline_days=1)}
+    overridden_etfs = {item.key for item in hot_candidates(kind="etf", window_hours=24, baseline_days=1)}
+    assert "510300.SH" in overridden_stocks
+    assert "600519.SH" not in overridden_stocks
+    assert "600519.SH" in overridden_etfs
+    assert "510300.SH" not in overridden_etfs

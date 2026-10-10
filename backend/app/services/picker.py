@@ -304,6 +304,13 @@ def map_hot_sectors(
     return scores, {symbol: _join_events(labels) for symbol, labels in events.items()}
 
 
+def _mentioned_is_fund(key: str, name: str = "") -> bool:
+    """选股只收个股。维表优先，没有维表时再看基金名称和代码前缀。"""
+    from app.news.service import asset_kind_of
+
+    return asset_kind_of(key, name) == "etf"
+
+
 def resolve_mentioned_stock(key: str, known_symbols: set[str]) -> str | None:
     text = str(key or "").strip()
     if not text:
@@ -353,11 +360,15 @@ def map_selected_hot_event(
     for stock in mentioned:
         if not isinstance(stock, dict):
             continue
+        key = str(stock.get("key") or "")
+        name = str(stock.get("name") or "")
+        if _mentioned_is_fund(key, name):
+            continue
         try:
-            mention_rank[str(stock.get("key") or "")] = int(stock.get("mentions") or 0)
+            mention_rank[key] = int(stock.get("mentions") or 0)
         except (TypeError, ValueError):
-            mention_rank[str(stock.get("key") or "")] = 0
-        symbol = resolve_mentioned_stock(str(stock.get("key") or ""), known_symbols)
+            mention_rank[key] = 0
+        symbol = resolve_mentioned_stock(key, known_symbols)
         if symbol is None:
             unresolved += 1
             continue
@@ -367,7 +378,10 @@ def map_selected_hot_event(
         constituents - resolved,
         key=lambda symbol: (-mention_rank.get(symbol, 0), -(caps.get(symbol) or 0.0), symbol),
     )
-    symbols = resolved | set(extra[:_CONCEPT_CONSTITUENT_CAP])
+    symbols = {
+        symbol for symbol in (resolved | set(extra[:_CONCEPT_CONSTITUENT_CAP]))
+        if not _mentioned_is_fund(symbol)
+    }
     note = None
     if concepts and not has_dimensions and resolved:
         note = "尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股"

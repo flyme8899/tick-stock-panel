@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -69,11 +71,12 @@ from app.news.extract import (
     Lexicon,
     Mention,
     StructuredStock,
+    _is_fund_name,
     _usable_sector_name,
     parse_llm_payload,
     parse_llm_summary,
 )
-from app.news.scoring import MentionEvent, mention_weight, score_candidates
+from app.news.scoring import Candidate, MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
 
 logger = logging.getLogger(__name__)
@@ -86,6 +89,11 @@ _LLM_LOCK = threading.Lock()
 _LLM_PER_HOUR = 10
 # 一次外文轮询可能带上几十条新稿。模型只处理前几条，避免单轮把额度打光。
 _FOREIGN_LLM_PER_POLL = 10
+# 本地维表里的 ETF / 股票集合。请求线程不扫盘，大约 10 分钟复用一次。
+_ASSET_TYPES: tuple[float, dict[str, str]] | None = None
+_ASSET_TTL = 600
+# 50/51/56/58 是沪市基金，15/16 是深市 ETF 和 LOF。维表里有的代码以维表为准。
+_FUND_CODE = re.compile(r"^(?:15|16|50|51|56|58)\d{4}$")
 
 
 def get_store() -> NewsStore:
@@ -97,12 +105,13 @@ def get_store() -> NewsStore:
 
 
 def reset_store_for_tests(path: Path | None = None) -> NewsStore:
-    global _STORE, _LEXICON
+    global _STORE, _LEXICON, _ASSET_TYPES
     with _STORE_LOCK:
         if _STORE is not None:
             _STORE.close()
         _STORE = NewsStore(path or (settings.data_dir / "news" / "news.sqlite"))
         _LEXICON = None
+        _ASSET_TYPES = None
     from app.news.hot_events import clear_hot_event_cache
 
     clear_hot_event_cache()
@@ -251,6 +260,75 @@ def backfill_mentions(lexicon: Lexicon, *, limit: int = 200) -> int:
     return updated
 
 
+def known_asset_types() -> dict[str, str]:
+    """本地标的维表：symbol → etf 或 stock。ETF 优先。仓库还没挂上时返回空表。"""
+    global _ASSET_TYPES
+    now = time.monotonic()
+    if _ASSET_TYPES is not None and now - _ASSET_TYPES[0] < _ASSET_TTL:
+        return _ASSET_TYPES[1]
+    repo = _repo()
+    if repo is None:
+        return {}
+    mapping: dict[str, str] = {}
+    try:
+        etfs = repo.get_etf_symbol_set() or set()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读取 ETF 维表失败: %s", exc)
+        etfs = set()
+    for symbol in etfs:
+        text = str(symbol or "").strip()
+        if text:
+            mapping[text] = "etf"
+    try:
+        frame = repo.get_instruments()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读取股票维表失败: %s", exc)
+        frame = None
+    if frame is not None and not frame.is_empty() and "symbol" in frame.columns:
+        for symbol in frame.get_column("symbol").to_list():
+            text = str(symbol or "").strip()
+            if text:
+                mapping.setdefault(text, "stock")
+    _ASSET_TYPES = (now, mapping)
+    return mapping
+
+
+def asset_kind_of(symbol: str, name: str = "") -> str:
+    """个股还是 ETF/LOF/基金。维表里有的代码信维表，没有才看名称和代码前缀。"""
+    text = (symbol or "").strip()
+    known = known_asset_types()
+    for key in _asset_lookup_keys(text):
+        kind = known.get(key)
+        if kind == "etf":
+            return "etf"
+        if kind == "stock":
+            return "stock"
+    if _is_fund_name(name):
+        return "etf"
+    code = text.split(".", 1)[0]
+    if _FUND_CODE.fullmatch(code):
+        return "etf"
+    return "stock"
+
+
+def _asset_lookup_keys(symbol: str) -> list[str]:
+    if not symbol:
+        return []
+    keys = [symbol]
+    code = symbol.split(".", 1)[0]
+    if code and code not in keys:
+        keys.append(code)
+    if "." not in symbol and code:
+        keys.extend(f"{code}{suffix}" for suffix in (".SH", ".SZ", ".BJ"))
+    return keys
+
+
+def _retag_fund(item: Candidate) -> Candidate:
+    if item.kind == "stock" and asset_kind_of(item.key, item.name) == "etf":
+        return replace(item, kind="etf")
+    return item
+
+
 def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: int = 4, limit: int = 20):
     now = cn_now()
     start = now - timedelta(hours=window_hours, days=baseline_days)
@@ -270,15 +348,18 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
             published_at=published,
             weight=mention_weight(str(row["origin"] or "")),
         ))
-    ranked = score_candidates(events, now=now, window_hours=window_hours, baseline_days=baseline_days)
-    if kind in {"stock", "sector"}:
+    ranked = [_retag_fund(item) for item in score_candidates(
+        events, now=now, window_hours=window_hours, baseline_days=baseline_days,
+    )]
+    if kind in {"stock", "sector", "etf"}:
         ranked = [item for item in ranked if item.kind == kind]
     return ranked[: max(1, min(limit, 50))]
 
 
 def public_hot_event(event: dict) -> dict:
-    """给页面和推送的事件字段。不带内部条目 id。"""
+    """给页面和推送的事件字段。不带内部条目 id。个股和 ETF 分开。"""
     stocks = []
+    etfs = []
     for stock in event.get("mentioned_stocks") or []:
         if not isinstance(stock, dict):
             continue
@@ -289,11 +370,15 @@ def public_hot_event(event: dict) -> dict:
             mentions = int(stock.get("mentions") or 0)
         except (TypeError, ValueError):
             mentions = 0
-        stocks.append({
+        row = {
             "key": key,
             "name": str(stock.get("name") or key),
             "mentions": mentions,
-        })
+        }
+        if asset_kind_of(key, row["name"]) == "etf":
+            etfs.append(row)
+        else:
+            stocks.append(row)
     try:
         heat = float(event.get("heat") or 0)
     except (TypeError, ValueError):
@@ -308,6 +393,7 @@ def public_hot_event(event: dict) -> dict:
         "first_seen": str(event.get("first_seen") or ""),
         "heat": round(heat, 4),
         "stocks": stocks,
+        "etfs": etfs,
     }
 
 
@@ -334,7 +420,7 @@ def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> d
         None,
     )
     if event is None:
-        return {"kind": "event", "key": wanted, "event": None, "stocks": [], "items": []}
+        return {"kind": "event", "key": wanted, "event": None, "stocks": [], "etfs": [], "items": []}
     ids: list[int] = []
     for raw in event.get("item_ids") or []:
         try:
@@ -348,6 +434,7 @@ def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> d
         "key": wanted,
         "event": public,
         "stocks": public["stocks"],
+        "etfs": public["etfs"],
         "items": [message_view(row) for row in rows[: max(1, min(limit, 50))]],
     }
 
@@ -382,8 +469,10 @@ def hot_messages(kind: str, key: str, *, window_hours: int = 24, limit: int = 30
         return event_detail(key, limit=limit)["items"]
     if kind == "sector" and not _usable_sector_name(key):
         return []
+    # 基金代码入库时仍记成 stock。热门 ETF 页签按这个原样去取摘录。
+    stored_kind = "stock" if kind == "etf" else kind
     start = cn_now() - timedelta(hours=window_hours)
-    rows = get_store().messages_for(kind=kind, key=key, start=start, limit=limit)
+    rows = get_store().messages_for(kind=stored_kind, key=key, start=start, limit=limit)
     seen: set[str] = set()
     out = []
     for row in rows:
@@ -1019,14 +1108,14 @@ def _hot_feed_items(limit: int = 50) -> list[dict]:
             ),
             "url": "",
             "published_at": cn_now().isoformat(timespec="seconds"),
-            "symbols": [stock["key"] for stock in event["stocks"]][:8],
+            "symbols": [row["key"] for row in (*event["stocks"], *(event.get("etfs") or []))][:8],
             "sectors": list(event["concepts"])[:6],
         })
     if items:
         return items[:limit]
-    for kind, label in (("sector", "热门板块"), ("stock", "热门个股")):
+    for kind, label in (("sector", "热门板块"), ("stock", "热门个股"), ("etf", "热门ETF")):
         for candidate in hot_candidates(kind=kind, limit=8):
-            symbols = [candidate.key] if kind == "stock" else []
+            symbols = [candidate.key] if kind in {"stock", "etf"} else []
             sectors = [candidate.key] if kind == "sector" else []
             items.append({
                 "source_id": f"hot:{kind}:{candidate.key}:{today}",

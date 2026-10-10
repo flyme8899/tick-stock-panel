@@ -773,6 +773,40 @@ def test_hot_event_constituents_are_capped_by_market_cap():
     assert "000005.SZ" not in scores
 
 
+def test_picker_hot_event_keeps_funds_out_of_the_stock_list(monkeypatch):
+    monkeypatch.setattr("app.news.service.known_asset_types", lambda: {})
+    event = {
+        "key": "ev_fund",
+        "name": "沪深300ETF放量",
+        "concepts": ["宽基"],
+        "mentions": 2,
+        "source_count": 1,
+        "mentioned_stocks": [
+            {"key": "600519.SH", "name": "贵州茅台", "mentions": 1},
+            {"key": "510300.SH", "name": "沪深300ETF", "mentions": 2},
+            {"key": "159915.SZ", "name": "创业板ETF易方达", "mentions": 1},
+        ],
+    }
+    known = {"600519.SH", "510300.SH", "159915.SZ", "000001.SZ"}
+    concepts = {"510300.SH": ["宽基"], "000001.SZ": ["宽基"], "600519.SH": ["白酒"]}
+    scores, _, note = map_selected_hot_event(
+        event,
+        Dimensions(concepts=concepts),
+        known,
+    )
+    assert note is None
+    assert set(scores) == {"600519.SH", "000001.SZ"}
+
+    monkeypatch.setattr("app.news.service.known_asset_types", lambda: {
+        "510300.SH": "stock",
+        "600519.SH": "etf",
+    })
+    scores, _, _ = map_selected_hot_event(event, Dimensions(concepts=concepts), known)
+    assert "510300.SH" in scores
+    assert "600519.SH" not in scores
+    assert "159915.SZ" not in scores
+
+
 def test_hot_events_do_not_merge_across_the_time_window(tmp_path):
     reset_store_for_tests(tmp_path / "window.sqlite")
     friday = date(2026, 10, 9)

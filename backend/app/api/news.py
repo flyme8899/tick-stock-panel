@@ -46,12 +46,12 @@ class PushTest(BaseModel):
 
 @router.get("/hot")
 def hot(
-    kind: str = Query("all", pattern="all|stock|sector|event"),
+    kind: str = Query("all", pattern="all|stock|sector|etf|event"),
     window_hours: int = Query(24, ge=1, le=168),
     baseline_days: int = Query(4, ge=1, le=14),
     limit: int = Query(20, ge=1, le=50),
 ):
-    """具体事件是主列表。板块和个股仍是近 24 小时相对基线的升温榜。"""
+    """具体事件是主列表。板块、个股和 ETF 仍是近 24 小时相对基线的升温榜。"""
     payload = {
         "kind": kind,
         "window_hours": window_hours,
@@ -104,7 +104,7 @@ def _attach_fund_flow(candidates: list[dict]) -> list[dict]:
 
 @router.get("/messages")
 def messages(
-    kind: str = Query(..., pattern="stock|sector|event"),
+    kind: str = Query(..., pattern="stock|sector|etf|event"),
     key: str = Query(..., min_length=1, max_length=64),
     window_hours: int = Query(24, ge=1, le=168),
     limit: int = Query(30, ge=1, le=50),

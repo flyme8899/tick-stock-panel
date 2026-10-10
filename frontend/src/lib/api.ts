@@ -2215,7 +2215,7 @@ export interface FundFlowBoard {
 }
 
 export interface NewsCandidate {
-  kind: 'stock' | 'sector'
+  kind: 'stock' | 'sector' | 'etf'
   key: string
   name: string
   score: number
@@ -2248,6 +2248,7 @@ export interface NewsHotEvent {
   first_seen: string
   heat: number
   stocks: NewsHotStock[]
+  etfs?: NewsHotStock[]
 }
 
 export interface NewsHotResponse {
@@ -4301,18 +4302,18 @@ export const api = {
 
   fundFlowBoard: () => request<FundFlowBoard>('/api/fund-flow/board'),
 
-  newsHot: (kind: 'all' | 'stock' | 'sector' | 'event' = 'all') =>
+  newsHot: (kind: 'all' | 'stock' | 'sector' | 'etf' | 'event' = 'all') =>
     request<NewsHotResponse>(
       `/api/news/hot?kind=${kind}&limit=20`,
     ),
 
-  newsMessages: (kind: 'stock' | 'sector', key: string) =>
+  newsMessages: (kind: 'stock' | 'sector' | 'etf', key: string) =>
     request<{ kind: string; key: string; items: NewsMessage[] }>(
       `/api/news/messages?kind=${kind}&key=${encodeURIComponent(key)}`,
     ),
 
   newsEventMessages: (key: string) =>
-    request<{ kind: 'event'; key: string; event: NewsHotEvent | null; stocks: NewsHotStock[]; items: NewsMessage[] }>(
+    request<{ kind: 'event'; key: string; event: NewsHotEvent | null; stocks: NewsHotStock[]; etfs: NewsHotStock[]; items: NewsMessage[] }>(
       `/api/news/messages?kind=event&key=${encodeURIComponent(key)}`,
     ),
 

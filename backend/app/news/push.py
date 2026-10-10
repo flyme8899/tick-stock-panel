@@ -177,8 +177,9 @@ def format_hot_markdown(
     *,
     heading: str,
     events: list[dict] | None = None,
+    etfs: list[dict] | None = None,
 ) -> tuple[str, str] | None:
-    """热点候选。具体事件在前，板块和个股升温榜在后。没有内容时不发。"""
+    """热点候选。具体事件在前，板块、个股、ETF 升温榜在后。没有内容时不发。"""
     blocks = []
     if events:
         lines = ["**具体事件**"]
@@ -200,7 +201,7 @@ def format_hot_markdown(
                 if text:
                     lines.append(f"   - {text}")
         blocks.append("\n".join(lines))
-    for title, rows in (("热门板块", sectors), ("热门个股", stocks)):
+    for title, rows in (("热门板块", sectors), ("热门个股", stocks), ("热门ETF", etfs or [])):
         if not rows:
             continue
         lines = [f"**{title}**"]
@@ -730,9 +731,10 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     events = [row for row in snapshot if row["kind"] == "event"][:limit]
     sectors = [row for row in snapshot if row["kind"] == "sector"][:limit]
     stocks = [row for row in snapshot if row["kind"] == "stock"][:limit]
+    etfs = [row for row in snapshot if row["kind"] == "etf"][:limit]
     if loader is None:
-        _attach_refs(sectors, stocks, events)
-    packed = format_hot_markdown(sectors, stocks, heading=heading, events=events)
+        _attach_refs(sectors, stocks, events, etfs)
+    packed = format_hot_markdown(sectors, stocks, heading=heading, events=events, etfs=etfs)
     if packed is None:
         state.data["last_hot_check"] = stamp
         return False
@@ -880,7 +882,7 @@ def _load_hot() -> list[dict]:
             "concepts": event["concepts"],
             "headline": event["headline"],
         })
-    for kind in ("sector", "stock"):
+    for kind in ("sector", "stock", "etf"):
         for item in hot_candidates(kind=kind, limit=top_n()):
             rows.append({
                 "kind": item.kind,
@@ -894,9 +896,14 @@ def _load_hot() -> list[dict]:
     return rows
 
 
-def _attach_refs(sectors: list[dict], stocks: list[dict], events: list[dict] | None = None) -> None:
+def _attach_refs(
+    sectors: list[dict],
+    stocks: list[dict],
+    events: list[dict] | None = None,
+    etfs: list[dict] | None = None,
+) -> None:
     from app.news.service import event_detail, hot_messages
-    for row in [*(events or []), *sectors, *stocks]:
+    for row in [*(events or []), *sectors, *stocks, *(etfs or [])]:
         try:
             if row.get("kind") == "event":
                 messages = event_detail(str(row.get("key") or ""), limit=8)["items"]
