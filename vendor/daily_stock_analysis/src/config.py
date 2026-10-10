@@ -126,6 +126,7 @@ TICKFLOW_KLINE_ADJUST_VALUES = {"none", "forward", "backward", "forward_additive
 # 沪深300 / 中证500 / 创业板 / 红利低波 / 纳指 / 黄金；防守资产为货币 ETF
 DEFAULT_ETF_ROTATION_POOL = ("510300", "510500", "159915", "512890", "513100", "518880")
 DEFAULT_ETF_ROTATION_SAFE_ASSET = "511880"
+DEFAULT_ETF_ROTATION_BUCKETS = "A股:510300|510500|159915;512890;513100;518880"
 # Fallback defaults used when ANSPIRE_API_KEYS is reused as legacy OpenAI-compatible source.
 # These are compatibility examples; actual availability should be validated by Anspire console/model entitlement.
 ANSPIRE_LLM_BASE_URL_DEFAULT = "https://open-gateway.anspire.cn/v6"
@@ -1238,9 +1239,14 @@ class Config:
     # === ETF 轮动配置（仅 --etf-rotation 使用）===
     etf_rotation_pool: List[str] = field(default_factory=lambda: list(DEFAULT_ETF_ROTATION_POOL))
     etf_rotation_safe_asset: str = DEFAULT_ETF_ROTATION_SAFE_ASSET
+    etf_rotation_mode: str = "blended_bucket"
+    etf_rotation_lookbacks: List[int] = field(default_factory=lambda: [20, 60, 120])
+    etf_rotation_buckets: str = DEFAULT_ETF_ROTATION_BUCKETS
     etf_rotation_lookback_days: int = 60
-    etf_rotation_rebalance: str = "weekly"
-    etf_rotation_top_n: int = 2
+    etf_rotation_rebalance: str = "monthly"
+    etf_rotation_top_n: int = 3
+    etf_rotation_weighting: str = "inv_vol"
+    etf_rotation_drawdown_risk_off: bool = False
     etf_rotation_switch_buffer_pct: float = 2.0
     etf_rotation_cost_bps: float = 10.0
     etf_rotation_backtest_years: int = 8
@@ -1846,6 +1852,19 @@ class Config:
         if report_show_llm_model_raw is not None and not report_show_llm_model_raw.strip():
             report_show_llm_model = False
 
+        from src.core.etf_rotation import parse_buckets, parse_lookbacks, parse_mode, parse_weighting
+
+        etf_rotation_mode = parse_mode(os.getenv('ETF_ROTATION_MODE'))
+        etf_rotation_lookbacks = parse_lookbacks(os.getenv('ETF_ROTATION_LOOKBACKS'))
+        etf_rotation_buckets = os.getenv('ETF_ROTATION_BUCKETS', DEFAULT_ETF_ROTATION_BUCKETS)
+        if not (etf_rotation_buckets or '').strip():
+            etf_rotation_buckets = DEFAULT_ETF_ROTATION_BUCKETS
+        parse_buckets(etf_rotation_buckets)
+        etf_rotation_weighting = parse_weighting(os.getenv('ETF_ROTATION_WEIGHTING'), etf_rotation_mode)
+        etf_rotation_drawdown_risk_off = os.getenv('ETF_ROTATION_DRAWDOWN_RISK_OFF', 'false').strip().lower() in {
+            '1', 'true', 'yes', 'on',
+        }
+
         return cls(
             stock_list=stock_list,
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
@@ -2228,15 +2247,24 @@ class Config:
             etf_rotation_safe_asset=(
                 os.getenv('ETF_ROTATION_SAFE_ASSET', DEFAULT_ETF_ROTATION_SAFE_ASSET) or ''
             ).strip(),
+            etf_rotation_mode=etf_rotation_mode,
+            etf_rotation_lookbacks=list(etf_rotation_lookbacks),
+            etf_rotation_buckets=etf_rotation_buckets,
             etf_rotation_lookback_days=parse_env_int(
                 os.getenv('ETF_ROTATION_LOOKBACK_DAYS'), 60,
                 field_name='ETF_ROTATION_LOOKBACK_DAYS', minimum=5, maximum=500,
             ),
-            etf_rotation_rebalance=cls._parse_etf_rotation_rebalance(os.getenv('ETF_ROTATION_REBALANCE')),
+            etf_rotation_rebalance=cls._parse_etf_rotation_rebalance(
+                os.getenv('ETF_ROTATION_REBALANCE'),
+                default='weekly' if etf_rotation_mode == 'legacy' else 'monthly',
+            ),
             etf_rotation_top_n=parse_env_int(
-                os.getenv('ETF_ROTATION_TOP_N'), 2,
+                os.getenv('ETF_ROTATION_TOP_N'),
+                2 if etf_rotation_mode == 'legacy' else 3,
                 field_name='ETF_ROTATION_TOP_N', minimum=1, maximum=10,
             ),
+            etf_rotation_weighting=etf_rotation_weighting,
+            etf_rotation_drawdown_risk_off=etf_rotation_drawdown_risk_off,
             etf_rotation_switch_buffer_pct=parse_env_float(
                 os.getenv('ETF_ROTATION_SWITCH_BUFFER_PCT'), 2.0,
                 field_name='ETF_ROTATION_SWITCH_BUFFER_PCT', minimum=0.0, maximum=50.0,
@@ -3005,12 +3033,13 @@ class Config:
         return codes
 
     @staticmethod
-    def _parse_etf_rotation_rebalance(value: Optional[str]) -> str:
-        normalized = (value or 'weekly').strip().lower()
+    def _parse_etf_rotation_rebalance(value: Optional[str], default: str = 'monthly') -> str:
+        fallback = default if default in ('weekly', 'monthly') else 'monthly'
+        normalized = (value or fallback).strip().lower()
         if normalized in ('weekly', 'monthly'):
             return normalized
-        logger.warning("ETF_ROTATION_REBALANCE=%r is invalid; falling back to weekly", value)
-        return 'weekly'
+        logger.warning("ETF_ROTATION_REBALANCE=%r is invalid; falling back to %s", value, fallback)
+        return fallback
 
     @classmethod
     def _parse_market_review_region(cls, value: str) -> str:

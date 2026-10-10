@@ -41,7 +41,13 @@ Docker 服务带健康检查：容器内 `curl -fsS http://127.0.0.1:8000/api/v1
 
 ## ETF 轮动
 
-决策页「运行轮动」调用 `POST /api/dsa/jobs/etf-rotation`。命令固定为 `python main.py --etf-rotation --no-notify`，股票池和成本只读 `ETF_ROTATION_*`，请求不能改参数。
+决策页「ETF 轮动」里的「运行轮动」调用 `POST /api/dsa/jobs/etf-rotation`。命令固定为 `python main.py --etf-rotation --no-notify`，模式、分桶和成本只读 `ETF_ROTATION_*`，请求不能改参数。
+
+默认模式 `blended_bucket`：用 20、60、120 日收益的平均排名给 ETF 打分（第 1 名最强），`A股:510300|510500|159915` 这个桶只留下最强的一只，其余桶各一只。每月最后一个交易日收盘发信号，下一交易日收盘执行。持有混合动量为正的前 3 个桶，按 60 日波动率倒数分配这 3 个名额；入选不足 3 个时，空出来的仓位才买入 `511880`。单边成本 10 bp。组合回撤风控有钩子，默认关闭。
+
+`ETF_ROTATION_MODE=equal_weight` 改为 6 只 ETF 等权、每月再平衡。`legacy` 是原来的周频、单窗口、前 2 名规则。
+
+日线按各数据源自己的优先级取值，`TICKFLOW_PRIORITY` 数字越小越优先。这次请求会向 TickFlow 要前复权，不改全局的 `TICKFLOW_KLINE_ADJUST`。优先级不如其他源时不会抢到第一位。
 
 TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里，接口不会在 app 容器中找解释器，而是请求 sidecar 的 `POST /api/v1/tsp/etf-rotation`。该入口由 `dsa_bootstrap.py` 在 DSA 导入自己的 API 时挂上，并在 sidecar 的工作目录里执行上面的命令。因此需要 `docker compose --profile dsa`，且 `DSA_BASE_URL=http://dsa:8000`。app 服务不挂载 Docker 套接字。
 
@@ -49,7 +55,17 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 
 本机仓库里已经有 `vendor/daily_stock_analysis/main.py` 和解释器时，仍由 TSP 进程直接执行。没有这份源码、sidecar 也没连上时，接口返回 `ok: false` 和原因，不会改用系统里的其他 Python。单次运行超过 180 秒会按超时失败。
 
-上游没有单独的 ETF 轮动 HTTP 接口，所以没有改 `vendor/daily_stock_analysis`。
+规则在 `vendor/daily_stock_analysis/src/core/etf_rotation.py`。上游没有单独的 ETF 轮动 HTTP 接口，TSP 仍通过上面的固定命令执行。决策页用返回里的 `result` 画信号日、模式、持仓权重和得分、上次与下次调仓；原始输出收在「运行日志」里。
+
+### 验收回测（2021-01 至 2026-10-09，单边 10 bp）
+
+这是该窗口、该成本下的验收基线，不是下一次实盘运行的保证。数据源或复权变化后，数字可以偏离。
+
+| 模式 | 年化 | 最大回撤 | 夏普 |
+| --- | --- | --- | --- |
+| blended_bucket，每月，前 3 | 12.6% | -20% | 1.00 |
+| equal_weight，每月 | 9.5% | -17.7% | — |
+| legacy | -4.8% | -46% | — |
 
 ## 量化回测证据
 
@@ -110,7 +126,7 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 
 DSA 读取的密钥和数据源（写在同一个 `.env`，留空则对应能力失败并给出原因）：
 
-`DSA_INTERNAL_TOKEN`、`SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`SCHEDULE_RUN_IMMEDIATELY`、`TRADING_DAY_CHECK_ENABLED`、`MARKET_REVIEW_REGION`、`STOCK_LIST`、`SCREENING_ENABLED`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`AIHUBMIX_KEY`、`ANSPIRE_API_KEYS`、`TUSHARE_TOKEN`、`TICKFLOW_API_KEY`、`EFINANCE_PRIORITY`、`SERPAPI_API_KEYS`、`TAVILY_API_KEYS`、`BOCHA_API_KEYS`、`BRAVE_API_KEYS`、`MINIMAX_API_KEYS`、`SEARXNG_BASE_URLS`、`WECHAT_WEBHOOK_URL`、`FEISHU_WEBHOOK_URL`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`DISCORD_WEBHOOK_URL`、`SLACK_BOT_TOKEN`、`SLACK_CHANNEL_ID`、`EMAIL_SENDER`、`EMAIL_PASSWORD`、`ETF_ROTATION_POOL`、`ETF_ROTATION_SAFE_ASSET`。
+`DSA_INTERNAL_TOKEN`、`SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`SCHEDULE_RUN_IMMEDIATELY`、`TRADING_DAY_CHECK_ENABLED`、`MARKET_REVIEW_REGION`、`STOCK_LIST`、`SCREENING_ENABLED`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`AIHUBMIX_KEY`、`ANSPIRE_API_KEYS`、`TUSHARE_TOKEN`、`TICKFLOW_API_KEY`、`EFINANCE_PRIORITY`、`TICKFLOW_PRIORITY`、`SERPAPI_API_KEYS`、`TAVILY_API_KEYS`、`BOCHA_API_KEYS`、`BRAVE_API_KEYS`、`MINIMAX_API_KEYS`、`SEARXNG_BASE_URLS`、`WECHAT_WEBHOOK_URL`、`FEISHU_WEBHOOK_URL`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`DISCORD_WEBHOOK_URL`、`SLACK_BOT_TOKEN`、`SLACK_CHANNEL_ID`、`EMAIL_SENDER`、`EMAIL_PASSWORD`、`ETF_ROTATION_MODE`、`ETF_ROTATION_LOOKBACKS`、`ETF_ROTATION_BUCKETS`、`ETF_ROTATION_REBALANCE`、`ETF_ROTATION_TOP_N`、`ETF_ROTATION_WEIGHTING`、`ETF_ROTATION_POOL`、`ETF_ROTATION_SAFE_ASSET`。
 
 sidecar 启动时，如果 `OPENAI_API_KEY` 为空且 TSP 已配置 `AI_API_KEY`，会借用 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`。`TICKFLOW_API_KEY` 两边同名，直接共用。
 

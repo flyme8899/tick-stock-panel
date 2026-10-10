@@ -1,8 +1,30 @@
-# ETF 轮动（规则化双动量）
+# ETF 轮动
 
 `python main.py --etf-rotation` 基于一组事先定好的 ETF，输出**最新调仓信号**和**规则回测报告**。整个流程是纯规则计算，不调用 LLM，不依赖任何 AI 配置。
 
-## 规则
+`ETF_ROTATION_MODE` 决定规则。未设置时是 `blended_bucket`。
+
+| 模式 | 行为 |
+| --- | --- |
+| `blended_bucket` | 20/60/120 日收益的平均排名。`A股:510300\|510500\|159915` 只留最强的一只，其余分号桶各一只。混合动量为正的前 3 个桶按 60 日波动率倒数加权。入选不足 3 个时，剩余仓位才给 `511880`。每月调仓 |
+| `equal_weight` | 风险池 6 只等权，每月把权重拉回等权 |
+| `legacy` | 旧规则：周频、单一回看窗口、前 2 名，带换仓缓冲 |
+
+三种模式都在收盘发信号，下一交易日收盘成交，不使用信号日之后的价格。组合回撤风控（`ETF_ROTATION_DRAWDOWN_RISK_OFF`）默认关闭；打开后，回撤达到 15% 的调仓日改持防守资产。
+
+日线按数据源优先级尝试。TickFlow 即使全局 `TICKFLOW_KLINE_ADJUST` 不是 `forward`，这次也会单独请求前复权，顺序仍遵守 `TICKFLOW_PRIORITY`（数字越小越优先）。
+
+## 验收回测（2021-01 至 2026-10-09，单边 10 bp）
+
+| 模式 | 年化 | 最大回撤 | 夏普 |
+| --- | --- | --- | --- |
+| blended_bucket，每月，前 3 | 12.6% | -20% | 1.00 |
+| equal_weight，每月 | 9.5% | -17.7% | — |
+| legacy | -4.8% | -46% | — |
+
+这是该窗口的验收基线。换数据源或复权后可以偏离，不代表未来收益。
+
+## 规则（legacy）
 
 1. **调仓日**：每周（或每月）最后一个交易日收盘后计算信号，下一个交易日收盘执行，避免使用信号当天的价格成交（防未来函数）。
 2. **相对动量**：按过去 `ETF_ROTATION_LOOKBACK_DAYS` 个交易日的涨幅，对风险池中的 ETF 排名。
@@ -49,11 +71,16 @@ python main.py --etf-rotation --no-notify  # 只生成本地报告
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `ETF_ROTATION_POOL` | `510300,510500,159915,512890,513100,518880` | 风险池，逗号分隔，会自动去重。默认依次为沪深300、中证500、创业板、红利低波、纳指、黄金 |
-| `ETF_ROTATION_SAFE_ASSET` | `511880` | 防守资产（货币 ETF）；配置为空表示持有现金 |
-| `ETF_ROTATION_LOOKBACK_DAYS` | `60` | 动量窗口（交易日），取值范围 5 到 500 |
-| `ETF_ROTATION_REBALANCE` | `weekly` | `weekly` 或 `monthly`，填写非法值时回退为 `weekly` |
-| `ETF_ROTATION_TOP_N` | `2` | 最多同时持有几只，取值范围 1 到 10 |
+| `ETF_ROTATION_MODE` | `blended_bucket` | `blended_bucket`、`equal_weight` 或 `legacy` |
+| `ETF_ROTATION_LOOKBACKS` | `20,60,120` | 混合动量窗口。得分是这些收益的平均排名 |
+| `ETF_ROTATION_BUCKETS` | `A股:510300\|510500\|159915;512890;513100;518880` | 分号分隔分桶。冒号桶只持有最强成员 |
+| `ETF_ROTATION_WEIGHTING` | `inv_vol` | 仅 `blended_bucket` 使用。`equal_weight` 与 `legacy` 固定等权 |
+| `ETF_ROTATION_DRAWDOWN_RISK_OFF` | `false` | 关闭时回撤钩子不改变持仓 |
+| `ETF_ROTATION_POOL` | `510300,510500,159915,512890,513100,518880` | 等权和 legacy 的风险池。分桶模式读 `ETF_ROTATION_BUCKETS` |
+| `ETF_ROTATION_SAFE_ASSET` | `511880` | 防守资产（货币 ETF）；配置为空表示持有现金。分桶模式只在入选数少于 `TOP_N` 时补仓 |
+| `ETF_ROTATION_LOOKBACK_DAYS` | `60` | legacy 的动量窗口（交易日），取值范围 5 到 500 |
+| `ETF_ROTATION_REBALANCE` | 随模式 | 未设置时 `blended_bucket` / `equal_weight` 为 `monthly`，`legacy` 为 `weekly` |
+| `ETF_ROTATION_TOP_N` | 随模式 | 未设置时 `blended_bucket` 为 3，`legacy` 为 2 |
 | `ETF_ROTATION_SWITCH_BUFFER_PCT` | `2.0` | 换仓缓冲（百分点） |
 | `ETF_ROTATION_COST_BPS` | `10` | 单边交易成本（bp），包含佣金和滑点 |
 | `ETF_ROTATION_BACKTEST_YEARS` | `8` | 回测拉取的历史年数，取值范围 1 到 30 |
@@ -62,7 +89,7 @@ python main.py --etf-rotation --no-notify  # 只生成本地报告
 
 ## 解读与边界
 
-- **先看参数平原，再看收益**。如果相邻窗口之间收益差异很大，说明当前参数的结果主要来自运气。持有 1 只时路径依赖最强，所以默认持有 2 只。
+- **先看参数平原，再看收益**。如果相邻窗口之间收益差异很大，说明当前参数的结果主要来自运气。`legacy` 持有 1 只时路径依赖最强，所以该模式默认持有 2 只；`blended_bucket` 默认持有 3 个分桶。
 - 趋势轮动的主要价值是**控制回撤**，并不保证跑赢基准。在震荡市里它会反复止损；遇到急涨行情（比如跳空的连续涨停）时反应会滞后。回测跑输等权持有是常见的正常结果。
 - **池子要事先定死**。回测时事后挑选"涨得好的 ETF"会产生幸存者偏差。
 - **数据源回退可能静默截断历史**。例如东财接口不可用时回退到 Baostock，可能只返回最近一段数据。这种情况会在"数据告警"中列出，此时回测区间会变短，结论要打折扣；不足 1 年时回测部分会直接省略。

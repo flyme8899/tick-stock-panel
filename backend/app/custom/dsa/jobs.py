@@ -12,7 +12,12 @@ import os
 import subprocess
 from pathlib import Path
 
-from app.custom.dsa.etf_job import TOKEN_MISSING_DETAIL, configured_token, token_usable
+from app.custom.dsa.etf_job import (
+    TOKEN_MISSING_DETAIL,
+    configured_token,
+    split_rotation_output,
+    token_usable,
+)
 from app.custom.dsa.proxy import UpstreamError, enabled, forward
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -72,12 +77,16 @@ def _run_local() -> dict:
     except subprocess.TimeoutExpired:
         return {"ok": False, "detail": "ETF 轮动超时", "command": command}
     output = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
-    return {
+    detail, result = split_rotation_output(output)
+    payload = {
         "ok": completed.returncode == 0,
         "code": completed.returncode,
-        "detail": output[-8000:],
+        "detail": detail[-8000:],
         "command": command,
     }
+    if result is not None:
+        payload["result"] = result
+    return payload
 
 
 def _run_in_sidecar() -> dict:
@@ -120,6 +129,8 @@ def _parse_sidecar_payload(status: int, payload: bytes, command: str) -> dict:
         }
         if "code" in body:
             parsed["code"] = body.get("code")
+        if isinstance(body.get("result"), dict):
+            parsed["result"] = body["result"]
         return parsed
     if status == 404:
         return {

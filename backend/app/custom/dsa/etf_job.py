@@ -11,6 +11,7 @@ sidecar 导入 FastAPI 应用时挂上 ``POST /api/v1/tsp/etf-rotation``，由�
 from __future__ import annotations
 
 import importlib.machinery
+import json
 import logging
 import os
 import secrets
@@ -33,6 +34,7 @@ TOKEN_MISSING_DETAIL = (
     "未配置 DSA_INTERNAL_TOKEN。请在共享的 .env 里写成至少 16 位随机 ASCII，TSP 与 DSA 使用同一值。"
 )
 _UNAUTHORIZED = {"ok": False, "detail": "未授权", "command": COMMAND}
+_RESULT_PREFIX = "TSP_ETF_RESULT "
 _ARGV = ("main.py", "--etf-rotation", "--no-notify")
 _TIMEOUT_SECONDS = 180
 _TOKEN_MIN = 16
@@ -81,6 +83,35 @@ def dsa_root() -> Path | None:
     return None
 
 
+def split_rotation_output(output: str) -> tuple[str, dict | None]:
+    """Pull the structured card off the CLI stdout. The line is not a log."""
+    result = None
+    kept: list[str] = []
+    for line in (output or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_RESULT_PREFIX):
+            try:
+                parsed = json.loads(stripped[len(_RESULT_PREFIX):])
+            except json.JSONDecodeError:
+                kept.append(line)
+                continue
+            if isinstance(parsed, dict):
+                result = parsed
+                continue
+        kept.append(line)
+    return "\n".join(kept).strip(), result
+
+
+def _job_payload(ok: bool, output: str, code: int | None = None) -> dict:
+    detail, result = split_rotation_output(output)
+    body: dict[str, Any] = {"ok": ok, "detail": detail[-8000:], "command": COMMAND}
+    if code is not None:
+        body["code"] = code
+    if result is not None:
+        body["result"] = result
+    return body
+
+
 def execute_job() -> dict:
     """执行固定的 ETF 轮动命令。重叠调用直接失败，不另起一套进程。"""
     if not _LOCK.acquire(blocking=False):
@@ -112,12 +143,7 @@ def _run_locked() -> dict:
         return {"ok": False, "detail": "ETF 轮动超时", "command": COMMAND}
     output = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
     logger.info("ETF 轮动结束，退出码 %s", completed.returncode)
-    return {
-        "ok": completed.returncode == 0,
-        "code": completed.returncode,
-        "detail": output[-8000:],
-        "command": COMMAND,
-    }
+    return _job_payload(completed.returncode == 0, output, completed.returncode)
 
 
 def run_job(request: Request) -> Any:
