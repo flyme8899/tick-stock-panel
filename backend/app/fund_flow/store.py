@@ -27,6 +27,9 @@ KINDS = frozenset({
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# 全市场 A 股大约五千只。少于此数的分区是半次失败留下的样本，不能当成排名。
+FULL_MARKET_MIN = 1000
+
 # 合并主键。后写覆盖先写。
 KEYS: dict[str, list[str]] = {
     "stock": ["code", "trade_date"],
@@ -43,10 +46,12 @@ _SCHEMAS: dict[str, dict[str, pl.DataType]] = {
     "stock": {
         "symbol": pl.Utf8,
         "code": pl.Utf8,
+        "name": pl.Utf8,
         "trade_date": pl.Utf8,
         "main_net": pl.Float64,
         "large_net": pl.Float64,
         "super_net": pl.Float64,
+        "main_net_5d": pl.Float64,
         "source": pl.Utf8,
     },
     "industry": {
@@ -244,6 +249,24 @@ def read_range(data_dir: Path, kind: str, *, start: str | None = None, end: str 
         return empty_frame(kind)
     frames = [read_partition(data_dir, kind, item) for item in dates]
     return pl.concat(frames, how="vertical_relaxed")
+
+
+def ranking_limit(universe: int | None) -> int:
+    """全市场门槛。已知股票池更小时，池子本身就是全集。"""
+    if universe is None or universe <= 0:
+        return FULL_MARKET_MIN
+    return min(FULL_MARKET_MIN, universe)
+
+
+def is_partial_ranking(count: int, universe: int | None) -> bool:
+    return count < ranking_limit(universe)
+
+
+def code_count(frame: pl.DataFrame) -> int:
+    """分区里有多少只不同的股票。空表或缺代码列算 0。"""
+    if frame.is_empty() or "code" not in frame.columns:
+        return 0
+    return int(frame.get_column("code").drop_nulls().n_unique())
 
 
 def latest_date(data_dir: Path, kind: str) -> str | None:

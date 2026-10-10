@@ -224,19 +224,15 @@ def dsa_context(data_dir: Path | None = None) -> dict:
     stock_day = store.latest_date(root, "stock")
     if stock_day:
         frame = _partition(root, "stock", stock_day)
-        if "main_net" in frame.columns:
-            frame = frame.sort("main_net", descending=True, nulls_last=True)
-            top = [
-                row for row in frame.head(5).to_dicts()
-                if row.get("main_net") is not None and row.get("symbol")
-            ]
-        else:
-            top = []
-        if top:
-            published = stock_day
-            lines.append("主力净流入居前: " + "；".join(
-                f"{row.get('symbol')} {_yi(row.get('main_net'))}" for row in top
-            ))
+        ranked = _stock_sides(root, frame, "main_net")
+        if ranked is not None:
+            inflow, _outflow = ranked
+            top = inflow[:5]
+            if top:
+                published = stock_day
+                lines.append("主力净流入居前: " + "；".join(
+                    f"{row.get('name') or row.get('code')} {_yi(row.get('main_net'))}" for row in top
+                ))
     for kind, label in (("industry", "行业"), ("concept", "概念")):
         day = store.latest_date(root, kind)
         if not day:
@@ -266,10 +262,100 @@ def dsa_context(data_dir: Path | None = None) -> dict:
     }
 
 
+_PARTIAL_NOTE = "个股样本不完整，不作为全市场排名。"
+_PARTIAL_5D_NOTE = "5日样本不完整，不作为排名。"
+_BOARD_SIDE_LIMIT = 10
+_MARGIN_COVERAGE = {
+    ("sse", "szse"): ("both", "沪深合计"),
+    ("sse",): ("sse", "仅沪市"),
+    ("szse",): ("szse", "仅深市"),
+}
+
+
+def _listed_count(root: Path) -> int | None:
+    path = Path(root) / "instruments" / "instruments.parquet"
+    if not path.exists():
+        return None
+    try:
+        frame = pl.read_parquet(path)
+    except Exception:  # noqa: BLE001
+        return None
+    if frame.is_empty():
+        return None
+    return frame.height
+
+
+def _instrument_names(root: Path) -> dict[str, str]:
+    path = Path(root) / "instruments" / "instruments.parquet"
+    if not path.exists():
+        return {}
+    try:
+        frame = pl.read_parquet(path)
+    except Exception:  # noqa: BLE001
+        return {}
+    if frame.is_empty() or "name" not in frame.columns:
+        return {}
+    found: dict[str, str] = {}
+    symbols = frame["symbol"].to_list() if "symbol" in frame.columns else [""] * frame.height
+    codes = frame["code"].to_list() if "code" in frame.columns else [""] * frame.height
+    for symbol, code, name in zip(symbols, codes, frame["name"].to_list(), strict=False):
+        text = str(name or "").strip()
+        if not text or text.lower() in {"none", "nan"}:
+            continue
+        for key in (normalize.code6(str(code or "")), normalize.code6(str(symbol or "")), str(symbol or "")):
+            if key:
+                found[key] = text
+    return found
+
+
+def _with_names(rows: list[dict], names: dict[str, str]) -> list[dict]:
+    named = []
+    for row in rows:
+        code = normalize.code6(str(row.get("code") or row.get("symbol") or ""))
+        name = str(row.get("name") or "").strip()
+        if not name or name.lower() in {"none", "nan"}:
+            name = names.get(code) or names.get(str(row.get("symbol") or "")) or ""
+        named.append({**row, "code": code or row.get("code"), "name": name or None})
+    return named
+
+
+def _stock_sides(
+    root: Path,
+    frame: pl.DataFrame,
+    column: str,
+) -> tuple[list[dict], list[dict]] | None:
+    if frame.is_empty() or column not in frame.columns or "code" not in frame.columns:
+        return None
+    usable = frame.filter(pl.col(column).is_not_null()).unique(subset=["code"], keep="last")
+    if store.is_partial_ranking(usable.height, _listed_count(root)):
+        return None
+    keep = [name for name in ("symbol", "code", "name", column, "large_net", "super_net") if name in usable.columns]
+    names = _instrument_names(root)
+    inflow = _with_names(
+        usable.filter(pl.col(column) > 0).sort(column, descending=True).head(_BOARD_SIDE_LIMIT).select(keep).to_dicts(),
+        names,
+    )
+    outflow = _with_names(
+        usable.filter(pl.col(column) < 0).sort(column, descending=False).head(_BOARD_SIDE_LIMIT).select(keep).to_dicts(),
+        names,
+    )
+    return inflow, outflow
+
+
+def _empty_stock(day: str | None, *, partial: bool = False, note: str | None = None) -> dict:
+    return {
+        "trade_date": day,
+        "partial": partial,
+        "note": note,
+        "items": [],
+        "inflow": [],
+        "outflow": [],
+    }
+
+
 _BROAD_HS300 = frozenset({"510300", "510310", "510330", "159919"})
 _BROAD_KC50 = frozenset({"588000", "588080", "588050"})
 _BOARD_SECTOR_LIMIT = 12
-_BOARD_STOCK_LIMIT = 15
 _BOARD_HISTORY = 40
 _BOARD_ETF_OTHERS = 12
 
@@ -308,50 +394,108 @@ def _sector_board(root: Path, kind: str) -> dict:
 def _stocks_today(root: Path) -> dict:
     day = store.latest_date(root, "stock")
     if day is None:
-        return {"trade_date": None, "items": []}
+        return _empty_stock(None)
     frame = _partition(root, "stock", day)
-    if frame.is_empty() or "main_net" not in frame.columns:
-        return {"trade_date": day, "items": []}
-    ranked = (
-        frame.filter(pl.col("main_net").is_not_null())
-        .sort("main_net", descending=True)
-        .head(_BOARD_STOCK_LIMIT)
-    )
+    ranked = _stock_sides(root, frame, "main_net")
+    if ranked is None:
+        partial = store.code_count(frame) > 0
+        return _empty_stock(day, partial=partial, note=_PARTIAL_NOTE if partial else None)
+    inflow, outflow = ranked
     return {
         "trade_date": day,
-        "items": ranked.select("symbol", "code", "main_net", "large_net", "super_net").to_dicts(),
+        "partial": False,
+        "note": None,
+        "items": inflow,
+        "inflow": inflow,
+        "outflow": outflow,
     }
 
 
-def _stocks_5d(root: Path) -> dict:
-    """最新交易日上、已经凑满 5 个交易日的主力净流入。不足 5 日不出现，也不记成 0。"""
-    main = factors.main_net_frame(root)
-    if main.is_empty():
-        return {"trade_date": None, "items": []}
-    trade_date = main.select(pl.col("trade_date").max()).item()
-    ranked = (
-        main.filter((pl.col("trade_date") == trade_date) & pl.col("ff_main_net_5d").is_not_null())
-        .sort("ff_main_net_5d", descending=True)
-        .head(_BOARD_STOCK_LIMIT)
+def _five_day_frame(root: Path, day: str) -> pl.DataFrame:
+    """优先用已落盘的 5 日合计，没有时用排名接口写入的 ``main_net_5d``。"""
+    part = _partition(root, "stock", day)
+    if part.is_empty() or "code" not in part.columns:
+        return part
+    factor = factors.main_net_frame(root)
+    if not factor.is_empty():
+        latest = factor.filter(pl.col("trade_date") == day).select("code", "ff_main_net_5d")
+        if not latest.is_empty():
+            part = part.join(latest, on="code", how="left")
+    if "ff_main_net_5d" not in part.columns:
+        part = part.with_columns(pl.lit(None).cast(pl.Float64).alias("ff_main_net_5d"))
+    if "main_net_5d" not in part.columns:
+        part = part.with_columns(pl.lit(None).cast(pl.Float64).alias("main_net_5d"))
+    return part.with_columns(
+        pl.coalesce(pl.col("ff_main_net_5d"), pl.col("main_net_5d")).alias("ff_main_net_5d"),
     )
-    symbols = _partition(root, "stock", str(trade_date))
-    if not symbols.is_empty():
-        ranked = ranked.join(symbols.select("code", "symbol"), on="code", how="left")
-    else:
-        ranked = ranked.with_columns(pl.lit(None).cast(pl.Utf8).alias("symbol"))
-    return {"trade_date": trade_date, "items": ranked.select("symbol", "code", "ff_main_net_5d").to_dicts()}
+
+
+def _stocks_5d(root: Path) -> dict:
+    """全市场 5 日主力。样本不够时不把少数几只排成榜。"""
+    day = store.latest_date(root, "stock")
+    if day is None:
+        return _empty_stock(None)
+    frame = _five_day_frame(root, day)
+    ranked = _stock_sides(root, frame, "ff_main_net_5d")
+    if ranked is None:
+        usable = 0
+        if not frame.is_empty() and "ff_main_net_5d" in frame.columns:
+            usable = frame.filter(pl.col("ff_main_net_5d").is_not_null()).height
+        partial = usable > 0
+        return _empty_stock(day, partial=partial, note=_PARTIAL_5D_NOTE if partial else None)
+    inflow, outflow = ranked
+    return {
+        "trade_date": day,
+        "partial": False,
+        "note": None,
+        "items": inflow,
+        "inflow": inflow,
+        "outflow": outflow,
+    }
+
+
+def _margin_day(day: str, rows: list[dict]) -> dict:
+    by_market = {}
+    for row in rows:
+        market = str(row.get("market") or "")
+        if market in {"sse", "szse"} and row.get("margin_balance") is not None:
+            by_market[market] = row
+    present = tuple(market for market in ("sse", "szse") if market in by_market)
+    coverage, label = _MARGIN_COVERAGE.get(present, ("none", ""))
+    total = None
+    if present:
+        total = sum(by_market[market]["margin_balance"] for market in present)
+    shorts = [
+        by_market[market]["short_balance"]
+        for market in present
+        if by_market[market].get("short_balance") is not None
+    ]
+    return {
+        "trade_date": day,
+        "margin_balance": total,
+        "short_balance": sum(shorts) if shorts else None,
+        "coverage": coverage,
+        "label": label,
+        "sse_margin_balance": (by_market.get("sse") or {}).get("margin_balance"),
+        "szse_margin_balance": (by_market.get("szse") or {}).get("margin_balance"),
+    }
 
 
 def _margin_trend(root: Path) -> dict:
     dates = store.list_dates(root, "margin")[-_BOARD_HISTORY:]
     items = []
+    days = []
     for day in dates:
         frame = _partition(root, "margin", day)
         if frame.is_empty() or "row_kind" not in frame.columns:
             continue
         summary = frame.filter(pl.col("row_kind") == "summary")
-        items.extend(summary.select("trade_date", "market", "margin_balance", "short_balance").to_dicts())
-    return {"items": items}
+        rows = summary.select("trade_date", "market", "margin_balance", "short_balance").to_dicts()
+        if not rows:
+            continue
+        items.extend(rows)
+        days.append(_margin_day(day, rows))
+    return {"items": items, "days": days}
 
 
 def _southbound_trend(root: Path) -> dict:

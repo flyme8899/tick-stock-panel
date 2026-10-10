@@ -8,30 +8,33 @@
 
 HK 服务器上这些入口不可用，调用表里没有它们：
 
-- `ak.stock_individual_fund_flow`
-- `ak.stock_individual_fund_flow_rank`
+- `ak.stock_individual_fund_flow`（逐只，仍走东财 push2his 的代码搜索）
 - `ak.stock_main_fund_flow`
 - 东财 push2 板块资金流（含 `ak.stock_sector_fund_flow_rank`）
 
-个股不用 akshare。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。
+个股日频账单用显式 secid 直接请求东财 push2his，不再经 efinance 搜索代码。全市场当日 / 5 日排名才用 akshare：同花顺 `stock_fund_flow_individual` 优先，东财 `stock_individual_fund_flow_rank` 作备选。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。
 
 ## 来源和时刻
 
-时间都是 Asia/Shanghai。非交易日不跑。交易日探针不确定时，工作日仍会跑。
+时间都是 Asia/Shanghai。到点任务只在交易日跑。交易日探针不确定时，工作日仍会跑。开关在非交易日、或交易日收盘前提前打开时，会补最近一个还缺分区的交易日；30 分钟内不重复尝试。盘中板块快照不在这批补数里。
 
 | 数据 | 源 | 时刻 |
 | --- | --- | --- |
-| 个股主力 / 大单 / 超大单 | efinance `get_history_bill`。缺的代码用妙想 `MX_APIKEY` | 交易日 16:30 之后。单线程，约 2.5 次/秒。本轮失败率超过 5%（至少 20 次）后降到 1 次/秒。第一次每个代码留最近 120 个日期，之后只补还没有的代码 |
+| 个股主力 / 大单 / 超大单 | 东财 push2his 日 K，secid 由代码推导（沪市 `1.`，深市和北交所 `0.`）。已经请求过但没拿到的代码用妙想 `MX_APIKEY`。熔断后还没轮到的代码不进妙想，改走全市场排名 | 交易日 16:30 之后。单线程，约 2.5 次/秒，带浏览器请求头。本轮失败率超过 5%（至少 20 次）后降到 1 次/秒。第一次每个代码留最近 120 个日期。当天分区不足全市场时会整表重拉。排名兜底只写当日主力，以及单独一列的 5 日合计 |
 | 行业 / 概念资金 | akshare 同花顺，`symbol="即时"` | 交易日 9:30–15:00 每 3 分钟一份盘中快照，60 秒内不重复请求。15:05 之后再写一份收盘快照 |
-| 融资融券 | `stock_margin_sse`、`stock_margin_detail_sse`、深交所对应接口 | 次日约 08:30 拉上一交易日。20:00 若那天还没落盘再试一次 |
+| 融资融券 | `stock_margin_sse`、`stock_margin_detail_sse`、深交所对应接口。深市空表（pandas `Length mismatch`）不当成源故障，保留已拿到的沪市，并再试上一交易日的深市 | 次日约 08:30 拉上一交易日。20:00 若那天还没落盘再试一次。融资余额按 akshare 的元入库，页面除以 1 亿显示为亿元。2026-10-09 沪市融资余额 12914.37 亿元，约 1.29 万亿元 |
 | ETF 份额 | `fund_etf_scale_sse` | 交易日 16:40。akshare 1.19.1 返回的基金份额已是份（库内把万份乘了 10000），入库不再乘。带「万」「亿」的文本仍按后缀换。`data/etf_flow` 里已有的 ETF领航者净流入按代码和日期接上，对不上就空着 |
 | 龙虎榜 | 现有 fuyao `data/dragon_tiger` 仍是主源。没有结果时读 akshare `stock_lhb_detail_em` 备份 | 备份在 17:30 之后拉当天 |
 | 南向 | `stock_hsgt_hist_em(symbol="南向资金")` | 16:40。净流入入库，裸数字按亿元 |
 | 北向成交额 | 同一接口，`symbol="北向资金"` | 只在 `FUND_FLOW_NORTHBOUND_TURNOVER` 打开时拉。只存买入加卖出的成交额，不存净流入。北向净流入自 2024-08-16 起没有数据 |
 
-妙想没有密钥就跳过。单轮默认最多 30 次；响应里如果有剩余次数，用剩余次数和这个上限里更小的那个。只给 efinance 没拿到的代码补主力净流入，大单和超大单留空。
+妙想没有密钥就跳过，并记一条日志。单轮默认最多 30 次。响应里如果带剩余次数，用这个剩余次数继续判断，同时仍受单轮上限约束。只给已经请求过、东财没拿到的代码补主力净流入，大单和超大单留空。
 
-每个源连续 8 次调用失败后熔断 10 分钟。失败后的重试间隔是 2 秒、4 秒、8 秒，最多 3 次重试。
+efinance 导入时会在包内 `data/` 建搜索缓存。app 镜像构建把该目录设成 `1777`。进程启动后把搜索缓存改写到 `data/efinance`，避免非 root 用户写不进 site-packages。个股账单本身不再调用 `get_history_bill`。
+
+每个源连续 8 次调用失败后熔断 10 分钟。失败后的重试间隔是 2 秒、4 秒、8 秒，最多 3 次重试。熔断打开后，这一轮已经拿到的个股行仍写入；全市场排名不走这条熔断，避免东财被拦时把同花顺板块也停掉。
+
+资金页的个股榜需要接近全市场的样本（至少 1000 只；股票池更小时以池子为准）。不足这个数的分区标成样本不完整，不展示成排名。样本够时分别列出主力净流入前 10 和净流出前 10，名称优先用落盘列，否则用 `instruments.parquet`。两融按交易日给出沪深合计；只有一边时标成「仅沪市」或「仅深市」，不把缺的一边写成 0。
 
 ## 落盘
 
@@ -52,7 +55,7 @@ data/fund_flow/<kind>/date=YYYY-MM-DD/part.parquet
 | 方法 | 路径 | 内容 |
 | --- | --- | --- |
 | GET | `/api/fund-flow/health` | 开关、各分区最新日期、最近错误、熔断状态 |
-| GET | `/api/fund-flow/board` | 资金流向页用的排行和短趋势。没有的块是空列表 |
+| GET | `/api/fund-flow/board` | 资金流向页用的排行和短趋势。没有的块是空列表。个股带 `inflow` / `outflow`，样本不够时 `partial` 为真且名单为空。两融 `days` 带合计和「沪深合计 / 仅沪市 / 仅深市」 |
 | GET | `/api/fund-flow/stock/{symbol}` | 该股账单，以及主力净流入 5 日 |
 | GET | `/api/fund-flow/sectors?kind=industry\|concept` | 行业或概念排名。有收盘快照用收盘，否则用当天最后一次盘中 |
 | GET | `/api/fund-flow/margin` | 两融汇总，明细默认最多 100 行 |

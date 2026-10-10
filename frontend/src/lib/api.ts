@@ -2209,12 +2209,31 @@ export interface FundFlowAmountRow {
   flow_net?: number | null
 }
 
+export interface FundFlowStockBlock {
+  trade_date: string | null
+  partial?: boolean
+  note?: string | null
+  items: FundFlowAmountRow[]
+  inflow?: FundFlowAmountRow[]
+  outflow?: FundFlowAmountRow[]
+}
+
+export interface FundFlowMarginDay {
+  trade_date: string
+  margin_balance: number | null
+  short_balance?: number | null
+  coverage?: string
+  label?: string
+  sse_margin_balance?: number | null
+  szse_margin_balance?: number | null
+}
+
 export interface FundFlowBoard {
   industry: { trade_date: string | null; snapshot: string | null; items: FundFlowAmountRow[] }
   concept: { trade_date: string | null; snapshot: string | null; items: FundFlowAmountRow[] }
-  stocks_today: { trade_date: string | null; items: FundFlowAmountRow[] }
-  stocks_5d: { trade_date: string | null; items: FundFlowAmountRow[] }
-  margin: { items: FundFlowAmountRow[] }
+  stocks_today: FundFlowStockBlock
+  stocks_5d: FundFlowStockBlock
+  margin: { items: FundFlowAmountRow[]; days?: FundFlowMarginDay[] }
   southbound: { items: FundFlowAmountRow[] }
   etf_shares: { trade_date: string | null; prev_trade_date: string | null; items: FundFlowAmountRow[] }
 }

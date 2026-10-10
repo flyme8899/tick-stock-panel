@@ -52,6 +52,59 @@ def _date(value: str) -> str:
     return text[:10]
 
 
+def normalize_rank_rows(
+    rows: list[dict],
+    *,
+    trade_date: str,
+    source: str,
+    window: str,
+) -> list[dict]:
+    """全市场排名收成当日主力，或 5 日主力。两边不会写进同一个金额字段。
+
+    东财排名的净额是元。同花顺单元格带「亿」「万」时按后缀；没有后缀时也按元。
+    """
+    if window not in {"today", "5d"}:
+        raise ValueError("window 只能是 today 或 5d")
+    out = []
+    for row in rows:
+        code = code6(_text(row, "code", "股票代码", "代码"))
+        if not code:
+            continue
+        name = _text(row, "name", "股票简称", "名称")
+        if window == "today":
+            main = _first_money(row, "main_net", "净额", "今日主力净流入-净额")
+            large = _first_money(row, "large_net", "今日大单净流入-净额")
+            super_net = _first_money(row, "super_net", "今日超大单净流入-净额")
+            five = None
+        else:
+            main = large = super_net = None
+            five = _first_money(row, "main_net_5d", "资金流入净额", "5日主力净流入-净额")
+        if main is None and large is None and super_net is None and five is None:
+            continue
+        out.append({
+            "symbol": code,
+            "code": code,
+            "name": name or None,
+            "trade_date": trade_date,
+            "main_net": main,
+            "large_net": large,
+            "super_net": super_net,
+            "main_net_5d": five,
+            "source": source,
+        })
+    return out
+
+
+def _first_money(row: dict, *names: str) -> float | None:
+    for name in names:
+        if name not in row:
+            continue
+        amount = money_to_yuan(row.get(name), bare=BARE_YUAN)
+        if amount is not None:
+            return amount
+    return None
+
+
 def normalize_bills(rows: list[dict], *, symbol: str, source: str) -> list[dict]:
     """个股主力/大单/超大单。efinance 与妙想的裸金额都是元。"""
     code = code6(symbol)
@@ -136,17 +189,27 @@ def normalize_sectors(
     ]
 
 
-def normalize_margin_summary(rows: list[dict], *, market: str) -> list[dict]:
+def normalize_margin_summary(
+    rows: list[dict],
+    *,
+    market: str,
+    trade_date: str | None = None,
+) -> list[dict]:
+    """两融汇总。上交所自带信用交易日期。深交所汇总没有日期列，用调用方传入的交易日。
+
+    akshare 1.19.1 的 ``stock_margin_sse`` / ``stock_margin_szse`` 只做
+    ``to_numeric``，融资余额单位是元，这里不再乘。
+    """
     out = []
     for row in rows:
-        trade_date = _date(_text(row, "trade_date", "信用交易日期", "日期"))
-        if not trade_date:
+        day = _date(_text(row, "trade_date", "信用交易日期", "日期")) or (trade_date or "")
+        if not day:
             continue
         out.append({
             "market": market,
             "symbol": "",
             "name": "",
-            "trade_date": trade_date,
+            "trade_date": day,
             "row_kind": "summary",
             "margin_balance": money_to_yuan(
                 row.get("margin_balance", row.get("融资余额")), bare=BARE_YUAN,
