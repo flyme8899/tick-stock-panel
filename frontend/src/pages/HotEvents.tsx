@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type NewsCandidate, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
+import { api, type NewsCandidate, type NewsHotEvent, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
@@ -8,9 +8,34 @@ import { cn } from '@/lib/cn'
 const POLL_MS = 60_000
 
 const TABS = [
-  { key: 'sector' as const, label: '热门板块' },
+  { key: 'event' as const, label: '具体事件' },
+  { key: 'sector' as const, label: '板块热度' },
   { key: 'stock' as const, label: '热门个股' },
+  { key: 'etf' as const, label: '热门ETF' },
 ]
+
+const CATEGORIES = [
+  '国内政策/宏观',
+  '海外市场/央行',
+  '科技与产业',
+  '地缘政治',
+  '大宗商品/期货价格异动',
+  '公司重大事项',
+] as const
+
+type HotTab = (typeof TABS)[number]['key']
+
+function confirmBadge(confirm: NonNullable<NewsHotEvent['confirmation']>): string {
+  const session = confirm.label && !confirm.live ? confirm.label : ''
+  const horizon = confirm.horizon
+    || (confirm.persistence && confirm.persistence !== '无' ? confirm.persistence : '')
+  if (confirm.lagged && (!confirm.strength || confirm.strength === '无')) {
+    return ['消息滞后确认', session].filter(Boolean).join(' · ')
+  }
+  const name = confirm.phase === 'auction' ? '竞价验证' : '盘面验证'
+  const head = confirm.lagged ? `消息滞后确认 · ${name} ${confirm.strength}` : `${name} ${confirm.strength}`
+  return [head, horizon, session].filter(Boolean).join(' · ')
+}
 
 function fundFlowText(item: NewsCandidate): string {
   const flow = item.fund_flow
@@ -35,8 +60,10 @@ function authLabel(source: NewsSourceHealth): string {
 }
 
 export function HotEvents() {
-  const [tab, setTab] = useState<'sector' | 'stock'>('sector')
+  const [tab, setTab] = useState<HotTab>('event')
+  const [category, setCategory] = useState<string>('全部')
   const [picked, setPicked] = useState<NewsCandidate | null>(null)
+  const [pickedEvent, setPickedEvent] = useState<NewsHotEvent | null>(null)
   const [pushNote, setPushNote] = useState('')
   const queryClient = useQueryClient()
 
@@ -51,9 +78,14 @@ export function HotEvents() {
     refetchInterval: POLL_MS,
   })
   const messages = useQuery({
-    queryKey: QK.newsMessages(picked?.kind ?? tab, picked?.key ?? ''),
+    queryKey: QK.newsMessages(picked?.kind ?? 'sector', picked?.key ?? ''),
     queryFn: () => api.newsMessages(picked!.kind, picked!.key),
-    enabled: picked != null,
+    enabled: picked != null && tab !== 'event',
+  })
+  const eventDetail = useQuery({
+    queryKey: QK.newsMessages('event', pickedEvent?.key ?? ''),
+    queryFn: () => api.newsEventMessages(pickedEvent!.key),
+    enabled: pickedEvent != null && tab === 'event',
   })
   const toggle = useMutation({
     mutationFn: (source: NewsSourceHealth) =>
@@ -81,12 +113,13 @@ export function HotEvents() {
   })
 
   const candidates = hot.data?.candidates ?? []
+  const events = (hot.data?.events ?? []).filter(item => category === '全部' || item.category === category)
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="热门事件"
-        subtitle="近 24 小时相对前 4 日基线升温的板块和个股。只展示摘录，供内部研究。"
+        subtitle="当天和资本市场有关的具体事件，按政策、海外、产业、地缘、商品和公司事项分类。板块、个股和 ETF 热度仍在后面。只展示摘录，供内部研究。"
       />
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_280px]">
         <section className="min-w-0">
@@ -104,6 +137,7 @@ export function HotEvents() {
                 onClick={() => {
                   setTab(item.key)
                   setPicked(null)
+                  setPickedEvent(null)
                 }}
               >
                 {item.label}
@@ -113,12 +147,112 @@ export function HotEvents() {
 
           {hot.isLoading && <p className="text-sm text-muted">加载中…</p>}
           {hot.isError && <p className="text-sm text-danger">热门候选加载失败</p>}
-          {hot.isSuccess && candidates.length === 0 && (
+          {hot.isSuccess && tab === 'event' && events.length === 0 && (
             <p className="text-sm text-muted">
-              还没有候选。打开右侧来源并等待采集后，这里会列出升温的板块和个股。
+              {category !== '全部'
+                ? '这个分类下还没有事件。'
+                : (hot.data?.hint || '今天还没有收成具体事件。打开右侧来源并等待采集后，这里会列出当天的事件。')}
+            </p>
+          )}
+          {hot.isSuccess && tab !== 'event' && candidates.length === 0 && (
+            <p className="text-sm text-muted">
+              还没有候选。打开右侧来源并等待采集后，这里会列出升温的板块、个股和 ETF。
+            </p>
+          )}
+          {tab === 'event' && (
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {['全部', ...CATEGORIES].map(name => (
+                <button
+                  key={name}
+                  type="button"
+                  className={cn(
+                    'rounded-full border px-2 py-0.5 text-xs',
+                    category === name
+                      ? 'border-accent bg-accent/10 text-foreground'
+                      : 'border-border text-muted',
+                  )}
+                  onClick={() => {
+                    setCategory(name)
+                    setPickedEvent(null)
+                  }}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {tab === 'event' && hot.data?.hint && events.length > 0 && (
+            <p className={cn('mb-2 text-xs', hot.data.fallback ? 'text-amber-600 dark:text-amber-400' : 'text-muted')}>
+              {hot.data.hint}
             </p>
           )}
 
+          {tab === 'event' && (
+            <ul className="space-y-2">
+              {events.map(item => (
+                <li key={item.key}>
+                  <button
+                    type="button"
+                    title={item.headline || undefined}
+                    className={cn(
+                      'w-full rounded-md border px-3 py-2 text-left',
+                      pickedEvent?.key === item.key ? 'border-accent' : 'border-border',
+                    )}
+                    onClick={() => setPickedEvent(item)}
+                  >
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="font-medium">{item.name}</span>
+                      <span className="shrink-0 text-xs text-muted">热度 {item.heat}</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {item.importance && (
+                        <span className={cn(
+                          'rounded px-1 text-[10px] leading-4',
+                          item.importance === '重大' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
+                        )}>{item.importance}</span>
+                      )}
+                      {item.confirmation && (
+                        <span className={cn(
+                          'rounded px-1 text-[10px] leading-4',
+                          item.confirmation.strength === '强' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
+                        )}>
+                          {confirmBadge(item.confirmation)}
+                        </span>
+                      )}
+                      {item.category && (
+                        <span className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{item.category}</span>
+                      )}
+                      {item.direction && (
+                        <span className={cn(
+                          'rounded px-1 text-[10px] leading-4',
+                          item.direction === '利空' ? 'bg-bear/10 text-bear' : 'bg-bull/10 text-bull',
+                        )}>{item.direction}</span>
+                      )}
+                      {item.concepts.map(tag => (
+                        <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
+                      ))}
+                    </div>
+                    {([...item.stocks, ...(item.etfs ?? [])]).length > 0 && (
+                      <div className="mt-1 text-xs text-secondary">
+                        {item.direction || '映射'}{' '}
+                        {([...item.stocks, ...(item.etfs ?? [])]).slice(0, 4).map(stock => stock.name || stock.key).join('、')}
+                      </div>
+                    )}
+                    <div className="mt-1 text-xs text-muted">
+                      提及 {item.mentions} · 来源 {item.source_count}
+                      {item.first_seen ? ` · 首见 ${item.first_seen}` : ''}
+                    </div>
+                    {item.headline && item.headline !== item.name && (
+                      <div className="mt-1 truncate text-xs text-secondary">{item.headline}</div>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {tab !== 'event' && (
           <ul className="space-y-2">
             {candidates.map(item => (
               <li key={item.key}>
@@ -142,8 +276,47 @@ export function HotEvents() {
               </li>
             ))}
           </ul>
+          )}
 
-          {picked && (
+          {tab === 'event' && pickedEvent && (
+            <div className="mt-4 border-t border-border pt-3">
+              <h2 className="mb-2 text-sm font-medium">{pickedEvent.name}</h2>
+              {(eventDetail.data?.stocks ?? pickedEvent.stocks).length > 0 && (
+                <p className="mb-2 text-xs text-muted">
+                  相关个股：{(eventDetail.data?.stocks ?? pickedEvent.stocks).map(stock => stock.name || stock.key).join('、')}
+                </p>
+              )}
+              {(eventDetail.data?.etfs ?? pickedEvent.etfs ?? []).length > 0 && (
+                <p className="mb-2 text-xs text-muted">
+                  相关ETF：{(eventDetail.data?.etfs ?? pickedEvent.etfs ?? []).map(stock => stock.name || stock.key).join('、')}
+                </p>
+              )}
+              {eventDetail.isLoading && <p className="text-sm text-muted">加载摘录…</p>}
+              {eventDetail.isError && <p className="text-sm text-danger">摘录加载失败</p>}
+              {eventDetail.isSuccess && eventDetail.data.items.length === 0 && (
+                <p className="text-sm text-muted">这个事件里没有可展示的摘录。</p>
+              )}
+              <ul className="space-y-3">
+                {(eventDetail.data?.items ?? []).map(item => (
+                  <li key={`${item.source}-${item.published_at}-${item.title}`} className="text-sm">
+                    <div className="text-xs text-muted">
+                      {item.source_label} · {item.published_at}
+                      {item.level ? ` · ${item.level}` : ''}
+                    </div>
+                    {item.title && <div className="font-medium">{item.title}</div>}
+                    <p className="text-secondary">{item.excerpt}</p>
+                    {item.url && (
+                      <a className="text-xs text-accent" href={item.url} target="_blank" rel="noreferrer">
+                        打开来源链接
+                      </a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {tab !== 'event' && picked && (
             <div className="mt-4 border-t border-border pt-3">
               <h2 className="mb-2 text-sm font-medium">{picked.name} 的相关摘录</h2>
               {messages.isLoading && <p className="text-sm text-muted">加载摘录…</p>}

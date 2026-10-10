@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -69,11 +71,12 @@ from app.news.extract import (
     Lexicon,
     Mention,
     StructuredStock,
+    _is_fund_name,
     _usable_sector_name,
     parse_llm_payload,
     parse_llm_summary,
 )
-from app.news.scoring import MentionEvent, mention_weight, score_candidates
+from app.news.scoring import Candidate, MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
 
 logger = logging.getLogger(__name__)
@@ -86,6 +89,11 @@ _LLM_LOCK = threading.Lock()
 _LLM_PER_HOUR = 10
 # 一次外文轮询可能带上几十条新稿。模型只处理前几条，避免单轮把额度打光。
 _FOREIGN_LLM_PER_POLL = 10
+# 本地维表里的 ETF / 股票集合。请求线程不扫盘，大约 10 分钟复用一次。
+_ASSET_TYPES: tuple[float, dict[str, str]] | None = None
+_ASSET_TTL = 600
+# 50/51/56/58 是沪市基金，15/16 是深市 ETF 和 LOF。维表里有的代码以维表为准。
+_FUND_CODE = re.compile(r"^(?:15|16|50|51|56|58)\d{4}$")
 
 
 def get_store() -> NewsStore:
@@ -97,12 +105,13 @@ def get_store() -> NewsStore:
 
 
 def reset_store_for_tests(path: Path | None = None) -> NewsStore:
-    global _STORE, _LEXICON
+    global _STORE, _LEXICON, _ASSET_TYPES
     with _STORE_LOCK:
         if _STORE is not None:
             _STORE.close()
         _STORE = NewsStore(path or (settings.data_dir / "news" / "news.sqlite"))
         _LEXICON = None
+        _ASSET_TYPES = None
     from app.news.hot_events import clear_hot_event_cache
 
     clear_hot_event_cache()
@@ -251,6 +260,75 @@ def backfill_mentions(lexicon: Lexicon, *, limit: int = 200) -> int:
     return updated
 
 
+def known_asset_types() -> dict[str, str]:
+    """本地标的维表：symbol → etf 或 stock。ETF 优先。仓库还没挂上时返回空表。"""
+    global _ASSET_TYPES
+    now = time.monotonic()
+    if _ASSET_TYPES is not None and now - _ASSET_TYPES[0] < _ASSET_TTL:
+        return _ASSET_TYPES[1]
+    repo = _repo()
+    if repo is None:
+        return {}
+    mapping: dict[str, str] = {}
+    try:
+        etfs = repo.get_etf_symbol_set() or set()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读取 ETF 维表失败: %s", exc)
+        etfs = set()
+    for symbol in etfs:
+        text = str(symbol or "").strip()
+        if text:
+            mapping[text] = "etf"
+    try:
+        frame = repo.get_instruments()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读取股票维表失败: %s", exc)
+        frame = None
+    if frame is not None and not frame.is_empty() and "symbol" in frame.columns:
+        for symbol in frame.get_column("symbol").to_list():
+            text = str(symbol or "").strip()
+            if text:
+                mapping.setdefault(text, "stock")
+    _ASSET_TYPES = (now, mapping)
+    return mapping
+
+
+def asset_kind_of(symbol: str, name: str = "") -> str:
+    """个股还是 ETF/LOF/基金。维表里有的代码信维表，没有才看名称和代码前缀。"""
+    text = (symbol or "").strip()
+    known = known_asset_types()
+    for key in _asset_lookup_keys(text):
+        kind = known.get(key)
+        if kind == "etf":
+            return "etf"
+        if kind == "stock":
+            return "stock"
+    if _is_fund_name(name):
+        return "etf"
+    code = text.split(".", 1)[0]
+    if _FUND_CODE.fullmatch(code):
+        return "etf"
+    return "stock"
+
+
+def _asset_lookup_keys(symbol: str) -> list[str]:
+    if not symbol:
+        return []
+    keys = [symbol]
+    code = symbol.split(".", 1)[0]
+    if code and code not in keys:
+        keys.append(code)
+    if "." not in symbol and code:
+        keys.extend(f"{code}{suffix}" for suffix in (".SH", ".SZ", ".BJ"))
+    return keys
+
+
+def _retag_fund(item: Candidate) -> Candidate:
+    if item.kind == "stock" and asset_kind_of(item.key, item.name) == "etf":
+        return replace(item, kind="etf")
+    return item
+
+
 def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: int = 4, limit: int = 20):
     now = cn_now()
     start = now - timedelta(hours=window_hours, days=baseline_days)
@@ -270,18 +348,225 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
             published_at=published,
             weight=mention_weight(str(row["origin"] or "")),
         ))
-    ranked = score_candidates(events, now=now, window_hours=window_hours, baseline_days=baseline_days)
-    if kind in {"stock", "sector"}:
+    ranked = [_retag_fund(item) for item in score_candidates(
+        events, now=now, window_hours=window_hours, baseline_days=baseline_days,
+    )]
+    if kind in {"stock", "sector", "etf"}:
         ranked = [item for item in ranked if item.kind == kind]
     return ranked[: max(1, min(limit, 50))]
 
 
-def top_hot_events(now: datetime | None = None) -> dict:
-    """当前交易日热度最高的具体事件。
+def public_hot_event(event: dict) -> dict:
+    """给页面和推送的事件字段。不带内部条目 id。个股和 ETF 分开。"""
+    stocks = []
+    etfs = []
+    for stock in event.get("mentioned_stocks") or []:
+        if not isinstance(stock, dict):
+            continue
+        key = str(stock.get("key") or "").strip()
+        if not key:
+            continue
+        try:
+            mentions = int(stock.get("mentions") or 0)
+        except (TypeError, ValueError):
+            mentions = 0
+        direction = str(stock.get("direction") or event.get("direction") or "")
+        if direction not in {"利好", "利空"}:
+            direction = str(event.get("direction") or "")
+        row = {
+            "key": key,
+            "name": str(stock.get("name") or key),
+            "mentions": mentions,
+            "direction": direction if direction in {"利好", "利空"} else "利好",
+        }
+        if asset_kind_of(key, row["name"]) == "etf":
+            etfs.append(row)
+        else:
+            stocks.append(row)
+    try:
+        heat = float(event.get("heat") or 0)
+    except (TypeError, ValueError):
+        heat = 0.0
+    try:
+        relevance = int(event.get("relevance") or 0)
+    except (TypeError, ValueError):
+        relevance = 0
+    concepts = [str(item) for item in (event.get("concepts") or []) if str(item).strip()]
+    direction = str(event.get("direction") or "")
+    if direction not in {"利好", "利空"}:
+        direction = "利好"
+    mapping = []
+    for item in event.get("mapping") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        item_direction = str(item.get("direction") or direction)
+        if item_direction not in {"利好", "利空"}:
+            item_direction = direction
+        mapping.append({
+            "name": name,
+            "kind": "concept",
+            "direction": item_direction,
+        })
+    if not mapping:
+        mapping = [{"name": name, "kind": "concept", "direction": direction} for name in concepts]
+    headlines = [str(item).strip() for item in (event.get("headlines") or []) if str(item).strip()]
+    headline = str(event.get("headline") or "")
+    if headline and headline not in headlines:
+        headlines.insert(0, headline)
+    importance = str(event.get("importance") or "")
+    if importance not in {"琐碎", "一般", "重要", "重大"}:
+        importance = "一般"
+    try:
+        score = round(float(event.get("score") or 0), 4)
+    except (TypeError, ValueError):
+        score = 0.0
+    raw_parts = event.get("breakdown") if isinstance(event.get("breakdown"), dict) else {}
+    breakdown = {
+        part: _public_score_part(raw_parts.get(part))
+        for part in ("importance", "confirmation", "mapping", "freshness", "heat")
+    }
+    confirmation = _public_confirmation(event.get("confirmation"))
+    return {
+        "key": str(event.get("key") or ""),
+        "name": str(event.get("name") or ""),
+        "category": str(event.get("category") or ""),
+        "direction": direction,
+        "relevance": relevance,
+        "concepts": concepts,
+        "mapping": mapping,
+        "headline": headline or (headlines[0] if headlines else ""),
+        "headlines": headlines[:3],
+        "mentions": int(event.get("mentions") or 0),
+        "source_count": int(event.get("source_count") or 0),
+        "first_seen": str(event.get("first_seen") or ""),
+        "heat": round(heat, 4),
+        "importance": importance,
+        "score": score,
+        "breakdown": breakdown,
+        "confirmation": confirmation,
+        "stocks": stocks,
+        "etfs": etfs,
+    }
 
-    同一交易日的标题按主体、动作和细概念聚类，热度是资讯条数乘来源数，再按更新时间衰减。
+
+def _public_confirmation(raw) -> dict:
+    payload = raw if isinstance(raw, dict) else {}
+    detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else {}
+    strength = str(payload.get("strength") or "无")
+    if strength not in {"强", "中", "弱", "无"}:
+        strength = "无"
+    persistence = str(payload.get("persistence") or "无")
+    if persistence not in {"持续", "短暂", "无"}:
+        persistence = "无"
+    phase = str(payload.get("phase") or "session")
+    if phase not in {"auction", "intraday", "session"}:
+        phase = "session"
+    horizon = str(payload.get("horizon") or "")
+    if horizon not in {"主线", "一日游"}:
+        horizon = ""
+    return {
+        "label": str(payload.get("label") or "暂无行情"),
+        "session": payload.get("session") or None,
+        "live": bool(payload.get("live")),
+        "score": _public_score_part(payload.get("score")),
+        "abnormal": bool(payload.get("abnormal")),
+        "strength": strength,
+        "persistence": persistence,
+        "phase": phase,
+        "lagged": bool(payload.get("lagged")),
+        "horizon": horizon,
+        "detail": {
+            "excess_pct": _optional_score(detail.get("excess_pct")),
+            "breadth": _optional_score(detail.get("breadth")),
+            "limit_count": int(detail.get("limit_count") or 0),
+            "vol_ratio": _optional_score(detail.get("vol_ratio")),
+            "main_net": _optional_score(detail.get("main_net")),
+            "sector_net_inflow": _optional_score(detail.get("sector_net_inflow")),
+            "windows": int(detail.get("windows") or 0),
+            "windows_hit": int(detail.get("windows_hit") or 0),
+            "pre_return": _optional_score(detail.get("pre_return")),
+            "auction_open_pct": _optional_score(detail.get("auction_open_pct")),
+            "auction_vol_ratio": _optional_score(detail.get("auction_vol_ratio")),
+            "high_open_breadth": _optional_score(detail.get("high_open_breadth")),
+            "window_5": _optional_score(detail.get("window_5")),
+            "window_15": _optional_score(detail.get("window_15")),
+            "window_30": _optional_score(detail.get("window_30")),
+            "share": _optional_score(detail.get("share")),
+        },
+    }
+
+
+def _optional_score(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
+
+
+def _public_score_part(value) -> float:
+    try:
+        return round(float(value or 0), 4)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def hot_event_listing(now: datetime | None = None, *, limit: int = 20) -> dict:
+    """热门事件页的主列表。和选股、推送用同一套聚类，按事件分量从高到低。"""
+    snapshot = top_hot_events(now)
+    events = [public_hot_event(item) for item in snapshot.get("events") or [] if isinstance(item, dict)]
+    return {
+        "events": events[: max(1, min(limit, 50))],
+        "as_of": snapshot.get("as_of"),
+        "trading_day": snapshot.get("trading_day"),
+        "fallback": bool(snapshot.get("fallback")),
+        "hint": snapshot.get("hint"),
+        "updated_at": snapshot.get("updated_at"),
+    }
+
+
+def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> dict:
+    """点开一个具体事件：簇里的资讯摘录，以及正文里提到的个股。"""
+    wanted = (key or "").strip()
+    snapshot = top_hot_events(now)
+    event = next(
+        (item for item in snapshot.get("events") or [] if isinstance(item, dict) and item.get("key") == wanted),
+        None,
+    )
+    if event is None:
+        return {"kind": "event", "key": wanted, "event": None, "stocks": [], "etfs": [], "items": []}
+    ids: list[int] = []
+    for raw in event.get("item_ids") or []:
+        try:
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    rows = get_store().items_by_ids(ids)
+    public = public_hot_event(event)
+    return {
+        "kind": "event",
+        "key": wanted,
+        "event": public,
+        "stocks": public["stocks"],
+        "etfs": public["etfs"],
+        "items": [message_view(row) for row in rows[: max(1, min(limit, 50))]],
+    }
+
+
+def top_hot_events(now: datetime | None = None) -> dict:
+    """当前交易日分量最高的具体事件。
+
+    同一交易日的标题按主体、动作和细概念聚类。排序把事件重要性和首见之后的盘面验证
+    放在同一档，再看 A 股映射和首见新鲜度。热度（条数乘来源数，再按更新时间衰减）只作加分。
     当天没有资讯时，改用不晚于今天、且落在回看窗口里的最近一天，并在 hint 里标明。
-    结果缓存约 10 分钟。模型不可用时保留关键词标题。
+    结果缓存约 10 分钟。模型不可用时保留关键词标题和规则分级。
     """
     from app.news.hot_events import build_top_hot_events
 
@@ -302,10 +587,14 @@ def message_view(row, *, limit: int = 240) -> dict:
 
 
 def hot_messages(kind: str, key: str, *, window_hours: int = 24, limit: int = 30) -> list[dict]:
+    if kind == "event":
+        return event_detail(key, limit=limit)["items"]
     if kind == "sector" and not _usable_sector_name(key):
         return []
+    # 基金代码入库时仍记成 stock。热门 ETF 页签按这个原样去取摘录。
+    stored_kind = "stock" if kind == "etf" else kind
     start = cn_now() - timedelta(hours=window_hours)
-    rows = get_store().messages_for(kind=kind, key=key, start=start, limit=limit)
+    rows = get_store().messages_for(kind=stored_kind, key=key, start=start, limit=limit)
     seen: set[str] = set()
     out = []
     for row in rows:
@@ -332,7 +621,7 @@ def news_for_symbol(symbol: str, *, hours: int = 72, limit: int = 30) -> dict:
 def feed_for_source(source: str, *, limit: int = 50) -> dict:
     limit = max(1, min(limit, 50))
     if source == "hot":
-        return {"source": "hot", "name": SOURCE_LABELS["hot"], "items": _hot_feed_items()}
+        return {"source": "hot", "name": SOURCE_LABELS["hot"], "items": _hot_feed_items(limit)}
     if source not in SOURCE_ORDER:
         raise ValueError(f"未知来源 {source}")
     items = []
@@ -924,12 +1213,32 @@ def _read_host_auth(health_dir: Path) -> None:
             )
 
 
-def _hot_feed_items() -> list[dict]:
+def _hot_feed_items(limit: int = 50) -> list[dict]:
+    """DSA 热门候选源。有具体事件时先给事件；没有时仍给板块和个股升温榜。"""
     today = cn_now().date().isoformat()
     items = []
-    for kind, label in (("sector", "热门板块"), ("stock", "热门个股")):
+    listing = hot_event_listing(limit=limit)
+    for event in listing["events"]:
+        items.append({
+            "source_id": f"hot:event:{event['key']}:{today}",
+            "title": event["name"],
+            "summary": (
+                f"具体事件。{event.get('category') or ''} {event.get('direction') or ''}。"
+                f"提及 {event['mentions']} 条，来源 {event['source_count']} 个，"
+                f"首见 {event['first_seen'] or '未知'}。"
+                f"代表标题：{event['headline'] or event['name']}。"
+                "仅供内部研究。"
+            ),
+            "url": "",
+            "published_at": cn_now().isoformat(timespec="seconds"),
+            "symbols": [row["key"] for row in (*event["stocks"], *(event.get("etfs") or []))][:8],
+            "sectors": list(event["concepts"])[:6],
+        })
+    if items:
+        return items[:limit]
+    for kind, label in (("sector", "热门板块"), ("stock", "热门个股"), ("etf", "热门ETF")):
         for candidate in hot_candidates(kind=kind, limit=8):
-            symbols = [candidate.key] if kind == "stock" else []
+            symbols = [candidate.key] if kind in {"stock", "etf"} else []
             sectors = [candidate.key] if kind == "sector" else []
             items.append({
                 "source_id": f"hot:{kind}:{candidate.key}:{today}",
@@ -944,7 +1253,7 @@ def _hot_feed_items() -> list[dict]:
                 "symbols": symbols,
                 "sectors": sectors,
             })
-    return items
+    return items[:limit]
 
 
 def _symbol_keys(symbol: str) -> list[str]:

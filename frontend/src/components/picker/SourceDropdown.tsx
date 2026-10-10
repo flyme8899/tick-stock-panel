@@ -12,6 +12,11 @@ export interface SourceOption {
   updatedAt?: string
   concepts?: string[]
   headline?: string | null
+  category?: string
+  direction?: string
+  importance?: string
+  confirmationLabel?: string
+  mappedStocks?: string[]
 }
 
 interface Props {
@@ -105,6 +110,11 @@ export function SourceDropdown({
               </span>
               <span className="min-w-0">
                 <span className="block truncate text-xs text-foreground">{item.name}</span>
+                {(item.importance || item.category || item.direction) && (
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
+                    {[item.importance, item.confirmationLabel, item.category, item.direction, ...(item.mappedStocks ?? []).slice(0, 2)].filter(Boolean).join(' · ')}
+                  </span>
+                )}
                 {item.concepts && item.concepts.length > 0 && (
                   <span className="mt-0.5 flex flex-wrap gap-1">
                     {item.concepts.map(tag => (

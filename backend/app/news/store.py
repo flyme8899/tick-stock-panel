@@ -284,6 +284,22 @@ class NewsStore:
             items.append(item)
         return items
 
+    def items_by_ids(self, ids: list[int]) -> list[sqlite3.Row]:
+        """按 id 取资讯，供具体事件点开后看原文摘录。按发布时间从新到旧。"""
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        with self._lock:
+            return list(self._conn.execute(
+                f"""
+                SELECT id, source, published_at, author, title, clean_text, url, level, extra_json
+                FROM news_items
+                WHERE id IN ({marks})
+                ORDER BY published_at DESC
+                """,
+                ids,
+            ))
+
     def mentions_between(self, start: datetime, end: datetime) -> list[sqlite3.Row]:
         """[start, end) 内的提及。published_at 按北京时间入库，字符串比较与时区一致。"""
         with self._lock:

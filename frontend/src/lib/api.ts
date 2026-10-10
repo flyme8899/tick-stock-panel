@@ -2215,7 +2215,7 @@ export interface FundFlowBoard {
 }
 
 export interface NewsCandidate {
-  kind: 'stock' | 'sector'
+  kind: 'stock' | 'sector' | 'etf'
   key: string
   name: string
   score: number
@@ -2230,6 +2230,91 @@ export interface NewsCandidate {
     sector_net_inflow?: number | null
     sector_name?: string | null
   } | null
+}
+
+export interface NewsHotStock {
+  key: string
+  name: string
+  mentions: number
+  direction?: '利好' | '利空' | string
+}
+
+export interface NewsHotConfirmation {
+  label: string
+  session?: string | null
+  live?: boolean
+  score?: number
+  abnormal?: boolean
+  strength: '强' | '中' | '弱' | '无' | string
+  persistence: '持续' | '短暂' | '无' | string
+  phase?: 'auction' | 'intraday' | 'session' | string
+  lagged?: boolean
+  horizon?: '主线' | '一日游' | '' | string
+  detail?: {
+    excess_pct?: number | null
+    breadth?: number | null
+    limit_count?: number
+    vol_ratio?: number | null
+    main_net?: number | null
+    sector_net_inflow?: number | null
+    windows?: number
+    windows_hit?: number
+    pre_return?: number | null
+    auction_open_pct?: number | null
+    auction_vol_ratio?: number | null
+    high_open_breadth?: number | null
+    window_5?: number | null
+    window_15?: number | null
+    window_30?: number | null
+    share?: number | null
+  }
+}
+
+export interface NewsHotMapping {
+  name: string
+  kind: string
+  direction: '利好' | '利空' | string
+}
+
+export interface NewsHotEvent {
+  key: string
+  name: string
+  category?: string
+  direction?: '利好' | '利空' | string
+  relevance?: number
+  concepts: string[]
+  mapping?: NewsHotMapping[]
+  headline: string
+  headlines?: string[]
+  mentions: number
+  source_count: number
+  first_seen: string
+  heat: number
+  importance?: string
+  score?: number
+  breakdown?: {
+    importance: number
+    confirmation?: number
+    mapping: number
+    freshness: number
+    heat: number
+  }
+  confirmation?: NewsHotConfirmation
+  stocks: NewsHotStock[]
+  etfs?: NewsHotStock[]
+}
+
+export interface NewsHotResponse {
+  kind: string
+  window_hours: number
+  baseline_days: number
+  candidates: NewsCandidate[]
+  events?: NewsHotEvent[]
+  hint?: string | null
+  fallback?: boolean
+  as_of?: string | null
+  trading_day?: string | null
+  updated_at?: string | null
 }
 
 export interface NewsMessage {
@@ -2261,7 +2346,7 @@ export interface NewsHealth {
 }
 
 export interface NewsPushType {
-  id: 'hot' | 'abnormal' | 't_trade'
+  id: 'hot' | 'abnormal' | 't_trade' | 'hot_verified' | 'abnormal_verified'
   label: string
   enabled: boolean
   saved: boolean
@@ -2287,6 +2372,19 @@ export interface PickerSourceItem {
   first_seen?: string | null
   concepts?: string[]
   headline?: string | null
+  category?: string
+  direction?: string
+  importance?: string
+  confirmation?: {
+    strength?: string
+    persistence?: string
+    label?: string
+    live?: boolean
+    phase?: string
+    lagged?: boolean
+    horizon?: string
+  } | null
+  mapped_stocks?: string[]
 }
 
 export interface PickerSourceGroup {
@@ -4270,14 +4368,19 @@ export const api = {
 
   fundFlowBoard: () => request<FundFlowBoard>('/api/fund-flow/board'),
 
-  newsHot: (kind: 'all' | 'stock' | 'sector' = 'all') =>
-    request<{ kind: string; window_hours: number; baseline_days: number; candidates: NewsCandidate[] }>(
+  newsHot: (kind: 'all' | 'stock' | 'sector' | 'etf' | 'event' = 'all') =>
+    request<NewsHotResponse>(
       `/api/news/hot?kind=${kind}&limit=20`,
     ),
 
-  newsMessages: (kind: 'stock' | 'sector', key: string) =>
+  newsMessages: (kind: 'stock' | 'sector' | 'etf', key: string) =>
     request<{ kind: string; key: string; items: NewsMessage[] }>(
       `/api/news/messages?kind=${kind}&key=${encodeURIComponent(key)}`,
+    ),
+
+  newsEventMessages: (key: string) =>
+    request<{ kind: 'event'; key: string; event: NewsHotEvent | null; stocks: NewsHotStock[]; etfs: NewsHotStock[]; items: NewsMessage[] }>(
+      `/api/news/messages?kind=event&key=${encodeURIComponent(key)}`,
     ),
 
   newsHealth: () => request<NewsHealth>('/api/news/health'),

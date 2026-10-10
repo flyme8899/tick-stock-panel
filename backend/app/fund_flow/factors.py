@@ -200,6 +200,8 @@ def _candidate_flow(item: dict, by_code: dict, industry: dict, concept: dict) ->
     key = str(item.get("key") or "")
     name = str(item.get("name") or "")
     payload: dict = {}
+    if kind == "etf":
+        return None
     if kind == "stock":
         code = code6(key) or code6(name)
         if code in by_code and by_code[code] is not None:

@@ -8,7 +8,7 @@
 - 公告日当天的财报不参与选股，下一交易日才生效，与回测财务因子一致。
 - 来源运行失败（例如 DSA 连不上）不参与交集/并集，避免一次失败把其他来源清空。
   来源成功但一只都没有，仍然参与合并。
-- 热门事件按北京时间当前交易日的资讯标题聚类，取热度前 8。热度是条数乘来源数，再按更新时间衰减。
+- 热门事件按北京时间当前交易日的资讯标题聚类，取排序前 8。重要性与盘面验证优先，热度只作加分。
   选中后并入该事件直接提到的个股，以及细分概念的成分股（最多 30 只），不展开宽行业。
 """
 from __future__ import annotations
@@ -304,6 +304,13 @@ def map_hot_sectors(
     return scores, {symbol: _join_events(labels) for symbol, labels in events.items()}
 
 
+def _mentioned_is_fund(key: str, name: str = "") -> bool:
+    """选股只收个股。维表优先，没有维表时再看基金名称和代码前缀。"""
+    from app.news.service import asset_kind_of
+
+    return asset_kind_of(key, name) == "etf"
+
+
 def resolve_mentioned_stock(key: str, known_symbols: set[str]) -> str | None:
     text = str(key or "").strip()
     if not text:
@@ -353,11 +360,15 @@ def map_selected_hot_event(
     for stock in mentioned:
         if not isinstance(stock, dict):
             continue
+        key = str(stock.get("key") or "")
+        name = str(stock.get("name") or "")
+        if _mentioned_is_fund(key, name):
+            continue
         try:
-            mention_rank[str(stock.get("key") or "")] = int(stock.get("mentions") or 0)
+            mention_rank[key] = int(stock.get("mentions") or 0)
         except (TypeError, ValueError):
-            mention_rank[str(stock.get("key") or "")] = 0
-        symbol = resolve_mentioned_stock(str(stock.get("key") or ""), known_symbols)
+            mention_rank[key] = 0
+        symbol = resolve_mentioned_stock(key, known_symbols)
         if symbol is None:
             unresolved += 1
             continue
@@ -367,7 +378,10 @@ def map_selected_hot_event(
         constituents - resolved,
         key=lambda symbol: (-mention_rank.get(symbol, 0), -(caps.get(symbol) or 0.0), symbol),
     )
-    symbols = resolved | set(extra[:_CONCEPT_CONSTITUENT_CAP])
+    symbols = {
+        symbol for symbol in (resolved | set(extra[:_CONCEPT_CONSTITUENT_CAP]))
+        if not _mentioned_is_fund(symbol)
+    }
     note = None
     if concepts and not has_dimensions and resolved:
         note = "尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股"
@@ -790,6 +804,15 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             if str(concept).strip()
         ][:4]
         headline = event.get("headline") if isinstance(event.get("headline"), str) else None
+        mapped = []
+        for stock in event.get("mentioned_stocks") or []:
+            if not isinstance(stock, dict):
+                continue
+            label = str(stock.get("name") or stock.get("key") or "").strip()
+            if label and label not in mapped:
+                mapped.append(label)
+            if len(mapped) >= 3:
+                break
         items.append({
             "id": hot_event_id(key),
             "name": name,
@@ -800,6 +823,11 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             "first_seen": first_seen,
             "concepts": concepts,
             "headline": headline,
+            "category": str(event.get("category") or ""),
+            "direction": str(event.get("direction") or ""),
+            "importance": str(event.get("importance") or ""),
+            "confirmation": _confirmation_brief(event.get("confirmation")),
+            "mapped_stocks": mapped,
         })
     return {
         "id": "hot_events",
@@ -812,6 +840,27 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
         "hint": snapshot.get("hint") or None,
         "error": error,
         "items": items,
+    }
+
+
+def _confirmation_brief(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    strength = str(raw.get("strength") or "")
+    persistence = str(raw.get("persistence") or "")
+    label = str(raw.get("label") or "")
+    if not strength and not label:
+        return None
+    phase = str(raw.get("phase") or "")
+    horizon = str(raw.get("horizon") or "")
+    return {
+        "strength": strength,
+        "persistence": persistence,
+        "label": label,
+        "live": bool(raw.get("live")),
+        "phase": phase if phase in {"auction", "intraday", "session"} else "",
+        "lagged": bool(raw.get("lagged")),
+        "horizon": horizon if horizon in {"主线", "一日游"} else "",
     }
 
 

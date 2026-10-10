@@ -770,7 +770,8 @@ def reddit_retry_after_seconds(value: str, now: float) -> int | None:
     if when is None:
         return None
     if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
+        # datetime.UTC 是 3.11 才有的别名。和 parse_feed_time 一样用 timezone.utc。
+        when = when.replace(tzinfo=timezone.utc)  # noqa: UP017
     return max(0, int(when.timestamp() - now))
 
 
