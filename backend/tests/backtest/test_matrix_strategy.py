@@ -319,11 +319,17 @@ def test_builtin_matrix_strategies_use_their_declared_formula_modules():
         path for path in strategy_dir.glob("*.py") if path.name != "__init__.py"
     )
 
-    # 分钟形态策略 (minute_red_streak) 已迁至自定义策略目录, 内置策略全部 matrix 后端
-    assert len(strategy_files) == 26
-    for strategy_path in strategy_files:
-        strategy = StrategyEngine._load_file(strategy_path)
-        assert strategy.execution_backend == "matrix_native"
+    # 分钟形态策略已迁走。价格形态仍是 matrix；基本面三套走 filter_history。
+    loaded = [StrategyEngine._load_file(path) for path in strategy_files]
+    matrix = [item for item in loaded if item.execution_backend == "matrix_native"]
+    assert len(matrix) == 26
+    assert {item.meta["id"] for item in loaded} >= {
+        "fundamental_m1", "fundamental_m2", "fundamental_m3",
+    }
+    for strategy, strategy_path in zip(loaded, strategy_files, strict=True):
+        if strategy.execution_backend != "matrix_native":
+            assert strategy.filter_history_fn is not None
+            continue
         assert strategy.matrix_strategy is not None
         assert strategy.matrix_strategy.__class__.__module__ == strategy_path.stem
         assert strategy.filter_fn is None
@@ -787,7 +793,7 @@ def test_registered_builtin_matrix_strategies_share_one_cache_profile():
     profile = build_matrix_cache_profile(engine, "stock")
     strategies = tuple(
         s for s in engine.strategy_definitions()
-        if s.execution_backend != "minute_filter"
+        if s.execution_backend == "matrix_native"
     )
 
     assert len(strategies) == 26

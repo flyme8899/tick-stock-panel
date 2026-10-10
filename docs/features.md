@@ -8,7 +8,7 @@
 
 ## 🔍 选股引擎(Screener)
 
-**25 个内置策略**,每个策略一个独立 Python 文件,基于 Polars 表达式向量化实现(`backend/app/strategy/builtin/`; 目录里另有一个仅供挖掘 worker 使用的研究模板,不进入选股列表,见 [strategy.md → 内置策略](./strategy.md#内置策略)):
+**28 个内置策略**,每个策略一个独立 Python 文件(`backend/app/strategy/builtin/`; 目录里另有一个仅供挖掘 worker 使用的研究模板,不进入选股列表,见 [strategy.md → 内置策略](./strategy.md#内置策略))。价格形态策略基于 Polars 表达式或矩阵后端；三套基本面预设按公告日读财务报表，规则和外部回测记录见 [strategy.md → 基本面预设](./strategy.md#基本面预设):
 
 | 类型        | 代表策略                                                 |
 | :---------- | :------------------------------------------------------- |

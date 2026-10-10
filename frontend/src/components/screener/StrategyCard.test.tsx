@@ -43,6 +43,17 @@ it('shows pulsing placeholder (not hint) when computing', () => {
   expect(container.textContent).not.toContain('待计算')
 })
 
+it('keeps the full description on the card for hover', () => {
+  render({
+    description: '主推。扣非净利同比在 0 到 400% 之间，公告次日生效。',
+    cardSize: 'normal',
+  })
+
+  const node = container.querySelector('span.line-clamp-1')
+  expect(node?.getAttribute('title')).toContain('主推')
+  expect(node?.textContent).toContain('主推')
+})
+
 it('shows nothing extra for daily strategies without awaitRun', () => {
   render({})
 

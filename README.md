@@ -85,7 +85,7 @@
 </td>
 <td width="33.3%" valign="top">
 
-**🔍 选股引擎**<br/>25 内置策略 + 自定义信号 + AI 生成, 毫秒级扫全 A 股
+**🔍 选股引擎**<br/>28 内置策略 + 自定义信号 + AI 生成, 毫秒级扫全 A 股
 
 </td>
 <td width="33.3%" valign="top">
@@ -644,7 +644,7 @@ PORT=3018                      # 服务端口
 | [mcp-server/README.md](./mcp-server/README.md)                                                     | MCP 服务器配置(AI 客户端接入)与工具清单                              |
 | [examples/open-api](./examples/open-api/README.md)                                                 | 开放接口可运行示例(行情/写入/回测/事件流)                            |
 | [docs/custom-data-source.md](./docs/custom-data-source.md)                                         | 自定义数据源接入、能力路由契约、YAML 配置与 mock 联调示例            |
-| [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(25 内置策略 + 三种扩展方式 + 文件结构)                      |
+| [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(28 内置策略 + 三种扩展方式 + 文件结构)                      |
 | [docs/strategy-iteration.md](./docs/strategy-iteration.md)                                         | AI 策略迭代协议:台账 / 证据包 / 门槛判定 / 提示词卡片                |
 | [docs/mining.md](./docs/mining.md)                                                                 | 因子与策略挖掘口径、防泄漏、任务隔离和发布边界                       |
 | [docs/market-phase.md](./docs/market-phase.md)                                                     | 市场情绪周期 6 阶段与概念/行业主线识别的口径与设计                   |

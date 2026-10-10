@@ -137,7 +137,7 @@ export function StrategyCard({
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
             </div>
             {description && (
-              <span className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1">{description}</span>
+              <span className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1" title={description}>{description}</span>
             )}
             {count != null && !loading && (
               <div className="mt-1.5 flex items-center gap-2">
@@ -196,7 +196,7 @@ export function StrategyCard({
             </div>
             <div className="flex items-center gap-1.5 mt-0.5">
               {description && (
-                <span className="text-[10px] text-muted leading-tight line-clamp-1 max-w-[120px]">{description}</span>
+                <span className="text-[10px] text-muted leading-tight line-clamp-1 max-w-[120px]" title={description}>{description}</span>
               )}
               {hasExpired && (
                 <span className="text-[9px] font-mono text-red-400/80">{'-' + expiredCount}</span>
