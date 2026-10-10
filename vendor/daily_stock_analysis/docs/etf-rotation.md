@@ -73,7 +73,7 @@ python main.py --etf-rotation --no-notify  # 只生成本地报告
 | --- | --- | --- |
 | `ETF_ROTATION_MODE` | `blended_bucket` | `blended_bucket`、`equal_weight` 或 `legacy` |
 | `ETF_ROTATION_LOOKBACKS` | `20,60,120` | 混合动量窗口。得分是这些收益的平均排名 |
-| `ETF_ROTATION_BUCKETS` | `A股:510300\|510500\|159915;512890;513100;518880` | 分号分隔分桶。冒号桶只持有最强成员 |
+| `ETF_ROTATION_BUCKETS` | `A股:510300\|510500\|159915;红利:512890;海外:513100;商品:518880` | 分号分隔分桶。冒号前是桶名，桶内只持有最强成员。没写名字的代码会显示成风格名（红利、海外、宽基、商品、行业），不会显示代码 |
 | `ETF_ROTATION_WEIGHTING` | `inv_vol` | 仅 `blended_bucket` 使用。`equal_weight` 与 `legacy` 固定等权 |
 | `ETF_ROTATION_DRAWDOWN_RISK_OFF` | `false` | 关闭时回撤钩子不改变持仓 |
 | `ETF_ROTATION_POOL` | `510300,510500,159915,512890,513100,518880` | 等权和 legacy 的风险池。分桶模式读 `ETF_ROTATION_BUCKETS` |

@@ -17,6 +17,7 @@ from src.core.etf_rotation import (  # noqa: E402
     Bucket,
     RotationParams,
     _risk_off_weights,
+    bucket_display_name,
     compose_snapshot,
     parse_buckets,
     parse_lookbacks,
@@ -51,7 +52,14 @@ def _frame(index: pd.DatetimeIndex, **columns: list[float]) -> pd.DataFrame:
 def test_bucket_spec_keeps_only_the_best_member_of_a_named_bucket() -> None:
     buckets = parse_buckets(DEFAULT_BUCKET_SPEC)
     assert buckets[0] == Bucket("A股", ("510300", "510500", "159915"))
-    assert [bucket.members for bucket in buckets[1:]] == [("512890",), ("513100",), ("518880",)]
+    assert [(bucket.name, bucket.members) for bucket in buckets[1:]] == [
+        ("红利", ("512890",)),
+        ("海外", ("513100",)),
+        ("商品", ("518880",)),
+    ]
+    from src.config import DEFAULT_ETF_ROTATION_BUCKETS
+
+    assert DEFAULT_ETF_ROTATION_BUCKETS == DEFAULT_BUCKET_SPEC
     assert parse_mode(None) == "blended_bucket"
     assert parse_mode("legacy") == "legacy"
     assert parse_mode("nope") == "blended_bucket"
@@ -90,12 +98,92 @@ def test_named_bucket_uses_best_rank_and_safe_asset_fills_the_remainder() -> Non
     assert kind == "avg_rank"
     assert risk_off is False
     assert buckets["510300"] == "A股"
+    assert buckets["513100"] == "海外"
+    assert buckets["511880"] == "防守"
+    assert buckets["512890"] == "红利"
     assert "510500" not in weights
     assert "512890" not in weights
     assert scores["510300"] == pytest.approx(1.0)
     assert weights["510300"] == pytest.approx(2 / 9)
     assert weights["513100"] == pytest.approx(4 / 9)
     assert weights["511880"] == pytest.approx(1 / 3)
+
+
+def test_bare_code_buckets_show_style_names_on_the_card() -> None:
+    """512890 / 513100 used to render as their own codes. 511880 stays 防守."""
+    day = pd.Timestamp("2024-06-28")
+    index = pd.DatetimeIndex([day])
+    closes = _frame(
+        index,
+        **{"512890": [10.0], "513100": [10.0], "510300": [10.0], "511880": [10.0]},
+    )
+    avg_rank = _frame(index, **{"512890": [2.0], "513100": [1.0], "510300": [4.0]})
+    momentum = _frame(index, **{"512890": [0.03], "513100": [0.05], "510300": [-0.02]})
+    vol = _frame(index, **{"512890": [0.02], "513100": [0.03], "510300": [0.01]})
+    params = _params(buckets=parse_buckets("A股:510300|510500;512890;513100"))
+    weights, _scores, buckets, _kind, _risk_off = signal_weights(
+        closes,
+        closes,
+        day,
+        params,
+        ["510300", "510500", "512890", "513100"],
+        "511880",
+        (),
+        1.0,
+        1.0,
+        avg_rank,
+        momentum,
+        vol,
+    )
+    assert set(weights) == {"512890", "513100", "511880"}
+    assert buckets["512890"] == "红利"
+    assert buckets["513100"] == "海外"
+    assert buckets["511880"] == "防守"
+    assert buckets["510300"] == "A股"
+    for code, label in buckets.items():
+        assert label != code
+        assert not label.isdigit()
+
+    index = pd.bdate_range("2024-05-06", periods=45)
+    trend = [100 * (1.004 ** step) for step in range(len(index))]
+    down = [100 * (0.997 ** step) for step in range(len(index))]
+    flat = [50.0] * len(index)
+    history = _frame(
+        index,
+        **{"510300": down, "510500": flat, "512890": trend, "513100": trend, "511880": flat},
+    )
+    _result, snapshot = compose_snapshot(
+        history,
+        ["510300", "510500", "512890", "513100"],
+        "511880",
+        params,
+        names={
+            "512890": "红利低波ETF华泰柏瑞",
+            "513100": "纳指ETF国泰",
+            "511880": "银华日利ETF",
+            "510300": "沪深300ETF",
+        },
+        next_session=lambda day: (pd.Timestamp(day) + pd.offsets.BDay(1)).date(),
+    )
+    shown = {row["code"]: row["bucket"] for row in snapshot["holdings"]}
+    assert shown["512890"] == "红利"
+    assert shown["513100"] == "海外"
+    assert shown["511880"] == "防守"
+    for code, label in shown.items():
+        assert label != code
+        assert not str(label).isdigit()
+
+
+def test_bucket_display_name_keeps_explicit_labels_and_classifies_the_rest() -> None:
+    assert bucket_display_name("A股", "510300", "沪深300ETF") == "A股"
+    assert bucket_display_name("红利", "512890", "红利低波ETF华泰柏瑞") == "红利"
+    assert bucket_display_name("512890", "512890", "红利低波ETF华泰柏瑞") == "红利"
+    assert bucket_display_name("513100", "513100", "纳指ETF国泰") == "海外"
+    assert bucket_display_name("510300", "510300") == "宽基"
+    assert bucket_display_name("518880", "518880", "黄金ETF") == "商品"
+    assert bucket_display_name("511880", "511880", "银华日利ETF") == "防守"
+    assert bucket_display_name("512480", "512480", "半导体ETF") == "行业"
+    assert bucket_display_name("", "512480", "半导体ETF") == "行业"
 
 
 def test_negative_best_member_drops_the_whole_bucket() -> None:
@@ -262,6 +350,10 @@ def test_snapshot_carries_the_card_fields_and_disclaimer() -> None:
     assert snapshot["score_kind"] == "avg_rank"
     assert isinstance(snapshot["holdings"], list) and snapshot["holdings"]
     assert snapshot["next_rebalance"]
+    for row in snapshot["holdings"]:
+        assert row["bucket"]
+        assert row["bucket"] != row["code"]
+        assert not str(row["bucket"]).isdigit()
 
 
 class _Source:
