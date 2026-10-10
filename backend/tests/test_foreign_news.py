@@ -211,6 +211,67 @@ def test_conditional_get_skips_body_on_not_modified(tmp_path):
     assert client.calls[0][1]["User-Agent"] == "tsp-news/1.0"
 
 
+def test_validators_persist_only_after_parse(tmp_path):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    url = FOREIGN_FEEDS["marketwatch"][0].url
+    headers = {
+        "ETag": '"broken"',
+        "Last-Modified": "Fri, 09 Oct 2026 13:00:00 GMT",
+    }
+    broken = _Client({url: _Response(200, "<rss>", headers)})
+    failed = collect_foreign("marketwatch", broken)
+    assert "error" in failed
+    assert get_store().get_feed_cache(url) == ("", "")
+
+    good = _Client({url: _Response(200, _xml("mw_top.xml"), {
+        "ETag": '"mw-ok"',
+        "Last-Modified": "Fri, 09 Oct 2026 13:00:00 GMT",
+    })})
+    assert collect_foreign("marketwatch", good)["inserted"] == 1
+    assert get_store().get_feed_cache(url) == ('"mw-ok"', "Fri, 09 Oct 2026 13:00:00 GMT")
+    assert "If-None-Match" not in broken.calls[0][1]
+
+
+def test_foreign_llm_stops_after_poll_cap(tmp_path, monkeypatch):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    monkeypatch.setattr("app.news.service.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr("app.news.service._FOREIGN_LLM_PER_POLL", 2)
+    import app.news.service as news_service
+    news_service._LLM_TIMES.clear()
+    calls: list[str] = []
+
+    def fake(prompt: str) -> str:
+        calls.append(prompt)
+        return json.dumps({
+            "summary_zh": "中文摘要",
+            "stocks": [],
+            "sectors": [],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.service._llm_text", fake)
+    from app.news.collectors import Item
+    when = cn_now()
+    items = [
+        Item(
+            source="cnbc",
+            source_id=f"cap-{index}",
+            published_at=when,
+            title=f"Headline {index}",
+            text="A long enough English summary for the optional Chinese rewrite.",
+            url=f"https://www.cnbc.com/cap-{index}",
+        )
+        for index in range(4)
+    ]
+    result = ingest_items(items, Lexicon([], []))
+    assert result == {"inserted": 4, "duplicate": 0}
+    assert len(calls) == 2
+    rows = list(get_store()._conn.execute(
+        "SELECT extra_json FROM news_items ORDER BY source_id",
+    ))
+    summaries = [json.loads(row["extra_json"]).get("summary_zh", "") for row in rows]
+    assert summaries.count("中文摘要") == 2
+
+
 def test_sec_requires_contact_email_and_sends_it(tmp_path, monkeypatch):
     reset_store_for_tests(tmp_path / "news.sqlite")
     _clear_flags(monkeypatch)

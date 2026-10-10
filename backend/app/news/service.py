@@ -67,6 +67,8 @@ _LEXICON: tuple[float, Lexicon] | None = None
 _LLM_TIMES: list[float] = []
 _LLM_LOCK = threading.Lock()
 _LLM_PER_HOUR = 10
+# 一次外文轮询可能带上几十条新稿。模型只处理前几条，避免单轮把额度打光。
+_FOREIGN_LLM_PER_POLL = 10
 
 
 def get_store() -> NewsStore:
@@ -136,6 +138,7 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
         known_urls.update((source, url) for url in store.existing_urls(source, urls))
     inserted = 0
     duplicate = 0
+    foreign_llm_used = 0
     for item in pending:
         ident = (item.source, item.source_id)
         url_key = None
@@ -158,11 +161,18 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
             item.sectors,
         )
         extra = {"stocks": [stock.__dict__ for stock in item.stocks], "sectors": item.sectors}
-        if item.source in FOREIGN_SOURCES and llm_extract_enabled() and len(f"{title}\n{clean}".strip()) >= 8:
-            summary_zh, llm_found = _llm_foreign_enrich(title, clean, lexicon)
-            if summary_zh:
-                extra["summary_zh"] = summary_zh
-            mentions = _merge_mentions(mentions, llm_found)
+        if item.source in FOREIGN_SOURCES:
+            # 超过本轮上限后不再落到通用抽取，否则限额形同虚设。
+            if (
+                llm_extract_enabled()
+                and foreign_llm_used < _FOREIGN_LLM_PER_POLL
+                and len(f"{title}\n{clean}".strip()) >= 8
+            ):
+                foreign_llm_used += 1
+                summary_zh, llm_found = _llm_foreign_enrich(title, clean, lexicon)
+                if summary_zh:
+                    extra["summary_zh"] = summary_zh
+                mentions = _merge_mentions(mentions, llm_found)
         elif not mentions and llm_extract_enabled() and len(clean) >= 40:
             mentions = _llm_mentions(title, clean, lexicon)
         status = store.insert_item(
@@ -547,12 +557,14 @@ def _pull_feed(client: httpx.Client, feed: Feed, headers: dict[str, str]) -> tup
     if status == 304:
         return [], 304
     response.raise_for_status()
+    items = parse_feed_xml(response.text, feed.source, feed_url=feed.url)
+    # 解析失败时保留上一份校验值，下一轮仍拉完整响应，而不是把坏正文记成已同步。
     store.save_feed_cache(
         feed.url,
         _header(getattr(response, "headers", None), "etag"),
         _header(getattr(response, "headers", None), "last-modified"),
     )
-    return parse_feed_xml(response.text, feed.source, feed_url=feed.url), status
+    return items, status
 
 
 def _header(headers, name: str) -> str:
