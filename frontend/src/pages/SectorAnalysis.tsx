@@ -778,7 +778,10 @@ function RotationSummary({
     staleTime: 60_000,
   })
   const latest = query.data?.status === 'ok' ? query.data.timeline.at(-1) : undefined
-  const sectors = (query.data?.status === 'ok' ? query.data.sectors : []).slice(0, 5)
+  const leader = latest?.leader && !isMembershipTag(latest.leader) ? latest.leader : ''
+  const sectors = (query.data?.status === 'ok' ? query.data.sectors : [])
+    .filter(sector => !isMembershipTag(sector.name))
+    .slice(0, 5)
 
   return (
     <div data-rotation={kind} className="rounded-xl border border-border bg-base/40 p-2.5">
@@ -790,7 +793,7 @@ function RotationSummary({
         ) : latest ? (
           <span className="text-muted">
             切换强度 {latest.rotation.toFixed(2)}
-            {latest.leader ? ` · 领涨 ${latest.leader}` : ''}
+            {leader ? ` · 领涨 ${leader}` : ''}
           </span>
         ) : (
           <span className="text-muted">暂无轮动摘要</span>

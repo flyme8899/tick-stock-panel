@@ -114,18 +114,32 @@ vi.mock('@/lib/api', () => ({
           leader_pct: 0.02,
           market_pct: 0.01,
         }],
-        sectors: [{
-          name,
-          pct_now: 0.02,
-          pct_prev: 0.01,
-          rank_now: 1,
-          rank_prev: 2,
-          rank_change: 1,
-          flow: null,
-          score: 1,
-          n_members: 2,
-          n_members_with_bars: 2,
-        }],
+        sectors: [
+          {
+            name: '融资融券',
+            pct_now: 0.05,
+            pct_prev: 0.01,
+            rank_now: 1,
+            rank_prev: 1,
+            rank_change: 0,
+            flow: null,
+            score: 2,
+            n_members: 2,
+            n_members_with_bars: 2,
+          },
+          {
+            name,
+            pct_now: 0.02,
+            pct_prev: 0.01,
+            rank_now: 2,
+            rank_prev: 2,
+            rank_change: 1,
+            flow: null,
+            score: 1,
+            n_members: 2,
+            n_members_with_bars: 2,
+          },
+        ],
       }
     },
     rpsRotation: async () => ({
@@ -222,6 +236,9 @@ it('shows concept and industry side by side, with industry-only level and heatma
   expect(column('concept').textContent).toContain('银行概念')
   expect(column('concept').textContent).toContain('概念轮动')
   expect(column('concept').textContent).toContain('切换强度 0.42')
+  expect(column('concept').querySelector('[data-rotation="concept"]')?.textContent).toContain('银行概念')
+  expect(column('concept').querySelector('[data-rotation="concept"]')?.textContent).not.toContain('融资融券')
+  expect(column('industry').querySelector('[data-rotation="industry"]')?.textContent).not.toContain('融资融券')
   expect(column('concept').textContent).not.toContain('热度分布')
   expect(column('concept').querySelector('[aria-label="行业层级"]')).toBeNull()
   expect(column('concept').getAttribute('data-source')).toBe('ext_gn_ths')
