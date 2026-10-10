@@ -14,6 +14,15 @@ const TABS = [
   { key: 'etf' as const, label: '热门ETF' },
 ]
 
+const CATEGORIES = [
+  '国内政策/宏观',
+  '海外市场/央行',
+  '科技与产业',
+  '地缘政治',
+  '大宗商品/期货价格异动',
+  '公司重大事项',
+] as const
+
 type HotTab = (typeof TABS)[number]['key']
 
 function fundFlowText(item: NewsCandidate): string {
@@ -40,6 +49,7 @@ function authLabel(source: NewsSourceHealth): string {
 
 export function HotEvents() {
   const [tab, setTab] = useState<HotTab>('event')
+  const [category, setCategory] = useState<string>('全部')
   const [picked, setPicked] = useState<NewsCandidate | null>(null)
   const [pickedEvent, setPickedEvent] = useState<NewsHotEvent | null>(null)
   const [pushNote, setPushNote] = useState('')
@@ -91,13 +101,13 @@ export function HotEvents() {
   })
 
   const candidates = hot.data?.candidates ?? []
-  const events = hot.data?.events ?? []
+  const events = (hot.data?.events ?? []).filter(item => category === '全部' || item.category === category)
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="热门事件"
-        subtitle="当天资讯收成的具体事件。板块、个股和 ETF 热度仍按近 24 小时相对前 4 日基线，放在后面。只展示摘录，供内部研究。"
+        subtitle="当天和资本市场有关的具体事件，按政策、海外、产业、地缘、商品和公司事项分类。板块、个股和 ETF 热度仍在后面。只展示摘录，供内部研究。"
       />
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_280px]">
         <section className="min-w-0">
@@ -127,7 +137,9 @@ export function HotEvents() {
           {hot.isError && <p className="text-sm text-danger">热门候选加载失败</p>}
           {hot.isSuccess && tab === 'event' && events.length === 0 && (
             <p className="text-sm text-muted">
-              {hot.data?.hint || '今天还没有收成具体事件。打开右侧来源并等待采集后，这里会列出当天的事件。'}
+              {category !== '全部'
+                ? '这个分类下还没有事件。'
+                : (hot.data?.hint || '今天还没有收成具体事件。打开右侧来源并等待采集后，这里会列出当天的事件。')}
             </p>
           )}
           {hot.isSuccess && tab !== 'event' && candidates.length === 0 && (
@@ -135,6 +147,29 @@ export function HotEvents() {
               还没有候选。打开右侧来源并等待采集后，这里会列出升温的板块、个股和 ETF。
             </p>
           )}
+          {tab === 'event' && (
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {['全部', ...CATEGORIES].map(name => (
+                <button
+                  key={name}
+                  type="button"
+                  className={cn(
+                    'rounded-full border px-2 py-0.5 text-xs',
+                    category === name
+                      ? 'border-accent bg-accent/10 text-foreground'
+                      : 'border-border text-muted',
+                  )}
+                  onClick={() => {
+                    setCategory(name)
+                    setPickedEvent(null)
+                  }}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+
           {tab === 'event' && hot.data?.hint && events.length > 0 && (
             <p className={cn('mb-2 text-xs', hot.data.fallback ? 'text-amber-600 dark:text-amber-400' : 'text-muted')}>
               {hot.data.hint}
@@ -158,11 +193,24 @@ export function HotEvents() {
                       <span className="font-medium">{item.name}</span>
                       <span className="text-xs text-muted">热度 {item.heat}</span>
                     </div>
-                    {item.concepts.length > 0 && (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {item.concepts.map(tag => (
-                          <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
-                        ))}
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {item.category && (
+                        <span className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{item.category}</span>
+                      )}
+                      {item.direction && (
+                        <span className={cn(
+                          'rounded px-1 text-[10px] leading-4',
+                          item.direction === '利空' ? 'bg-bear/10 text-bear' : 'bg-bull/10 text-bull',
+                        )}>{item.direction}</span>
+                      )}
+                      {item.concepts.map(tag => (
+                        <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
+                      ))}
+                    </div>
+                    {([...item.stocks, ...(item.etfs ?? [])]).length > 0 && (
+                      <div className="mt-1 text-xs text-secondary">
+                        {item.direction || '映射'}{' '}
+                        {([...item.stocks, ...(item.etfs ?? [])]).slice(0, 4).map(stock => stock.name || stock.key).join('、')}
                       </div>
                     )}
                     <div className="mt-1 text-xs text-muted">

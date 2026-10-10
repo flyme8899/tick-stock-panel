@@ -560,6 +560,11 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert head["source_count"] == 3
     assert head["concepts"] == ["昇腾"]
     assert head["headline"] == "华为发布盘古新模型，昇腾链走强"
+    assert head["headlines"][0] == head["headline"]
+    assert head["category"] == "科技与产业"
+    assert head["direction"] == "利好"
+    assert head["relevance"] >= 3
+    assert head["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利好"}]
     assert head["first_seen"] == "10-09 14:52"
     assert [stock["key"] for stock in head["mentioned_stocks"]] == ["600519.SH", "000001.SZ"]
     assert head["mentioned_stocks"][0]["mentions"] == 2
@@ -634,6 +639,40 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert rejected.status_code == 422
 
 
+def test_hot_events_classify_market_news_and_drop_noise(tmp_path):
+    reset_store_for_tests(tmp_path / "classes.sqlite")
+    friday = date(2026, 10, 9)
+    samples = [
+        ("fed", "美联储宣布降息", "海外市场/央行", "利好"),
+        ("policy", "工信部出台算力补贴", "国内政策/宏观", "利好"),
+        ("chip", "华为发布新模型", "科技与产业", "利好"),
+        ("geo", "美国对华芯片制裁升级", "地缘政治", "利空"),
+        ("metal", "碳酸锂报价继续上涨", "大宗商品/期货价格异动", "利好"),
+        ("firm", "平安银行宣布回购", "公司重大事项", "利好"),
+    ]
+    for index, (source_id, title, _category, _direction) in enumerate(samples):
+        _insert_news("cls", source_id, _publish(friday, 9, index), [], [], title=title)
+    _insert_news("cls", "pic", _publish(friday, 10, 0), [], [], title="图片")
+    _insert_news("cls", "chat", _publish(friday, 10, 5), [], [], title="周末闲聊没什么")
+    _insert_news("cls", "ad", _publish(friday, 10, 8), [], [], title="点击领取开户赞助")
+    events = {event["name"]: event for event in top_hot_events(NOW)["events"]}
+    assert "图片" not in events
+    assert not any("闲聊" in name or "赞助" in name for name in events)
+    expected = {
+        "美联储降息": ("海外市场/央行", "利好"),
+        "工信部出台算力补贴": ("国内政策/宏观", "利好"),
+        "华为发布新模型": ("科技与产业", "利好"),
+        "美国对华芯片制裁升级": ("地缘政治", "利空"),
+        "碳酸锂报价继续上涨": ("大宗商品/期货价格异动", "利好"),
+        "平安银行回购": ("公司重大事项", "利好"),
+    }
+    for name, (category, direction) in expected.items():
+        assert events[name]["category"] == category
+        assert events[name]["direction"] == direction
+        assert events[name]["relevance"] >= 3
+        assert events[name]["headlines"]
+
+
 def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
     reset_store_for_tests(tmp_path / "news.sqlite")
     _insert_news(
@@ -656,6 +695,7 @@ def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
         datetime(2026, 10, 9, 16, 30, tzinfo=UTC),
         ["跨日"],
         [],
+        title="茅台宣布回购",
     )
     crossed = top_hot_events(NOW)
     assert crossed["as_of"] == "2026-10-10"
@@ -725,7 +765,7 @@ def test_hot_event_failure_does_not_drop_other_sources_but_true_miss_does(tmp_pa
     reset_store_for_tests(tmp_path / "miss.sqlite")
     _insert_news(
         "cls", "med-1", _publish(date(2026, 10, 9), 11, 1), ["医药"], [],
-        title="医药板块午后走强",
+        title="药监局出台医药细则",
     )
     missed_event = top_hot_events(NOW)["events"][0]
     assert missed_event["concepts"] == []
@@ -879,7 +919,11 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
 
     def fake_text(prompt: str) -> str:
         prompts.append(prompt)
-        return '{"title":"华为发布新模型","concepts":["昇腾","人工智能"],"stocks":[{"name":"不存在的公司","code":"999999"}]}'
+        return (
+            '{"title":"华为发布新模型","category":"地缘政治","direction":"利空",'
+            '"concepts":[{"name":"昇腾","direction":"利空"}],'
+            '"stocks":[{"name":"不存在的公司","code":"999999"}]}'
+        )
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", fake_text)
@@ -888,9 +932,13 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     named = top_hot_events(NOW)
     assert named["events"][0]["name"] == "华为发布新模型"
     assert named["events"][0]["concepts"] == ["昇腾"]
+    assert named["events"][0]["category"] == "地缘政治"
+    assert named["events"][0]["direction"] == "利空"
+    assert named["events"][0]["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利空"}]
     assert named["events"][0]["mentioned_stocks"] == []
     assert len(prompts) == 1
     assert "不超过20个字" in prompts[0]
+    assert "国内政策/宏观" in prompts[0]
 
     hot_mod.clear_hot_event_cache(llm=False)
     again = top_hot_events(NOW + timedelta(minutes=11))
@@ -901,6 +949,8 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     hot_mod.clear_hot_event_cache()
     fallback = top_hot_events(NOW + timedelta(minutes=22))
     assert fallback["events"][0]["name"] == "华为发布盘古新模型"
+    assert fallback["events"][0]["category"] == "科技与产业"
+    assert fallback["events"][0]["direction"] == "利好"
     assert len(prompts) == 1
 
 

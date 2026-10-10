@@ -948,6 +948,9 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     assert "人工智能" not in names
     head = listing["events"][0]
     assert head["concepts"] == ["昇腾"]
+    assert head["category"] == "科技与产业"
+    assert head["direction"] == "利好"
+    assert head["headlines"][0] == "华为发布盘古新模型，昇腾链走强"
     assert head["mentions"] == 2
     assert head["source_count"] == 2
     assert head["headline"] == "华为发布盘古新模型，昇腾链走强"
@@ -1048,8 +1051,8 @@ def test_hot_stocks_exclude_funds_and_events_list_them_apart(tmp_path, monkeypat
             source="cls",
             source_id="mix-event",
             published_at=datetime.combine(day, dt_time(14, 40), CN_TZ),
-            title="沪深300ETF放量，贵州茅台跟涨",
-            text="沪深300ETF放量，贵州茅台跟涨，正文写长一些以免被当成短讯。",
+            title="贵州茅台宣布回购",
+            text="贵州茅台宣布回购，沪深300ETF同步放量，正文写长一些以免被当成短讯。",
             stocks=[StructuredStock(name="贵州茅台", code="600519"), *funds],
         ),
         Item(
@@ -1068,7 +1071,7 @@ def test_hot_stocks_exclude_funds_and_events_list_them_apart(tmp_path, monkeypat
     assert etf_keys == {"510300.SH", "159915.SZ", "501018.SH", "161226.SZ"}
 
     listing = hot_event_listing(cn_now(), limit=20)
-    head = next(item for item in listing["events"] if item["name"] == "沪深300ETF放量，贵州茅台跟涨")
+    head = next(item for item in listing["events"] if any(stock["key"] == "600519.SH" for stock in item["stocks"]))
     assert [item["key"] for item in head["stocks"]] == ["600519.SH"]
     assert {item["key"] for item in head["etfs"]} == etf_keys
 

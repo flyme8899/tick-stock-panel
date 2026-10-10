@@ -204,6 +204,9 @@ export function StockPicker() {
               updatedAt: item.first_seen ?? item.updated_at ?? undefined,
               concepts: item.concepts,
               headline: item.headline ?? undefined,
+              category: item.category,
+              direction: item.direction,
+              mappedStocks: item.mapped_stocks,
             }))}
             selectedIds={idsOf(picks, 'hot_events')}
             onToggle={id => setPicks(current => togglePick(current, 'hot_events', id))}

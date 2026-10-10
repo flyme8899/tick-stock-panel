@@ -370,10 +370,14 @@ def public_hot_event(event: dict) -> dict:
             mentions = int(stock.get("mentions") or 0)
         except (TypeError, ValueError):
             mentions = 0
+        direction = str(stock.get("direction") or event.get("direction") or "")
+        if direction not in {"利好", "利空"}:
+            direction = str(event.get("direction") or "")
         row = {
             "key": key,
             "name": str(stock.get("name") or key),
             "mentions": mentions,
+            "direction": direction if direction in {"利好", "利空"} else "利好",
         }
         if asset_kind_of(key, row["name"]) == "etf":
             etfs.append(row)
@@ -383,11 +387,45 @@ def public_hot_event(event: dict) -> dict:
         heat = float(event.get("heat") or 0)
     except (TypeError, ValueError):
         heat = 0.0
+    try:
+        relevance = int(event.get("relevance") or 0)
+    except (TypeError, ValueError):
+        relevance = 0
+    concepts = [str(item) for item in (event.get("concepts") or []) if str(item).strip()]
+    direction = str(event.get("direction") or "")
+    if direction not in {"利好", "利空"}:
+        direction = "利好"
+    mapping = []
+    for item in event.get("mapping") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        item_direction = str(item.get("direction") or direction)
+        if item_direction not in {"利好", "利空"}:
+            item_direction = direction
+        mapping.append({
+            "name": name,
+            "kind": "concept",
+            "direction": item_direction,
+        })
+    if not mapping:
+        mapping = [{"name": name, "kind": "concept", "direction": direction} for name in concepts]
+    headlines = [str(item).strip() for item in (event.get("headlines") or []) if str(item).strip()]
+    headline = str(event.get("headline") or "")
+    if headline and headline not in headlines:
+        headlines.insert(0, headline)
     return {
         "key": str(event.get("key") or ""),
         "name": str(event.get("name") or ""),
-        "concepts": [str(item) for item in (event.get("concepts") or []) if str(item).strip()],
-        "headline": str(event.get("headline") or ""),
+        "category": str(event.get("category") or ""),
+        "direction": direction,
+        "relevance": relevance,
+        "concepts": concepts,
+        "mapping": mapping,
+        "headline": headline or (headlines[0] if headlines else ""),
+        "headlines": headlines[:3],
         "mentions": int(event.get("mentions") or 0),
         "source_count": int(event.get("source_count") or 0),
         "first_seen": str(event.get("first_seen") or ""),
@@ -1101,7 +1139,8 @@ def _hot_feed_items(limit: int = 50) -> list[dict]:
             "source_id": f"hot:event:{event['key']}:{today}",
             "title": event["name"],
             "summary": (
-                f"具体事件。提及 {event['mentions']} 条，来源 {event['source_count']} 个，"
+                f"具体事件。{event.get('category') or ''} {event.get('direction') or ''}。"
+                f"提及 {event['mentions']} 条，来源 {event['source_count']} 个，"
                 f"首见 {event['first_seen'] or '未知'}。"
                 f"代表标题：{event['headline'] or event['name']}。"
                 "仅供内部研究。"

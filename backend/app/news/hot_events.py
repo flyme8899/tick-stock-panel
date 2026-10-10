@@ -41,9 +41,50 @@ BROAD_SECTORS = frozenset({
     "食品饮料",
 })
 _ACTIONS = (
-    "发布", "出台", "涨价", "降价", "提价", "收购", "中标", "获批", "上市",
-    "回购", "签约", "停产", "召回", "立案", "补贴",
+    "发布", "出台", "涨价", "降价", "提价", "上调", "下调", "报价", "收购", "中标", "获批", "上市",
+    "回购", "签约", "停产", "召回", "立案", "补贴", "降准", "降息", "加息", "制裁", "收紧",
+    "追加", "订单",
 )
+# 先看更具体的市场语境，再退回动作本身。六个分类覆盖政策、海外、产业、地缘、商品和公司。
+CATEGORY_NAMES = (
+    "国内政策/宏观",
+    "海外市场/央行",
+    "科技与产业",
+    "地缘政治",
+    "大宗商品/期货价格异动",
+    "公司重大事项",
+)
+_CATEGORY_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("地缘政治", ("制裁", "关税", "冲突", "战争", "停火", "出口管制", "配额", "地缘")),
+    ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "加息", "降息", "美股", "纳指", "标普", "欧股", "日经")),
+    ("国内政策/宏观", ("出台", "补贴", "降准", "国务院", "发改委", "工信部", "证监会", "财政部", "央行", "宏观", "政策")),
+    ("大宗商品/期货价格异动", ("碳酸锂", "原油", "期货", "黄金", "铜价", "铁矿", "煤炭", "稀土", "豆粕", "螺纹", "报价")),
+    ("公司重大事项", ("收购", "回购", "上市", "立案", "停产", "召回", "签约", "中标", "停牌", "退市")),
+    ("科技与产业", ("发布", "订单", "追加", "获批", "涨价", "降价", "提价", "上调", "下调", "量产", "芯片", "模型")),
+)
+_ACTION_CATEGORY = {
+    "出台": "国内政策/宏观",
+    "补贴": "国内政策/宏观",
+    "降准": "国内政策/宏观",
+    "加息": "海外市场/央行",
+    "降息": "海外市场/央行",
+    "制裁": "地缘政治",
+    "收紧": "地缘政治",
+    "报价": "大宗商品/期货价格异动",
+    "收购": "公司重大事项",
+    "回购": "公司重大事项",
+    "上市": "公司重大事项",
+    "立案": "公司重大事项",
+    "停产": "公司重大事项",
+    "召回": "公司重大事项",
+    "签约": "公司重大事项",
+    "中标": "公司重大事项",
+}
+_BEAR_CUES = ("制裁", "立案", "停产", "召回", "下调", "降价", "收紧", "冲突", "战争", "关税", "暴跌", "下跌", "加息")
+_BULL_CUES = ("补贴", "获批", "订单", "涨价", "回购", "发布", "出台", "降息", "降准", "上调", "提价", "中标", "签约", "上涨")
+_NOISE_EXACT = frozenset({"图片", "广告", "视频", "转发", "分享", "推广", "赞助"})
+_NOISE_HINTS = ("闲聊", "广告", "推广", "赞助", "加微信", "点击领取", "转发微博")
+_RELEVANCE_MIN = 3
 _LEAD_SUFFIXES = ("宣布", "称", "表示", "指出", "消息", "传闻", "公司", "披露")
 _STOP = frozenset({
     "公司", "市场", "今日", "表示", "消息", "记者", "财经", "股份", "有限",
@@ -168,8 +209,11 @@ def _doc(row: dict) -> dict | None:
         elif kind == "stock":
             stocks[key] = name or key
     lead, action, obj = _parse_phrase(title)
-    if not lead and not action and not obj:
+    if not lead or not action:
         lead, action, obj = _parse_phrase(summary)
+    shown = title or summary[:80]
+    if _relevance(shown, lead, action, concepts, stocks) < _RELEVANCE_MIN:
+        return None
     tokens = _tokens(lead, obj, concepts)
     return {
         "item_id": row.get("id"),
@@ -180,6 +224,7 @@ def _doc(row: dict) -> dict | None:
         "lead": lead,
         "action": action,
         "object": obj,
+        "relevance": _relevance(shown, lead, action, concepts, stocks),
         "concepts": concepts,
         "stocks": stocks,
         "tokens": tokens,
@@ -287,17 +332,35 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         for hit in stocks.values()
     ]
     mentioned.sort(key=lambda item: (-item["mentions"], -item["source_count"], item["name"]))
+    blob = "\n".join(item["title"] for item in members)
+    action = _mode([item["action"] for item in members if item["action"]])
+    category = _category_for(blob, action)
+    direction = _direction_for(blob, action)
+    for hit in mentioned:
+        hit["direction"] = direction
     name = _keyword_title(members)
     item_ids = [str(item["item_id"]) for item in members]
     digest = hashlib.sha1(",".join(sorted(item_ids)).encode("utf-8")).hexdigest()[:12]
     seen = first.astimezone(CN_TZ)
     first_seen = seen.strftime("%H:%M") if seen.date() == now.date() else seen.strftime("%m-%d %H:%M")
-    headline = members[0]["title"]
+    headlines: list[str] = []
+    for item in members:
+        title = str(item["title"] or "").strip()
+        if title and title not in headlines:
+            headlines.append(title)
+        if len(headlines) >= 3:
+            break
+    headline = headlines[0] if headlines else ""
     return {
         "key": f"ev_{digest}",
         "name": name,
+        "category": category,
+        "direction": direction,
+        "relevance": max(int(item.get("relevance") or 0) for item in members),
         "concepts": concepts,
+        "mapping": [{"name": concept, "kind": "concept", "direction": direction} for concept in concepts],
         "headline": headline,
+        "headlines": headlines,
         "mentions": mentions,
         "source_count": len(sources),
         "first_seen": first_seen,
@@ -338,6 +401,46 @@ def _keyword_title(members: list[dict]) -> str:
     if title in BROAD_SECTORS:
         title = _clip(f"{title}动态")
     return title or "事件"
+
+
+def _is_noise(title: str) -> bool:
+    text = re.sub(r"\s+", "", (title or "").strip())
+    if not text or text in _NOISE_EXACT or len(text) < 4:
+        return True
+    if sum(1 for char in text if "\u4e00" <= char <= "\u9fff") < 2:
+        return True
+    return any(hint in text for hint in _NOISE_HINTS)
+
+
+def _relevance(title: str, lead: str, action: str, concepts: list[str], stocks: dict) -> int:
+    """有主体也有动作才算一条能进榜的资讯。图片、闲聊和广告是 0。"""
+    if _is_noise(title) or not lead or not action:
+        return 0
+    score = 3
+    if concepts:
+        score += 1
+    if stocks:
+        score += 1
+    return score
+
+
+def _category_for(text: str, action: str) -> str:
+    blob = text or ""
+    for name, cues in _CATEGORY_CUES:
+        if any(cue in blob for cue in cues):
+            return name
+    return _ACTION_CATEGORY.get(action, "科技与产业")
+
+
+def _direction_for(text: str, action: str) -> str:
+    blob = text or ""
+    if any(cue in blob for cue in _BEAR_CUES):
+        return "利空"
+    if any(cue in blob for cue in _BULL_CUES):
+        return "利好"
+    if action in {"降价", "下调", "立案", "停产", "召回", "制裁", "收紧", "加息"}:
+        return "利空"
+    return "利好"
 
 
 def _mode(values: list[str]) -> str:
@@ -384,13 +487,18 @@ def _label_with_llm(events: list[dict]) -> None:
         if not _reserve_llm_call():
             break
         used += 1
+        headlines = "\n".join(str(item) for item in (event.get("headlines") or [event.get("headline") or ""]))
         prompt = (
-            "下面几条标题是同一件财经事件。请收成一个具体事件，不要用宽泛行业名当标题。"
+            "下面几条标题是同一件与资本市场有关的资讯。收成一个具体事件，不要用宽泛行业名当标题。"
             "只输出 JSON："
-            '{"title":"不超过20个字","concepts":["细分概念"],"stocks":[{"name":"","code":""}]}。'
-            "concepts 写细概念，不要写人工智能、半导体、医药这种大行业。"
+            '{"title":"不超过20个字","category":"","direction":"利好或利空",'
+            '"concepts":[{"name":"细分概念","direction":"利好或利空"}],'
+            '"stocks":[{"name":"","code":"","direction":"利好或利空"}]}。'
+            f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
+            "concepts 写受影响的细概念，不要写人工智能、半导体、医药这种大行业。"
+            "direction 表示对 A 股相关方向是利好还是利空。"
             "没有把握就留空，不要编造标题里没出现的事实。\n\n"
-            f"标题：{event.get('headline') or event.get('name')}"
+            f"标题：\n{headlines}"
         )
         try:
             raw = _llm_text(prompt)
@@ -413,39 +521,84 @@ def _parse_llm_event(raw: str, text: str) -> dict | None:
     if not title or title in BROAD_SECTORS:
         title = ""
     concepts = []
+    concept_directions: dict[str, str] = {}
     for item in payload.get("concepts") or payload.get("sectors") or []:
-        name = str(item or "").strip()
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            direct = str(item.get("direction") or "")
+        else:
+            name, direct = str(item or "").strip(), ""
         if name and name in text and _fine_concept(name, name) and name not in concepts:
             concepts.append(name)
+            if direct in {"利好", "利空"}:
+                concept_directions[name] = direct
     stocks = []
     for item in payload.get("stocks") or []:
         if isinstance(item, str):
-            name, code = item.strip(), ""
+            name, code, direct = item.strip(), "", ""
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
             code = str(item.get("code") or item.get("symbol") or "").strip()
+            direct = str(item.get("direction") or "")
         else:
             continue
         if (name and name in text) or (code and code in text):
-            stocks.append({"name": name, "code": code})
-    if not title and not concepts and not stocks:
+            row = {"name": name, "code": code}
+            if direct in {"利好", "利空"}:
+                row["direction"] = direct
+            stocks.append(row)
+    category = str(payload.get("category") or "").strip()
+    if category not in CATEGORY_NAMES:
+        category = ""
+    direction = str(payload.get("direction") or "").strip()
+    if direction not in {"利好", "利空"}:
+        direction = ""
+    if not title and not concepts and not stocks and not category:
         return None
-    return {"title": title, "concepts": concepts[:_CONCEPT_LIMIT], "stocks": stocks}
+    return {
+        "title": title,
+        "category": category,
+        "direction": direction,
+        "concepts": concepts[:_CONCEPT_LIMIT],
+        "concept_directions": concept_directions,
+        "stocks": stocks,
+    }
 
 
 def _apply_llm(event: dict, parsed: dict) -> None:
     title = str(parsed.get("title") or "")
     if title:
         event["name"] = title
+    category = str(parsed.get("category") or "")
+    if category in CATEGORY_NAMES:
+        event["category"] = category
+    direction = str(parsed.get("direction") or "")
+    if direction in {"利好", "利空"}:
+        event["direction"] = direction
     for name in parsed.get("concepts") or []:
         if name not in event["concepts"] and len(event["concepts"]) < _CONCEPT_LIMIT:
             event["concepts"].append(name)
+    directions = parsed.get("concept_directions") or {}
+    event["mapping"] = [
+        {
+            "name": name,
+            "kind": "concept",
+            "direction": directions.get(name) or event.get("direction") or "利好",
+        }
+        for name in event["concepts"]
+    ]
+    if direction in {"利好", "利空"}:
+        for stock in event.get("mentioned_stocks") or []:
+            stock["direction"] = direction
     known = {item["key"] for item in event.get("mentioned_stocks") or []}
     known_names = {item["name"] for item in event.get("mentioned_stocks") or []}
     for stock in parsed.get("stocks") or []:
         code = str(stock.get("code") or "").strip()
         name = str(stock.get("name") or "").strip()
         key = code or name
+        direct = str(stock.get("direction") or event.get("direction") or "利好")
+        if direct not in {"利好", "利空"}:
+            direct = "利好"
         if not key or key in known or name in known_names:
             continue
         known.add(key)
@@ -454,4 +607,5 @@ def _apply_llm(event: dict, parsed: dict) -> None:
             "name": name or key,
             "mentions": 1,
             "source_count": 1,
+            "direction": direct,
         })

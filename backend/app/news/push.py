@@ -188,8 +188,11 @@ def format_hot_markdown(
             concept_text = f" · {concepts}" if concepts else ""
             seen = row.get("first_seen") or ""
             seen_text = f" · 首见 {seen}" if seen else ""
+            tag = str(row.get("category") or "").strip()
+            direction = str(row.get("direction") or "").strip()
+            label = "".join(f" · {part}" for part in (tag, direction) if part)
             lines.append(
-                f"{index}. {row.get('name') or row.get('key')}{concept_text} · "
+                f"{index}. {row.get('name') or row.get('key')}{label}{concept_text} · "
                 f"提及 {row.get('story_count', 0)} · "
                 f"来源 {row.get('source_count', 0)}{seen_text}"
             )
@@ -597,6 +600,10 @@ def _snapshot_rows(items: list[dict]) -> list[dict]:
             row["first_seen"] = item["first_seen"]
         if item.get("headline"):
             row["headline"] = item["headline"]
+        if item.get("category"):
+            row["category"] = item["category"]
+        if item.get("direction"):
+            row["direction"] = item["direction"]
         concepts = [str(concept) for concept in (item.get("concepts") or []) if str(concept).strip()]
         if concepts:
             row["concepts"] = concepts
@@ -881,6 +888,8 @@ def _load_hot() -> list[dict]:
             "first_seen": event["first_seen"],
             "concepts": event["concepts"],
             "headline": event["headline"],
+            "category": event.get("category") or "",
+            "direction": event.get("direction") or "",
         })
     for kind in ("sector", "stock", "etf"):
         for item in hot_candidates(kind=kind, limit=top_n()):

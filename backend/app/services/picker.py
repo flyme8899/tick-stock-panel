@@ -804,6 +804,15 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             if str(concept).strip()
         ][:4]
         headline = event.get("headline") if isinstance(event.get("headline"), str) else None
+        mapped = []
+        for stock in event.get("mentioned_stocks") or []:
+            if not isinstance(stock, dict):
+                continue
+            label = str(stock.get("name") or stock.get("key") or "").strip()
+            if label and label not in mapped:
+                mapped.append(label)
+            if len(mapped) >= 3:
+                break
         items.append({
             "id": hot_event_id(key),
             "name": name,
@@ -814,6 +823,9 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             "first_seen": first_seen,
             "concepts": concepts,
             "headline": headline,
+            "category": str(event.get("category") or ""),
+            "direction": str(event.get("direction") or ""),
+            "mapped_stocks": mapped,
         })
     return {
         "id": "hot_events",

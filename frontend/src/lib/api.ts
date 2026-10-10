@@ -2236,13 +2236,25 @@ export interface NewsHotStock {
   key: string
   name: string
   mentions: number
+  direction?: '利好' | '利空' | string
+}
+
+export interface NewsHotMapping {
+  name: string
+  kind: string
+  direction: '利好' | '利空' | string
 }
 
 export interface NewsHotEvent {
   key: string
   name: string
+  category?: string
+  direction?: '利好' | '利空' | string
+  relevance?: number
   concepts: string[]
+  mapping?: NewsHotMapping[]
   headline: string
+  headlines?: string[]
   mentions: number
   source_count: number
   first_seen: string
@@ -2319,6 +2331,9 @@ export interface PickerSourceItem {
   first_seen?: string | null
   concepts?: string[]
   headline?: string | null
+  category?: string
+  direction?: string
+  mapped_stocks?: string[]
 }
 
 export interface PickerSourceGroup {
