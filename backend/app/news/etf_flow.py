@@ -19,6 +19,7 @@ mimo-v2.6-flash 不改默认。一张图一次请求；空内容再试一次。�
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import logging
@@ -57,6 +58,7 @@ MAX_VISION_IMAGES = 6
 VISION_BATCH_SIZE = 1
 VISION_EMPTY_RETRIES = 1
 MAX_STORED_IMAGES = 12
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_BROAD = 20
 MAX_CATEGORY = 30
 MAX_ETF = 80
@@ -69,6 +71,15 @@ _IMAGE_HOSTS = {
     "dingyue.ws.126.net",
     "mmbiz.qpic.cn",
     "mmbiz.qlogo.cn",
+}
+# 网易图片代理没有扩展名。tokenhub 自己拉 nimg.ws.126.net 会 400，所以只接受这些类型。
+_IMAGE_TYPES = {
+    "image/jpeg": "image/jpeg",
+    "image/jpg": "image/jpeg",
+    "image/png": "image/png",
+    "image/webp": "image/webp",
+    "image/gif": "image/gif",
+    "image/bmp": "image/bmp",
 }
 _WECHAT_FETCH_HOSTS = {"weixin.sogou.com", WECHAT_HOST}
 _BROWSER = {
@@ -382,15 +393,18 @@ def wechat_article_id(url: str) -> str:
     return ""
 
 
-def vision_payload(images: list[str], *, model: str) -> dict:
-    """一次请求只放一张表。表格 OCR 不关思考。"""
+def vision_payload(client, images: list[str], *, model: str) -> dict:
+    """一次请求只放一张表。表格 OCR 不关思考。
+
+    image_url 用 data URL。tokenhub 拉不到 nimg.ws.126.net，远程地址会 400。
+    """
     content: list[dict] = [{"type": "text", "text": VISION_PROMPT}]
     kept = 0
     for url in images:
         normalized = _normalize_image(url)
         if not normalized:
             continue
-        content.append({"type": "image_url", "image_url": {"url": normalized}})
+        content.append({"type": "image_url", "image_url": {"url": _image_data_url(client, normalized)}})
         kept += 1
         if kept >= VISION_BATCH_SIZE:
             break
@@ -800,7 +814,7 @@ def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, boo
 
 
 def _read_vision(client, images: list[str], key: str) -> tuple[dict | None, bool]:
-    payload = _post_vision(client, vision_payload(images, model=vision_model()), key)
+    payload = _post_vision(client, vision_payload(client, images, model=vision_model()), key)
     try:
         return parse_vision_response(payload), False
     except EmptyVisionError:
@@ -848,6 +862,18 @@ def _fetch(
     allow_hosts: set[str],
     params: dict | None = None,
 ) -> tuple[str, str]:
+    response, final = _open(client, url, allow_hosts=allow_hosts, params=params)
+    text = getattr(response, "text", "") or ""
+    return text[:2_000_000], final
+
+
+def _open(
+    client,
+    url: str,
+    *,
+    allow_hosts: set[str],
+    params: dict | None = None,
+):
     current = url
     query = params
     for _hop in range(4):
@@ -866,9 +892,39 @@ def _fetch(
             if raiser:
                 raiser()
             raise RuntimeError(f"http {status}")
-        text = getattr(response, "text", "") or ""
-        return text[:2_000_000], current
+        return response, current
     raise RuntimeError("重定向次数过多")
+
+
+def _image_data_url(client, url: str) -> str:
+    try:
+        response, _final = _open(client, url, allow_hosts=_IMAGE_HOSTS)
+        media = _image_media_type(response)
+        body = getattr(response, "content", None)
+        if not isinstance(body, (bytes, bytearray)) or not body:
+            raise ExtractFailedError("表格图片下载失败")
+        if len(body) > MAX_IMAGE_BYTES:
+            raise ExtractFailedError("表格图片过大")
+    except ExtractFailedError:
+        raise
+    except Exception as exc:  # 下载失败不能把远程地址交给视觉模型
+        logger.warning("ETF申赎表格图片下载失败: %s", _public_error(exc))
+        raise ExtractFailedError("表格图片下载失败") from exc
+    encoded = base64.b64encode(body).decode("ascii")
+    return f"data:{media};base64,{encoded}"
+
+
+def _image_media_type(response) -> str:
+    headers = getattr(response, "headers", None) or {}
+    getter = getattr(headers, "get", None)
+    raw = ""
+    if getter is not None:
+        raw = str(getter("content-type") or getter("Content-Type") or "")
+    media = raw.split(";", 1)[0].strip().lower()
+    mapped = _IMAGE_TYPES.get(media)
+    if not mapped:
+        raise ExtractFailedError("表格图片格式不支持")
+    return mapped
 
 
 def _check_url(url: str, allow_hosts: set[str]) -> None:
@@ -883,8 +939,12 @@ def _headers(url: str) -> dict[str, str]:
     host = (urlparse(url).hostname or "").lower()
     if host.endswith("sogou.com"):
         headers["Referer"] = "https://weixin.sogou.com/"
+    elif host == "nimg.ws.126.net":
+        headers["Referer"] = "https://www.163.com/"
     elif host.endswith("163.com"):
         headers["Referer"] = NETEASE_MEDIA_URL
+    elif host.startswith("mmbiz."):
+        headers["Referer"] = "https://mp.weixin.qq.com/"
     return headers
 
 
