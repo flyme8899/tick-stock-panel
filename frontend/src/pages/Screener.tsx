@@ -275,6 +275,15 @@ export function Screener() {
 
   // 进入页面自动跑策略池中的策略，获取命中数 (日线走盘后缓存/渐进式 runAll;
   // 分钟策略结果不落缓存, 由 runAllMinute 异步批量计算后合入 hitCounts)
+  // 同一条策略错误只提示一次: 首返 errors 和稍后的摘要轮询会带同一句话
+  const seenStrategyErrors = useRef(new Set<string>())
+  const noteStrategyError = useCallback((id: string, message: string) => {
+    const key = `${id}\0${message}`
+    if (seenStrategyErrors.current.has(key)) return
+    seenStrategyErrors.current.add(key)
+    toast(message, 'error')
+  }, [])
+
   const runAll = useMutation({
     mutationFn: ({ date, strategyIds }: { date?: string; strategyIds?: string[] } = {}) =>
       api.screenerRunAll(
@@ -296,6 +305,9 @@ export function Screener() {
           : null,
       )
       if (data.error) toast(`策略计算失败：${data.error}`, 'error')
+      for (const [id, message] of Object.entries(data.errors ?? {})) {
+        if (message) noteStrategyError(id, message)
+      }
       qc.invalidateQueries({ queryKey: ['screener-cached'] })
     },
   })
@@ -347,6 +359,10 @@ export function Screener() {
     const expired: Record<string, number> = {}
     for (const [id, r] of Object.entries(summaryQuery.data.results)) {
       if (r.as_of !== asOf) continue
+      if (r.error) {
+        noteStrategyError(id, r.error)
+        continue
+      }
       counts[id] = r.total
       const everCount = summaryQuery.data.today_ever_counts[id] ?? r.total
       const expiredCount = Math.max(everCount - r.total, 0)
@@ -378,7 +394,7 @@ export function Screener() {
         setPendingRun(rest.length ? { ...pendingRun, ids: rest } : null)
       }
     }
-  }, [summaryQuery.data, asOf, pendingRun, strategyMap])
+  }, [summaryQuery.data, asOf, pendingRun, strategyMap, noteStrategyError])
 
   // 渐进式兜底: 后台计算最长等 8 分钟, 防止异常时无限轮询
   useEffect(() => {
@@ -935,6 +951,11 @@ export function Screener() {
                   source={s.source}
                   active={activeStrategy === s.id}
                   count={hitCounts[id]}
+                  error={
+                    summaryQuery.data?.results[id]?.as_of === asOf
+                      ? summaryQuery.data.results[id].error
+                      : undefined
+                  }
                   expiredCount={expiredCounts[id]}
                   loading={runAll.isPending}
                   computing={pendingRunIds.has(id) || selfRunning || minuteRunning}

@@ -43,6 +43,26 @@ it('shows pulsing placeholder (not hint) when computing', () => {
   expect(container.textContent).not.toContain('待计算')
 })
 
+it('keeps the full description on the card for hover', () => {
+  render({
+    description: '主推。扣非净利同比在 0 到 400% 之间，公告次日生效。',
+    cardSize: 'normal',
+  })
+
+  const node = container.querySelector('span.line-clamp-1')
+  expect(node?.getAttribute('title')).toContain('主推')
+  expect(node?.textContent).toContain('主推')
+})
+
+it('shows 失败 instead of a zero hit count when the strategy errors', () => {
+  render({ error: '长期价值白马需要同花顺行业分类', count: 0, cardSize: 'normal' })
+
+  const failed = container.querySelector('span.text-danger')
+  expect(failed?.textContent).toBe('失败')
+  expect(failed?.getAttribute('title')).toContain('同花顺')
+  expect(container.textContent).not.toContain('0')
+})
+
 it('shows nothing extra for daily strategies without awaitRun', () => {
   render({})
 

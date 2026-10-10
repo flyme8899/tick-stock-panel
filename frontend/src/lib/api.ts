@@ -413,6 +413,8 @@ export interface ScreenerResultSummary {
   as_of: string
   /** 渐进式 run_all 写入的计算时间戳 (Unix ms); 监控实时叠加等来源无此字段 */
   computed_at?: number | null
+  /** 该策略本轮计算失败时的说明; 有此字段时 total 不是真实命中数 */
+  error?: string
 }
 
 export interface ScreenerCachedSummary {
@@ -432,6 +434,8 @@ export interface ScreenerRunAllSummary {
   complete?: boolean
   /** 后台执行出错时的错误信息 (部分结果仍会返回) */
   error?: string | null
+  /** 单个策略失败时的说明，键是策略 id */
+  errors?: Record<string, string>
   /** 本次执行起点 (Unix ms, 后端时钟), 用于判断缓存结果是否属于本轮 */
   started_at?: number | null
 }

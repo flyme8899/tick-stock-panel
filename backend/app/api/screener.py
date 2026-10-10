@@ -421,6 +421,8 @@ def get_cached_summary(request: Request):
             # 渐进式 run_all 写入的计算时间戳; 监控实时叠加/旧缓存无此字段 → None,
             # 前端视为新鲜 (有值即为最新一轮实时结果)
             "computed_at": result.get("computed_at"),
+            # 策略级失败 (如长期价值白马缺行业文件) 落在这里, 避免摘要把 total 0 当成命中
+            **({"error": result["error"]} if result.get("error") else {}),
         }
         for sid, result in results.items()
         if isinstance(result, dict)
@@ -604,7 +606,21 @@ def _run_all_progressive(
                 result = single[sid]
             except Exception as e:
                 logger.warning("run_all: 策略 %s 执行失败, 跳过: %s", sid, e, exc_info=True)
-                handle.fail_one(sid, str(e))
+                message = str(e)
+                handle.fail_one(sid, message)
+                # 首返之后才失败的策略, 前端只轮询摘要。把错误写进缓存,
+                # 卡片才能停转并看到原因, 而不是一直转圈或变成静默的 0 只。
+                payload = {
+                    "total": 0,
+                    "as_of": str(as_of),
+                    "rows": [],
+                    "computed_at": int(time.time() * 1000),
+                    "error": message,
+                }
+                try:
+                    strategy_cache.write_cache(data_dir, str(as_of), {sid: payload})
+                except Exception:
+                    logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
                 continue
             payload = {
                 "total": result.total,

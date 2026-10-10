@@ -1577,7 +1577,10 @@ class StrategyBacktestService:
                         logger.warning("basic_filter mask failed: %s", e)
                         return _err(f"基础过滤计算失败: {e}")
 
-            candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
+            try:
+                candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
+            except ValueError as e:
+                return _err(str(e))
             candidate_mask = basic_mask & candidate_filter_mask
             panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask, factor_snapshot=factor_snapshot)
             formal_candidate_mask = candidate_mask & formal_range
@@ -2288,7 +2291,9 @@ class StrategyBacktestService:
                     )
                 )
                 return marked["_hit"].fill_null(False).cast(pl.Boolean)
-            except Exception as e:
+            except ValueError:
+                raise
+            except Exception as e:  # noqa: BLE001 — 策略代码失败时回退，缺行业文件的 ValueError 继续抛出
                 history_failed = True
                 logger.warning("strategy filter_history_fn failed: %s", e)
                 # 失败则回退到 filter_fn (若存在)
