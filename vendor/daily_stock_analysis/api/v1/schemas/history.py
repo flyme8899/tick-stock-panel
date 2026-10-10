@@ -52,6 +52,7 @@ class HistoryItem(BaseModel):
         description="本次分析市场阶段低敏摘要",
     )
     created_at: Optional[str] = Field(None, description="创建时间")
+    read_at: Optional[str] = Field(None, description="标为已读的时间；空表示未读")
     asset_type: Optional[Literal["stock", "index"]] = Field(
         None,
         description="后端权威资产类型（stock/index）；由持久化代码经 parser 生成。旧客户端与 market review 可缺省。",
@@ -99,6 +100,44 @@ class DeleteHistoryResponse(BaseModel):
     """删除历史记录响应"""
 
     deleted: int = Field(..., description="实际删除的历史记录数量")
+
+
+class MarkHistoryReadRequest(BaseModel):
+    """把仪表盘卡片标为已读。"""
+
+    record_ids: List[int] = Field(..., min_length=1, max_length=500, description="历史记录主键 ID")
+
+
+class DismissHistoryRequest(BaseModel):
+    """把记录移出决策仪表盘。软删除，不物理删行。"""
+
+    record_ids: List[int] = Field(default_factory=list, max_length=500, description="要移出的历史记录主键")
+    older_than_days: Optional[int] = Field(
+        None,
+        ge=1,
+        le=3650,
+        description="移出早于这么多天的记录，按服务进程本地时钟",
+    )
+    only_read: bool = Field(False, description="只移出已标为已读的记录")
+
+    @model_validator(mode="after")
+    def exactly_one_mode(self) -> "DismissHistoryRequest":
+        modes = int(bool(self.record_ids)) + int(self.older_than_days is not None) + int(self.only_read)
+        if modes != 1:
+            raise ValueError("record_ids、older_than_days、only_read 必须且只能指定一种")
+        return self
+
+
+class DismissHistoryResponse(BaseModel):
+    """移出仪表盘的数量。"""
+
+    dismissed: int = Field(..., description="本次移出的历史记录数量")
+
+
+class MarkHistoryReadResponse(BaseModel):
+    """标为已读的数量。"""
+
+    updated: int = Field(..., description="本次标为已读的历史记录数量")
 
 
 class NewsIntelItem(BaseModel):
@@ -412,6 +451,12 @@ class WatchlistRequest(BaseModel):
     """自选队列操作请求"""
 
     stock_code: str = Field(..., description="股票代码", min_length=1)
+
+
+class WatchlistRemoveBatchRequest(BaseModel):
+    """一次移出多只观察池股票。"""
+
+    stock_codes: List[str] = Field(..., min_length=1, max_length=200, description="要移出的股票代码")
 
 
 class WatchlistResponse(BaseModel):

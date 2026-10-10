@@ -23,8 +23,8 @@ FEATURES = (
         "id": "decision_dashboard",
         "label": "决策仪表盘",
         "section": "dashboard",
-        "summary": "自选股 AI 结论、评分、趋势和操作建议汇总。",
-        "upstream": "GET /api/v1/history",
+        "summary": "自选股 AI 结论、评分、趋势和操作建议汇总。可移出卡片，也可把股票移出观察池。",
+        "upstream": "GET /api/v1/history；POST /api/v1/history/dismiss；POST /api/v1/stocks/watchlist/remove-batch",
         "overlap": "TSP 看板继续负责行情与市场总览。这里只汇总 DSA 的决策报告，不替换看板。",
     },
     {

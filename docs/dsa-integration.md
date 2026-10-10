@@ -134,6 +134,10 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 
 结果写入 DSA 历史，决策仪表盘能看到。推送走 `.env` 里的 `FEISHU_WEBHOOK_URL`、`WECHAT_WEBHOOK_URL`、Telegram、Discord、Slack、邮件等，不改 TSP 设置页里的监控渠道。页面上的「生成研报」仍然 `notify=false`；定时任务和「立即跑一轮」按这些渠道发送。
 
+观察池就是这份 `STOCK_LIST`。仪表盘上可以单条或批量移出，之后定时任务不再分析这些代码。已有分析卡片不会跟着消失。
+
+卡片本身存在 DSA 的 `analysis_history`。移出是软删除（`dismissed_at`），列表和详情不再返回，回测关联仍留在库里。同一天重复生成的大盘复盘，列表只给最新一条。`POST /api/v1/history/read` 标已读，`POST /api/v1/history/dismiss` 按主键、已读或早于 N 天移出。浏览器只打 TSP 的 `/api/dsa/upstream/...`，要有面板登录；转发层再带 DSA 会话访问上游。
+
 ## 分享图
 
 `docker compose --profile dsa up --build` 使用的镜像安装了 `wkhtmltopdf`（含 `wkhtmltoimage`）和 `fonts-noto-cjk`，并执行 `fc-cache`。个股研报里的「分享图」在页内生成 PNG。工具缺失或渲染失败时，按钮下方显示上游返回的原因，不会把浏览器带到一份 JSON。

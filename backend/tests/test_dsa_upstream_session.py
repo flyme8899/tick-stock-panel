@@ -105,6 +105,39 @@ def test_catalog_documents_password() -> None:
     assert "Set-Cookie" in item["purpose"]
 
 
+def test_dashboard_mutations_forward_session_cookie(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DSA_UPSTREAM_COOKIE", "dsa_session=static-token")
+    DATA_QUEUE.append(_response(200, b'{"dismissed":2}'))
+    status, payload, _media, _extra = forward(
+        "POST",
+        "history/dismiss",
+        body=b'{"only_read":true}',
+        content_type="application/json",
+    )
+    assert status == 200
+    assert payload == b'{"dismissed":2}'
+    assert CALLS[-1] == (
+        "POST",
+        "http://dsa.test/api/v1/history/dismiss",
+        "dsa_session=static-token",
+    )
+
+    DATA_QUEUE.append(_response(200, b'{"stock_codes":["600519"]}'))
+    status, payload, _media, _extra = forward(
+        "POST",
+        "stocks/watchlist/remove-batch",
+        body=b'{"stock_codes":["300750"]}',
+        content_type="application/json",
+    )
+    assert status == 200
+    assert b"600519" in payload
+    assert CALLS[-1] == (
+        "POST",
+        "http://dsa.test/api/v1/stocks/watchlist/remove-batch",
+        "dsa_session=static-token",
+    )
+
+
 def test_no_password_uses_static_cookie_and_does_not_login() -> None:
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("DSA_UPSTREAM_COOKIE", "dsa_session=static-token")
