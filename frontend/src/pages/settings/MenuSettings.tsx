@@ -44,7 +44,7 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/financials', label: '财务分析', type: 'builtin', visible: true },
   { id: '/monitor', label: '监控中心', type: 'builtin', visible: true },
   { id: '/regime', label: '市场环境', type: 'builtin', visible: true },
-  { id: '/fund-flow', label: '资金', type: 'builtin', visible: true },
+  { id: '/fund-flow', label: '资金流向', type: 'builtin', visible: true },
   { id: '/abnormal', label: '异动监控', type: 'builtin', visible: true },
   { id: '/lots', label: '持仓提醒', type: 'builtin', visible: true },
   { id: '/paper', label: '模拟盘', type: 'builtin', visible: true },

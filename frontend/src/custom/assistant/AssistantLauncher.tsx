@@ -31,6 +31,7 @@ const PAGE_LABELS: Record<string, string> = {
   '/financials': '财务分析',
   '/monitor': '监控中心',
   '/regime': '市场环境',
+  '/fund-flow': '资金流向',
   '/abnormal': '异动监控',
   '/lots': '持仓提醒',
   '/signals': '信号库',
