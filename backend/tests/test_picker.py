@@ -547,11 +547,11 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
         "华为发布盘古新模型",
         "工信部出台机器人补贴政策",
         "碳酸锂报价继续上涨",
-        "平安银行回购",
+        "平安银行回购股份",
         "稀土出口配额收紧",
     ]
     assert "光伏组件厂下调报价" not in names
-    assert names.index("稀土出口配额收紧") < names.index("存储芯片厂涨价")
+    assert names.index("稀土出口配额收紧") < names.index("存储芯片厂宣布涨价")
     assert "人工智能" not in names
     assert "半导体" not in names
     assert "周六闲聊不影响交易日" not in names
@@ -610,7 +610,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     )
     assert {row["symbol"] for row in overlapped["rows"]} == {"600519.SH"}
 
-    bank = next(event for event in snapshot["events"] if event["name"] == "平安银行回购")
+    bank = next(event for event in snapshot["events"] if event["name"] == "平安银行回购股份")
     assert names.index(bank["name"]) == 3
     assert bank["mentions"] == 1
     assert bank["importance"] == "重大"
@@ -664,9 +664,9 @@ def test_major_event_with_few_mentions_outranks_routine_heat(tmp_path):
     _insert_news("cls", "pv", _publish(friday, 15, 20), [], [], title="光伏组件厂下调报价")
     events = top_hot_events(NOW)["events"]
     names = [event["name"] for event in events]
-    assert names[0] == "美联储降息"
-    assert "存储芯片厂涨价" in names
-    assert names.index("美联储降息") < names.index("存储芯片厂涨价")
+    assert names[0] == "美联储宣布降息"
+    assert "存储芯片厂宣布涨价" in names
+    assert names.index("美联储宣布降息") < names.index("存储芯片厂宣布涨价")
     assert "光伏组件厂下调报价" not in names
     head = events[0]
     assert head["importance"] == "重大"
@@ -675,7 +675,7 @@ def test_major_event_with_few_mentions_outranks_routine_heat(tmp_path):
     parts = head["breakdown"]
     assert set(parts) == {"importance", "confirmation", "mapping", "freshness", "heat"}
     assert parts["importance"] > parts["mapping"] + parts["freshness"] + parts["heat"]
-    routine = next(event for event in events if event["name"] == "存储芯片厂涨价")
+    routine = next(event for event in events if event["name"] == "存储芯片厂宣布涨价")
     assert routine["importance"] == "重要"
     assert routine["mentions"] > head["mentions"]
     assert routine["heat"] > head["heat"]
@@ -683,7 +683,7 @@ def test_major_event_with_few_mentions_outranks_routine_heat(tmp_path):
 
     listed = hot_event_listing(NOW, limit=20)
     public = listed["events"][0]
-    assert public["name"] == "美联储降息"
+    assert public["name"] == "美联储宣布降息"
     assert public["importance"] == "重大"
     assert public["score"] == head["score"]
     assert public["breakdown"] == head["breakdown"]
@@ -710,12 +710,12 @@ def test_hot_events_classify_market_news_and_drop_noise(tmp_path):
     assert "图片" not in events
     assert not any("闲聊" in name or "赞助" in name for name in events)
     expected = {
-        "美联储降息": ("海外市场/央行", "利好"),
+        "美联储宣布降息": ("海外市场/央行", "利好"),
         "工信部出台算力补贴": ("国内政策/宏观", "利好"),
         "华为发布新模型": ("科技与产业", "利好"),
         "美国对华芯片制裁升级": ("地缘政治", "利空"),
         "碳酸锂报价继续上涨": ("大宗商品/期货价格异动", "利好"),
-        "平安银行回购": ("公司重大事项", "利好"),
+        "平安银行宣布回购": ("公司重大事项", "利好"),
     }
     for name, (category, direction) in expected.items():
         assert events[name]["category"] == category
@@ -932,7 +932,7 @@ def test_hot_event_recency_breaks_equal_item_source_products(tmp_path):
     noon = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
     events = top_hot_events(noon)["events"]
     names = [event["name"] for event in events]
-    assert names[0] == "存储芯片厂涨价"
+    assert names[0] == "存储芯片厂宣布涨价"
     assert events[0]["importance"] == events[1]["importance"] == "重要"
     assert events[0]["mentions"] * events[0]["source_count"] == events[1]["mentions"] * events[1]["source_count"]
 

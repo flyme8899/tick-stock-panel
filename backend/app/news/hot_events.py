@@ -27,6 +27,8 @@ _CLUSTER_WINDOW = timedelta(hours=6)
 _HEAT_HALF_LIFE_HOURS = 12
 _LLM_PER_PASS = 8
 _TITLE_LIMIT = 20
+# 标题缓存按这个版本取。旧键里的半句话不再套用，下一轮重新生成。
+_TITLE_CACHE_VERSION = 2
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -117,6 +119,53 @@ _STOP = frozenset({
     "国内", "海外", "全球", "多家", "有关", "A股", "港股",
 })
 _CLAUSE = re.compile(r"[，。！？、；：:\n]")
+# 半句话常见的起笔。完整标题不会从这些词开始。
+_FRAGMENT_LEADS = (
+    "再叠加", "叠加", "再加上", "加上",
+    "和之前", "和此前", "和这次", "和本次", "和上述", "以及",
+    "根据", "据悉", "据称", "据报道",
+    "与此同时", "与此",
+    "同时", "此外", "另外", "并且", "而且",
+    "但是", "不过", "然而", "虽然", "尽管", "如果", "因为", "由于", "随着",
+    "其中", "对此", "为此", "因此", "因而",
+    "继而", "随后", "此后", "日前", "此前", "还有",
+)
+_FRAGMENT_PREFIX = re.compile("^(?:" + "|".join(_FRAGMENT_LEADS) + ")")
+_TIME_PREFIX = re.compile(r"^(?:昨夜|昨晚|今日|昨日|今天|昨天|日前|此前|本次|这次|当前|目前|最近|刚刚)+")
+# 涨跌叙述不是聚类动作，但标题被从中间截开时，它往往才是这件事的谓语。
+_PRICE_NARRATIVE = (
+    "大涨", "大跌", "上涨", "下跌", "暴涨", "暴跌",
+    "走强", "走弱", "走高", "走低", "飙升", "跳水",
+)
+# 聚类停用词里的国别可以当标题主体。这里只挡「公司」「市场」这种没有对象的词。
+_NOT_SUBJECT = frozenset({
+    "公司", "市场", "今日", "表示", "消息", "记者", "财经", "股份", "有限",
+    "集团", "板块", "概念", "龙头", "资金", "多家", "有关", "相关",
+    "持续", "继续", "午后", "盘中",
+})
+# 叙述谓语后面再接这些动作，就是两件不相干的事被粘在了一起。
+_GLUE_FOLLOWUPS = frozenset({
+    "发布", "出台", "收购", "中标", "获批", "上市", "回购", "签约",
+    "停产", "召回", "立案", "补贴", "制裁", "收紧", "降息", "加息", "降准",
+})
+_DANGLING_FINAL = frozenset("的了和与及等把被将已正而或但之以为于对从在超")
+# 以这些字结尾时，只有最后两个字是完整词才算没截断。
+_CLOSED_TAILS = {
+    "政": frozenset({"新政", "政府", "财政", "行政", "市政", "内政", "党政", "军政"}),
+}
+_SOURCE_HEADS = (
+    "财联社", "华尔街见闻", "证券时报", "上海证券报", "中国证券报",
+    "第一财经", "澎湃新闻", "新浪财经", "新华社", "界面新闻",
+    "路透社", "路透", "彭博", "南华早报",
+)
+_SOURCE_BRACKET = re.compile(r"^(?:【[^】]{1,16}】|\[[^\]]{1,16}\]|（[^）]{1,12}）|\([^)]{1,12}\))")
+_SOURCE_DATELINE = re.compile(
+    r"^(?:" + "|".join(_SOURCE_HEADS) + r")(?:\d{1,2}月\d{1,2}日)?(?:电|讯)[，,]?"
+)
+_SOURCE_LABEL = re.compile(
+    r"^(?:" + "|".join(_SOURCE_HEADS) + r"|快讯|突发|独家|刚刚)[：:|｜]"
+)
+_REUTERS_TAIL = re.compile(r"(?:[-|｜]\s*)?(?:Reuters|路透社|路透)$")
 
 _CACHE: dict[tuple, dict] = {}
 _LLM_CACHE: dict[str, dict] = {}
@@ -537,21 +586,20 @@ def _specific_concepts(counts: Counter[str]) -> list[str]:
 
 
 def _keyword_title(members: list[dict]) -> str:
-    leads = [item["lead"] for item in members if item["lead"]]
-    actions = [item["action"] for item in members if item["action"]]
-    objects = [item["object"] for item in members if item["object"]]
-    lead = _mode(leads)
-    action = _mode(actions)
-    obj = _mode(objects)
-    if lead and action:
-        title = _clip(f"{lead}{action}{obj}")
-        if title and title not in BROAD_SECTORS:
-            return title
-    headline = members[0]["title"]
-    title = _clip(headline)
-    if title in BROAD_SECTORS:
-        title = _clip(f"{title}动态")
-    return title or "事件"
+    """用代表标题的第一分句，不再把各条的主体、动作、宾语拼在一起。"""
+    clauses: list[str] = []
+    for item in members:
+        clause = _representative_clause(str(item.get("title") or ""))
+        if clause:
+            clauses.append(clause)
+    if not clauses:
+        return "事件"
+    counts = Counter(clauses)
+    best = max(counts.values())
+    for clause in clauses:
+        if counts[clause] == best:
+            return clause
+    return clauses[0]
 
 
 def _is_noise(title: str) -> bool:
@@ -600,10 +648,214 @@ def _mode(values: list[str]) -> str:
     return Counter(values).most_common(1)[0][0]
 
 
-def _clip(text: str) -> str:
-    compact = re.sub(r"\s+", "", (text or "").strip())
-    compact = compact.strip("，。！？、；：")
-    return compact[:_TITLE_LIMIT]
+def _compact(text: str) -> str:
+    body = re.sub(r"\s+", "", (text or "").strip())
+    return body.strip("，。！？、；：\"'“”")
+
+
+def _strip_source_prefix(text: str) -> str:
+    body = _compact(text)
+    changed = True
+    while body and changed:
+        changed = False
+        for pattern in (_SOURCE_BRACKET, _SOURCE_DATELINE, _SOURCE_LABEL):
+            updated = pattern.sub("", body, count=1)
+            if updated != body:
+                body = updated.lstrip("，。！？、；：")
+                changed = True
+    return _REUTERS_TAIL.sub("", body).strip("，。！？、；：")
+
+
+def _starts_fragment(text: str) -> bool:
+    if not text:
+        return False
+    if _FRAGMENT_PREFIX.match(text):
+        return True
+    return text.startswith("与")
+
+
+def _drop_leading_fragment(text: str) -> str:
+    body = text
+    while body:
+        match = _FRAGMENT_PREFIX.match(body)
+        if match:
+            body = body[match.end():]
+            continue
+        if body.startswith("与"):
+            body = body[1:]
+            continue
+        break
+    return body
+
+
+def _ends_abruptly(text: str) -> bool:
+    if not text:
+        return True
+    last = text[-1]
+    if last in _DANGLING_FINAL:
+        return True
+    allowed = _CLOSED_TAILS.get(last)
+    return allowed is not None and text[-2:] not in allowed
+
+
+def _subject_text(before: str) -> str:
+    lead = _compact(before)
+    changed = True
+    while changed and lead:
+        changed = False
+        for suffix in _LEAD_SUFFIXES:
+            if lead.endswith(suffix) and len(lead) - len(suffix) >= 2:
+                lead = lead[:-len(suffix)]
+                changed = True
+                break
+    return lead
+
+
+def _subject_ok(before: str) -> bool:
+    lead = _subject_text(before)
+    if len(lead) < 2 or lead in _NOT_SUBJECT or lead in BROAD_SECTORS:
+        return False
+    if _starts_fragment(lead) or lead.endswith(("性", "的", "地", "超")):
+        return False
+    if lead.endswith(("针对", "对于", "关于")):
+        return False
+    if any(word in lead for word in _PRICE_NARRATIVE):
+        return False
+    return _tuple_action(lead)[0] < 0
+
+
+def _normalize_subject(before: str) -> str:
+    lead = _drop_leading_fragment(_subject_text(before))
+    lead = _TIME_PREFIX.sub("", lead)
+    for suffix in ("针对", "对于", "关于"):
+        if lead.endswith(suffix) and len(lead) - len(suffix) >= 2:
+            lead = lead[:-len(suffix)]
+    return lead
+
+
+def _tuple_action(text: str) -> tuple[int, str]:
+    for verb in _ACTIONS:
+        index = text.find(verb)
+        if index >= 0:
+            return index, verb
+    return -1, ""
+
+
+def _narrative_action(text: str) -> tuple[int, str]:
+    found: tuple[int, str] | None = None
+    for verb in _PRICE_NARRATIVE:
+        index = text.find(verb)
+        if index < 0:
+            continue
+        if found is None or index < found[0] or (index == found[0] and len(verb) > len(found[1])):
+            found = (index, verb)
+    return found if found else (-1, "")
+
+
+def _split_headline(text: str) -> tuple[str, str, str]:
+    """选出主体说得通的谓语。叙述后面再接发布、出台这类动作时，宾语停在那之前。"""
+    options: list[tuple[int, int, str, str]] = []
+    for index, verb in (_tuple_action(text), _narrative_action(text)):
+        if index < 0 or not verb or not _subject_ok(text[:index]):
+            continue
+        options.append((index, -len(verb), verb, text[:index]))
+    if not options:
+        return "", "", ""
+    options.sort()
+    index, _neg, verb, lead = options[0]
+    rest = text[index + len(verb):]
+    obj = rest
+    if verb in _PRICE_NARRATIVE:
+        later, later_verb = _tuple_action(rest)
+        if later > 0 and later_verb in _GLUE_FOLLOWUPS:
+            obj = rest[:later]
+    return lead, verb, obj.strip("，。！？、；：")
+
+
+def _title_ok(title: str) -> bool:
+    """完整、有主体和动作、不超过 20 字，且不是半句话或词中间截断。"""
+    text = _compact(title)
+    if not text or len(text) > _TITLE_LIMIT or text in BROAD_SECTORS:
+        return False
+    if _starts_fragment(text) or _ends_abruptly(text):
+        return False
+    if re.search(r"超(?!过|预|标|额|出|市)", text):
+        return False
+    lead, action, obj = _split_headline(text)
+    if not action or not _subject_ok(lead):
+        return False
+    tail = text[len(lead) + len(action) + len(obj):].strip("，。！？、；：")
+    return not tail
+
+
+def _fit_object(base: str, obj: str) -> str:
+    obj = obj.strip("，。！？、；：")
+    if obj and len(base) + len(obj) <= _TITLE_LIMIT and not _ends_abruptly(obj):
+        return base + obj
+    head = re.split(r"[和与及]", obj, maxsplit=1)[0] if obj else ""
+    if head and head != obj and len(base) + len(head) <= _TITLE_LIMIT and not _ends_abruptly(head):
+        return base + head
+    return base
+
+
+def _repair_headline(text: str) -> str:
+    body = _TIME_PREFIX.sub("", _drop_leading_fragment(_compact(text)))
+    if not body:
+        return ""
+    options: list[tuple[int, int, str, str]] = []
+    for index, verb in (_tuple_action(body), _narrative_action(body)):
+        if index < 0 or not verb:
+            continue
+        subject = _normalize_subject(body[:index])
+        if _subject_ok(subject):
+            options.append((index, -len(verb), subject, verb))
+    if not options:
+        return ""
+    options.sort()
+    index, _neg, subject, verb = options[0]
+    rest = body[index + len(verb):]
+    obj = rest
+    if verb in _PRICE_NARRATIVE:
+        later, later_verb = _tuple_action(rest)
+        if later > 0 and later_verb in _GLUE_FOLLOWUPS:
+            obj = rest[:later]
+    base = f"{subject}{verb}"
+    if len(base) > _TITLE_LIMIT or _ends_abruptly(base):
+        return ""
+    return _fit_object(base, obj)
+
+
+def _fit_clause(clause: str) -> str:
+    compact = _drop_leading_fragment(_strip_source_prefix(clause))
+    if not compact:
+        return ""
+    if _title_ok(compact):
+        return compact
+    repaired = _repair_headline(compact)
+    if repaired and _title_ok(repaired):
+        return repaired
+    return ""
+
+
+def _representative_clause(text: str) -> str:
+    body = _strip_source_prefix(text)
+    if not body:
+        return ""
+    for part in _CLAUSE.split(body):
+        fitted = _fit_clause(part)
+        if fitted:
+            return fitted
+    return ""
+
+
+def _title_cache_key(fingerprint: str) -> str:
+    return f"title-v{_TITLE_CACHE_VERSION}:{fingerprint}"
+
+
+def _purge_stale_title_cache() -> None:
+    prefix = f"title-v{_TITLE_CACHE_VERSION}:"
+    for key in [key for key in _LLM_CACHE if not str(key).startswith(prefix)]:
+        _LLM_CACHE.pop(key, None)
 
 
 def _hint(now: datetime, trading: date, chosen: date, fallback: bool, updated_hm: str) -> str:
@@ -626,13 +878,18 @@ def _label_with_llm(events: list[dict]) -> None:
         return
     from app.news.service import _llm_text, _reserve_llm_call
 
+    _purge_stale_title_cache()
     used = 0
     for event in events[:_LLM_PER_PASS]:
         fingerprint = str(event.get("_fp") or "")
-        cached = _LLM_CACHE.get(fingerprint)
-        if cached is not None:
+        cache_key = _title_cache_key(fingerprint)
+        cached = _LLM_CACHE.get(cache_key)
+        cached_title = str((cached or {}).get("title") or "")
+        if cached is not None and (not cached_title or _title_ok(cached_title)):
             _apply_llm(event, cached)
             continue
+        if cached is not None:
+            _LLM_CACHE.pop(cache_key, None)
         if used >= _LLM_PER_PASS:
             break
         if not _reserve_llm_call():
@@ -646,6 +903,8 @@ def _label_with_llm(events: list[dict]) -> None:
             '"importance":"重大或重要或一般或琐碎",'
             '"concepts":[{"name":"细分概念","direction":"利好或利空"}],'
             '"stocks":[{"name":"","code":"","direction":"利好或利空"}]}。'
+            "title 必须是完整具体的事件标题，不超过20个字，包含主体和动作，"
+            "例如美联储降息25基点。不要半句话，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
             f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
             "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
             "寻常涨价、获批、订单是重要。"
@@ -660,7 +919,7 @@ def _label_with_llm(events: list[dict]) -> None:
             logger.info("热门事件标题生成失败: %s", exc)
             raw = ""
         parsed = _parse_llm_event(raw, str(event.get("headline") or ""))
-        _LLM_CACHE[fingerprint] = parsed or {}
+        _LLM_CACHE[cache_key] = parsed or {}
         if parsed:
             _apply_llm(event, parsed)
 
@@ -671,8 +930,8 @@ def _parse_llm_event(raw: str, text: str) -> dict | None:
     payload = _llm_object(raw)
     if not payload:
         return None
-    title = _clip(str(payload.get("title") or ""))
-    if not title or title in BROAD_SECTORS:
+    title = _compact(str(payload.get("title") or ""))
+    if not _title_ok(title):
         title = ""
     concepts = []
     concept_directions: dict[str, str] = {}
@@ -725,7 +984,7 @@ def _parse_llm_event(raw: str, text: str) -> dict | None:
 
 def _apply_llm(event: dict, parsed: dict) -> None:
     title = str(parsed.get("title") or "")
-    if title:
+    if _title_ok(title):
         event["name"] = title
     category = str(parsed.get("category") or "")
     if category in CATEGORY_NAMES:

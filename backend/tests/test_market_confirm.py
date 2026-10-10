@@ -252,14 +252,14 @@ def test_confirmed_move_outranks_an_unconfirmed_major(tmp_path, monkeypatch):
     monkeypatch.setattr(confirm_mod, "load_market_tape", tape)
     names = [event["name"] for event in top_hot_events(NOW)["events"]]
     assert names[0] == "创新药临床获批"
-    assert names.index("创新药临床获批") < names.index("美联储降息")
+    assert names.index("创新药临床获批") < names.index("美联储宣布降息")
     drug = top_hot_events(NOW)["events"][0]
     assert drug["importance"] == "重要"
     assert drug["confirmation"]["strength"] == "强"
     assert drug["confirmation"]["persistence"] == "持续"
     assert drug["breakdown"]["confirmation"] == drug["confirmation"]["score"]
     assert drug["breakdown"]["confirmation"] > drug["breakdown"]["heat"]
-    fed = next(event for event in top_hot_events(NOW)["events"] if event["name"] == "美联储降息")
+    fed = next(event for event in top_hot_events(NOW)["events"] if event["name"] == "美联储宣布降息")
     assert fed["importance"] == "重大"
     assert fed["confirmation"]["score"] == 0
     assert drug["score"] > fed["score"]
