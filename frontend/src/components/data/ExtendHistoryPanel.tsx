@@ -6,11 +6,13 @@ import { QK } from '@/lib/queryKeys'
 import { MissingCapChip } from '@/lib/capability-labels'
 
 // hasCap: 日K批量能力当前是否可用 (路由矩阵判定, 生效源含插件/自定义源)
-export function ExtendHistoryPanel({ hasCap, isRunning, earliestDate, onStart }: {
+// assetType: 要补的资产族 — 三族独立落盘, 深度需分别补。
+export function ExtendHistoryPanel({ hasCap, isRunning, earliestDate, onStart, assetType = 'stock' }: {
   hasCap: boolean
   isRunning: boolean
   earliestDate: string | null
   onStart: () => void
+  assetType?: 'stock' | 'etf' | 'index'
 }) {
   const qc = useQueryClient()
   const [value, setValue] = useState(6)
@@ -18,7 +20,7 @@ export function ExtendHistoryPanel({ hasCap, isRunning, earliestDate, onStart }:
   const hasBatchCap = hasCap
 
   const extend = useMutation({
-    mutationFn: () => api.extendHistory(value, unit),
+    mutationFn: () => api.extendHistory(value, unit, assetType),
     onSuccess: () => {
       onStart()
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
