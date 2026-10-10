@@ -14,6 +14,7 @@ import {
 // framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
 // Layout / Onboarding / Auth 为应用外壳与入口, 保持同步加载。
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
+const StockPicker = lazy(() => import('./pages/StockPicker').then(m => ({ default: m.StockPicker })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
 const Factors = lazy(() => import('./pages/Factors').then(m => ({ default: m.Factors })))
@@ -54,6 +55,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/stock-analysis',
   '/review',
   '/watchlist',
+  '/stock-picker',
   '/screener',
   '/backtest',
   '/factors',
@@ -160,6 +162,7 @@ export const router = createBrowserRouter([
       { path: 'stock-analysis', element: <StockAnalysis /> },
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
+      { path: 'stock-picker', element: <StockPicker /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
       { path: 'factors', element: <Factors /> },
