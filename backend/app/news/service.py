@@ -1295,7 +1295,7 @@ def _reserve_llm_call() -> bool:
         return True
 
 
-def _llm_text(prompt: str) -> str:
+def _llm_text(prompt: str, *, max_tokens: int = 400) -> str:
     try:
         import asyncio
 
@@ -1304,7 +1304,7 @@ def _llm_text(prompt: str) -> str:
         raw = asyncio.run(generate_ai_text(
             [{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=400,
+            max_tokens=max_tokens,
             timeout=30,
         ))
     except Exception as exc:  # noqa: BLE001

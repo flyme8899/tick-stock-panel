@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import date, datetime, timedelta
 
 from app.market_time import CN_TZ
-from app.news.hot_events import _keyword_title, _title_ok
+from app.news.hot_events import _is_section_label, _keyword_title, _llm_title_ok, _title_ok
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
 
 NOW = datetime(2026, 10, 10, 8, 30, tzinfo=CN_TZ)
@@ -147,7 +148,7 @@ def test_llm_prefers_good_title_and_rejects_fragment(tmp_path, monkeypatch):
     _insert("fed", "【财联社】美联储宣布降息25基点", 0)
     prompts: list[str] = []
 
-    def good(prompt: str) -> str:
+    def good(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
         return '{"title":"美联储降息25基点","category":"海外市场/央行","direction":"利好"}'
 
@@ -160,7 +161,7 @@ def test_llm_prefers_good_title_and_rejects_fragment(tmp_path, monkeypatch):
     assert len(prompts) == 1
     assert "不要半句话" in prompts[0]
 
-    def bad(prompt: str) -> str:
+    def bad(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
         return (
             '{"title":"叠加昨夜美国针对制裁","category":"海外市场/央行","direction":"利好",'
@@ -181,9 +182,9 @@ def test_llm_prefers_good_title_and_rejects_fragment(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache(llm=False)
     again = top_hot_events(NOW + timedelta(minutes=22))
     assert again["events"][0]["name"] == "美联储宣布降息25基点"
-    assert len(prompts) == 2
+    assert len(prompts) == 3
 
-    def clipped(prompt: str) -> str:
+    def clipped(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
         return '{"title":"根据宏观经济运行情况出台务实管用的增量政策以及配套改革措施"}'
 
@@ -209,7 +210,7 @@ def test_old_title_cache_is_regenerated(tmp_path, monkeypatch):
     }
     prompts: list[str] = []
 
-    def good(prompt: str) -> str:
+    def good(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
         return '{"title":"美联储降息25基点"}'
 
@@ -600,3 +601,164 @@ def test_red_items_count_more_and_a_single_red_item_stays_listed(tmp_path):
     assert detail["items"][0]["level"] == "A"
     soy_detail = event_detail(next(event["key"] for event in listed if "豆粕" in event["name"]), now=NOW)
     assert soy_detail["items"][0]["red"] is False
+
+
+_PRODUCTION_BAD_TITLES = (
+    "32财政部发布2026年上半年中",
+    "橡胶价格大涨超60家轮胎企业集体涨价今年以来",
+    "重点...",
+    "TIM材料",
+    "IEA下调原油供需预期...",
+    "隔夜美股半导体硬件波动点评",
+)
+
+
+def test_production_titles_drop_clocks_ellipsis_and_labels():
+    """这些字符串是线上展示过的坏标题，清理后不能再原样出现。"""
+    fiscal = _keyword_title([{
+        "title": "15:32【财联社】财政部发布2026年上半年中长期财政规划",
+    }])
+    assert "财政部" in fiscal and "2026" in fiscal and "中长期" in fiscal
+    assert fiscal != "32财政部发布2026年上半年中"
+    assert not fiscal[0].isdigit()
+    assert "【" not in fiscal and "】" not in fiscal
+
+    clipped = _keyword_title([{"title": "32财政部发布2026年上半年中"}])
+    assert clipped != "32财政部发布2026年上半年中"
+    assert clipped.startswith("财政部")
+    assert "2026" in clipped
+
+    rubber = _keyword_title([{
+        "title": "橡胶价格大涨超60%。60家轮胎企业集体涨价。今年以来橡胶价格持续上涨",
+    }])
+    assert rubber != "橡胶价格大涨超60家轮胎企业集体涨价今年以来"
+    assert "今年以来" not in rubber
+    assert "集体涨价" not in rubber
+    assert "橡胶" in rubber and "大涨" in rubber
+
+    glued = _keyword_title([{
+        "title": "橡胶价格大涨超60家轮胎企业集体涨价今年以来",
+    }])
+    assert glued != "橡胶价格大涨超60家轮胎企业集体涨价今年以来"
+    assert "今年以来" not in glued
+
+    assert _keyword_title([{"title": "重点..."}]) == ""
+    assert _keyword_title([{"title": "TIM材料"}]) == ""
+    assert _keyword_title([{"title": "隔夜美股半导体硬件波动点评"}]) == ""
+    oil = _keyword_title([{"title": "IEA下调原油供需预期..."}])
+    assert oil == "IEA下调原油供需预期"
+    assert "..." not in oil and "…" not in oil
+    assert _keyword_title([{"title": "机构点评美联储降息"}]) == "机构点评美联储降息"
+
+    for bad in _PRODUCTION_BAD_TITLES:
+        assert not _llm_title_ok(bad)
+    assert _llm_title_ok("美联储降息25基点")
+    assert _llm_title_ok("华为发布新模型")
+    assert not _llm_title_ok("油价走高")
+    assert _is_section_label("重点...")
+    assert _is_section_label("TIM材料")
+    assert _is_section_label("隔夜美股半导体硬件波动点评")
+    assert not _is_section_label("机构点评美联储降息")
+
+
+def test_bad_production_strings_are_absent_from_the_hot_list(tmp_path):
+    reset_store_for_tests(tmp_path / "prod-titles.sqlite")
+    _insert("fiscal", "15:32【财联社】财政部发布2026年上半年中长期财政规划", 1)
+    _insert("rubber", "橡胶价格大涨超60%。60家轮胎企业集体涨价。今年以来橡胶价格持续上涨", 2)
+    _insert("label", "重点...", 3)
+    _insert("material", "TIM材料", 4)
+    _insert("oil", "IEA下调原油供需预期...", 5)
+    _insert("note", "隔夜美股半导体硬件波动点评", 6)
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    for bad in _PRODUCTION_BAD_TITLES:
+        assert bad not in names
+    assert any("财政部" in name and "2026" in name and "中长期" in name for name in names)
+    assert any(name == "IEA下调原油供需预期" for name in names)
+    assert any("橡胶" in name and "大涨" in name and "今年以来" not in name for name in names)
+    assert all("..." not in name and "…" not in name and "【" not in name for name in names)
+    assert all(not name[0].isdigit() for name in names)
+
+
+def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_path, monkeypatch):
+    """模型一次写完展示标题；没有概念的事件只能回填词典里的名称。"""
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    reset_store_for_tests(tmp_path / "llm-batch.sqlite")
+    _insert("fiscal", "32财政部发布2026年上半年中", 10)
+    _insert("rubber", "橡胶价格大涨超60家轮胎企业集体涨价今年以来", 20)
+    _insert("oil", "IEA下调原油供需预期...", 30)
+    _insert("label", "重点...", 40)
+    _insert("material", "TIM材料", 41)
+    _insert("note", "隔夜美股半导体硬件波动点评", 42)
+    _insert("ship-a", "航运公司上调运价", 50)
+    _insert("ship-b", "航运公司上调运价", 55, source="wscn")
+    prompts: list[str] = []
+
+    def fake(prompt: str, **_kwargs: object) -> str:
+        prompts.append(prompt)
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            title = "航运公司上调运价"
+            concepts: list[str] = []
+            if "财政" in rest:
+                title = "财政部发布上半年财政规划"
+            elif "橡胶" in rest:
+                title = "橡胶价格大涨超六成"
+            elif "IEA" in rest:
+                title = "IEA下调原油供需预期"
+            elif "航运" in rest:
+                concepts = ["石油", "苹果"]
+            rows.append({
+                "id": head,
+                "title": title,
+                "concepts": concepts,
+                "direction": "利好",
+            })
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", fake)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    events = top_hot_events(NOW)["events"]
+    names = [event["name"] for event in events]
+    assert len(prompts) == 1
+    assert "不超过28个字" in prompts[0]
+    assert "32财政部发布2026年上半年中" in prompts[0]
+    assert "橡胶价格大涨超60家轮胎企业集体涨价今年以来" in prompts[0]
+    assert "IEA下调原油供需预期..." in prompts[0]
+    for bad in _PRODUCTION_BAD_TITLES:
+        assert bad not in names
+    assert "财政部发布上半年财政规划" in names
+    assert "橡胶价格大涨超六成" in names
+    assert "IEA下调原油供需预期" in names
+    ship = next(event for event in events if "航运" in event["name"])
+    assert ship["concepts"] == ["石油"]
+    assert "苹果" not in ship["concepts"]
+
+    def echo(prompt: str, **_kwargs: object) -> str:
+        prompts.append(prompt)
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            rows.append({"id": head, "title": rest.strip(), "concepts": ["半导体"]})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr(news_service, "_llm_text", echo)
+    hot_mod.clear_hot_event_cache()
+    fallback = top_hot_events(NOW + timedelta(minutes=11))["events"]
+    fallback_names = [event["name"] for event in fallback]
+    assert len(prompts) == 3
+    assert "上一轮标题不合格" in prompts[-1]
+    for bad in _PRODUCTION_BAD_TITLES:
+        assert bad not in fallback_names
+    assert any(name.startswith("财政部") and "2026" in name for name in fallback_names)
+    assert any(name == "IEA下调原油供需预期" for name in fallback_names)
+    ship = next(event for event in fallback if "航运" in event["name"])
+    assert ship["concepts"] == []
