@@ -218,11 +218,23 @@ def trade_date_from_title(title: str, published: datetime) -> str:
 
 
 def apply_trade_date(title: str, published: datetime, extracted: dict) -> dict:
-    """标题里的月日是交易日，优先于模型自己填的日期。"""
+    """标题里的月日是交易日，优先于模型自己填的日期。
+
+    标题推不出日期时，丢掉晚于发布日的模型日期，避免把尚未发生的交易日记进资讯。
+    """
     out = dict(extracted)
     derived = trade_date_from_title(title, published)
     if derived:
         out["trade_date"] = derived
+        return out
+    model = str(out.get("trade_date") or "")
+    publish_day = published.astimezone(CN_TZ).date()
+    try:
+        parsed = date.fromisoformat(model) if model else None
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed > publish_day:
+        out["trade_date"] = ""
     return out
 
 
@@ -608,7 +620,9 @@ def collect_etf_flow(
         logger.warning("ETF领航者表格抽取失败: %s", message)
         _mark_err(message)
         if _deadline(now):
-            _alert(root, now.date(), EXTRACT_ALERT)
+            # 只在「今天应有新稿」时提醒。周一补抓失败记健康检查，不把旧稿抽失败报成当日缺稿。
+            if expect:
+                _alert(root, now.date(), EXTRACT_ALERT)
             return _result(error=message)
         return _result(error=message, pending=True)
     except Exception as exc:  # noqa: BLE001 — 单源失败不能拖垮其他资讯轮询
@@ -981,6 +995,8 @@ def _public_error(exc: BaseException) -> str:
     if key and len(key) >= 6:
         text = text.replace(key, "***")
     text = re.sub(r"Bearer\s+\S+", "Bearer ***", text)
+    text = re.sub(r"(?i)(access_token=)[^&\s\"']+", r"\1***", text)
+    text = re.sub(r"(?i)([?&]sign=)[^&\s\"']+", r"\1***", text)
     return text[:200]
 
 
@@ -1070,16 +1086,22 @@ def _sogou_time(text: str, now: datetime) -> datetime | None:
         return _safe_dt(int(full.group(1)), int(full.group(2)), int(full.group(3)))
     month_day = re.search(r"(\d{1,2})月(\d{1,2})日", text)
     if month_day:
-        return _safe_dt(
-            now.astimezone(CN_TZ).year, int(month_day.group(1)), int(month_day.group(2))
-        )
+        # 搜狗有时只给月日。跨年时用今年会落到未来，入库后会排到最新并提前暴露。
+        year = now.astimezone(CN_TZ).year
+        month, day = int(month_day.group(1)), int(month_day.group(2))
+        guessed = _safe_dt(year, month, day)
+        today = now.astimezone(CN_TZ).date()
+        if guessed is not None and guessed.date() > today:
+            guessed = _safe_dt(year - 1, month, day)
+        return guessed
     parsed = parse_time(text.strip())
     return parsed
 
 
 def _safe_dt(year: int, month: int, day: int) -> datetime | None:
     try:
-        return datetime(year, month, day, 7, 30, tzinfo=CN_TZ)
+        # 只有日期时按轮询窗口起点记，不写成窗口打开之前的时刻。
+        return datetime(year, month, day, POLL_START.hour, POLL_START.minute, tzinfo=CN_TZ)
     except ValueError:
         return None
 

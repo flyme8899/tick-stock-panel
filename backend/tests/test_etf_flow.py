@@ -22,6 +22,8 @@ from app.news.etf_flow import (
     ExtractFailedError,
     _call_vision,
     _fetch,
+    _public_error,
+    apply_trade_date,
     choose_flow_article,
     collect_etf_flow,
     day_was_trading,
@@ -800,3 +802,70 @@ def test_choose_catchup_keeps_latest_flow_when_today_is_absent():
     assert chosen is not None and chosen.article_id == "new"
     missing, why = choose_flow_article([older, newer], day=date(2026, 10, 12), expect=True)
     assert missing is None and why == "missing"
+
+
+def test_sogou_month_day_does_not_land_in_the_future():
+    html = """
+    <ul><li>
+      <a href="https://weixin.sogou.com/link?url=acct">ETF领航者</a>
+      <a href="https://weixin.sogou.com/link?url=article1">12月31日ETF基金申购和赎回</a>
+      <span>12月31日</span>
+    </li></ul>
+    """
+    now = datetime(2026, 1, 2, 8, 0, tzinfo=CN_TZ)
+    refs = parse_sogou_account(html, now)
+    assert len(refs) == 1
+    assert refs[0].published_at.date() == date(2025, 12, 31)
+    assert refs[0].published_at.timetz().replace(tzinfo=None) >= datetime(2026, 1, 2, 7, 35).time()
+
+
+def test_model_trade_date_after_publish_is_dropped_when_title_has_no_day():
+    published = datetime(2026, 10, 10, 7, 38, tzinfo=CN_TZ)
+    kept = apply_trade_date("无关标题", published, {"trade_date": "2026-10-11", "unit": "亿元"})
+    assert kept["trade_date"] == ""
+    titled = apply_trade_date(
+        "10月9日ETF基金申购和赎回", published, {"trade_date": "2026-10-11"}
+    )
+    assert titled["trade_date"] == "2026-10-09"
+
+
+def test_public_error_redacts_vision_key_and_dingtalk_token(monkeypatch):
+    monkeypatch.setattr(settings, "vision_ai_api_key", "vision-test-key")
+    monkeypatch.setenv("VISION_AI_API_KEY", "vision-test-key")
+    text = _public_error(
+        RuntimeError(
+            "Bearer vision-test-key failed "
+            "https://oapi.dingtalk.com/robot/send?access_token=sekret&sign=abc123"
+        )
+    )
+    assert "vision-test-key" not in text
+    assert "sekret" not in text
+    assert "abc123" not in text
+    assert "access_token=***" in text
+
+
+def test_monday_extract_failure_does_not_alert(news_db, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        settings, "dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test"
+    )
+    monkeypatch.setattr(
+        "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
+    )
+    client = Client(
+        media=_text("netease_media.html"),
+        article=_text("netease_article.html"),
+        vision={"choices": [{"message": {"content": "不是表格"}}]},
+    )
+    late = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 9, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert late["found"] is False
+    assert late["pending"] is False
+    assert sent == []
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    assert rows["etf_flow"]["last_error"]
