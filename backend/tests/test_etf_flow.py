@@ -114,7 +114,7 @@ def news_db(tmp_path, monkeypatch):
     monkeypatch.delenv("VISION_AI_MODEL", raising=False)
     monkeypatch.setattr(settings, "vision_ai_api_key", "vision-test-key")
     monkeypatch.setattr(settings, "vision_ai_base_url", "https://tokenhub.tencentmaas.com/v1")
-    monkeypatch.setattr(settings, "vision_ai_model", "glm-5.3-flash")
+    monkeypatch.setattr(settings, "vision_ai_model", "deepseek/deepseek-v4-flash-vision-exp")
     monkeypatch.setattr(settings, "ai_api_key", "deepseek-secret")
     monkeypatch.setattr(settings, "ai_model", "deepseek-chat")
     monkeypatch.setattr(settings, "ai_base_url", "https://api.deepseek.com/v1")
@@ -189,6 +189,12 @@ def test_vision_response_normalizes_numbers_and_title_date_wins():
         "net_20d": -0.5,
     }
     assert [row["code"] for row in aliased["etfs"]] == ["510300", "", ""]
+    conflicted = normalize_flow(
+        {"etfs": [{"name": "甲", "code": "510300", "net_1d": 1, "day": -1, "net_5d": 2}]}
+    )
+    assert conflicted["etfs"] == [
+        {"name": "甲", "code": "510300", "net_1d": None, "net_5d": 2.0, "net_20d": None},
+    ]
     broad_etfs = [
         {"name": f"宽基{i:02d}", "code": f"510{i:03d}", "net_1d": float(i + 1)} for i in range(20)
     ]
@@ -229,7 +235,7 @@ def test_vision_payload_uses_image_url_and_drops_other_hosts():
     urls = [part["image_url"]["url"] for part in parts if part["type"] == "image_url"]
     assert urls == ["https://nimg.ws.126.net/a.jpg"]
     assert body["model"] == "glm-5.3-flash"
-    assert body["max_tokens"] >= 4096
+    assert body["max_tokens"] >= 8192
     assert "thinking" not in body
     assert "enable_thinking" not in body
     assert "deepseek" not in json.dumps(body)
@@ -243,6 +249,17 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
     answers = [
         _completion(None),
         _vision(),
+        _completion(
+            json.dumps(
+                {
+                    "etfs": [
+                        {"name": "宽基甲", "code": "510880", "day": 0.4, "d5": 1, "d20": -2},
+                        {"name": "坏代码", "code": "1234567", "day": 9},
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        ),
         _completion(
             json.dumps(
                 {
@@ -273,10 +290,10 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
             "https://evil.example/skip.jpg",
         ],
     )
-    assert len(client.posts) == 3
+    assert len(client.posts) == 4
     sent = []
     for _url, _headers, body in client.posts:
-        assert body["max_tokens"] >= 4096
+        assert body["max_tokens"] >= 8192
         assert "thinking" not in body
         assert "enable_thinking" not in body
         urls = [
@@ -289,6 +306,7 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
     assert sent == [
         "https://nimg.ws.126.net/a.jpg",
         "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/b.jpg",
         "https://nimg.ws.126.net/b.jpg",
     ]
     assert extracted["overview"]["net_1d"] == 12.5
@@ -316,11 +334,12 @@ def test_empty_content_retries_once_then_skips_that_image(news_db):
         client,
         ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"],
     )
-    assert len(client.posts) == 3
+    assert len(client.posts) == 4
     assert extracted["overview"]["net_1d"] == 12.5
     assert [body["messages"][0]["content"][1]["image_url"]["url"] for body in client.posts] == [
         "https://nimg.ws.126.net/a.jpg",
         "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/b.jpg",
         "https://nimg.ws.126.net/b.jpg",
     ]
 
@@ -353,6 +372,48 @@ def test_non_empty_garbage_is_not_retried(news_db):
     with pytest.raises(ExtractFailedError, match="没有抽出"):
         _call_vision(client, ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"])
     assert len(client.posts) == 1
+
+
+def test_sign_mismatch_across_retries_clears_only_that_cell(news_db):
+    first = {
+        "overview": {"net_1d": 1.0, "net_5d": 2.0, "net_20d": -3.0},
+        "etfs": [
+            {"name": "甲", "code": "510300", "net_1d": 4.0, "net_5d": -1.0, "net_20d": 0.2},
+            {"name": "坏代码", "code": "12345", "net_1d": 8},
+        ],
+    }
+    second = {
+        "overview": {"net_1d": -1.0, "net_5d": 2.5, "net_20d": -3.0},
+        "etfs": [
+            {"name": "甲", "code": "510300.SH", "net_1d": -4.0, "net_5d": -1.2, "net_20d": 0.2},
+        ],
+    }
+
+    answers = [
+        _completion(json.dumps(first, ensure_ascii=False)),
+        _completion(json.dumps(second, ensure_ascii=False)),
+    ]
+
+    class Seq:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None):
+            self.posts.append(json)
+            return Resp("", url, payload=answers[len(self.posts) - 1])
+
+    client = Seq()
+    extracted = _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
+    assert len(client.posts) == 2
+    assert extracted["overview"]["net_1d"] is None
+    assert extracted["overview"]["net_5d"] == 2.0
+    assert extracted["overview"]["net_20d"] == -3.0
+    row = next(item for item in extracted["etfs"] if item["name"] == "甲")
+    assert row["code"] == "510300"
+    assert row["net_1d"] is None
+    assert row["net_5d"] == -1.0
+    assert row["net_20d"] == 0.2
+    assert all(item["code"] == "" or len(item["code"]) == 6 for item in extracted["etfs"])
 
 
 def test_redirect_stops_before_leaving_allowlist():
@@ -430,6 +491,9 @@ def test_source_stays_off_without_vision_key(monkeypatch):
     monkeypatch.setattr(settings, "ai_model", "deepseek-chat")
     assert vision_base_url() == "https://vision.example.test/v1"
     assert vision_model() == "glm-from-env"
+    monkeypatch.delenv("VISION_AI_MODEL", raising=False)
+    monkeypatch.setattr(settings, "vision_ai_model", "")
+    assert vision_model() == "deepseek/deepseek-v4-flash-vision-exp"
 
 
 def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch):
@@ -439,7 +503,7 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert saved["inserted"] == 1
     assert saved["found"] is True
     assert saved["pending"] is False
-    assert len(client.posts) == 2
+    assert len(client.posts) == 4
     assert all("163.com" in url for url in client.gets)
     images = []
     for url, headers, body in client.posts:
@@ -448,8 +512,8 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
         encoded = json.dumps({"url": url, "headers": headers, "body": body}, ensure_ascii=False)
         assert "deepseek-secret" not in encoded
         assert "deepseek-chat" not in encoded
-        assert body["model"] == "glm-5.3-flash"
-        assert body["max_tokens"] >= 4096
+        assert body["model"] == "deepseek/deepseek-v4-flash-vision-exp"
+        assert body["max_tokens"] >= 8192
         assert "thinking" not in body
         assert "enable_thinking" not in body
         parts = [
@@ -459,7 +523,12 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
         ]
         assert len(parts) == 1
         images.extend(parts)
-    assert images == ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"]
+    assert images == [
+        "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/b.jpg",
+        "https://nimg.ws.126.net/b.jpg",
+    ]
 
     row = (
         get_store()
@@ -471,7 +540,10 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert row["source_id"] == "netease:L8S4S48P0556ADVD"
     assert row["title"] == "10月9日ETF基金申购和赎回"
     assert row["url"] == "https://www.163.com/dy/article/L8S4S48P0556ADVD.html"
-    assert json.loads(row["media_ids"]) == images
+    assert json.loads(row["media_ids"]) == [
+        "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/b.jpg",
+    ]
     raw = json.loads(row["raw_json"])
     assert raw["channel"] == "netease"
     assert raw["trade_date"] == "2026-10-09"
@@ -482,7 +554,7 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     again = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
     assert again["found"] is True
     assert again["inserted"] == 0
-    assert len(client.posts) == 2
+    assert len(client.posts) == 4
     assert len(client.gets) == 2
 
     monkeypatch.setattr("app.news.config.feed_token", lambda: "feed-secret")

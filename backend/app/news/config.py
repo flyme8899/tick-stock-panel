@@ -1,4 +1,5 @@
 """每个来源独立开关。未配置凭据或群号时强制关闭，环境变量优先于页面偏好。"""
+
 from __future__ import annotations
 
 import hmac
@@ -19,7 +20,7 @@ SOURCE_LABELS = {
 }
 
 _DEFAULT_VISION_BASE = "https://tokenhub.tencentmaas.com/v1"
-_DEFAULT_VISION_MODEL = "glm-5.3-flash"
+_DEFAULT_VISION_MODEL = "deepseek/deepseek-v4-flash-vision-exp"
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -70,10 +71,13 @@ def vision_api_key() -> str:
 
 
 def vision_base_url() -> str:
-    return (_text_setting("VISION_AI_BASE_URL", "vision_ai_base_url") or _DEFAULT_VISION_BASE).rstrip("/")
+    return (
+        _text_setting("VISION_AI_BASE_URL", "vision_ai_base_url") or _DEFAULT_VISION_BASE
+    ).rstrip("/")
 
 
 def vision_model() -> str:
+    """空白时用 deepseek 视觉模型。备选是环境变量里的 glm-5.3-flash。"""
     return _text_setting("VISION_AI_MODEL", "vision_ai_model") or _DEFAULT_VISION_MODEL
 
 
@@ -95,6 +99,7 @@ def source_enabled(source: str) -> bool:
     if flag is not None:
         return flag
     from app.services import preferences
+
     saved = preferences.load().get("news_sources") or {}
     row = saved.get(source) if isinstance(saved, dict) else None
     if isinstance(row, dict):
@@ -132,6 +137,7 @@ def set_source_enabled(source: str, enabled: bool) -> bool:
     if source_locked(source) or not source_configured(source):
         return source_enabled(source)
     from app.services import preferences
+
     current = preferences.load()
     saved = dict(current.get("news_sources") or {})
     row = dict(saved.get(source) or {})

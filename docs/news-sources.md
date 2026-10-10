@@ -25,12 +25,12 @@
 
 主源是同一作者的网易号列表：<https://www.163.com/dy/media/T1730214999977.html>。列表里没有当天这篇，或列表请求失败时，才用搜狗微信搜索公众号「ETF领航者」，再打开 `mp.weixin.qq.com` 文章。不登录微信。搜狗一天最多 4 次，两次至少隔 20 分钟。
 
-表格交给视觉模型，走 OpenAI 兼容的 `chat/completions`，图片放在 `image_url`。只用下面三个变量，不读取文本模型的 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`，也不走 `NEWS_LLM_EXTRACT`。tokenhub 上试过的模型里，只有 `glm-5.3-flash` 能读 `image_url`。这个模型总会思考：`enable_thinking` 不生效，请求里带 `thinking.type=disabled` 会返回 400，所以程序不发送这两个字段。`max_tokens` 低于 4096 时，预算被思考用完，`content` 是空的。每张图单独请求，`max_tokens` 为 4096；返回空内容时同一张图再试一次。代码只保留恰好 6 位的基金代码。
+表格交给视觉模型，走 OpenAI 兼容的 `chat/completions`，图片放在 `image_url`。只用下面三个变量，不读取文本模型的 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`，也不走 `NEWS_LLM_EXTRACT`。默认模型 `deepseek/deepseek-v4-flash-vision-exp` 会读图片，单张表大约 16 秒，和 `glm-5.3-flash`（大约 23 秒）一样能抽出约 20 行 ETF。两个模型都会思考：`enable_thinking` 不生效，请求里带 `thinking.type=disabled` 会让 glm 返回 400，所以程序不发送这两个字段。`max_tokens` 低于 8192 时，预算被思考用完，`content` 是空的。每张图单独请求，`max_tokens` 为 8192。空内容时同一张图再试一次；第一次已经抽出数字时，再请求一次核对正负号。同一格两次正负号相反就留空，不猜哪一次对。代码只保留恰好 6 位的数字。备选模型把 `VISION_AI_MODEL` 设为 `glm-5.3-flash`。
 
 ```ini
 VISION_AI_API_KEY=
 VISION_AI_BASE_URL=https://tokenhub.tencentmaas.com/v1
-VISION_AI_MODEL=glm-5.3-flash
+VISION_AI_MODEL=deepseek/deepseek-v4-flash-vision-exp
 ```
 
 没填 `VISION_AI_API_KEY` 时来源保持未配置，页面上不能打开。数字按图中印刷保存，单位写在 `unit`（常见是亿元），净申购为正、净赎回为负，程序不再做单位换算。全市场、宽基、分类和单只 ETF 的当日 / 5 日 / 20 日净申购放在 `raw_json`。图片地址记在 `media_ids`。同一篇文章用网易 docid 或微信 `sn` 去重。

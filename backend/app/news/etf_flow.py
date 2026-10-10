@@ -11,9 +11,9 @@ https://www.163.com/dy/media/T1730214999977.html ；列表里没有当天稿件�
 报成故障。交易日历不可用时，周一到周五视作开市。
 
 表格交给视觉模型。密钥只用 VISION_AI_*，不读取文本模型的 AI_API_KEY。
-tokenhub 上只有 glm-5.3-flash 能读 image_url。它总会思考：enable_thinking
-无效，thinking.type=disabled 会返回 400。max_tokens 低于 4096 时预算被
-reasoning 用完，content 为空。因此一张图一次请求，上限至少 4096，空内容再试一次。
+默认模型是 deepseek/deepseek-v4-flash-vision-exp，备选 glm-5.3-flash。
+两者都会思考，不能关。max_tokens 低于 8192 时预算被 reasoning 用完，content
+为空。一张图一次请求；空内容再试一次。有两份结果时，正负号不一致的格子留空。
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ SOGOU_MIN_GAP = timedelta(minutes=20)
 MAX_VISION_IMAGES = 6
 # 一张表大约 20 只 ETF。思考占掉 completion 预算，多张图叠在一次请求里会把正文挤空。
 VISION_BATCH_SIZE = 1
-VISION_MAX_TOKENS = 4096
+VISION_MAX_TOKENS = 8192
 VISION_EMPTY_RETRIES = 1
 MAX_STORED_IMAGES = 12
 MAX_BROAD = 20
@@ -453,6 +453,22 @@ def normalize_flow(payload: dict) -> dict:
     return _shrink(extracted)
 
 
+def agree_flow_signs(left: dict, right: dict) -> dict:
+    """两次抽取对同一格的正负号相反时，该格留空。只比较符号，不要求数值相等。"""
+    overview = _agree_fields(left.get("overview") or {}, right.get("overview") or {})
+    extracted = {
+        "trade_date": left.get("trade_date") or right.get("trade_date") or "",
+        "unit": left.get("unit") or right.get("unit") or "",
+        "overview": overview,
+        "broad_index": _agree_rows(left.get("broad_index") or [], right.get("broad_index") or []),
+        "categories": _agree_rows(left.get("categories") or [], right.get("categories") or []),
+        "etfs": _agree_rows(left.get("etfs") or [], right.get("etfs") or []),
+    }
+    if not _has_number(extracted):
+        raise ValueError("两次结果正负号不一致")
+    return _shrink(extracted)
+
+
 def merge_flows(parts: list[dict]) -> dict:
     """把每张表的抽取结果按代码拼起来。同一只基金只留先看到的一行。"""
     if not parts:
@@ -738,22 +754,44 @@ def _call_vision(client, images: list[str]) -> dict:
 
 
 def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, bool]:
-    """空 content 再请求一次。非空但不是申赎 JSON 时不重试。"""
-    saw_empty = False
-    for attempt in range(VISION_EMPTY_RETRIES + 1):
-        payload = _post_vision(client, vision_payload(images, model=vision_model()), key)
-        try:
-            return parse_vision_response(payload), saw_empty
-        except EmptyVisionError:
-            saw_empty = True
-            if attempt < VISION_EMPTY_RETRIES:
-                logger.warning("ETF申赎视觉模型返回空内容，重试一次")
-                continue
+    """空内容再试一次。第一次已有数字时，再用一次结果核对正负号。"""
+    first, empty = _read_vision(client, images, key)
+    if first is None:
+        if not empty:
+            return None, False
+        second = None
+        for _extra in range(VISION_EMPTY_RETRIES):
+            logger.warning("ETF申赎视觉模型返回空内容，重试一次")
+            second, _again = _read_vision(client, images, key)
+            if second is not None:
+                break
+        if second is None:
             logger.warning("ETF申赎视觉模型重试后仍无内容")
             return None, True
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
-    return None, saw_empty
+        return second, True
+    try:
+        second, confirm_empty = _read_vision(client, images, key)
+    except ExtractFailedError as exc:
+        logger.warning("ETF申赎正负号确认失败，沿用第一次结果: %s", _public_error(exc))
+        return first, empty
+    if second is None:
+        logger.warning("ETF申赎正负号确认没有内容，沿用第一次结果")
+        return first, True
+    try:
+        return agree_flow_signs(first, second), empty or confirm_empty
+    except ValueError:
+        logger.warning("ETF申赎两次结果正负号不一致")
+        return None, empty or confirm_empty
+
+
+def _read_vision(client, images: list[str], key: str) -> tuple[dict | None, bool]:
+    payload = _post_vision(client, vision_payload(images, model=vision_model()), key)
+    try:
+        return parse_vision_response(payload), False
+    except EmptyVisionError:
+        return None, True
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
 
 
 def _post_vision(client, body: dict, key: str) -> dict:
@@ -1098,14 +1136,98 @@ def _rows(value, limit: int, *, with_code: bool) -> list[dict]:
     return rows
 
 
+def _direction(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return 0
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
+def _signs_disagree(left, right) -> bool:
+    left_sign = _direction(left)
+    right_sign = _direction(right)
+    if left_sign == 0 or right_sign == 0:
+        return False
+    return left_sign != right_sign
+
+
 def _pick_num(row: dict, *keys: str):
+    found = []
     for key in keys:
         if key not in row:
             continue
         number = _num(row.get(key))
         if number is not None:
-            return number
-    return None
+            found.append(number)
+    if not found:
+        return None
+    if any(_signs_disagree(found[0], item) for item in found[1:]):
+        return None
+    return found[0]
+
+
+def _agree_fields(left: dict, right: dict) -> dict:
+    agreed = {}
+    for key in ("net_1d", "net_5d", "net_20d"):
+        lv, rv = left.get(key), right.get(key)
+        if _signs_disagree(lv, rv):
+            agreed[key] = None
+        elif lv is not None:
+            agreed[key] = lv
+        else:
+            agreed[key] = rv
+    return agreed
+
+
+def _row_identity(row: dict) -> str:
+    code = str(row.get("code") or "")
+    if re.fullmatch(r"\d{6}", code):
+        return f"c:{code}"
+    return f"n:{row.get('name') or ''}"
+
+
+def _agree_one(left: dict, right: dict) -> dict:
+    merged: dict = {"name": left.get("name") or right.get("name") or ""}
+    if "code" in left or "code" in right:
+        code = str(left.get("code") or right.get("code") or "")
+        merged["code"] = code if re.fullmatch(r"\d{6}", code) else ""
+    merged.update(_agree_fields(left, right))
+    return merged
+
+
+def _row_has_flow(row: dict) -> bool:
+    return any(row.get(key) is not None for key in ("net_1d", "net_5d", "net_20d"))
+
+
+def _agree_rows(left_rows: list, right_rows: list) -> list[dict]:
+    right_map: dict[str, dict] = {}
+    for row in right_rows:
+        if isinstance(row, dict):
+            right_map.setdefault(_row_identity(row), row)
+    seen: set[str] = set()
+    agreed: list[dict] = []
+    for row in left_rows:
+        if not isinstance(row, dict):
+            continue
+        key = _row_identity(row)
+        seen.add(key)
+        other = right_map.get(key)
+        merged = _agree_one(row, other) if other is not None else row
+        if _row_has_flow(merged):
+            agreed.append(merged)
+    for row in right_rows:
+        if not isinstance(row, dict):
+            continue
+        key = _row_identity(row)
+        if key in seen or not _row_has_flow(row):
+            continue
+        agreed.append(row)
+    return agreed
 
 
 def _is_fund_code(code: str) -> bool:
