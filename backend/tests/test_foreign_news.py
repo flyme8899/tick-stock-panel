@@ -7,12 +7,28 @@ from datetime import datetime
 from pathlib import Path
 
 from app.market_time import CN_TZ, cn_now
-from app.news.collectors import FOREIGN_FEEDS, parse_feed_time, parse_feed_xml
-from app.news.config import SOURCE_ORDER, sec_user_agent, source_configured, source_enabled
+from app.news.collectors import (
+    FOREIGN_FEEDS,
+    REUTERS_GOOGLE_NEWS,
+    REUTERS_SITEMAP_INDEX,
+    latest_reuters_news_sitemaps,
+    parse_feed_time,
+    parse_feed_xml,
+    parse_reuters_news_sitemap,
+    strip_reuters_suffix,
+)
+from app.news.config import (
+    SOURCE_ORDER,
+    sec_user_agent,
+    source_configured,
+    source_enabled,
+    source_locked,
+)
 from app.news.extract import Lexicon
 from app.news.scheduler import interval_seconds
 from app.news.service import (
     collect_foreign,
+    collect_reuters,
     feed_for_source,
     get_store,
     health_payload,
@@ -69,6 +85,10 @@ def _clear_flags(monkeypatch) -> None:
         "NEWS_MARKETWATCH_ENABLED",
         "NEWS_WSJ_ENABLED",
         "NEWS_BLOOMBERG_ENABLED",
+        "NEWS_SCMP_ENABLED",
+        "NEWS_REUTERS_ENABLED",
+        "NEWS_REDDIT_ENABLED",
+        "NEWS_REDDIT_SUBREDDITS",
         "NEWS_SEC_ENABLED",
         "SEC_USER_AGENT",
     )
@@ -79,6 +99,10 @@ def _clear_flags(monkeypatch) -> None:
         "news_marketwatch_enabled",
         "news_wsj_enabled",
         "news_bloomberg_enabled",
+        "news_scmp_enabled",
+        "news_reuters_enabled",
+        "news_reddit_enabled",
+        "news_reddit_subreddits",
         "news_sec_enabled",
         "sec_user_agent",
     ):
@@ -385,6 +409,12 @@ def test_intervals_stay_flat_outside_the_a_share_session():
     assert interval_seconds("cnbc", night) == 300
     assert interval_seconds("wsj", night) == 300
     assert interval_seconds("bloomberg", morning) == 300
+    assert interval_seconds("scmp", morning) == 900
+    assert interval_seconds("scmp", night) == 900
+    assert interval_seconds("reuters", morning) == 900
+    assert interval_seconds("reuters", night) == 900
+    assert interval_seconds("reddit", morning) == 75
+    assert interval_seconds("reddit", night) == 75
     assert interval_seconds("sec", morning) == 180
     assert interval_seconds("sec", night) == 180
 
@@ -398,21 +428,254 @@ def test_run_due_and_health_include_foreign_sources(tmp_path, monkeypatch):
     )
     assert run_due("sec")["inserted"] == 0
     assert seen == ["sec"]
+    monkeypatch.setattr(
+        "app.news.service.collect_reuters",
+        lambda client=None: seen.append("reuters") or {"inserted": 0, "duplicate": 0},
+    )
+    assert run_due("reuters") == {"inserted": 0, "duplicate": 0}
+    assert seen == ["sec", "reuters"]
     _clear_flags(monkeypatch)
     ids = [row["id"] for row in health_payload()["sources"]]
     assert ids == list(SOURCE_ORDER)
     sec = next(row for row in health_payload()["sources"] if row["id"] == "sec")
     cnbc = next(row for row in health_payload()["sources"] if row["id"] == "cnbc")
+    scmp = next(row for row in health_payload()["sources"] if row["id"] == "scmp")
+    reuters = next(row for row in health_payload()["sources"] if row["id"] == "reuters")
     assert sec["configured"] is False
     assert sec["enabled"] is False
     assert cnbc["configured"] is True
     assert cnbc["enabled"] is False
+    assert scmp["configured"] is True
+    assert scmp["enabled"] is False
+    assert reuters["configured"] is True
+    assert reuters["enabled"] is False
+    reddit = next(row for row in health_payload()["sources"] if row["id"] == "reddit")
+    assert reddit["label"] == "Reddit"
+    assert reddit["configured"] is True
+    assert reddit["enabled"] is False
+    monkeypatch.setenv("NEWS_SCMP_ENABLED", "true")
+    monkeypatch.setenv("NEWS_REUTERS_ENABLED", "false")
+    monkeypatch.setenv("NEWS_REDDIT_ENABLED", "true")
+    assert source_enabled("scmp") is True
+    assert source_locked("scmp") is True
+    assert source_enabled("reuters") is False
+    assert source_locked("reuters") is True
+    assert source_enabled("reddit") is True
+    assert source_locked("reddit") is True
 
 
 def test_dsa_feed_pattern_accepts_foreign_sources():
     from app.api.news import _FEED_SOURCE_PATTERN
 
-    for source in ("cnbc", "marketwatch", "wsj", "bloomberg", "sec", "hot"):
+    for source in (
+        "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "reddit", "sec", "hot",
+    ):
         assert re.fullmatch(_FEED_SOURCE_PATTERN, source)
     assert re.fullmatch(_FEED_SOURCE_PATTERN, "sec.gov") is None
     assert re.fullmatch(_FEED_SOURCE_PATTERN, "cnbc-extra") is None
+
+
+def _stored_blob() -> str:
+    rows = [
+        dict(row)
+        for row in get_store()._conn.execute(
+            "SELECT title, clean_text, raw_json, url FROM news_items",
+        )
+    ]
+    return json.dumps(rows, ensure_ascii=False)
+
+
+def test_latest_sitemap_is_the_smallest_from_offset():
+    pages = latest_reuters_news_sitemaps(_xml("reuters_sitemap_index.xml"))
+    assert pages == ["https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml"]
+    direct = """
+    <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml&amp;from=100</loc></sitemap>
+      <sitemap><loc>https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml</loc></sitemap>
+      <sitemap><loc>https://example.test/sitemap.xml</loc></sitemap>
+    </sitemapindex>
+    """
+    assert latest_reuters_news_sitemaps(direct) == [
+        "https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml",
+    ]
+    assert strip_reuters_suffix("Fed holds - Reuters") == "Fed holds"
+    assert strip_reuters_suffix("Fed holds – Reuters") == "Fed holds"
+    assert strip_reuters_suffix("A Reuters briefing") == "A Reuters briefing"
+
+
+def test_reuters_sitemap_parser_keeps_sections_and_publication_date():
+    items, saw_title = parse_reuters_news_sitemap(
+        _xml("reuters_news_sitemap.xml"),
+        feed_url="https://example.test/news-sitemap",
+    )
+    assert saw_title is True
+    titles = {item.title: item for item in items}
+    assert set(titles) == {
+        "Isaias weakens to Category 1 hurricane after Florida landfall, NHC says",
+        "Mapping the Market: Citigroup shares set to deepen losses",
+        "Pressure mounts on India poll chief Gyanesh Kumar over voter list changes",
+    }
+    hurricane = titles["Isaias weakens to Category 1 hurricane after Florida landfall, NHC says"]
+    assert hurricane.published_at.isoformat(timespec="seconds") == "2026-10-10T09:49:10+08:00"
+    assert hurricane.url.endswith("-2026-10-10/")
+    assert "/business/" in hurricane.url
+    assert hurricane.text == hurricane.title
+    assert "arcpublishing.com" not in json.dumps(hurricane.raw)
+    assert set(hurricane.raw) == {"guid", "feed"}
+
+
+def test_scmp_keeps_summary_and_dedups_across_feeds(tmp_path, monkeypatch):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    prompts: list[str] = []
+    monkeypatch.setattr("app.news.service.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr("app.news.service._llm_text", lambda prompt: prompts.append(prompt) or "")
+    import app.news.service as news_service
+    news_service._LLM_TIMES.clear()
+
+    feeds = FOREIGN_FEEDS["scmp"]
+    assert [feed.url for feed in feeds] == [
+        "https://www.scmp.com/rss/92/feed/",
+        "https://www.scmp.com/rss/318421/feed/",
+    ]
+    client = _Client({
+        feeds[0].url: _Response(200, _xml("scmp_business.xml")),
+        feeds[1].url: _Response(200, _xml("scmp_economy.xml")),
+    })
+    result = collect_foreign("scmp", client)
+    assert result == {"inserted": 3, "duplicate": 1}
+    assert [url for url, _headers in client.calls] == [feeds[0].url, feeds[1].url]
+    assert "https://cdn.example.test/scmp-should-not-fetch.jpg" not in [url for url, _h in client.calls]
+    blob = _stored_blob()
+    assert _PAYWALL not in blob
+    assert "biomedical powerhouse" in blob
+    assert "Shuibei" in blob
+    assert "K&K offers extra warranty" in blob
+    assert prompts
+    assert _PAYWALL not in "".join(prompts)
+    assert "biomedical powerhouse" in prompts[0]
+
+
+def test_reuters_primary_skips_other_sections_and_article_links(tmp_path):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    page = latest_reuters_news_sitemaps(_xml("reuters_sitemap_index.xml"))[0]
+    client = _Client({
+        REUTERS_SITEMAP_INDEX: _Response(200, _xml("reuters_sitemap_index.xml"), {
+            "ETag": '"idx"',
+            "Last-Modified": "Sat, 10 Oct 2026 05:27:57 GMT",
+        }),
+        page: _Response(200, _xml("reuters_news_sitemap.xml"), {"ETag": '"news"'}),
+    })
+    result = collect_reuters(client)
+    assert result == {"inserted": 3, "duplicate": 0}
+    assert "error" not in result
+    requested = [url for url, _headers in client.calls]
+    assert requested == [REUTERS_SITEMAP_INDEX, page]
+    assert REUTERS_GOOGLE_NEWS not in requested
+    assert "from=100" not in requested[1]
+    assert all("shesterkin" not in url for url in requested)
+    blob = _stored_blob()
+    assert "shesterkin" not in blob.lower()
+    assert "arcpublishing.com" not in blob
+    assert "Citigroup" in blob
+    feed = feed_for_source("reuters")
+    assert feed["name"] == "路透"
+    assert len(feed["items"]) == 3
+    assert all(item["url"].startswith("https://www.reuters.com/") for item in feed["items"])
+    assert get_store().get_feed_cache(REUTERS_SITEMAP_INDEX)[0] == '"idx"'
+
+    def index_body(headers):
+        if headers.get("If-None-Match") == '"idx"':
+            return _Response(304)
+        return _Response(500, "nope")
+
+    again = _Client({REUTERS_SITEMAP_INDEX: index_body, page: _Response(500, "nope")})
+    second = collect_reuters(again)
+    assert second == {"inserted": 0, "duplicate": 0}
+    assert [url for url, _headers in again.calls] == [REUTERS_SITEMAP_INDEX]
+    assert again.calls[0][1]["If-None-Match"] == '"idx"'
+    assert again.calls[0][1]["If-Modified-Since"] == "Sat, 10 Oct 2026 05:27:57 GMT"
+    assert again.calls[0][1]["User-Agent"] == "tsp-news/1.0"
+
+
+def test_reuters_falls_back_when_primary_fails(tmp_path):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    page = "https://www.reuters.com/arc/outboundfeeds/news-sitemap/?outputType=xml"
+    client = _Client({
+        REUTERS_SITEMAP_INDEX: _Response(200, _xml("reuters_sitemap_index.xml"), {"ETag": '"idx"'}),
+        page: _Response(401, "denied"),
+        REUTERS_GOOGLE_NEWS: _Response(200, _xml("reuters_google_news.xml"), {"ETag": '"gnews"'}),
+    })
+    result = collect_reuters(client)
+    assert result == {"inserted": 2, "duplicate": 0}
+    assert [url for url, _headers in client.calls] == [
+        REUTERS_SITEMAP_INDEX,
+        page,
+        REUTERS_GOOGLE_NEWS,
+    ]
+    assert get_store().get_feed_cache(REUTERS_SITEMAP_INDEX) == ("", "")
+    assert get_store().get_feed_cache(REUTERS_GOOGLE_NEWS)[0] == '"gnews"'
+    blob = _stored_blob()
+    assert "GOOGLE_NEWS_DESCRIPTION_HTML" not in blob
+    assert " - Reuters" not in blob
+    titles = {item["title"] for item in feed_for_source("reuters")["items"]}
+    assert "Trump says Norway has 'indelible stain' for not awarding him Nobel Peace Prize" in titles
+    assert all(item["url"].startswith("https://news.google.com/rss/articles/") for item in feed_for_source("reuters")["items"])
+    assert all(not item["url"].startswith("https://www.reuters.com/") for item in feed_for_source("reuters")["items"])
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    assert rows["reuters"]["last_error"] == ""
+
+
+def test_reuters_sports_only_does_not_fall_back(tmp_path):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    sports = """<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+      <url>
+        <loc>https://www.reuters.com/sports/example-2026-10-10/</loc>
+        <news:news><news:publication_date>2026-10-10T01:00:00Z</news:publication_date>
+        <news:title>Only sports</news:title></news:news>
+      </url>
+    </urlset>
+    """
+    page = latest_reuters_news_sitemaps(_xml("reuters_sitemap_index.xml"))[0]
+    client = _Client({
+        REUTERS_SITEMAP_INDEX: _Response(200, _xml("reuters_sitemap_index.xml")),
+        page: _Response(200, sports),
+    })
+    result = collect_reuters(client)
+    assert result == {"inserted": 0, "duplicate": 0}
+    assert REUTERS_GOOGLE_NEWS not in [url for url, _headers in client.calls]
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    assert rows["reuters"]["last_error"] == ""
+
+
+def test_reuters_plain_sitemap_without_titles_uses_google_news(tmp_path):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    plain = """<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url><loc>https://www.reuters.com/business/example-2026-10-10/</loc>
+      <lastmod>2026-10-10T01:00:00Z</lastmod></url>
+    </urlset>
+    """
+    page = latest_reuters_news_sitemaps(_xml("reuters_sitemap_index.xml"))[0]
+    client = _Client({
+        REUTERS_SITEMAP_INDEX: _Response(200, _xml("reuters_sitemap_index.xml")),
+        page: _Response(200, plain),
+        REUTERS_GOOGLE_NEWS: _Response(200, _xml("reuters_google_news.xml")),
+    })
+    result = collect_reuters(client)
+    assert result["inserted"] == 2
+    assert REUTERS_GOOGLE_NEWS in [url for url, _headers in client.calls]
+
+
+def test_reuters_failure_is_isolated_when_fallback_also_fails(tmp_path):
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    client = _Client({
+        REUTERS_SITEMAP_INDEX: _Response(401, "denied"),
+        REUTERS_GOOGLE_NEWS: _Response(503, "down"),
+    })
+    failed = collect_reuters(client)
+    assert failed["inserted"] == 0
+    assert "error" in failed
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    assert rows["reuters"]["last_error"]
+    assert "401" in rows["reuters"]["last_error"] or "HTTP" in rows["reuters"]["last_error"]

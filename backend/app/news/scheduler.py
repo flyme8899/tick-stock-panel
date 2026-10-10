@@ -7,7 +7,7 @@ from datetime import datetime
 from datetime import time as dt_time
 
 from app.market_time import cn_now
-from app.news.collectors import FOREIGN_RSS_SOURCES
+from app.news.collectors import FOREIGN_RSS_SOURCES, FOREIGN_SLOW_SOURCES, REDDIT_MIN_GAP
 from app.news.config import SOURCE_ORDER, source_enabled
 from app.news.etf_flow import etf_wait_seconds
 from app.news.service import backfill_mentions, collect_inbox, get_lexicon, run_due
@@ -31,11 +31,25 @@ def interval_seconds(source: str, now: datetime | None = None) -> int:
         return 900 if daytime else 1800
     if source == "ima":
         return 6 * 3600
+    if source == "reddit":
+        return REDDIT_MIN_GAP
+    if source in FOREIGN_SLOW_SOURCES:
+        return 900
     if source in FOREIGN_RSS_SOURCES:
         return 300
     if source == "sec":
         return 180
     return 600
+
+
+def next_delay(source: str, result: dict | None = None, now: datetime | None = None) -> int:
+    """Reddit 用采集返回的 retry_after。其余来源仍走固定间隔。"""
+    if source == "reddit":
+        raw = (result or {}).get("retry_after")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+            return min(raw, 3600)
+        return REDDIT_MIN_GAP
+    return interval_seconds(source, now)
 
 
 class NewsScheduler:
@@ -77,6 +91,9 @@ class NewsScheduler:
                         self._next[source] = stamp + etf_wait_seconds(
                             now, pending=bool(result.get("pending")),
                         )
+                    elif source == "reddit":
+                        result = run_due(source) or {}
+                        self._next[source] = stamp + next_delay(source, result, now)
                     else:
                         run_due(source)
                         self._next[source] = stamp + interval_seconds(source, now)

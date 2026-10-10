@@ -170,6 +170,14 @@ class Settings(BaseSettings):
     news_marketwatch_enabled: str = ""
     news_wsj_enabled: str = ""
     news_bloomberg_enabled: str = ""
+    news_scmp_enabled: str = ""
+    news_reuters_enabled: str = ""
+    news_reddit_enabled: str = ""
+    # 逗号分隔。留空时采集用 wallstreetbets,stocks,investing。
+    news_reddit_subreddits: str = ""
+    # 预留。当前采集不换 token，请求里也不带 Authorization。
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
     news_sec_enabled: str = ""
     # 例：TSP-News ops@example.com。不含邮箱时 SEC 来源保持未配置。
     sec_user_agent: str = ""
