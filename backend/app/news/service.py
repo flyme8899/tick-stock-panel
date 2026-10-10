@@ -6,13 +6,15 @@ import logging
 import math
 import threading
 import time
-from datetime import timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 
 import httpx
 
 from app.config import settings
-from app.market_time import cn_now
+from app.market_time import CN_TZ, cn_now, current_trading_day
 from app.news.cleaning import clean_text, content_hash, excerpt
 from app.news.collectors import (
     CLS_URL,
@@ -271,6 +273,153 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
     if kind in {"stock", "sector"}:
         ranked = [item for item in ranked if item.kind == kind]
     return ranked[: max(1, min(limit, 50))]
+
+
+# 选股页按交易日取热门板块。长假大约一周出头，三周够覆盖最近一个有资讯的交易日。
+_HOT_EVENT_LOOKBACK_DAYS = 21
+# 同一事件里只算「多次出现」的个股。只被一条资讯点到的名字不并入选股。
+_FREQUENT_STOCK_MENTIONS = 2
+
+
+def top_hot_events(now: datetime | None = None) -> dict:
+    """当前交易日热度最高的板块。
+
+    热度按北京时间当日的资讯条数（提及）和来源数排序，不使用近 24 小时相对基线的升温分数。
+    当天没有板块时，改用不晚于今天、且落在回看窗口里的最近一天，并在 hint 里标明。
+    每个板块附带同一条资讯里至少出现两次的个股。
+    """
+    now = (now or cn_now()).astimezone(CN_TZ)
+    today = now.date()
+    trading = current_trading_day(now)
+    start = datetime.combine(today - timedelta(days=_HOT_EVENT_LOOKBACK_DAYS), dt_time.min, CN_TZ)
+    end = datetime.combine(today + timedelta(days=1), dt_time.min, CN_TZ)
+    by_day: dict[date, list] = defaultdict(list)
+    for row in get_store().mentions_between(start, end):
+        published = parse_time(row["published_at"])
+        if published is None:
+            continue
+        by_day[published.astimezone(CN_TZ).date()].append(row)
+    ranked = {day: _rank_hot_sectors(rows, today) for day, rows in by_day.items()}
+    ranked = {day: events for day, events in ranked.items() if events}
+    fallback = False
+    chosen: date | None
+    if trading in ranked:
+        chosen = trading
+    else:
+        earlier = [day for day in ranked if day <= today]
+        chosen = max(earlier) if earlier else None
+        fallback = chosen is not None
+    if chosen is None:
+        return {
+            "as_of": None,
+            "trading_day": trading.isoformat(),
+            "fallback": False,
+            "hint": None,
+            "updated_at": None,
+            "events": [],
+        }
+    events = ranked[chosen]
+    latest = max(event["_updated"] for event in events)
+    for event in events:
+        event.pop("_updated", None)
+    updated_hm = latest.astimezone(CN_TZ).strftime("%H:%M")
+    return {
+        "as_of": chosen.isoformat(),
+        "trading_day": trading.isoformat(),
+        "fallback": fallback,
+        "hint": _hot_event_hint(now, trading, chosen, fallback, updated_hm),
+        "updated_at": updated_hm,
+        "events": events,
+    }
+
+
+def _rank_hot_sectors(rows: list, today: date) -> list[dict]:
+    items: dict[int, dict] = {}
+    for row in rows:
+        published = parse_time(row["published_at"])
+        if published is None:
+            continue
+        bucket = items.get(row["item_id"])
+        if bucket is None:
+            bucket = {"source": row["source"], "published": published, "sectors": {}, "stocks": {}}
+            items[row["item_id"]] = bucket
+        if published > bucket["published"]:
+            bucket["published"] = published
+        key = str(row["key"] or "").strip()
+        name = str(row["name"] or key).strip() or key
+        if not key:
+            continue
+        if row["kind"] == "sector":
+            if _sector_name_ok(key, name):
+                bucket["sectors"][key] = name
+        elif row["kind"] == "stock":
+            bucket["stocks"][key] = name
+    sectors: dict[str, dict] = {}
+    for item in items.values():
+        for key, name in item["sectors"].items():
+            acc = sectors.get(key)
+            if acc is None:
+                acc = {
+                    "key": key,
+                    "name": name,
+                    "mentions": 0,
+                    "sources": set(),
+                    "updated": item["published"],
+                    "stocks": {},
+                }
+                sectors[key] = acc
+            acc["mentions"] += 1
+            acc["sources"].add(item["source"])
+            if item["published"] >= acc["updated"]:
+                acc["updated"] = item["published"]
+                acc["name"] = name
+            for stock_key, stock_name in item["stocks"].items():
+                hit = acc["stocks"].get(stock_key)
+                if hit is None:
+                    hit = {"key": stock_key, "name": stock_name, "mentions": 0, "sources": set()}
+                    acc["stocks"][stock_key] = hit
+                hit["mentions"] += 1
+                hit["sources"].add(item["source"])
+                hit["name"] = stock_name
+    ranked: list[dict] = []
+    for acc in sectors.values():
+        frequent = [
+            {
+                "key": hit["key"],
+                "name": hit["name"],
+                "mentions": hit["mentions"],
+                "source_count": len(hit["sources"]),
+            }
+            for hit in acc["stocks"].values()
+            if hit["mentions"] >= _FREQUENT_STOCK_MENTIONS
+        ]
+        frequent.sort(key=lambda item: (-item["mentions"], -item["source_count"], item["name"]))
+        moment = acc["updated"].astimezone(CN_TZ)
+        updated = moment.strftime("%H:%M") if moment.date() == today else moment.strftime("%m-%d %H:%M")
+        ranked.append({
+            "key": acc["key"],
+            "name": acc["name"],
+            "mentions": acc["mentions"],
+            "source_count": len(acc["sources"]),
+            "updated_at": updated,
+            "_updated": moment,
+            "frequent_stocks": frequent,
+        })
+    ranked.sort(key=lambda item: (-item["mentions"], -item["source_count"], item["name"]))
+    return ranked
+
+
+def _hot_event_hint(now: datetime, trading: date, chosen: date, fallback: bool, updated_hm: str) -> str:
+    clock = f" · 更新于 {updated_hm}" if updated_hm else ""
+    if fallback:
+        return f"暂无{_month_day(trading)}数据，显示{_month_day(chosen)}{clock}"
+    if chosen != now.date():
+        return f"交易日 {_month_day(chosen)}{clock}"
+    return f"更新于 {updated_hm}" if updated_hm else ""
+
+
+def _month_day(day: date) -> str:
+    return f"{day.month}月{day.day}日"
 
 
 def message_view(row, *, limit: int = 240) -> dict:

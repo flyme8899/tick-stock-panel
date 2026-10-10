@@ -247,6 +247,22 @@ class NewsStore:
             self._conn.commit()
             return cur.rowcount
 
+    def mentions_between(self, start: datetime, end: datetime) -> list[sqlite3.Row]:
+        """[start, end) 内的提及。published_at 按北京时间入库，字符串比较与时区一致。"""
+        with self._lock:
+            return list(self._conn.execute(
+                """
+                SELECT i.id AS item_id, i.source, i.published_at, m.kind, m.key, m.name
+                FROM news_mentions m
+                JOIN news_items i ON i.id = m.item_id
+                WHERE i.published_at >= ? AND i.published_at < ?
+                """,
+                (
+                    start.astimezone(CN_TZ).isoformat(timespec="seconds"),
+                    end.astimezone(CN_TZ).isoformat(timespec="seconds"),
+                ),
+            ))
+
     def mention_events_since(self, start: datetime) -> list[sqlite3.Row]:
         with self._lock:
             return list(self._conn.execute(

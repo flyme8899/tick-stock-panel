@@ -28,6 +28,18 @@ def cn_today() -> date:
     return datetime.now(CN_TZ).date()
 
 
+def current_trading_day(now: datetime | None = None) -> date:
+    """不晚于北京时间今天的最近一个周一至周五。
+
+    这里没有节假日日历：休市但有资讯的工作日仍算这一天；完全没有数据时由调用方再往前找。
+    """
+    now = now or cn_now()
+    day = now.astimezone(CN_TZ).date()
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
 def in_continuous_session(now: datetime | None = None) -> bool:
     """A股连续竞价时段 (北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。"""
     now = now or cn_now()

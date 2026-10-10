@@ -2281,6 +2281,9 @@ export interface PickerSourceItem {
   id: string
   name: string
   description: string
+  mentions?: number
+  source_count?: number
+  updated_at?: string | null
 }
 
 export interface PickerSourceGroup {
@@ -2289,6 +2292,10 @@ export interface PickerSourceGroup {
   items: PickerSourceItem[]
   live?: boolean
   updated_at?: string | null
+  as_of?: string | null
+  trading_day?: string | null
+  fallback?: boolean
+  hint?: string | null
   beta?: boolean
   available?: boolean
   error?: string | null
@@ -2351,6 +2358,7 @@ export interface PickerRunResponse {
     first_snapshot: boolean
     profit_yoy_label: string
     hot_updated_at: string | null
+    hot_hint?: string | null
     warnings: string[]
   }
 }

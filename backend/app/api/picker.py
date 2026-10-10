@@ -37,6 +37,7 @@ class SourceIn(BaseModel):
     @field_validator("params")
     @classmethod
     def _params(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # 旧客户端仍会带上时间窗和最少来源数。热门事件已改按交易日热度选取，运行时不再读取这两项。
         allowed = {"window", "min_sources"}
         extra = set(value) - allowed
         if extra:

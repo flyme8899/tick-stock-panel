@@ -7,6 +7,9 @@ export interface SourceOption {
   id: string
   name: string
   description?: string
+  mentions?: number
+  sourceCount?: number
+  updatedAt?: string
 }
 
 interface Props {
@@ -19,11 +22,14 @@ interface Props {
   empty?: ReactNode
   footer?: ReactNode
   disabled?: boolean
+  searchable?: boolean
+  hintClassName?: string
 }
 
 /** 带搜索的多选。桌面展开为下拉，窄屏展开为底部面板。 */
 export function SourceDropdown({
   label, options, selectedIds, onToggle, badge, hint, empty, footer, disabled,
+  searchable = true, hintClassName,
 }: Props) {
   const desktop = useIsDesktop()
   const [open, setOpen] = useState(false)
@@ -64,17 +70,19 @@ export function SourceDropdown({
           : 'max-h-[70vh]',
       )}
     >
-      <div className="border-b border-border p-2">
-        <label className="flex items-center gap-1.5 rounded-input border border-border bg-base px-2">
-          <Search className="h-3.5 w-3.5 shrink-0 text-muted" />
-          <input
-            value={query}
-            onChange={event => setQuery(event.target.value)}
-            placeholder="搜索"
-            className="h-8 w-full bg-transparent text-xs text-foreground outline-none placeholder:text-muted"
-          />
-        </label>
-      </div>
+      {searchable && (
+        <div className="border-b border-border p-2">
+          <label className="flex items-center gap-1.5 rounded-input border border-border bg-base px-2">
+            <Search className="h-3.5 w-3.5 shrink-0 text-muted" />
+            <input
+              value={query}
+              onChange={event => setQuery(event.target.value)}
+              placeholder="搜索"
+              className="h-8 w-full bg-transparent text-xs text-foreground outline-none placeholder:text-muted"
+            />
+          </label>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto p-1">
         {visible.length === 0 && (empty ?? <p className="px-2 py-3 text-xs text-muted">没有匹配项</p>)}
         {visible.map(item => {
@@ -94,9 +102,14 @@ export function SourceDropdown({
               </span>
               <span className="min-w-0">
                 <span className="block truncate text-xs text-foreground">{item.name}</span>
-                {item.description && (
+                {item.mentions != null ? (
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
+                    提及 {item.mentions} · 来源 {item.sourceCount ?? 0}
+                    {item.updatedAt ? ` · ${item.updatedAt}` : ''}
+                  </span>
+                ) : item.description ? (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">{item.description}</span>
-                )}
+                ) : null}
               </span>
             </button>
           )
@@ -127,7 +140,7 @@ export function SourceDropdown({
         )}
         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted" />
       </button>
-      {hint && <p className="mt-1 truncate text-[10px] text-muted">{hint}</p>}
+      {hint && <p className={cn('mt-1 text-[10px] leading-snug text-muted', hintClassName)}>{hint}</p>}
       {open && desktop && panel}
       {open && !desktop && (
         <div className="fixed inset-0 z-40 flex items-end bg-black/50" onClick={() => setOpen(false)}>

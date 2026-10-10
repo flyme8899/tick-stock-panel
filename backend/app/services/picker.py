@@ -8,9 +8,12 @@
 - 公告日当天的财报不参与选股，下一交易日才生效，与回测财务因子一致。
 - 来源运行失败（例如 DSA 连不上）不参与交集/并集，避免一次失败把其他来源清空。
   来源成功但一只都没有，仍然参与合并。
+- 热门事件按北京时间当前交易日的板块提及次数和来源数取前 5，不是近 24 小时升温分数。
+  选中后并入同花顺行业或概念成分股，以及同一资讯里至少出现两次的个股。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -25,12 +28,13 @@ from typing import Any
 
 import polars as pl
 
-from app.market_time import CN_TZ, cn_now
+from app.market_time import CN_TZ, cn_now, current_trading_day
 from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-_SAFE_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+# 板块名是中文。只拒绝路径和空白，避免把事件 id 收成另一套编码。
+_SAFE_ID = re.compile(r"^[\w.:-]{1,64}$")
 _ST_RE = re.compile(r"(?i)ST|\*ST|退")
 _SNAPSHOT_NAME = re.compile(r"^\d{8}T\d{6}(?:-\d+)?\.json$")
 _MAX_SNAPSHOTS = 40
@@ -78,18 +82,7 @@ FUNDAMENTAL_PRESETS: tuple[dict[str, str], ...] = (
     },
 )
 
-HOT_ITEMS: tuple[dict[str, str], ...] = (
-    {
-        "id": "hot_sector_constituents",
-        "name": "热门板块成分股",
-        "description": "把热门板块映射到同花顺行业或概念的成分股。",
-    },
-    {
-        "id": "hot_stocks",
-        "name": "热门个股",
-        "description": "资讯模块直接点名的热门个股。",
-    },
-)
+_TOP_HOT_EVENTS = 5
 
 
 def safe_source_id(value: str) -> bool:
@@ -122,6 +115,27 @@ class Dimensions:
     concepts: dict[str, list[str]] = field(default_factory=dict)
 
 
+def empty_hot_snapshot(now: datetime) -> dict:
+    trading = current_trading_day(now)
+    return {
+        "as_of": None,
+        "trading_day": trading.isoformat(),
+        "fallback": False,
+        "hint": None,
+        "updated_at": None,
+        "events": [],
+    }
+
+
+def hot_event_id(key: str) -> str:
+    """板块名能直接当来源 id 时用原名，否则用短哈希，避免把斜杠送进接口。"""
+    text = str(key or "").strip()
+    if safe_source_id(text):
+        return text
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    return f"ev_{digest}"
+
+
 @dataclass
 class PickerDeps:
     data_dir: Path
@@ -130,11 +144,11 @@ class PickerDeps:
     load_market: Callable[[], tuple[date | None, list[dict]]]
     load_financial: Callable[[date], tuple[pl.DataFrame, str]]
     load_dimensions: Callable[[], Dimensions]
-    load_hot: Callable[[str, int], list]
     dsa_request: Callable[[str, str, dict | None], tuple[int, dict]] | None
     now: datetime | None = None
     poll_seconds: float = 12.0
     limiter: Any = None
+    load_top_events: Callable[[datetime], dict] = field(default=empty_hot_snapshot)
 
 
 def classify_strategies(metas: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -263,18 +277,6 @@ def hot_display_score(source_count: int, story_count: int) -> float:
     return round(min(100.0, source_count * 10 + min(max(story_count, 0), 10) * 2), 1)
 
 
-def window_hours(params: dict[str, Any]) -> int:
-    return 72 if params.get("window") == "3d" else 24
-
-
-def min_sources(params: dict[str, Any]) -> int:
-    try:
-        value = int(params.get("min_sources", 2))
-    except (TypeError, ValueError):
-        return 2
-    return max(1, min(value, 20))
-
-
 def map_hot_sectors(
     candidates: list[Any],
     dimensions: Dimensions,
@@ -301,30 +303,69 @@ def map_hot_sectors(
     return scores, {symbol: _join_events(labels) for symbol, labels in events.items()}
 
 
-def map_hot_stocks(
-    candidates: list[Any],
+def resolve_mentioned_stock(key: str, known_symbols: set[str]) -> str | None:
+    text = str(key or "").strip()
+    if not text:
+        return None
+    if known_symbols:
+        if text in known_symbols:
+            return text
+        return resolve_dsa_code(text, known_symbols)
+    if "." in text:
+        return text
+    return None
+
+
+def map_selected_hot_event(
+    event: dict,
+    dimensions: Dimensions,
     known_symbols: set[str],
-    *,
-    min_source_count: int,
-) -> tuple[dict[str, float], dict[str, str], list[str]]:
-    scores: dict[str, float] = {}
-    events: dict[str, str] = {}
-    unresolved: list[str] = []
-    for item in candidates:
-        sources = list(_hot_attr(item, "sources", ()) or ())
-        if len(sources) < min_source_count:
+    index: dict[str, set[str]] | None = None,
+) -> tuple[dict[str, float], dict[str, str], str | None]:
+    """成分股来自同花顺行业/概念；多次提及的个股来自当天同一条资讯。"""
+    name = str(event.get("name") or event.get("key") or "")
+    key = str(event.get("key") or "")
+    try:
+        mentions = int(event.get("mentions") or 0)
+    except (TypeError, ValueError):
+        mentions = 0
+    try:
+        source_count = int(event.get("source_count") or 0)
+    except (TypeError, ValueError):
+        source_count = 0
+    label = hot_event_label(name or key, source_count)
+    score = hot_display_score(source_count, mentions)
+    has_dimensions = bool(dimensions.concepts or dimensions.industry_path)
+    constituents: set[str] = set()
+    if has_dimensions:
+        constituents = match_sector_symbols(name, key, index if index is not None else build_label_index(dimensions))
+    resolved: set[str] = set()
+    unresolved = 0
+    for stock in event.get("frequent_stocks") or []:
+        if not isinstance(stock, dict):
             continue
-        key = str(_hot_attr(item, "key", "") or "")
-        name = str(_hot_attr(item, "name", "") or key)
-        symbol = resolve_dsa_code(key, known_symbols) if known_symbols else (key if "." in key else None)
-        if symbol is None and key in known_symbols:
-            symbol = key
+        symbol = resolve_mentioned_stock(str(stock.get("key") or ""), known_symbols)
         if symbol is None:
-            unresolved.append(key or name)
+            unresolved += 1
             continue
-        events[symbol] = hot_event_label(name, len(sources))
-        scores[symbol] = hot_display_score(len(sources), int(_hot_attr(item, "story_count", 0) or 0))
-    return scores, events, unresolved
+        resolved.add(symbol)
+    symbols = constituents | resolved
+    note = None
+    if not has_dimensions and resolved:
+        note = "尚未同步同花顺行业/概念，本次只纳入多次提及的个股"
+    elif not has_dimensions and not resolved:
+        note = "尚未同步同花顺行业/概念，无法映射成分股"
+    elif not symbols:
+        note = f"「{name or key}」没有匹配到成分股"
+    elif unresolved and not resolved:
+        note = "热门个股无法对应本地代码"
+    elif unresolved:
+        note = "部分热门个股无法对应本地代码"
+    return (
+        {symbol: score for symbol in symbols},
+        {symbol: label for symbol in symbols},
+        note,
+    )
 
 
 def _join_events(labels: list[str]) -> str:
@@ -695,7 +736,80 @@ def _item(sid: str, name: str, description: str = "") -> dict[str, str]:
     return {"id": sid, "name": name, "description": description}
 
 
-def build_catalog(deps: PickerDeps) -> dict:
+def _load_hot_snapshot(deps: PickerDeps, now: datetime) -> tuple[dict, str | None]:
+    try:
+        raw = deps.load_top_events(now)
+    except Exception:
+        logger.exception("picker hot events load failed")
+        return empty_hot_snapshot(now), "热门事件暂时不可用"
+    if not isinstance(raw, dict) or not isinstance(raw.get("events"), list):
+        return empty_hot_snapshot(now), "热门事件暂时不可用"
+    return raw, None
+
+
+def _hot_group(snapshot: dict, error: str | None) -> dict:
+    items = []
+    for event in snapshot.get("events") or []:
+        if len(items) >= _TOP_HOT_EVENTS:
+            break
+        if not isinstance(event, dict):
+            continue
+        key = str(event.get("key") or "").strip()
+        if not key:
+            continue
+        try:
+            mentions = int(event.get("mentions") or 0)
+            source_count = int(event.get("source_count") or 0)
+        except (TypeError, ValueError):
+            continue
+        name = str(event.get("name") or key)
+        updated = event.get("updated_at")
+        items.append({
+            "id": hot_event_id(key),
+            "name": name,
+            "description": f"提及 {mentions} · 来源 {source_count}",
+            "mentions": mentions,
+            "source_count": source_count,
+            "updated_at": updated if isinstance(updated, str) else None,
+        })
+    return {
+        "id": "hot_events",
+        "label": "热门事件",
+        "live": True,
+        "updated_at": snapshot.get("updated_at"),
+        "as_of": snapshot.get("as_of"),
+        "trading_day": snapshot.get("trading_day"),
+        "fallback": bool(snapshot.get("fallback")),
+        "hint": snapshot.get("hint") or None,
+        "error": error,
+        "items": items,
+    }
+
+
+def _hot_names(snapshot: dict) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for event in snapshot.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        key = str(event.get("key") or "").strip()
+        if not key:
+            continue
+        names[hot_event_id(key)] = str(event.get("name") or key)
+    return names
+
+
+def _event_index(snapshot: dict) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for event in snapshot.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        key = str(event.get("key") or "").strip()
+        if key:
+            index[hot_event_id(key)] = event
+    return index
+
+
+def build_catalog(deps: PickerDeps, snapshot: dict | None = None, hot_error: str | None = None) -> dict:
     try:
         metas = deps.list_strategies() or []
     except Exception:
@@ -710,6 +824,8 @@ def build_catalog(deps: PickerDeps) -> dict:
         dimensions = Dimensions()
     industries = sorted({label for label in dimensions.industry_label.values() if label})
     now = deps.now or cn_now()
+    if snapshot is None:
+        snapshot, hot_error = _load_hot_snapshot(deps, now)
     return {
         "groups": [
             {
@@ -720,25 +836,7 @@ def build_catalog(deps: PickerDeps) -> dict:
                     for item in FUNDAMENTAL_PRESETS
                 ],
             },
-            {
-                "id": "hot_events",
-                "label": "热门事件（实时）",
-                "live": True,
-                "updated_at": now.astimezone(CN_TZ).strftime("%H:%M"),
-                "params": [
-                    {
-                        "id": "window",
-                        "label": "时间窗",
-                        "default": "24h",
-                        "options": [
-                            {"id": "24h", "label": "24h"},
-                            {"id": "3d", "label": "3d"},
-                        ],
-                    },
-                    {"id": "min_sources", "label": "最少来源数", "default": 2, "min": 1, "max": 20},
-                ],
-                "items": [_item(item["id"], item["name"], item["description"]) for item in HOT_ITEMS],
-            },
+            _hot_group(snapshot, hot_error),
             {"id": "technical", "label": "技术面/短线", "items": technical},
             {
                 "id": "factor",
@@ -810,8 +908,17 @@ def _lookup(frame: pl.DataFrame) -> dict[str, dict]:
 def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, deps: PickerDeps) -> dict:
     if combine not in {"and", "or"}:
         raise ValueError("combine 只能是 and 或 or")
-    catalog = build_catalog(deps)
+    now = deps.now or cn_now()
+    wants_hot = any(source.type == "hot_events" for source in sources)
+    if wants_hot:
+        hot_snapshot, hot_error = _load_hot_snapshot(deps, now)
+    else:
+        hot_snapshot, hot_error = empty_hot_snapshot(now), None
+    catalog = build_catalog(deps, snapshot=hot_snapshot, hot_error=hot_error)
     names = _names_from_catalog(catalog)
+    for event_id, event_name in _hot_names(hot_snapshot).items():
+        names[("hot_events", event_id)] = event_name
+    hot_events = _event_index(hot_snapshot)
     warnings: list[str] = []
     as_of, market_rows = deps.load_market()
     financial = pl.DataFrame()
@@ -861,7 +968,14 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
             strategy_results = deps.run_strategies(strategy_ids)
 
     dsa_cache: tuple[list[dict], str | None] | None = None
+    hot_index = build_label_index(dimensions) if wants_hot else {}
+    hot_blocked = False
     for source in sources:
+        if source.type == "hot_events" and hot_error:
+            if not hot_blocked:
+                warnings.append(hot_error)
+                hot_blocked = True
+            continue
         if (source.type, source.id) not in names:
             warnings.append(f"未识别的来源 {source.id}")
             continue
@@ -869,31 +983,21 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
             scores, error = screen_fundamental(universe, source.id)
             _take(source, scores, None, error)
         elif source.type == "hot_events":
-            hours = window_hours(source.params)
-            floor = min_sources(source.params)
-            kind = "sector" if source.id == "hot_sector_constituents" else "stock"
-            try:
-                candidates = deps.load_hot(kind, hours)
-            except Exception:
-                logger.exception("hot events load failed")
-                _take(source, {}, None, "热门事件暂时不可用")
+            event = hot_events.get(source.id)
+            if event is None:
+                warnings.append(f"未识别的来源 {source.id}")
                 continue
-            if source.id == "hot_sector_constituents":
-                if not dimensions.concepts and not dimensions.industry_path:
-                    _take(source, {}, None, "尚未同步同花顺行业/概念，无法映射成分股")
-                    continue
-                scores, events = map_hot_sectors(candidates, dimensions, min_source_count=floor)
-                if candidates and not scores:
-                    warnings.append("热门板块没有匹配到成分股")
-                _take(source, scores, events, None)
-            else:
-                scores, events, unresolved = map_hot_stocks(candidates, known, min_source_count=floor)
-                if unresolved and not scores:
-                    _take(source, {}, None, "热门个股无法对应本地代码")
-                    continue
-                if unresolved:
-                    warnings.append("部分热门个股无法对应本地代码")
-                _take(source, scores, events, None)
+            scores, events, note = map_selected_hot_event(event, dimensions, known, hot_index)
+            if not scores and note in {
+                "尚未同步同花顺行业/概念，无法映射成分股",
+                "热门个股无法对应本地代码",
+            }:
+                if note not in warnings:
+                    _take(source, {}, None, note)
+                continue
+            if note and note not in warnings:
+                warnings.append(note)
+            _take(source, scores, events, None)
         elif source.type in {"technical", "factor"}:
             rows, error = strategy_results.get(source.id, ([], "策略没有返回结果"))
             scores = {}
@@ -941,7 +1045,6 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
     rows = apply_filters(rows, filters)
     rows.sort(key=lambda item: (item.get("score") is None, -(item.get("score") or 0), item["symbol"]))
     current_symbols = {row["symbol"] for row in rows}
-    now = deps.now or cn_now()
     previous = read_previous_snapshot(deps.data_dir)
     previous_symbols = None
     previous_as_of = None
@@ -965,9 +1068,8 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
     shown = rows[:_MAX_ROWS]
     if len(rows) > _MAX_ROWS:
         warnings.append(f"结果超过 {_MAX_ROWS} 只，表格只显示前 {_MAX_ROWS} 只")
-    hot_updated = None
-    if any(source.type == "hot_events" for source in sources):
-        hot_updated = now.astimezone(CN_TZ).strftime("%H:%M")
+    hot_updated = hot_snapshot.get("updated_at") if wants_hot and not hot_error else None
+    hot_hint = hot_snapshot.get("hint") if wants_hot and not hot_error else None
     return {
         "rows": shown,
         "summary": {
@@ -981,6 +1083,7 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
             "first_snapshot": previous_symbols is None,
             "profit_yoy_label": profit_label,
             "hot_updated_at": hot_updated,
+            "hot_hint": hot_hint,
             "warnings": warnings,
         },
     }
@@ -1185,10 +1288,10 @@ def sync_dsa_watchlist(
     return {"ok": not failed, "synced": synced, "failed": failed, "message": message}
 
 
-def default_hot_loader(kind: str, window_hours_value: int) -> list:
-    from app.news.service import hot_candidates
+def load_top_events_from_news(now: datetime) -> dict:
+    from app.news.service import top_hot_events
 
-    return hot_candidates(kind=kind, window_hours=window_hours_value, limit=20)
+    return top_hot_events(now)
 
 
 def deps_from_app(request, *, limiter=None, dsa_request=None, poll_seconds: float = 12.0) -> PickerDeps:
@@ -1208,8 +1311,8 @@ def deps_from_app(request, *, limiter=None, dsa_request=None, poll_seconds: floa
         load_market=lambda: load_market_from_repo(repo),
         load_financial=lambda as_of: load_financial_from_dir(data_dir, as_of),
         load_dimensions=lambda: load_dimensions_from_dir(data_dir),
-        load_hot=default_hot_loader,
         dsa_request=dsa_forward_request if dsa_request is None else dsa_request,
+        load_top_events=load_top_events_from_news,
         poll_seconds=poll_seconds,
         limiter=limiter,
     )
