@@ -13,6 +13,8 @@ from app.market_time import CN_TZ
 from app.news.config import source_configured, source_enabled, vision_base_url, vision_model
 from app.news.etf_flow import (
     ArticleRef,
+    ExtractFailedError,
+    _call_vision,
     _fetch,
     choose_flow_article,
     collect_etf_flow,
@@ -170,6 +172,36 @@ def test_vision_response_normalizes_numbers_and_title_date_wins():
     ] == [
         {"name": "甲", "code": "", "net_1d": -2.5, "net_5d": None, "net_20d": None},
     ]
+    aliased = normalize_flow(
+        {
+            "broad_etfs": [
+                {"name": "宽基甲", "code": "510300", "day": 1.25, "d5": "2", "d20": -0.5},
+                {"name": "坏代码", "code": "51030", "day": 3},
+                {"name": "七位", "code": "5103001", "day": 4},
+            ]
+        }
+    )
+    assert aliased["etfs"][0] == {
+        "name": "宽基甲",
+        "code": "510300",
+        "net_1d": 1.25,
+        "net_5d": 2.0,
+        "net_20d": -0.5,
+    }
+    assert [row["code"] for row in aliased["etfs"]] == ["510300", "", ""]
+    broad_etfs = [
+        {"name": f"宽基{i:02d}", "code": f"510{i:03d}", "net_1d": float(i + 1)} for i in range(20)
+    ]
+    broad_etfs.append({"name": "沪深300", "code": "000300", "net_1d": 9})
+    moved = normalize_flow({"broad_index": broad_etfs})
+    assert moved["broad_index"] == [
+        {"name": "沪深300", "code": "000300", "net_1d": 9.0, "net_5d": None, "net_20d": None}
+    ]
+    assert len(moved["etfs"]) == 20
+    assert all(len(row["code"]) == 6 for row in moved["etfs"])
+    ranked, _sectors = flow_mentions(moved)
+    assert len(ranked) == 8
+    assert ranked[0].code == "510019"
     with pytest.raises(ValueError, match="没有抽出"):
         normalize_flow({"overview": {"net_1d": None}, "etfs": []})
     stocks, sectors = flow_mentions(parsed)
@@ -197,7 +229,130 @@ def test_vision_payload_uses_image_url_and_drops_other_hosts():
     urls = [part["image_url"]["url"] for part in parts if part["type"] == "image_url"]
     assert urls == ["https://nimg.ws.126.net/a.jpg"]
     assert body["model"] == "glm-5.3-flash"
+    assert body["max_tokens"] >= 4096
+    assert "thinking" not in body
+    assert "enable_thinking" not in body
     assert "deepseek" not in json.dumps(body)
+
+
+def _completion(content) -> dict:
+    return {"choices": [{"message": {"content": content, "reasoning_content": "思考"}}]}
+
+
+def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
+    answers = [
+        _completion(None),
+        _vision(),
+        _completion(
+            json.dumps(
+                {
+                    "etfs": [
+                        {"name": "宽基甲", "code": "510880", "day": 0.4, "d5": 1, "d20": -2},
+                        {"name": "坏代码", "code": "1234567", "day": 9},
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        ),
+    ]
+
+    class Seq:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None):
+            self.posts.append((url, headers, json))
+            return Resp("", url, payload=answers[len(self.posts) - 1])
+
+    client = Seq()
+    extracted = _call_vision(
+        client,
+        [
+            "https://nimg.ws.126.net/a.jpg",
+            "https://nimg.ws.126.net/b.jpg",
+            "https://evil.example/skip.jpg",
+        ],
+    )
+    assert len(client.posts) == 3
+    sent = []
+    for _url, _headers, body in client.posts:
+        assert body["max_tokens"] >= 4096
+        assert "thinking" not in body
+        assert "enable_thinking" not in body
+        urls = [
+            part["image_url"]["url"]
+            for part in body["messages"][0]["content"]
+            if part["type"] == "image_url"
+        ]
+        assert urls
+        sent.extend(urls)
+    assert sent == [
+        "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/b.jpg",
+    ]
+    assert extracted["overview"]["net_1d"] == 12.5
+    by_name = {row["name"]: row for row in extracted["etfs"]}
+    assert by_name["宽基甲"]["code"] == "510880"
+    assert by_name["宽基甲"]["net_1d"] == 0.4
+    assert by_name["宽基甲"]["net_20d"] == -2
+    assert by_name["坏代码"]["code"] == ""
+    assert "510050" in by_name["最大申购"]["code"]
+
+
+def test_empty_content_retries_once_then_skips_that_image(news_db):
+    class Seq:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None):
+            self.posts.append(json)
+            if len(self.posts) <= 2:
+                return Resp("", url, payload=_completion("  "))
+            return Resp("", url, payload=_vision())
+
+    client = Seq()
+    extracted = _call_vision(
+        client,
+        ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"],
+    )
+    assert len(client.posts) == 3
+    assert extracted["overview"]["net_1d"] == 12.5
+    assert [body["messages"][0]["content"][1]["image_url"]["url"] for body in client.posts] == [
+        "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/a.jpg",
+        "https://nimg.ws.126.net/b.jpg",
+    ]
+
+
+def test_empty_content_on_the_only_image_fails_after_one_retry(news_db):
+    class Seq:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None):
+            self.posts.append(json)
+            return Resp("", url, payload=_completion(""))
+
+    client = Seq()
+    with pytest.raises(ExtractFailedError, match="没有返回内容"):
+        _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
+    assert len(client.posts) == 2
+
+
+def test_non_empty_garbage_is_not_retried(news_db):
+    class Seq:
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None):
+            self.posts.append(json)
+            return Resp("", url, payload=_completion("不是表格"))
+
+    client = Seq()
+    with pytest.raises(ExtractFailedError, match="没有抽出"):
+        _call_vision(client, ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"])
+    assert len(client.posts) == 1
 
 
 def test_redirect_stops_before_leaving_allowlist():
@@ -284,20 +439,26 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert saved["inserted"] == 1
     assert saved["found"] is True
     assert saved["pending"] is False
-    assert len(client.posts) == 1
+    assert len(client.posts) == 2
     assert all("163.com" in url for url in client.gets)
-    url, headers, body = client.posts[0]
-    assert url == "https://tokenhub.tencentmaas.com/v1/chat/completions"
-    assert headers["Authorization"] == "Bearer vision-test-key"
-    encoded = json.dumps({"url": url, "headers": headers, "body": body}, ensure_ascii=False)
-    assert "deepseek-secret" not in encoded
-    assert "deepseek-chat" not in encoded
-    assert body["model"] == "glm-5.3-flash"
-    images = [
-        part["image_url"]["url"]
-        for part in body["messages"][0]["content"]
-        if part["type"] == "image_url"
-    ]
+    images = []
+    for url, headers, body in client.posts:
+        assert url == "https://tokenhub.tencentmaas.com/v1/chat/completions"
+        assert headers["Authorization"] == "Bearer vision-test-key"
+        encoded = json.dumps({"url": url, "headers": headers, "body": body}, ensure_ascii=False)
+        assert "deepseek-secret" not in encoded
+        assert "deepseek-chat" not in encoded
+        assert body["model"] == "glm-5.3-flash"
+        assert body["max_tokens"] >= 4096
+        assert "thinking" not in body
+        assert "enable_thinking" not in body
+        parts = [
+            part["image_url"]["url"]
+            for part in body["messages"][0]["content"]
+            if part["type"] == "image_url"
+        ]
+        assert len(parts) == 1
+        images.extend(parts)
     assert images == ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"]
 
     row = (
@@ -321,7 +482,7 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     again = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
     assert again["found"] is True
     assert again["inserted"] == 0
-    assert len(client.posts) == 1
+    assert len(client.posts) == 2
     assert len(client.gets) == 2
 
     monkeypatch.setattr("app.news.config.feed_token", lambda: "feed-secret")

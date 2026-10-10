@@ -11,6 +11,9 @@ https://www.163.com/dy/media/T1730214999977.html ；列表里没有当天稿件�
 报成故障。交易日历不可用时，周一到周五视作开市。
 
 表格交给视觉模型。密钥只用 VISION_AI_*，不读取文本模型的 AI_API_KEY。
+tokenhub 上只有 glm-5.3-flash 能读 image_url。它总会思考：enable_thinking
+无效，thinking.type=disabled 会返回 400。max_tokens 低于 4096 时预算被
+reasoning 用完，content 为空。因此一张图一次请求，上限至少 4096，空内容再试一次。
 """
 
 from __future__ import annotations
@@ -49,6 +52,10 @@ POLL_EVERY = 15 * 60
 SOGOU_DAILY_CAP = 4
 SOGOU_MIN_GAP = timedelta(minutes=20)
 MAX_VISION_IMAGES = 6
+# 一张表大约 20 只 ETF。思考占掉 completion 预算，多张图叠在一次请求里会把正文挤空。
+VISION_BATCH_SIZE = 1
+VISION_MAX_TOKENS = 4096
+VISION_EMPTY_RETRIES = 1
 MAX_STORED_IMAGES = 12
 MAX_BROAD = 20
 MAX_CATEGORY = 30
@@ -76,13 +83,13 @@ MISSING_TEXT = "09:00 仍未采集到 ETF领航者当日申赎文章"
 MISSING_ALERT = f"TSP 资讯采集：{MISSING_TEXT}。"
 EXTRACT_ALERT = "TSP 资讯采集：09:00 仍未完成 ETF领航者当日申赎表格抽取。"
 VISION_PROMPT = (
-    "你是表格抽取器。这些图片是公众号「ETF领航者」的 ETF 申购赎回表，正文几乎没有文字。\n"
+    "你是表格抽取器。下面这张图是公众号「ETF领航者」申赎表中的一张，正文几乎没有文字。\n"
     "只输出一个 JSON 对象，不要解释，不要编造看不清的数字。\n"
     "单位按图中印刷写入 unit（例如亿元、万份），不要把亿元换算成元。\n"
     "净申购用正数，净赎回用负数。看不清就填 null。\n"
-    "net_1d、net_5d、net_20d 分别是当日、5日、20日净申购。\n"
-    "overview 是全市场汇总。broad_index 是宽基指数。categories 是行业或主题。etfs 是单只 ETF。\n"
-    "code 只填 6 位基金代码，没有就留空字符串。\n"
+    "当日、5日、20日分别写入 net_1d、net_5d、net_20d。\n"
+    "overview 是全市场汇总。broad_index 只放指数名称。categories 是行业或主题。\n"
+    "带 6 位基金代码的 ETF 写入 etfs，包括宽基 ETF。code 不是 6 位数字就留空字符串。\n"
     '{"trade_date":"YYYY-MM-DD","unit":"","overview":{"net_1d":null,"net_5d":null,"net_20d":null},'
     '"broad_index":[{"name":"","code":"","net_1d":null,"net_5d":null,"net_20d":null}],'
     '"categories":[{"name":"","net_1d":null,"net_5d":null,"net_20d":null}],'
@@ -96,6 +103,10 @@ class ArticleMissingError(Exception):
 
 class ExtractFailedError(Exception):
     """稿件已出现，但图片或视觉结果不能入库。"""
+
+
+class EmptyVisionError(ValueError):
+    """content 为空。思考占满了 max_tokens，或模型没有写出 JSON。"""
 
 
 @dataclass(frozen=True)
@@ -360,15 +371,21 @@ def wechat_article_id(url: str) -> str:
 
 
 def vision_payload(images: list[str], *, model: str) -> dict:
+    """一次请求只放一批图片。不发送关闭思考的字段，那个字段会 400。"""
     content: list[dict] = [{"type": "text", "text": VISION_PROMPT}]
-    for url in images[:MAX_VISION_IMAGES]:
+    kept = 0
+    for url in images:
         normalized = _normalize_image(url)
-        if normalized:
-            content.append({"type": "image_url", "image_url": {"url": normalized}})
+        if not normalized:
+            continue
+        content.append({"type": "image_url", "image_url": {"url": normalized}})
+        kept += 1
+        if kept >= VISION_BATCH_SIZE:
+            break
     return {
         "model": model,
         "temperature": 0,
-        "max_tokens": 4096,
+        "max_tokens": VISION_MAX_TOKENS,
         "messages": [{"role": "user", "content": content}],
     }
 
@@ -388,7 +405,7 @@ def _message_text(payload: dict) -> str:
                 parts.append(block["text"])
         content = "".join(parts)
     if not isinstance(content, str) or not content.strip():
-        raise ValueError("视觉模型没有返回内容")
+        raise EmptyVisionError("视觉模型没有返回内容")
     return content
 
 
@@ -412,17 +429,58 @@ def parse_json_object(text: str) -> dict:
 
 
 def normalize_flow(payload: dict) -> dict:
+    payload = _canonicalize_payload(payload)
     overview = _overview(payload.get("overview"))
-    broad = _rows(payload.get("broad_index"), MAX_BROAD, with_code=True)
+    broad = _rows(payload.get("broad_index"), MAX_BROAD + MAX_ETF, with_code=True)
     categories = _rows(payload.get("categories"), MAX_CATEGORY, with_code=False)
     etfs = _rows(payload.get("etfs"), MAX_ETF, with_code=True)
+    kept_broad: list[dict] = []
+    for row in broad:
+        if _is_fund_code(str(row.get("code") or "")):
+            etfs.append(row)
+        else:
+            kept_broad.append(row)
     extracted = {
         "trade_date": _trade_date(payload.get("trade_date")),
         "unit": _unit(payload.get("unit")),
         "overview": overview,
-        "broad_index": broad,
+        "broad_index": kept_broad[:MAX_BROAD],
         "categories": categories,
-        "etfs": etfs,
+        "etfs": _dedupe_rows(etfs)[:MAX_ETF],
+    }
+    if not _has_number(extracted):
+        raise ValueError("视觉模型没有抽出申赎数字")
+    return _shrink(extracted)
+
+
+def merge_flows(parts: list[dict]) -> dict:
+    """把每张表的抽取结果按代码拼起来。同一只基金只留先看到的一行。"""
+    if not parts:
+        raise ValueError("视觉模型没有抽出申赎数字")
+    if len(parts) == 1:
+        return parts[0]
+    overview = {"net_1d": None, "net_5d": None, "net_20d": None}
+    trade_date = ""
+    unit = ""
+    buckets: dict[str, list] = {key: [] for key in ("broad_index", "categories", "etfs")}
+    for part in parts:
+        if not trade_date and part.get("trade_date"):
+            trade_date = str(part["trade_date"])
+        if not unit and part.get("unit"):
+            unit = str(part["unit"])
+        part_overview = part.get("overview") or {}
+        for key in overview:
+            if overview[key] is None and part_overview.get(key) is not None:
+                overview[key] = part_overview[key]
+        for key in buckets:
+            buckets[key].extend(part.get(key) or [])
+    extracted = {
+        "trade_date": trade_date,
+        "unit": unit,
+        "overview": overview,
+        "broad_index": _dedupe_rows(buckets["broad_index"])[:MAX_BROAD],
+        "categories": _dedupe_rows(buckets["categories"])[:MAX_CATEGORY],
+        "etfs": _dedupe_rows(buckets["etfs"])[:MAX_ETF],
     }
     if not _has_number(extracted):
         raise ValueError("视觉模型没有抽出申赎数字")
@@ -662,7 +720,43 @@ def _call_vision(client, images: list[str]) -> dict:
     key = vision_api_key()
     if not key:
         raise ExtractFailedError("未配置 VISION_AI_API_KEY")
-    body = vision_payload(usable, model=vision_model())
+    parts: list[dict] = []
+    saw_empty = False
+    for url in usable:
+        parsed, empty = _vision_batch(client, [url], key)
+        saw_empty = saw_empty or empty
+        if parsed is not None:
+            parts.append(parsed)
+    if not parts:
+        if saw_empty:
+            raise ExtractFailedError("视觉模型没有返回内容")
+        raise ExtractFailedError("视觉模型没有抽出申赎数字")
+    try:
+        return merge_flows(parts)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
+
+
+def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, bool]:
+    """空 content 再请求一次。非空但不是申赎 JSON 时不重试。"""
+    saw_empty = False
+    for attempt in range(VISION_EMPTY_RETRIES + 1):
+        payload = _post_vision(client, vision_payload(images, model=vision_model()), key)
+        try:
+            return parse_vision_response(payload), saw_empty
+        except EmptyVisionError:
+            saw_empty = True
+            if attempt < VISION_EMPTY_RETRIES:
+                logger.warning("ETF申赎视觉模型返回空内容，重试一次")
+                continue
+            logger.warning("ETF申赎视觉模型重试后仍无内容")
+            return None, True
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
+    return None, saw_empty
+
+
+def _post_vision(client, body: dict, key: str) -> dict:
     try:
         response = client.post(
             f"{vision_base_url()}/chat/completions",
@@ -678,10 +772,9 @@ def _call_vision(client, images: list[str]) -> dict:
     except Exception as exc:
         logger.warning("ETF申赎视觉模型失败: %s", _public_error(exc))
         raise ExtractFailedError("视觉模型请求失败") from exc
-    try:
-        return parse_vision_response(payload)
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
+    if not isinstance(payload, dict):
+        raise ExtractFailedError("视觉模型没有抽出申赎数字")
+    return payload
 
 
 def _missing(now: datetime, root: Path, expect: bool) -> dict:
@@ -952,9 +1045,33 @@ def _safe_dt(year: int, month: int, day: int) -> datetime | None:
         return None
 
 
+def _canonicalize_payload(payload: dict) -> dict:
+    data = dict(payload)
+    if not isinstance(data.get("broad_index"), list) and isinstance(data.get("broad"), list):
+        data["broad_index"] = data["broad"]
+    if not isinstance(data.get("etfs"), list):
+        for key in ("broad_etfs", "rows", "items"):
+            if isinstance(data.get(key), list):
+                data["etfs"] = data[key]
+                break
+    if not isinstance(data.get("overview"), dict) and any(
+        key in data for key in ("day", "d5", "d20", "net_1d", "net_5d", "net_20d")
+    ):
+        data["overview"] = {
+            "net_1d": data.get("net_1d", data.get("day")),
+            "net_5d": data.get("net_5d", data.get("d5")),
+            "net_20d": data.get("net_20d", data.get("d20")),
+        }
+    return data
+
+
 def _overview(value) -> dict:
     row = value if isinstance(value, dict) else {}
-    return {key: _num(row.get(key)) for key in ("net_1d", "net_5d", "net_20d")}
+    return {
+        "net_1d": _pick_num(row, "net_1d", "day", "d1"),
+        "net_5d": _pick_num(row, "net_5d", "d5"),
+        "net_20d": _pick_num(row, "net_20d", "d20"),
+    }
 
 
 def _rows(value, limit: int, *, with_code: bool) -> list[dict]:
@@ -969,9 +1086,9 @@ def _rows(value, limit: int, *, with_code: bool) -> list[dict]:
             continue
         row = {
             "name": name,
-            "net_1d": _num(item.get("net_1d")),
-            "net_5d": _num(item.get("net_5d")),
-            "net_20d": _num(item.get("net_20d")),
+            "net_1d": _pick_num(item, "net_1d", "day", "d1"),
+            "net_5d": _pick_num(item, "net_5d", "d5"),
+            "net_20d": _pick_num(item, "net_20d", "d20"),
         }
         if with_code:
             row["code"] = _code(item.get("code"))
@@ -979,6 +1096,35 @@ def _rows(value, limit: int, *, with_code: bool) -> list[dict]:
             continue
         rows.append(row)
     return rows
+
+
+def _pick_num(row: dict, *keys: str):
+    for key in keys:
+        if key not in row:
+            continue
+        number = _num(row.get(key))
+        if number is not None:
+            return number
+    return None
+
+
+def _is_fund_code(code: str) -> bool:
+    """沪深 ETF 基金代码。指数代码（如 000300）留在宽基名称里，不进个股提及。"""
+    return bool(re.fullmatch(r"(?:15|16|51|56|58)\d{4}", code))
+
+
+def _dedupe_rows(rows: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    kept: list[dict] = []
+    for row in rows:
+        code = str(row.get("code") or "")
+        name = str(row.get("name") or "")
+        key = f"c:{code}" if code else f"n:{name}"
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(row)
+    return kept
 
 
 def _num(value):

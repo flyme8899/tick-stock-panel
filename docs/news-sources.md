@@ -25,7 +25,7 @@
 
 主源是同一作者的网易号列表：<https://www.163.com/dy/media/T1730214999977.html>。列表里没有当天这篇，或列表请求失败时，才用搜狗微信搜索公众号「ETF领航者」，再打开 `mp.weixin.qq.com` 文章。不登录微信。搜狗一天最多 4 次，两次至少隔 20 分钟。
 
-表格交给视觉模型，走 OpenAI 兼容的 `chat/completions`，图片放在 `image_url`。只用下面三个变量，不读取文本模型的 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`，也不走 `NEWS_LLM_EXTRACT`：
+表格交给视觉模型，走 OpenAI 兼容的 `chat/completions`，图片放在 `image_url`。只用下面三个变量，不读取文本模型的 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`，也不走 `NEWS_LLM_EXTRACT`。tokenhub 上试过的模型里，只有 `glm-5.3-flash` 能读 `image_url`。这个模型总会思考：`enable_thinking` 不生效，请求里带 `thinking.type=disabled` 会返回 400，所以程序不发送这两个字段。`max_tokens` 低于 4096 时，预算被思考用完，`content` 是空的。每张图单独请求，`max_tokens` 为 4096；返回空内容时同一张图再试一次。代码只保留恰好 6 位的基金代码。
 
 ```ini
 VISION_AI_API_KEY=

@@ -185,7 +185,7 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 ## 多源资讯（可选）
 
-热门事件和 DSA 情报桥的变量、宿主机采集见 [news-sources.md](./news-sources.md)。`NEWS_DWS_ENABLED`、`NEWS_ZSXQ_ENABLED`、`NEWS_IMA_ENABLED`、`NEWS_CLS_ENABLED`、`NEWS_WSCN_ENABLED`、`NEWS_ETF_FLOW_ENABLED` 默认留空，来源关闭。`NEWS_DSA_FEED_TOKEN` 留空时 DSA 不拉取。ima 需要 `IMA_CLIENT_ID` 与 `IMA_API_KEY`。ETF 申赎表格用 `VISION_AI_API_KEY`（可选 `VISION_AI_BASE_URL`、`VISION_AI_MODEL`），不复用 `AI_API_KEY`。
+热门事件和 DSA 情报桥的变量、宿主机采集见 [news-sources.md](./news-sources.md)。`NEWS_DWS_ENABLED`、`NEWS_ZSXQ_ENABLED`、`NEWS_IMA_ENABLED`、`NEWS_CLS_ENABLED`、`NEWS_WSCN_ENABLED`、`NEWS_ETF_FLOW_ENABLED` 默认留空，来源关闭。`NEWS_DSA_FEED_TOKEN` 留空时 DSA 不拉取。ima 需要 `IMA_CLIENT_ID` 与 `IMA_API_KEY`。ETF 申赎表格用 `VISION_AI_API_KEY`（可选 `VISION_AI_BASE_URL`、`VISION_AI_MODEL`，默认 `glm-5.3-flash`），不复用 `AI_API_KEY`。视觉请求按图片分批，`max_tokens` 至少 4096，不关闭模型思考。
 
 ## 配置优先级
 
