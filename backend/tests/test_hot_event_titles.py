@@ -6,7 +6,16 @@ import json
 from datetime import date, datetime, timedelta
 
 from app.market_time import CN_TZ
-from app.news.hot_events import _is_section_label, _keyword_title, _llm_title_ok, _title_ok
+from app.news.hot_events import (
+    _ensure_shown_name,
+    _fallback_title_ok,
+    _is_section_label,
+    _keep_shown_event,
+    _keyword_title,
+    _llm_title_ok,
+    _llm_title_reject_reason,
+    _title_ok,
+)
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
 
 NOW = datetime(2026, 10, 10, 8, 30, tzinfo=CN_TZ)
@@ -603,6 +612,64 @@ def test_red_items_count_more_and_a_single_red_item_stays_listed(tmp_path):
     assert soy_detail["items"][0]["red"] is False
 
 
+def test_red_items_without_listed_verbs_stay_eligible(tmp_path):
+    """线上加红快讯常常没有「大涨/发布」。财联社 B 和见闻评分 2（含整数）仍要进榜。"""
+    from app.news.service import hot_event_listing
+
+    path = tmp_path / "red-shaped.sqlite"
+    reset_store_for_tests(path)
+
+    def add(source_id: str, title: str, minute: int, *, source: str, level: str) -> None:
+        status = get_store().insert_item(
+            source=source,
+            source_id=source_id,
+            published_at=_publish(date(2026, 10, 9), 11, minute),
+            author="",
+            title=title,
+            clean_text=title,
+            raw=None,
+            content_hash=source_id,
+            url="",
+            level=level,
+            media_ids=[],
+            extra=None,
+            mentions=[],
+        )
+        assert status == "inserted"
+
+    add("cls-b", "立讯精密公告涉美国337调查", 1, source="cls", level="B")
+    add("wscn-str", "沙特利雅得机场再次遭袭造成12人受伤", 2, source="wscn", level="2")
+    add("wscn-int", "欧洲多国电网在凌晨大范围熄灯", 3, source="wscn", level="2")
+    add("plain", "图片闲聊没有动作", 4, source="cls", level="C")
+
+    # level 列是 TEXT，整数评分入库后仍是文本。聚类入口对真正的整数同样认加红。
+    from app.news.hot_events import _doc
+
+    integer_doc = _doc({
+        "id": 1,
+        "source": "wscn",
+        "level": 2,
+        "title": "欧洲多国电网在凌晨大范围熄灯",
+        "published": _publish(date(2026, 10, 9), 11, 3),
+        "mentions": [],
+    })
+    assert integer_doc is not None and integer_doc["red"] is True
+
+    events = top_hot_events(NOW)["events"]
+    by_name = {event["name"]: event for event in events}
+    assert "图片闲聊没有动作" not in by_name
+    luxshare = next(event for event in events if "立讯精密" in event["name"])
+    airport = next(event for event in events if "利雅得" in event["name"])
+    grid = next(event for event in events if "电网" in event["name"])
+    assert luxshare["red_count"] >= 1
+    assert airport["red_count"] >= 1
+    assert grid["red_count"] >= 1
+
+    listed = hot_event_listing(NOW)["events"]
+    assert any("立讯精密" in event["name"] and event["red_count"] >= 1 for event in listed)
+    assert any("电网" in event["name"] and event["red_count"] >= 1 for event in listed)
+
+
 _PRODUCTION_BAD_TITLES = (
     "32财政部发布2026年上半年中",
     "橡胶价格大涨超60家轮胎企业集体涨价今年以来",
@@ -655,6 +722,12 @@ def test_production_titles_drop_clocks_ellipsis_and_labels():
     assert _llm_title_ok("美联储降息25基点")
     assert _llm_title_ok("华为发布新模型")
     assert not _llm_title_ok("油价走高")
+    long_title = "财政部发布2026年上半年中长期财政规划并明确后续增量政策"
+    assert len(long_title) > 28
+    assert _llm_title_ok(long_title)
+    assert _llm_title_ok("财政部发布2026年上半年中长期财政规划")
+    assert _llm_title_ok("橡胶价格大涨至每吨13.1元")
+    assert _llm_title_reject_reason("橡胶价格大涨至13") == "数字被截断"
     assert _is_section_label("重点...")
     assert _is_section_label("TIM材料")
     assert _is_section_label("隔夜美股半导体硬件波动点评")
@@ -758,7 +831,66 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     assert "上一轮标题不合格" in prompts[-1]
     for bad in _PRODUCTION_BAD_TITLES:
         assert bad not in fallback_names
-    assert any(name.startswith("财政部") and "2026" in name for name in fallback_names)
+    # 模型回声仍是「上半年中」这种残词时，回退也不能把它放上榜。
+    assert not any(name.endswith("中") or "上半年中" in name for name in fallback_names)
     assert any(name == "IEA下调原油供需预期" for name in fallback_names)
     ship = next(event for event in fallback if "航运" in event["name"])
     assert ship["concepts"] == []
+
+
+_FALLBACK_BAD = (
+    "财政部发布2026年上半年中",
+    "橡胶价格大涨超60家轮胎企业集体",
+    "🌸固态电池",
+    "高争民爆/西藏地矿/西藏铜矿资",
+    "市场没有太关注到公司近期正在进行",
+)
+
+
+def test_bad_fallback_titles_are_rejected_and_dropped(tmp_path, monkeypatch, caplog):
+    """模型两次都没给出能用的标题时，这些回退字符串不能上屏，事件直接丢掉。"""
+    import logging
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    for text in _FALLBACK_BAD:
+        assert not _fallback_title_ok(text)
+        event = {"name": text, "headline": text, "headlines": [text]}
+        _ensure_shown_name(event)
+        assert event["name"] == ""
+        assert not _keep_shown_event(event)
+
+    assert _fallback_title_ok("财政部发布2026年上半年中长期财政规划")
+    assert _fallback_title_ok("橡胶价格大涨至每吨13.1元")
+    assert _llm_title_ok("橡胶价格大涨至每吨13.1元")
+
+    reset_store_for_tests(tmp_path / "fallback-drop.sqlite")
+    _insert("fiscal", "财政部发布2026年上半年中", 1)
+    _insert("rubber", "橡胶价格大涨超60家轮胎企业集体", 2)
+    _insert("flower", "🌸固态电池", 3)
+    _insert("mines", "高争民爆/西藏地矿/西藏铜矿资", 4)
+    _insert("comment", "市场没有太关注到公司近期正在进行", 5)
+    _insert("fed", "美联储降息25基点", 6)
+
+    def reject(_prompt: str, **_kwargs: object) -> str:
+        return json.dumps({
+            "events": [{
+                "id": "1",
+                "title": "市场没有太关注到公司近期正在进行",
+            }],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", reject)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert "热门事件标题未采用: 市场没有太关注到公司近期正在进行" in caplog.text
+    assert "缺少主体、动作或宾语" in caplog.text
+    for bad in _FALLBACK_BAD:
+        assert bad not in names
+    assert "美联储降息25基点" in names
+    assert not any("财政部" in name for name in names)
+    assert not any("橡胶" in name for name in names)

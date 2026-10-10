@@ -104,6 +104,7 @@ def sectors(kind: str, *, trade_date: str | None = None, data_dir: Path | None =
 
 def margin(*, trade_date: str | None = None, detail_limit: int = 100, data_dir: Path | None = None) -> dict:
     root = _dir(data_dir)
+    store.repair_szse_margin_summaries(root)
     day = trade_date or store.latest_date(root, "margin")
     if day is None:
         return {"trade_date": None, "summary": [], "details": [], "detail_count": 0}
@@ -374,6 +375,7 @@ def _broad_label(code: str | None, name: str | None) -> str | None:
 def board(data_dir: Path | None = None) -> dict:
     """资金页一次读完。只读已落盘分区，没有的块留空，不把缺失写成 0。"""
     root = _dir(data_dir)
+    store.repair_szse_margin_summaries(root)
     return {
         "industry": _sector_board(root, "industry"),
         "concept": _sector_board(root, "concept"),

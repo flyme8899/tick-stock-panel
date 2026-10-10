@@ -197,9 +197,11 @@ def normalize_margin_summary(
 ) -> list[dict]:
     """两融汇总。上交所自带信用交易日期。深交所汇总没有日期列，用调用方传入的交易日。
 
-    akshare 1.19.1 的 ``stock_margin_sse`` / ``stock_margin_szse`` 只做
-    ``to_numeric``，融资余额单位是元，这里不再乘。
+    akshare 1.19.1 的 ``stock_margin_sse`` / ``stock_margin_szse`` 都只做
+    ``to_numeric``，不再乘单位。上交所融资余额是元（2026-10-09 实盘约 1.29e12）。
+    深交所汇总目录是亿元（例如 12380.27），这里按市场换成元。明细行仍是元，不在这里乘。
     """
+    bare = BARE_YI if market == "szse" else BARE_YUAN
     out = []
     for row in rows:
         day = _date(_text(row, "trade_date", "信用交易日期", "日期")) or (trade_date or "")
@@ -212,14 +214,14 @@ def normalize_margin_summary(
             "trade_date": day,
             "row_kind": "summary",
             "margin_balance": money_to_yuan(
-                row.get("margin_balance", row.get("融资余额")), bare=BARE_YUAN,
+                row.get("margin_balance", row.get("融资余额")), bare=bare,
             ),
             "short_balance": money_to_yuan(
                 row.get("short_balance", row.get("融券余量金额", row.get("融券余额"))),
-                bare=BARE_YUAN,
+                bare=bare,
             ),
             "margin_buy": money_to_yuan(
-                row.get("margin_buy", row.get("融资买入额")), bare=BARE_YUAN,
+                row.get("margin_buy", row.get("融资买入额")), bare=bare,
             ),
             "source": "akshare",
         })

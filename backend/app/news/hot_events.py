@@ -6,8 +6,8 @@
 共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
 
 展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v4。
-模型要给出完整中文标题，不超过 28 字，写明主体、动作和宾语，不带时间戳、括号和省略号。
-规则只做校验：不合格就再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
+模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
+规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
 清理会去掉开头的钟点或【前的分钟数字、【】标签和末尾省略号，并停在句号前。
 栏目标题，以及只有点评、重点、没有动作的稿，不进列表。
 
@@ -22,6 +22,7 @@ import hashlib
 import logging
 import math
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
@@ -45,6 +46,12 @@ _LLM_TITLE_TOKENS = 1600
 _TITLE_LIMIT = 20
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
 _TITLE_HARD = 28
+# 模型标题只拒绝真正的残句。28 字是提示里的目标，不是验收上限。
+_LLM_TITLE_MAX = 48
+# 清理后的回退标题如果停在这些残词上，不能拿来顶替没通过的模型标题。
+_FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
+_FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
+_CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
 # 标题缓存按这个版本取。旧键里的截断标题不再套用，下一轮重新生成。
 _TITLE_CACHE_VERSION = 4
 _CONCEPT_LIMIT = 4
@@ -347,10 +354,12 @@ def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
     groups: dict[int, list[dict]] = defaultdict(list)
     for index, doc in enumerate(docs):
         groups[find(index)].append(doc)
-    events = [
-        event for event in (_event_from(members, now) for members in groups.values())
-        if _cleaned_display_ok(event.get("name"))
-    ]
+    events = []
+    for members in groups.values():
+        event = _event_from(members, now)
+        # 加红稿即使关键词标题还不完整也先留下，后面还有模型和回退标题。
+        if _cleaned_display_ok(event.get("name")) or int(event.get("red_count") or 0) > 0:
+            events.append(event)
     return _rank_events(events, now, grade=True)
 
 
@@ -359,6 +368,8 @@ def _doc(row: dict) -> dict | None:
     summary = _summary_text(row)
     if not title and not summary:
         return None
+    source = str(row.get("source") or "")
+    red = is_red(source, row.get("level"))
     published = row["published"]
     concepts: list[str] = []
     stocks: dict[str, str] = {}
@@ -376,7 +387,9 @@ def _doc(row: dict) -> dict | None:
     if not lead or not action:
         lead, action, obj = _parse_phrase(summary)
     shown = title or summary[:80]
-    if _relevance(shown, lead, action, concepts, stocks) < _RELEVANCE_MIN:
+    relevance = _relevance(shown, lead, action, concepts, stocks)
+    # 加红不依赖涨价、发布这类动词。普通稿仍要主体和动作都在，才不会把闲聊收进榜。
+    if relevance < _RELEVANCE_MIN and not red:
         return None
     entity_text = title
     if summary and not _explicit_entities(title):
@@ -385,11 +398,10 @@ def _doc(row: dict) -> dict | None:
     if not entities and _subject_is_vague(lead):
         entities = _explicit_entities(summary[:200])
     tokens = _title_tokens(lead, obj, concepts, title or summary[:80], entities)
-    source = str(row.get("source") or "")
     return {
         "item_id": row.get("id"),
         "source": source,
-        "red": is_red(source, row.get("level")),
+        "red": red,
         "published": published,
         "title": title or summary[:80],
         "entity_text": entity_text,
@@ -398,7 +410,7 @@ def _doc(row: dict) -> dict | None:
         "action": action,
         "object": obj,
         "entities": entities,
-        "relevance": _relevance(shown, lead, action, concepts, stocks),
+        "relevance": relevance,
         "concepts": concepts,
         "stocks": stocks,
         "tokens": tokens,
@@ -1523,29 +1535,70 @@ def _is_section_label(name: object) -> bool:
     return "点评" in text or text.startswith("重点")
 
 
-def _llm_title_ok(title: str) -> bool:
-    """模型标题只验收：完整中文、有主体动作宾语、不超过 28 字，且不是钟点、标签或半句。"""
+def _llm_title_reject_reason(title: str) -> str:
+    """模型标题的拒绝原因。空字符串表示可以上屏。
+
+    字数只卡到 48。标题中间的年份、价格（2026、13.1元）不是截断；
+    只有整句停在数字上才算数字被截断。
+    """
     text = _compact(title)
-    if (
-        not text
-        or text == "事件"
-        or len(text) < 6
-        or len(text) > _TITLE_HARD
-        or _is_section_label(text)
-    ):
-        return False
-    if text[0].isdigit() or any(char in text for char in "【】[]"):
-        return False
-    if "..." in text or "…" in text or _starts_fragment(text):
-        return False
-    if _ends_abruptly(text) or _ends_split_verb(text) or _ends_mid_number(text):
-        return False
+    if not text or text == "事件":
+        return "空标题"
+    if len(text) < 6:
+        return "过短"
+    if len(text) > _LLM_TITLE_MAX:
+        return "超过48字"
+    if _is_section_label(text):
+        return "栏目标签"
+    if text[0].isdigit():
+        return "以数字开头"
+    if any(char in text for char in "【】[]"):
+        return "含括号"
+    if "..." in text or "…" in text:
+        return "省略号"
+    if _starts_fragment(text):
+        return "半句话"
+    if _ends_abruptly(text):
+        return "结尾不完整"
+    if _ends_split_verb(text):
+        return "动词被截断"
+    if _ends_mid_number(text):
+        return "数字被截断"
     if sum(1 for char in text if "\u4e00" <= char <= "\u9fff") < 2:
-        return False
+        return "中文不足"
     if _cut_glued_sentence(text) != text:
-        return False
+        return "粘连了下一句"
     lead, action, obj = _split_headline(text)
-    return bool(action and obj and _subject_ok(lead))
+    if not (action and obj and _subject_ok(lead)):
+        return "缺少主体、动作或宾语"
+    return ""
+
+
+def _llm_title_ok(title: str) -> bool:
+    """模型标题：完整中文，有主体、动作和宾语，且不是钟点、标签或半句。"""
+    return _llm_title_reject_reason(title) == ""
+
+
+def _has_emoji(text: str) -> bool:
+    for char in text:
+        code = ord(char)
+        if code >= 0x1F000 or 0x2600 <= code <= 0x27BF:
+            return True
+        if code > 0x2100 and unicodedata.category(char) == "So":
+            return True
+    return False
+
+
+def _fallback_title_ok(name: object) -> bool:
+    """回退标题比关键词聚类更严：表情、斜杠串票、残词和点评起句都不能上屏。"""
+    if not _cleaned_display_ok(name):
+        return False
+    text = _compact(str(name or ""))
+    if _has_emoji(text) or _CJK_SLASH.search(text):
+        return False
+    if any(text.startswith(prefix) for prefix in _FALLBACK_BAD_OPENINGS):
+        return False
+    return not any(text.endswith(tail) for tail in _FALLBACK_BAD_TAILS)
 
 
 def _cleaned_display_ok(name: object) -> bool:
@@ -1564,7 +1617,7 @@ def _fallback_cleaned_name(event: dict) -> str:
     sources.append(str(event.get("name") or ""))
     for text in sources:
         cleaned = _cleaned_headline(text)
-        if _cleaned_display_ok(cleaned):
+        if _fallback_title_ok(cleaned):
             return cleaned
     return ""
 
@@ -1573,7 +1626,7 @@ def _ensure_shown_name(event: dict) -> None:
     if event.get("_llm_title_applied") and _llm_title_ok(str(event.get("name") or "")):
         return
     name = str(event.get("name") or "")
-    if _cleaned_display_ok(name):
+    if _fallback_title_ok(name):
         return
     event["name"] = _fallback_cleaned_name(event)
     event.pop("_llm_title_applied", None)
@@ -1583,7 +1636,7 @@ def _keep_shown_event(event: dict) -> bool:
     name = str(event.get("name") or "")
     if event.get("_llm_title_applied"):
         return _llm_title_ok(name)
-    return _cleaned_display_ok(name)
+    return _fallback_title_ok(name)
 
 
 def _cached_title_usable(cached: dict) -> bool:
@@ -1618,7 +1671,8 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "只输出 JSON："
         '{"events":[{"id":"1","title":"","concepts":[],"category":"",'
         '"direction":"利好或利空","importance":"重大或重要或一般或琐碎"}]}。'
-        "title 必须是完整的中文标题，不超过28个字，写明主体、动作和宾语，"
+        "title 必须是完整的中文标题，尽量不超过28个字，写完整，不要为了压字数把词截断，"
+        "写明主体、动作和宾语，"
         "例如美联储降息25基点。不要半句话，不要时间戳，不要【】，不要省略号，"
         "不要以数字或钟点开头，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
         "不要把下一句粘进来。不要用「事件」当标题。不要输出重点、点评或栏目标签。"
@@ -1691,7 +1745,10 @@ def _label_with_llm(events: list[dict]) -> None:
 
 
 def _accept_title(event: dict, parsed: dict | None) -> bool:
-    if not parsed or not _llm_title_ok(str(parsed.get("title") or "")):
+    title = str((parsed or {}).get("title") or "")
+    reason = _llm_title_reject_reason(title)
+    if reason:
+        logger.info("热门事件标题未采用: %s（%s）", title or "∅", reason)
         return False
     _apply_llm(event, parsed)
     _LLM_CACHE[_title_cache_key(str(event.get("_fp") or ""))] = parsed
