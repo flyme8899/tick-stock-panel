@@ -166,7 +166,7 @@ AUTH_PASSWORD='你的密码'
 2. 用 PBKDF2 哈希后写入 `auth.json`(`chmod 600`,只存哈希不存明文)
 3. **之后这个环境变量就不再被读取** —— 是一次性的初始化
 
-设完后即可用公网地址 + 这个密码正常登录。后续改密码请用页面 UI(`设置 → 修改密码`),不受环境变量影响。
+设完后即可用公网地址登录。登录页需要用户名:这份旧版共享密码使用用户名 `admin`,也可以把用户名留空。后续改密码请用页面 UI(`设置 → 修改密码`),不受环境变量影响。
 
 **注意事项:**
 
@@ -181,6 +181,18 @@ AUTH_PASSWORD='你的密码'
 ```bash
 rm data/user_data/auth.json   # 停服后执行,清空后重启
 ```
+
+### 多用户账号
+
+独立账号写在 `data/users.json`(可用 `AUTH_USERS` 指向其他文件,或内联只含 Argon2id/bcrypt 哈希的 JSON)。明文密码不会写入文件。
+
+```bash
+cd backend && uv run python ../scripts/manage_users.py add alice
+cd backend && uv run python ../scripts/manage_users.py reset alice
+cd backend && uv run python ../scripts/manage_users.py remove alice
+```
+
+`add` 和 `reset` 会生成强密码并只打印一次。登录失败按来源 IP 和用户名限流(5 次后锁定 5 分钟)。各账号会话分开,退出只注销自己,权限目前相同。`AUTH_PASSWORD` 仍是用户名 `admin`(或留空用户名)的旧版登录,不会覆盖账号文件。说明见 [deploy-password.md](./deploy-password.md)。
 
 ### 方式二:SSH 端口转发
 

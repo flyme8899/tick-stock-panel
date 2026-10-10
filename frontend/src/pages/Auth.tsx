@@ -3,7 +3,7 @@
  *
  * 根据后端 /api/auth/status 的 configured 字段决定显示:
  *   - configured=false → 显示「设置访问密码」(首次)
- *   - configured=true  → 显示「登录」
+ *   - configured=true  → 显示「登录」(用户名 + 密码; 旧版共享密码可留空用户名或填 admin)
  *
  * 安全:
  *   - 设密码接口后端限本机/内网; 公网用户设密码会被 403 拒绝, 页面据此提示。
@@ -20,6 +20,7 @@ import { cn } from '@/lib/cn'
 
 export function Auth() {
   const navigate = useNavigate()
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')  // 仅设密码时用
   const [showPwd, setShowPwd] = useState(false)
@@ -43,7 +44,7 @@ export function Auth() {
       if (isSetup) {
         return api.authSetup(password)
       }
-      return api.authLogin(password)
+      return api.authLogin(password, username.trim())
     },
     onSuccess: () => {
       // 成功: 跳回原页面(或首页)
@@ -106,20 +107,35 @@ export function Auth() {
                 {isSetup ? '设置访问密码' : '登录访问'}
               </div>
               <div className="text-[11px] text-muted">
-                {isSetup ? '首次使用, 请为面板设置访问密码' : '请输入访问密码以继续'}
+                {isSetup ? '首次使用, 请为面板设置访问密码' : '请输入用户名和密码'}
               </div>
             </div>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-3">
+            {!isSetup && (
+              <input
+                type="text"
+                name="username"
+                value={username}
+                onChange={e => setUsername(e.target.value)}
+                placeholder="用户名"
+                autoFocus
+                autoComplete="username"
+                className="h-10 w-full rounded-btn border border-border bg-base px-3 text-sm text-foreground outline-none transition-colors focus:border-accent/50"
+              />
+            )}
+
             {/* 密码输入 */}
             <div className="relative">
               <input
                 type={showPwd ? 'text' : 'password'}
+                name="password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                placeholder="访问密码"
-                autoFocus
+                placeholder={isSetup ? '访问密码' : '密码'}
+                autoFocus={isSetup}
+                autoComplete={isSetup ? 'new-password' : 'current-password'}
                 className="h-10 w-full rounded-btn border border-border bg-base px-3 pr-9 text-sm text-foreground outline-none transition-colors focus:border-accent/50"
               />
               <button
@@ -163,6 +179,12 @@ export function Auth() {
               )}
             </button>
           </form>
+
+          {!isSetup && (
+            <p className="mt-3 text-[10px] leading-relaxed text-muted/70">
+              多人账号由服务器上的用户文件管理。仍使用单一访问密码时，用户名填 admin，或留空。
+            </p>
+          )}
 
           {/* 提示: 设密码模式告知本机限制 */}
           {isSetup && (

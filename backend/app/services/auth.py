@@ -1,15 +1,14 @@
-"""访问密码认证 — 单用户, 自托管场景。
+"""访问认证 — 旧版共享密码 + 多用户账号。
 
 设计:
-  - 密码用 PBKDF2-HMAC-SHA256 哈希(标准库 hashlib, 无新依赖), 加随机 salt。
-    即使 auth.json 泄露, 也无法逆向出明文密码。
-  - 会话用随机 token(token_urlsafe), 内存 + 文件双存(支持多进程/重启不丢失)。
-  - 存储: data/user_data/auth.json (chmod 0600), 仿 secrets_store 模式。
+  - 旧版共享密码仍用 PBKDF2-HMAC-SHA256（auth.json）。AUTH_PASSWORD 只做一次性初始化。
+  - 多用户账号在 data/users.json（或 AUTH_USERS），密码只存 Argon2id / bcrypt 哈希。
+  - 会话按账号签发。token 内存 + auth.json 双存，登出只作废当前 token。
+  - 所有已登录账号权限相同，会话里不区分角色。
 
 安全要点:
   - 设密码接口必须限制本机/内网(见 auth router), 防黑客抢占域名抢先设密码。
-  - 登录限流: 错5次锁5分钟(见 auth router 内存计数)。
-  - 单密码, 不做多用户(避免重构全项目数据层)。
+  - 登录限流: 同一 IP 或同一用户名错 5 次锁 5 分钟(见 auth router)。
 """
 from __future__ import annotations
 
@@ -22,6 +21,7 @@ import threading
 import time
 from pathlib import Path
 
+from app.services import user_accounts
 from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -31,12 +31,14 @@ _PBKDF2_ITER = 200_000
 _SALT_LEN = 16
 _TOKEN_BYTES = 32
 
-# 会话有效期: 30 天(自托管单用户, 长一点减少重登频率)
+# 会话有效期: 30 天(自托管, 长一点减少重登频率)
 SESSION_TTL = 30 * 24 * 3600
+# 旧版共享密码登录使用的用户名。若 users 文件里另有 admin 账号，则该名字只属于那个账号。
+LEGACY_USERNAME = "admin"
 
 _lock = threading.Lock()
-# 内存中的有效会话: { token: expire_ts }。进程重启后从磁盘恢复。
-_sessions: dict[str, float] = {}
+# 内存中的有效会话: { token: {username, kind, expire, iat, rev} }。进程重启后从磁盘恢复。
+_sessions: dict[str, dict] = {}
 
 # 「是否已设密码」缓存: 每个 /api/ 请求都要判定, auth_middleware 原先每次 read_text
 # 磁盘 (阻塞事件循环)。此处懒加载缓存, set_password 后失效重算 (仍返回最新真值)。
@@ -90,34 +92,37 @@ def _verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
 # 密码管理
 # ================================================================
 
-def is_configured() -> bool:
-    """是否已设置访问密码 (带缓存)。
-
-    热路径 (auth_middleware 每请求调用): 命中缓存则不碰磁盘, 不阻塞事件循环。
-    首次或 set_password 失效后, 懒加载重读一次 auth.json, 保证返回最新真值。
-    """
+def _legacy_configured() -> bool:
+    """是否已写入旧版共享密码。热路径命中缓存则不读盘。"""
     global _configured_cache
     if _configured_cache is None:
         d = _load()
         _configured_cache = bool(d.get("password_hash"))
-    return _configured_cache
+    return bool(_configured_cache)
+
+
+def is_configured() -> bool:
+    """已有旧版共享密码，或至少有一个多用户账号。"""
+    if _legacy_configured():
+        return True
+    return user_accounts.has_users()
 
 
 def set_password(password: str) -> None:
-    """设置/修改访问密码。清空所有现有会话(强制重新登录)。"""
+    """设置/修改旧版共享密码。只作废 legacy 会话，不影响多用户账号的会话。"""
     global _configured_cache
     if len(password) < 6:
         raise ValueError("密码至少 6 位")
     salt_hex, hash_hex = _hash_password(password)
     with _lock:
-        _sessions.clear()  # 改密码 = 旧会话全部失效
-        _save({
-            "password_hash": hash_hex,
-            "password_salt": salt_hex,
-            "updated_at": int(time.time()),
-            "sessions": {},  # 清空持久化会话
-        })
-    _configured_cache = None  # 失效缓存, 下次 is_configured 重读最新真值
+        _drop_kind_locked("legacy")
+        d = _load()
+        d["password_hash"] = hash_hex
+        d["password_salt"] = salt_hex
+        d["updated_at"] = int(time.time())
+        d["sessions"] = _dump_sessions()
+        _save(d)
+    _configured_cache = None  # 失效缓存, 下次 _legacy_configured 重读最新真值
     logger.info("access password set")
 
 
@@ -144,8 +149,9 @@ def bootstrap_from_env() -> bool:
             pwd = raw_pwd.strip()
     if not pwd:
         return False
-    if is_configured():
-        # 已设过密码, 不覆盖 (避免环境变量反复重置用户在 UI 改的密码)
+    if _legacy_configured():
+        # 已设过共享密码, 不覆盖 (避免环境变量反复重置用户在 UI 改的密码)。
+        # 已有多用户账号时仍允许补上这份旧版密码。
         return False
     try:
         set_password(pwd)
@@ -157,48 +163,189 @@ def bootstrap_from_env() -> bool:
         return False
 
 
-def verify_and_create_session(password: str) -> str | None:
-    """验证密码, 成功则创建会话并返回 token, 失败返回 None。"""
+def _verify_legacy(password: str) -> bool:
     d = _load()
     if not d.get("password_hash"):
+        return False
+    return _verify_password(password, d.get("password_salt", ""), d["password_hash"])
+
+
+def authenticate(password: str, username: str | None = None) -> dict | None:
+    """校验凭据，不签发会话。
+
+    空用户名只匹配旧版共享密码。指定用户名时先查账号文件；
+    仅当不存在同名账号且用户名是 admin 时，才回退到旧版密码。
+    """
+    name = (username or "").strip()
+    if not name:
+        if _verify_legacy(password):
+            return {"username": LEGACY_USERNAME, "kind": "legacy", "rev": 0}
+        # 只有多用户、没有旧版密码时，空用户名也走一次哈希，避免用响应时间判断用户名是否存在。
+        if not _legacy_configured():
+            user_accounts.verify_user("*", password)
         return None
-    if not _verify_password(password, d.get("password_salt", ""), d["password_hash"]):
+    record = user_accounts.verify_user(name, password)
+    if record is not None:
+        return {"username": record.username, "kind": "user", "rev": record.rev}
+    try:
+        canonical = user_accounts.normalize_username(name)
+    except ValueError:
         return None
+    if (
+        canonical == LEGACY_USERNAME
+        and user_accounts.get_user(canonical) is None
+        and _verify_legacy(password)
+    ):
+        return {"username": LEGACY_USERNAME, "kind": "legacy", "rev": 0}
+    return None
+
+
+def verify_and_create_session(password: str, username: str | None = None) -> str | None:
+    """验证密码, 成功则创建该账号的会话并返回 token, 失败返回 None。"""
+    identity = authenticate(password, username)
+    if identity is None:
+        return None
+    return _issue_session(identity)
+
+
+def _issue_session(identity: dict) -> str:
     token = _secrets.token_urlsafe(_TOKEN_BYTES)
-    expire = time.time() + SESSION_TTL
+    now = time.time()
+    sess = {
+        "username": identity["username"],
+        "kind": identity["kind"],
+        "expire": now + SESSION_TTL,
+        "iat": now,
+        "rev": int(identity.get("rev") or 0),
+    }
     with _lock:
-        _sessions[token] = expire
+        _sessions[token] = sess
         _persist_sessions_locked()
     return token
 
 
 def revoke_session(token: str) -> None:
-    """注销会话(登出)。"""
+    """注销会话(登出)。只删除这一个 token。"""
     with _lock:
         _sessions.pop(token, None)
         _persist_sessions_locked()
 
 
+def revoke_user_sessions(username: str) -> None:
+    """作废某个多用户账号的全部会话。"""
+    try:
+        canonical = user_accounts.normalize_username(username)
+    except ValueError:
+        return
+    with _lock:
+        dead = [
+            token
+            for token, sess in _sessions.items()
+            if sess.get("kind") == "user" and sess.get("username") == canonical
+        ]
+        for token in dead:
+            _sessions.pop(token, None)
+        if dead:
+            _persist_sessions_locked()
+
+
+def session_info(token: str) -> dict | None:
+    """有效会话的副本。无效 token 返回 None。"""
+    if not token or not is_valid_session(token):
+        return None
+    with _lock:
+        sess = _sessions.get(token)
+        return dict(sess) if sess else None
+
+
+def session_username(token: str) -> str | None:
+    info = session_info(token)
+    if info is None:
+        return None
+    return str(info.get("username") or "")
+
+
 def is_valid_session(token: str) -> bool:
-    """检查会话是否有效(存在且未过期)。过期则清理。"""
+    """检查会话是否有效(存在、未过期、账号仍有效)。过期或已重置密码则清理。"""
     if not token:
         return False
     with _lock:
-        expire = _sessions.get(token)
-        if expire is None:
+        sess = _sessions.get(token)
+        if sess is None:
             return False
-        if time.time() > expire:
+        if time.time() > float(sess["expire"]):
             _sessions.pop(token, None)
             _persist_sessions_locked()
             return False
+        snapshot = dict(sess)
+    if _session_authorized(snapshot):
         return True
+    with _lock:
+        current = _sessions.get(token)
+        if current is not None and current.get("iat") == snapshot.get("iat"):
+            _sessions.pop(token, None)
+            _persist_sessions_locked()
+    return False
+
+
+def _session_authorized(sess: dict) -> bool:
+    if sess.get("kind") == "user":
+        user = user_accounts.get_user(str(sess.get("username") or ""))
+        if user is None:
+            return False
+        return int(sess.get("rev") or 0) == user.rev
+    return _legacy_configured()
+
+
+def _drop_kind_locked(kind: str) -> None:
+    for token, sess in list(_sessions.items()):
+        if sess.get("kind") == kind:
+            _sessions.pop(token, None)
+
+
+def _dump_sessions() -> dict[str, dict]:
+    return {token: dict(sess) for token, sess in _sessions.items()}
 
 
 def _persist_sessions_locked() -> None:
     """把当前内存会话写回 auth.json(需持锁调用)。"""
     d = _load()
-    d["sessions"] = {t: exp for t, exp in _sessions.items()}
+    d["sessions"] = _dump_sessions()
     _save(d)
+
+
+def _coerce_session(raw: object) -> dict | None:
+    """兼容旧格式 {token: expire_ts}。"""
+    if isinstance(raw, (int, float)):
+        return {
+            "username": LEGACY_USERNAME,
+            "kind": "legacy",
+            "expire": float(raw),
+            "iat": 0.0,
+            "rev": 0,
+        }
+    if not isinstance(raw, dict):
+        return None
+    try:
+        expire = float(raw["expire"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    kind = raw.get("kind")
+    if kind not in ("user", "legacy"):
+        kind = "legacy"
+    username = str(raw.get("username") or (LEGACY_USERNAME if kind == "legacy" else ""))
+    try:
+        rev = int(raw.get("rev") or 0)
+        iat = float(raw.get("iat") or 0)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "username": username,
+        "kind": kind,
+        "expire": expire,
+        "iat": iat,
+        "rev": rev,
+    }
 
 
 def _restore_sessions() -> None:
@@ -207,11 +354,21 @@ def _restore_sessions() -> None:
         d = _load()
         now = time.time()
         saved = d.get("sessions") or {}
-        for token, expire in saved.items():
-            if isinstance(expire, (int, float)) and expire > now:
-                _sessions[token] = expire
-        if len(_sessions) != len(saved):
-            # 有过期会话被清理, 落盘一次
+        if not isinstance(saved, dict) or not saved:
+            return
+        migrated = False
+        for token, raw in saved.items():
+            if not isinstance(token, str):
+                migrated = True
+                continue
+            if not isinstance(raw, dict):
+                migrated = True
+            sess = _coerce_session(raw)
+            if sess and sess["expire"] > now:
+                _sessions[token] = sess
+            else:
+                migrated = True
+        if migrated:
             _persist_sessions_locked()
 
 

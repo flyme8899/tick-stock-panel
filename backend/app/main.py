@@ -519,6 +519,8 @@ async def auth_middleware(request: Request, call_next):
     # 情况 3: 已设密码, 检查会话
     token = request.cookies.get(auth_api.COOKIE_NAME)
     if token and auth_service.is_valid_session(token):
+        # 账号之间权限相同, 这里只标明是谁的会话。
+        request.state.auth_user = auth_service.session_username(token)
         return await call_next(request)
     # 未登录: 401(前端跳登录页)
     return JSONResponse(status_code=401, content={"detail": "未登录或会话已过期"})
