@@ -13,8 +13,9 @@ https://www.163.com/dy/media/T1730214999977.html ；列表里没有当天稿件�
 表格交给视觉模型。密钥只用 VISION_AI_*，不读取文本模型的 AI_API_KEY。
 默认模型是 deepseek/deepseek-v4-flash-vision-exp。表格 OCR 保持思考，
 max_tokens 至少 8192；关掉思考会让表格识别变差。备选 glm-5.3-flash、
-mimo-v2.6-flash 不改默认。一张图一次请求；空内容再试一次。有两份结果时，
-正负号不一致的格子留空。
+mimo-v2.6-flash 不改默认。一张图一次请求；空内容再试一次。若这次是因为
+长度截断且正文为空，重试把 max_tokens 提高到 16384，思考仍然打开。
+有两份结果时，正负号不一致的格子留空。
 """
 
 from __future__ import annotations
@@ -57,6 +58,8 @@ MAX_VISION_IMAGES = 6
 # 一张表大约 20 只 ETF。思考占掉 completion 预算，多张图叠在一次请求里会把正文挤空。
 VISION_BATCH_SIZE = 1
 VISION_EMPTY_RETRIES = 1
+# 总览大表会把 8192 全部用在思考上，finish_reason=length 且 content 为空。
+VISION_LENGTH_MAX_TOKENS = 16384
 MAX_STORED_IMAGES = 12
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_BROAD = 20
@@ -393,10 +396,17 @@ def wechat_article_id(url: str) -> str:
     return ""
 
 
-def vision_payload(client, images: list[str], *, model: str) -> dict:
+def vision_payload(
+    client,
+    images: list[str],
+    *,
+    model: str,
+    max_tokens: int | None = None,
+) -> dict:
     """一次请求只放一张表。表格 OCR 不关思考。
 
     image_url 用 data URL。tokenhub 拉不到 nimg.ws.126.net，远程地址会 400。
+    max_tokens 只在长度截断后的那一次重试里提高，不关掉思考。
     """
     content: list[dict] = [{"type": "text", "text": VISION_PROMPT}]
     kept = 0
@@ -414,6 +424,8 @@ def vision_payload(client, images: list[str], *, model: str) -> dict:
         "messages": [{"role": "user", "content": content}],
     }
     body.update(vision_generation(model, ocr=True))
+    if max_tokens is not None:
+        body["max_tokens"] = max(int(max_tokens), body["max_tokens"])
     return body
 
 
@@ -434,6 +446,14 @@ def _message_text(payload: dict) -> str:
     if not isinstance(content, str) or not content.strip():
         raise EmptyVisionError("视觉模型没有返回内容")
     return content
+
+
+def _stopped_for_length(payload: dict) -> bool:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return False
+    reason = choices[0].get("finish_reason")
+    return isinstance(reason, str) and reason.strip().lower() == "length"
 
 
 def parse_vision_response(payload: dict) -> dict:
@@ -784,14 +804,23 @@ def _call_vision(client, images: list[str]) -> dict:
 
 def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, bool]:
     """空内容再试一次。第一次已有数字时，再用一次结果核对正负号。"""
-    first, empty = _read_vision(client, images, key)
+    first, empty, length_stop = _read_vision(client, images, key)
     if first is None:
         if not empty:
             return None, False
         second = None
         for _extra in range(VISION_EMPTY_RETRIES):
-            logger.warning("ETF申赎视觉模型返回空内容，重试一次")
-            second, _again = _read_vision(client, images, key)
+            if length_stop:
+                logger.warning(
+                    "ETF申赎视觉输出被长度截断且没有正文，提高到 %s 再试一次",
+                    VISION_LENGTH_MAX_TOKENS,
+                )
+                second, _again, _stop = _read_vision(
+                    client, images, key, max_tokens=VISION_LENGTH_MAX_TOKENS
+                )
+            else:
+                logger.warning("ETF申赎视觉模型返回空内容，重试一次")
+                second, _again, _stop = _read_vision(client, images, key)
             if second is not None:
                 break
         if second is None:
@@ -799,7 +828,7 @@ def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, boo
             return None, True
         return second, True
     try:
-        second, confirm_empty = _read_vision(client, images, key)
+        second, confirm_empty, _confirm_stop = _read_vision(client, images, key)
     except ExtractFailedError as exc:
         logger.warning("ETF申赎正负号确认失败，沿用第一次结果: %s", _public_error(exc))
         return first, empty
@@ -813,12 +842,22 @@ def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, boo
         return None, empty or confirm_empty
 
 
-def _read_vision(client, images: list[str], key: str) -> tuple[dict | None, bool]:
-    payload = _post_vision(client, vision_payload(client, images, model=vision_model()), key)
+def _read_vision(
+    client,
+    images: list[str],
+    key: str,
+    *,
+    max_tokens: int | None = None,
+) -> tuple[dict | None, bool, bool]:
+    payload = _post_vision(
+        client,
+        vision_payload(client, images, model=vision_model(), max_tokens=max_tokens),
+        key,
+    )
     try:
-        return parse_vision_response(payload), False
+        return parse_vision_response(payload), False, False
     except EmptyVisionError:
-        return None, True
+        return None, True, _stopped_for_length(payload)
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
 
