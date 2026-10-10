@@ -1,12 +1,23 @@
-"""Local jobs that DSA exposes as CLI flags rather than HTTP routes."""
+"""Jobs that DSA exposes as CLI flags rather than its own HTTP routes.
+
+The panel image does not contain ``vendor/daily_stock_analysis``. Docker
+Compose profile ``dsa`` already runs that source inside the ``dsa`` service,
+so the ETF rotation CLI is executed there. A local checkout that still has
+the vendored tree and its interpreter keeps running the command in-process.
+"""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
 
+from app.custom.dsa.proxy import UpstreamError, enabled, forward
+
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _VENDOR = _REPO_ROOT / "vendor" / "daily_stock_analysis"
+# 比 sidecar 内部的 180 秒多留一点，让超时以 JSON 形式回来，而不是连接被掐断。
+_SIDECAR_TIMEOUT = 200.0
 
 
 def vendor_root() -> Path:
@@ -18,7 +29,7 @@ def sidecar_python() -> Path | None:
     if configured:
         path = Path(configured)
         return path if path.is_file() else None
-    candidate = _VENDOR / ".venv" / "bin" / "python"
+    candidate = vendor_root() / ".venv" / "bin" / "python"
     return candidate if candidate.is_file() else None
 
 
@@ -27,30 +38,30 @@ def etf_rotation_command() -> str:
 
 
 def run_etf_rotation() -> dict:
-    """Run the vendored ETF rotation entry with a fixed argument list.
+    """Run the fixed ETF rotation command where the DSA source lives.
 
-    The pool and cost settings come from the environment, not from the request,
-    so this cannot be turned into a shell invocation.
+    Pool and cost settings come from the environment, not from the request.
     """
-    if not (_VENDOR / "main.py").is_file():
-        return {
-            "ok": False,
-            "detail": "仓库里没有 DSA 源码快照",
-            "command": etf_rotation_command(),
-        }
+    if (vendor_root() / "main.py").is_file():
+        return _run_local()
+    return _run_in_sidecar()
+
+
+def _run_local() -> dict:
+    command = etf_rotation_command()
     python = sidecar_python()
     if python is None:
         return {
             "ok": False,
             "detail": "未找到 DSA 解释器。先运行 scripts/dsa.sh 安装 sidecar，或设置 DSA_PYTHON",
-            "command": etf_rotation_command(),
+            "command": command,
         }
     env = os.environ.copy()
     env.setdefault("ENV_FILE", str(_REPO_ROOT / ".env"))
     try:
         completed = subprocess.run(
             [str(python), "main.py", "--etf-rotation", "--no-notify"],
-            cwd=_VENDOR,
+            cwd=vendor_root(),
             env=env,
             capture_output=True,
             text=True,
@@ -58,11 +69,61 @@ def run_etf_rotation() -> dict:
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "detail": "ETF 轮动超时", "command": etf_rotation_command()}
+        return {"ok": False, "detail": "ETF 轮动超时", "command": command}
     output = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
     return {
         "ok": completed.returncode == 0,
         "code": completed.returncode,
         "detail": output[-8000:],
-        "command": etf_rotation_command(),
+        "command": command,
     }
+
+
+def _run_in_sidecar() -> dict:
+    """Ask the running DSA service to execute the CLI in its own tree."""
+    command = etf_rotation_command()
+    if not enabled():
+        return {
+            "ok": False,
+            "detail": "未配置 DSA_BASE_URL。Docker 请设置为 http://dsa:8000，并用 docker compose --profile dsa 启动。",
+            "command": command,
+        }
+    try:
+        status, payload, _media, _extra = forward(
+            "POST",
+            "tsp/etf-rotation",
+            timeout=_SIDECAR_TIMEOUT,
+        )
+    except UpstreamError as exc:
+        return {
+            "ok": False,
+            "detail": f"{exc}。请用 docker compose --profile dsa 启动，并把 DSA_BASE_URL 设为 http://dsa:8000。",
+            "command": command,
+        }
+    return _parse_sidecar_payload(status, payload, command)
+
+
+def _parse_sidecar_payload(status: int, payload: bytes, command: str) -> dict:
+    text = payload.decode("utf-8", errors="replace")
+    try:
+        body = json.loads(text) if text else {}
+    except json.JSONDecodeError:
+        body = {}
+    if isinstance(body, dict) and "ok" in body:
+        detail = str(body.get("detail") or "")
+        parsed: dict = {
+            "ok": bool(body.get("ok")),
+            "detail": detail[-8000:],
+            "command": command,
+        }
+        if "code" in body:
+            parsed["code"] = body.get("code")
+        return parsed
+    if status == 404:
+        return {
+            "ok": False,
+            "detail": "决策服务没有 ETF 轮动入口。请用当前仓库的 dsa_bootstrap 重启：docker compose --profile dsa up --build。",
+            "command": command,
+        }
+    snippet = text.strip()[-500:]
+    return {"ok": False, "detail": snippet or f"HTTP {status}", "command": command}

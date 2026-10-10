@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -141,7 +142,15 @@ def test_analyze_command_submits_without_notification(monkeypatch: pytest.Monkey
 
 
 def test_etf_job_does_not_spawn_without_runtime(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise AssertionError("有 vendor 源码时不应改去请求 sidecar")
+
     monkeypatch.setattr("app.custom.dsa.jobs.sidecar_python", lambda: None)
+    monkeypatch.setattr("app.custom.dsa.jobs.forward", fail)
+    monkeypatch.setattr(
+        "app.custom.dsa.jobs.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应启动进程")),
+    )
 
     response = client.post("/api/dsa/jobs/etf-rotation")
 
@@ -150,6 +159,78 @@ def test_etf_job_does_not_spawn_without_runtime(client: TestClient, monkeypatch:
     assert body["ok"] is False
     assert "DSA_PYTHON" in body["detail"]
     assert body["command"] == "python main.py --etf-rotation --no-notify"
+
+
+def test_etf_job_runs_inside_sidecar_when_vendor_tree_is_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    def fake_forward(method, path, *, params=None, body=None, content_type=None, timeout=None):
+        captured.update(method=method, path=path, body=body, timeout=timeout)
+        payload = json.dumps({"ok": True, "code": 0, "detail": "目标 510300"}).encode()
+        return 200, payload, "application/json", {}
+
+    monkeypatch.setattr("app.custom.dsa.jobs.vendor_root", lambda: Path("/no/such/dsa-vendor"))
+    monkeypatch.setattr("app.custom.dsa.jobs.forward", fake_forward)
+    monkeypatch.setattr(
+        "app.custom.dsa.jobs.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("app 进程不应执行轮动")),
+    )
+
+    response = client.post("/api/dsa/jobs/etf-rotation", json={"pool": "rm -rf /"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["detail"] == "目标 510300"
+    assert body["code"] == 0
+    assert body["command"] == "python main.py --etf-rotation --no-notify"
+    assert captured == {
+        "method": "POST",
+        "path": "tsp/etf-rotation",
+        "body": None,
+        "timeout": 200.0,
+    }
+
+
+def test_etf_job_reports_sidecar_down_without_spawning(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def down(*_args, **_kwargs):
+        raise UpstreamError("决策服务未连接")
+
+    monkeypatch.setattr("app.custom.dsa.jobs.vendor_root", lambda: Path("/no/such/dsa-vendor"))
+    monkeypatch.setattr("app.custom.dsa.jobs.forward", down)
+
+    response = client.post("/api/dsa/jobs/etf-rotation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert "决策服务未连接" in body["detail"]
+    assert "docker compose --profile dsa" in body["detail"]
+    assert body["command"] == "python main.py --etf-rotation --no-notify"
+
+
+def test_etf_job_explains_missing_sidecar_route(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(*_args, **_kwargs):
+        return 404, b'{"detail":"Not Found"}', "application/json", {}
+
+    monkeypatch.setattr("app.custom.dsa.jobs.vendor_root", lambda: Path("/no/such/dsa-vendor"))
+    monkeypatch.setattr("app.custom.dsa.jobs.forward", missing)
+
+    response = client.post("/api/dsa/jobs/etf-rotation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert "dsa_bootstrap" in body["detail"]
 
 
 def test_schedule_items_cover_shanghai_trading_day_watchlist() -> None:
@@ -287,3 +368,29 @@ def test_schedule_put_persists_through_system_config(
 def test_share_image_timeout_exceeds_plain_history_reads() -> None:
     assert timeout_for("history/12/markdown") == 20
     assert timeout_for("history/12/share-image") == 90
+    assert timeout_for("tsp/etf-rotation") == 200
+    assert normalize_upstream_path("tsp/etf-rotation") == "tsp/etf-rotation"
+
+
+def test_catalog_documents_screening_and_efinance_priority(client: TestClient) -> None:
+    payload = client.get("/api/dsa/catalog").json()
+    purposes = {item["name"]: item["purpose"] for item in payload["env_vars"]}
+    assert "screening_disabled" in purposes["SCREENING_ENABLED"]
+    assert "3" in purposes["EFINANCE_PRIORITY"]
+    assert "TickFlow" in purposes["EFINANCE_PRIORITY"]
+
+
+def test_compose_mounts_etf_job_next_to_bootstrap() -> None:
+    text = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "./backend/app/custom/dsa/etf_job.py:/opt/tsp/etf_job.py:ro" in text
+    assert 'profiles: ["dsa"]' in text
+
+
+def test_env_example_and_guide_document_screening_and_priority() -> None:
+    root = Path(__file__).resolve().parents[2]
+    example = (root / ".env.example").read_text(encoding="utf-8")
+    guide = (root / "docs" / "dsa-integration.md").read_text(encoding="utf-8")
+    for text in (example, guide):
+        assert "SCREENING_ENABLED" in text
+        assert "EFINANCE_PRIORITY=3" in text
+        assert "TickFlow" in text

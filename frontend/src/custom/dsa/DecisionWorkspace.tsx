@@ -561,11 +561,11 @@ function EtfRotation() {
   const run = useMutation({ mutationFn: dsaEtfRotation })
   const detail = isRecord(run.data) ? textOf(run.data.detail, '') : ''
   return (
-    <Panel title="ETF 双动量" hint="不调用大模型。股票池、避险资产和换仓周期读 ETF_ROTATION_* 环境变量。">
+    <Panel title="ETF 双动量" hint="不调用大模型。股票池、避险资产和换仓周期读 ETF_ROTATION_* 环境变量。Docker 下在 dsa 服务里执行。">
       <button className={primaryBtn} type="button" disabled={run.isPending} onClick={() => run.mutate()}>运行轮动</button>
       {run.isError && <div className="mt-2"><Failure error={run.error} /></div>}
       {detail && <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-secondary">{detail}</pre>}
-      {!detail && <p className="mt-3 text-xs text-muted">未安装 sidecar 时会提示如何启动，不会调用系统里别的 Python。</p>}
+      {!detail && <p className="mt-3 text-xs text-muted">没有 sidecar 时会说明原因。Docker 使用 dsa 容器里的源码，不会改用 app 容器里的其他 Python。</p>}
     </Panel>
   )
 }

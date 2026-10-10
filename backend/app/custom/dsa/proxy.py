@@ -27,6 +27,7 @@ ALLOWED_PREFIXES = frozenset(
         "system",
         "usage",
         "backtest",
+        "tsp",
     }
 )
 
@@ -57,7 +58,9 @@ def enabled() -> bool:
 
 def timeout_for(path: str) -> float:
     raw = os.getenv("DSA_TIMEOUT_SECONDS", "").strip()
-    if path.endswith("/share-image"):
+    if path == "tsp/etf-rotation":
+        default = 200.0
+    elif path.endswith("/share-image"):
         default = 90.0
     elif path.split("/", 1)[0] in _LONG_PREFIXES:
         default = 120.0
@@ -317,6 +320,7 @@ def forward(
     params: list[tuple[str, str]] | None = None,
     body: bytes | None = None,
     content_type: str | None = None,
+    timeout: float | None = None,
 ) -> tuple[int, bytes, str, dict[str, str]]:
     """Return status, body, media type and a small set of response headers."""
     if not enabled():
@@ -325,8 +329,9 @@ def forward(
     if body and len(body) > _MAX_BODY:
         raise UpstreamError("请求体过大", status_code=413)
     url = f"{base_url()}/api/v1/{normalized}"
+    client_timeout = timeout_for(normalized) if timeout is None or timeout <= 0 else timeout
     try:
-        with httpx.Client(timeout=timeout_for(normalized), follow_redirects=False) as client:
+        with httpx.Client(timeout=client_timeout, follow_redirects=False) as client:
             headers = _request_headers(content_type)
             response = client.request(
                 method.upper(),
