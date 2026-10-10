@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -60,12 +61,15 @@ def _vision() -> dict:
 
 
 class Resp:
-    def __init__(self, text, url, status=200, headers=None, payload=None):
+    def __init__(self, text, url, status=200, headers=None, payload=None, content=None):
         self.text = text
         self.url = url
         self.status_code = status
         self.headers = headers or {}
         self._payload = payload
+        if content is None:
+            content = text.encode("utf-8") if isinstance(text, str) else b""
+        self.content = content
 
     def json(self):
         if self._payload is None:
@@ -97,6 +101,8 @@ class Client:
 
     def get(self, url, params=None, headers=None):
         self.gets.append(url)
+        if url.startswith(("https://nimg.ws.126.net/", "https://mmbiz.qpic.cn/", "https://mmbiz.qlogo.cn/")):
+            return Resp("", url, headers={"content-type": "image/jpeg"}, content=url.encode("ascii"))
         if url.startswith("https://www.163.com/dy/media/"):
             return Resp(self.media, url)
         if url.startswith("https://www.163.com/dy/article/"):
@@ -234,14 +240,74 @@ def test_vision_response_normalizes_numbers_and_title_date_wins():
     assert "科技" in sectors
 
 
-def test_vision_payload_uses_image_url_and_drops_other_hosts():
+def _data_url(url: str, content_type: str = "image/jpeg") -> str:
+    return "data:" + content_type + ";base64," + base64.b64encode(url.encode("ascii")).decode("ascii")
+
+
+class _ImageDownload:
+    def get(self, url, params=None, headers=None):
+        return Resp("", url, headers={"content-type": "image/jpeg"}, content=url.encode("ascii"))
+
+
+def test_vision_payload_embeds_image_and_drops_other_hosts():
+    jpeg = b"\xff\xd8\xff\xd9"
+
+    class Images:
+        def __init__(self):
+            self.gets = []
+
+        def get(self, url, params=None, headers=None):
+            self.gets.append((url, headers))
+            kind = "image/png" if "mmbiz" in url else "image/jpeg"
+            body = b"\x89PNG" if kind == "image/png" else jpeg
+            return Resp("", url, headers={"content-type": kind}, content=body)
+
+    client = Images()
     body = vision_payload(
+        client,
         ["https://nimg.ws.126.net/a.jpg", "https://evil.example/x.jpg", "http://127.0.0.1/secret"],
         model="glm-5.3-flash",
     )
     parts = body["messages"][0]["content"]
     urls = [part["image_url"]["url"] for part in parts if part["type"] == "image_url"]
-    assert urls == ["https://nimg.ws.126.net/a.jpg"]
+    assert urls == ["data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")]
+    assert urls[0].startswith("data:image/")
+    assert client.gets == [("https://nimg.ws.126.net/a.jpg", client.gets[0][1])]
+    assert client.gets[0][1]["Referer"] == "https://www.163.com/"
+    wechat = vision_payload(client, ["https://mmbiz.qpic.cn/table.png"], model="glm-5.3-flash")
+    wechat_url = next(
+        part["image_url"]["url"]
+        for part in wechat["messages"][0]["content"]
+        if part["type"] == "image_url"
+    )
+    assert wechat_url.startswith("data:image/png;base64,")
+    assert client.gets[-1][1]["Referer"] == "https://mp.weixin.qq.com/"
+
+    class Down:
+        def get(self, url, params=None, headers=None):
+            raise RuntimeError("http 400")
+
+    with pytest.raises(ExtractFailedError, match="下载失败"):
+        vision_payload(Down(), ["https://nimg.ws.126.net/a.jpg"], model="glm-5.3-flash")
+
+    class Html:
+        def get(self, url, params=None, headers=None):
+            return Resp("<html>", url, headers={"content-type": "text/html"}, content=b"<html>")
+
+    with pytest.raises(ExtractFailedError, match="格式不支持"):
+        vision_payload(Html(), ["https://nimg.ws.126.net/a"], model="glm-5.3-flash")
+
+    class Big:
+        def get(self, url, params=None, headers=None):
+            return Resp(
+                "",
+                url,
+                headers={"content-type": "image/jpeg"},
+                content=b"x" * (5 * 1024 * 1024 + 1),
+            )
+
+    with pytest.raises(ExtractFailedError, match="过大"):
+        vision_payload(Big(), ["https://nimg.ws.126.net/a.jpg"], model="glm-5.3-flash")
     assert body["model"] == "glm-5.3-flash"
     assert body["max_tokens"] >= 8192
     assert "thinking" not in body
@@ -257,7 +323,7 @@ def test_short_vision_tasks_disable_thinking_without_touching_ocr():
         "mimo-v2.6-flash",
     )
     for model in ocr_models:
-        body = vision_payload(["https://nimg.ws.126.net/a.jpg"], model=model)
+        body = vision_payload(_ImageDownload(), ["https://nimg.ws.126.net/a.jpg"], model=model)
         assert body["max_tokens"] >= 8192
         assert "thinking" not in body
         assert "reasoning_effort" not in body
@@ -309,7 +375,7 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
         ),
     ]
 
-    class Seq:
+    class Seq(_ImageDownload):
         def __init__(self):
             self.posts = []
 
@@ -341,11 +407,12 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
         assert urls
         sent.extend(urls)
     assert sent == [
-        "https://nimg.ws.126.net/a.jpg",
-        "https://nimg.ws.126.net/a.jpg",
-        "https://nimg.ws.126.net/b.jpg",
-        "https://nimg.ws.126.net/b.jpg",
+        _data_url("https://nimg.ws.126.net/a.jpg"),
+        _data_url("https://nimg.ws.126.net/a.jpg"),
+        _data_url("https://nimg.ws.126.net/b.jpg"),
+        _data_url("https://nimg.ws.126.net/b.jpg"),
     ]
+    assert all(url.startswith("data:image/") for url in sent)
     assert extracted["overview"]["net_1d"] == 12.5
     by_name = {row["name"]: row for row in extracted["etfs"]}
     assert by_name["宽基甲"]["code"] == "510880"
@@ -356,7 +423,7 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
 
 
 def test_empty_content_retries_once_then_skips_that_image(news_db):
-    class Seq:
+    class Seq(_ImageDownload):
         def __init__(self):
             self.posts = []
 
@@ -374,15 +441,15 @@ def test_empty_content_retries_once_then_skips_that_image(news_db):
     assert len(client.posts) == 4
     assert extracted["overview"]["net_1d"] == 12.5
     assert [body["messages"][0]["content"][1]["image_url"]["url"] for body in client.posts] == [
-        "https://nimg.ws.126.net/a.jpg",
-        "https://nimg.ws.126.net/a.jpg",
-        "https://nimg.ws.126.net/b.jpg",
-        "https://nimg.ws.126.net/b.jpg",
+        _data_url("https://nimg.ws.126.net/a.jpg"),
+        _data_url("https://nimg.ws.126.net/a.jpg"),
+        _data_url("https://nimg.ws.126.net/b.jpg"),
+        _data_url("https://nimg.ws.126.net/b.jpg"),
     ]
 
 
 def test_empty_content_on_the_only_image_fails_after_one_retry(news_db):
-    class Seq:
+    class Seq(_ImageDownload):
         def __init__(self):
             self.posts = []
 
@@ -397,7 +464,7 @@ def test_empty_content_on_the_only_image_fails_after_one_retry(news_db):
 
 
 def test_non_empty_garbage_is_not_retried(news_db):
-    class Seq:
+    class Seq(_ImageDownload):
         def __init__(self):
             self.posts = []
 
@@ -431,7 +498,7 @@ def test_sign_mismatch_across_retries_clears_only_that_cell(news_db):
         _completion(json.dumps(second, ensure_ascii=False)),
     ]
 
-    class Seq:
+    class Seq(_ImageDownload):
         def __init__(self):
             self.posts = []
 
@@ -541,7 +608,7 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert saved["found"] is True
     assert saved["pending"] is False
     assert len(client.posts) == 4
-    assert all("163.com" in url for url in client.gets)
+    assert all("163.com" in url or url.startswith("https://nimg.ws.126.net/") for url in client.gets)
     images = []
     for url, headers, body in client.posts:
         assert url == "https://tokenhub.tencentmaas.com/v1/chat/completions"
@@ -562,11 +629,12 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
         assert len(parts) == 1
         images.extend(parts)
     assert images == [
-        "https://nimg.ws.126.net/a.jpg",
-        "https://nimg.ws.126.net/a.jpg",
-        "https://nimg.ws.126.net/b.jpg",
-        "https://nimg.ws.126.net/b.jpg",
+        _data_url("https://nimg.ws.126.net/a.jpg"),
+        _data_url("https://nimg.ws.126.net/a.jpg"),
+        _data_url("https://nimg.ws.126.net/b.jpg"),
+        _data_url("https://nimg.ws.126.net/b.jpg"),
     ]
+    assert all(url.startswith("data:image/") for url in images)
 
     row = (
         get_store()
@@ -589,11 +657,12 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert "12.5亿元" in row["clean_text"]
     assert "evil.example" not in row["raw_json"]
 
+    fetched = len(client.gets)
     again = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
     assert again["found"] is True
     assert again["inserted"] == 0
     assert len(client.posts) == 4
-    assert len(client.gets) == 2
+    assert len(client.gets) == fetched
 
     monkeypatch.setattr("app.news.config.feed_token", lambda: "feed-secret")
     from app.api.news import dsa_feed
