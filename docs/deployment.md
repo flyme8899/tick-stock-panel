@@ -63,7 +63,7 @@ docker compose up --build -d
 
 ### 容器不以 root 运行
 
-`docker-compose.yml` 里的 app 使用 `user: ${APP_UID:-1000}:${APP_GID:-1000}`。`.env` 里的 `APP_UID` / `APP_GID` 默认是 `1000`，和 Ubuntu 上的 `ubuntu` 用户一致。镜像把家目录放在 `/home/app`，uv 缓存放在 `/home/app/.cache/uv`，Codex 登录态挂到 `/codex-home`（`CODEX_HOME`）。这些路径不在 `/root` 下面，因为基础镜像里 `/root` 只有 root 能进入。
+`docker-compose.yml` 里的 app 和 dsa 都使用 `user: ${APP_UID:-1000}:${APP_GID:-1000}`。`.env` 里的 `APP_UID` / `APP_GID` 默认是 `1000`，和 Ubuntu 上的 `ubuntu` 用户一致。生产机上 `id -g ubuntu` 经常是 `1001`，`.env` 里就写成 `APP_GID=1001`。app 镜像把家目录放在 `/home/app`，uv 缓存放在 `/home/app/.cache/uv`，Codex 登录态挂到 `/codex-home`（`CODEX_HOME`）。dsa 镜像把家目录放在 `/home/dsa`。这些路径不在 `/root` 下面，因为基础镜像里 `/root` 只有 root 能进入。
 
 已经用 root 跑过的机器，`data/` 里会有 root 拥有的文件。切换前先停容器，执行一次：
 
@@ -71,18 +71,30 @@ docker compose up --build -d
 sudo chown -R 1000:1000 data
 ```
 
-`1000:1000` 要和 `.env` 里的 `APP_UID` / `APP_GID` 相同，并且等于宿主机采集器用户的 uid/gid。用 `id -u ubuntu` 和 `id -g ubuntu` 确认；不是 1000 就把 `.env` 和这条 chown 改成那一对数字。`.env` 通常是 `600`，Codex 目录通常是 `700`，容器用户必须是它们的属主，否则读不到。
+`1000:1000` 要和 `.env` 里的 `APP_UID` / `APP_GID` 相同，并且等于宿主机采集器用户的 uid/gid。用 `id -u ubuntu` 和 `id -g ubuntu` 确认；不是 1000 就把 `.env` 和这条 chown 改成那一对数字。
+
+生产环境是 `APP_UID=1000`、`APP_GID=1001`。dsa 以前没有 `user:`，停容器之后只改 `data/` 也不够：sidecar 仍会把 `data/dsa` 写成 root，而且决策页会写回 `.env`。先停 app 和 dsa，再执行：
+
+```bash
+sudo chown -R 1000:1001 data
+sudo chown 1000:1001 .env
+chmod 600 .env
+```
+
+`.env` 通常是 `600`。app 只读挂载它；dsa 把定时设置写回去，所以容器用户必须是它的属主。Codex 目录通常是 `700`，容器用户也必须是属主，否则读不到。
 
 然后：
 
 ```bash
 python3 scripts/deploy_preflight.py --data-dir ./data
 docker compose up -d
+# 启用了 dsa profile 时还要重建 sidecar：
+docker compose --profile dsa up -d --build --force-recreate
 ```
 
-预检要求 `data/` 和 `data/news` 对这对 uid/gid 可写，采集器虚拟环境的 Python 不低于 3.10，并且 `data/` 下面没有别人拥有的文件。失败时退出码不是 0。采集器虚拟环境的重建步骤在 [news-sources.md](./news-sources.md)。
+预检要求 `data/` 和 `data/news` 对这对 uid/gid 可写。`data/dsa` 存在时同样要可写，不存在时只提示。`.env` 的属主必须是这对 uid/gid，并且对它可写。采集器虚拟环境的 Python 不低于 3.10，并且 `data/` 下面（含 `data/dsa`）没有别人拥有的文件。失败时退出码不是 0。采集器虚拟环境的重建步骤在 [news-sources.md](./news-sources.md)。dsa 的写路径和迁移说明见 [dsa-integration.md](./dsa-integration.md)。
 
-回滚：把 `.env` 里的 `APP_UID` 和 `APP_GID` 改成下面这样，再重建容器。容器重新以 root 运行。root 可以写已经属于 1000 的文件，所以不一定要把属主改回去。
+回滚：把 `.env` 里的 `APP_UID` 和 `APP_GID` 改成下面这样，再重建容器。app 和 dsa 都会重新以 root 运行。root 可以写已经属于 1000 的文件，所以不一定要把属主改回去。
 
 ```bash
 APP_UID=0

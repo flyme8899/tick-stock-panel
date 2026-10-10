@@ -51,17 +51,29 @@ services:
     build:
       context: ./vendor/daily_stock_analysis
       dockerfile: Dockerfile.tsp
+    # 与 app 同一对 uid/gid。已有 data/dsa 或 .env 若是 root 写的，先 chown。见 docs/dsa-integration.md。
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     container_name: TickFlow_Stock_Panel_DSA
     ports:
       - "${DSA_HOST:-127.0.0.1}:${DSA_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
-      - ENV_FILE=/app/.env
+      # 保存设置时会在 ENV_FILE 同目录写 .env.tmp。父目录必须可写，所以不挂在 /app/.env。
+      - ENV_FILE=/app/config/.env
       - DATABASE_PATH=/app/data/stock_analysis.db
+      - LOG_DIR=/app/logs
       - WEBUI_HOST=0.0.0.0
       - WEBUI_PORT=8000
       - TZ=Asia/Shanghai
+      # uid 在启动时才确定。/root 是 0700，家目录和第三方缓存不能放在那里。
+      - HOME=/home/dsa
+      - XDG_CACHE_HOME=/home/dsa/.cache
+      - XDG_CONFIG_HOME=/home/dsa/.config
+      - MPLCONFIGDIR=/home/dsa/.config/matplotlib
+      - PYTHONPYCACHEPREFIX=/home/dsa/.cache/pyc
+      - PYTHONDONTWRITEBYTECODE=1
+      - TMPDIR=/tmp
       # 容器内路径。覆盖 .env 里可能写成的宿主机路径。设为 off 可关闭注入。
       - TSP_QUANT_EVIDENCE_FILE=/opt/tsp/quant_evidence.yaml
       # DSA 容器通过 compose 网络访问 TSP。未配 NEWS_DSA_FEED_TOKEN 时桥不拉取。
@@ -69,7 +81,8 @@ services:
     volumes:
       - ./data/dsa:/app/data
       # 决策页保存定时设置时会写回这份文件。只读挂载会导致保存失败。
-      - ./.env:/app/.env
+      # 单文件挂载的原子替换会先写同目录的 .env.tmp；/app/config 在镜像里是 1777。
+      - ./.env:/app/config/.env
       - ./backend/app/custom/dsa/dsa_bootstrap.py:/opt/tsp/dsa_bootstrap.py:ro
       # 与 bootstrap 一起挂进容器。app 镜像没有 vendor 源码，轮动命令在这里执行。
       - ./backend/app/custom/dsa/etf_job.py:/opt/tsp/etf_job.py:ro
