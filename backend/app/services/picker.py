@@ -8,8 +8,8 @@
 - 公告日当天的财报不参与选股，下一交易日才生效，与回测财务因子一致。
 - 来源运行失败（例如 DSA 连不上）不参与交集/并集，避免一次失败把其他来源清空。
   来源成功但一只都没有，仍然参与合并。
-- 热门事件按北京时间当前交易日的板块提及次数和来源数取前 5，不是近 24 小时升温分数。
-  选中后并入同花顺行业或概念成分股，以及同一资讯里至少出现两次的个股。
+- 热门事件按北京时间当前交易日的资讯标题聚类，取热度前 5。热度是条数乘来源数，再按更新时间衰减。
+  选中后并入该事件直接提到的个股，以及细分概念的成分股（最多 30 只），不展开宽行业。
 """
 from __future__ import annotations
 
@@ -83,6 +83,7 @@ FUNDAMENTAL_PRESETS: tuple[dict[str, str], ...] = (
 )
 
 _TOP_HOT_EVENTS = 5
+_CONCEPT_CONSTITUENT_CAP = 30
 
 
 def safe_source_id(value: str) -> bool:
@@ -268,8 +269,8 @@ def _hot_attr(item: Any, name: str, default: Any = None) -> Any:
 
 def hot_event_label(name: str, source_count: int) -> str:
     text = str(name or "").strip() or "事件"
-    if len(text) > 8:
-        text = text[:8]
+    if len(text) > 20:
+        text = text[:20]
     return f"{text} · {source_count}源"
 
 
@@ -321,8 +322,9 @@ def map_selected_hot_event(
     dimensions: Dimensions,
     known_symbols: set[str],
     index: dict[str, set[str]] | None = None,
+    market_caps: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], dict[str, str], str | None]:
-    """成分股来自同花顺行业/概念；多次提及的个股来自当天同一条资讯。"""
+    """个股来自事件正文里点到的名字；成分股只取细分概念，并按提及和市值截断。"""
     name = str(event.get("name") or event.get("key") or "")
     key = str(event.get("key") or "")
     try:
@@ -335,25 +337,41 @@ def map_selected_hot_event(
         source_count = 0
     label = hot_event_label(name or key, source_count)
     score = hot_display_score(source_count, mentions)
+    concepts = [str(item).strip() for item in (event.get("concepts") or []) if str(item).strip()]
     has_dimensions = bool(dimensions.concepts or dimensions.industry_path)
+    label_index = index if index is not None else build_label_index(dimensions)
     constituents: set[str] = set()
     if has_dimensions:
-        constituents = match_sector_symbols(name, key, index if index is not None else build_label_index(dimensions))
+        for concept in concepts:
+            constituents |= match_sector_symbols(concept, concept, label_index)
     resolved: set[str] = set()
     unresolved = 0
-    for stock in event.get("frequent_stocks") or []:
+    mention_rank: dict[str, int] = {}
+    mentioned = event.get("mentioned_stocks")
+    if not isinstance(mentioned, list):
+        mentioned = event.get("frequent_stocks") or []
+    for stock in mentioned:
         if not isinstance(stock, dict):
             continue
+        try:
+            mention_rank[str(stock.get("key") or "")] = int(stock.get("mentions") or 0)
+        except (TypeError, ValueError):
+            mention_rank[str(stock.get("key") or "")] = 0
         symbol = resolve_mentioned_stock(str(stock.get("key") or ""), known_symbols)
         if symbol is None:
             unresolved += 1
             continue
         resolved.add(symbol)
-    symbols = constituents | resolved
+    caps = market_caps or {}
+    extra = sorted(
+        constituents - resolved,
+        key=lambda symbol: (-mention_rank.get(symbol, 0), -(caps.get(symbol) or 0.0), symbol),
+    )
+    symbols = resolved | set(extra[:_CONCEPT_CONSTITUENT_CAP])
     note = None
-    if not has_dimensions and resolved:
-        note = "尚未同步同花顺行业/概念，本次只纳入多次提及的个股"
-    elif not has_dimensions and not resolved:
+    if concepts and not has_dimensions and resolved:
+        note = "尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股"
+    elif concepts and not has_dimensions and not resolved:
         note = "尚未同步同花顺行业/概念，无法映射成分股"
     elif not symbols:
         note = f"「{name or key}」没有匹配到成分股"
@@ -763,14 +781,25 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
         except (TypeError, ValueError):
             continue
         name = str(event.get("name") or key)
-        updated = event.get("updated_at")
+        first_seen = event.get("first_seen")
+        if not isinstance(first_seen, str):
+            first_seen = event.get("updated_at") if isinstance(event.get("updated_at"), str) else None
+        concepts = [
+            str(concept).strip()
+            for concept in (event.get("concepts") or [])
+            if str(concept).strip()
+        ][:4]
+        headline = event.get("headline") if isinstance(event.get("headline"), str) else None
         items.append({
             "id": hot_event_id(key),
             "name": name,
             "description": f"提及 {mentions} · 来源 {source_count}",
             "mentions": mentions,
             "source_count": source_count,
-            "updated_at": updated if isinstance(updated, str) else None,
+            "updated_at": first_seen,
+            "first_seen": first_seen,
+            "concepts": concepts,
+            "headline": headline,
         })
     return {
         "id": "hot_events",
@@ -894,6 +923,19 @@ def _universe_frame(
     return frame
 
 
+def _market_caps(by_symbol: dict[str, dict]) -> dict[str, float]:
+    caps: dict[str, float] = {}
+    for symbol, row in by_symbol.items():
+        value = row.get("market_cap")
+        if value is None:
+            continue
+        try:
+            caps[symbol] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return caps
+
+
 def _lookup(frame: pl.DataFrame) -> dict[str, dict]:
     if frame.is_empty() or "symbol" not in frame.columns:
         return {}
@@ -987,7 +1029,9 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
             if event is None:
                 warnings.append(f"未识别的来源 {source.id}")
                 continue
-            scores, events, note = map_selected_hot_event(event, dimensions, known, hot_index)
+            scores, events, note = map_selected_hot_event(
+                event, dimensions, known, hot_index, _market_caps(by_symbol),
+            )
             if not scores and note in {
                 "尚未同步同花顺行业/概念，无法映射成分股",
                 "热门个股无法对应本地代码",

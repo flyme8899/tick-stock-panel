@@ -247,6 +247,43 @@ class NewsStore:
             self._conn.commit()
             return cur.rowcount
 
+    def items_between(self, start: datetime, end: datetime) -> list[dict]:
+        """[start, end) 内的资讯，带上提及。选股热门事件按标题聚类时用。"""
+        bounds = (
+            start.astimezone(CN_TZ).isoformat(timespec="seconds"),
+            end.astimezone(CN_TZ).isoformat(timespec="seconds"),
+        )
+        with self._lock:
+            rows = list(self._conn.execute(
+                """
+                SELECT id, source, published_at, title, clean_text, extra_json
+                FROM news_items
+                WHERE published_at >= ? AND published_at < ?
+                """,
+                bounds,
+            ))
+            grouped: dict[int, list] = {}
+            ids = [row["id"] for row in rows]
+            for offset in range(0, len(ids), 400):
+                chunk = ids[offset:offset + 400]
+                marks = ",".join("?" for _ in chunk)
+                mentions = self._conn.execute(
+                    f"""
+                    SELECT item_id, kind, key, name
+                    FROM news_mentions
+                    WHERE item_id IN ({marks})
+                    """,
+                    chunk,
+                )
+                for mention in mentions:
+                    grouped.setdefault(mention["item_id"], []).append(mention)
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["mentions"] = grouped.get(row["id"], [])
+            items.append(item)
+        return items
+
     def mentions_between(self, start: datetime, end: datetime) -> list[sqlite3.Row]:
         """[start, end) 内的提及。published_at 按北京时间入库，字符串比较与时区一致。"""
         with self._lock:

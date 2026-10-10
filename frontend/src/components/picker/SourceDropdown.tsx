@@ -10,6 +10,8 @@ export interface SourceOption {
   mentions?: number
   sourceCount?: number
   updatedAt?: string
+  concepts?: string[]
+  headline?: string | null
 }
 
 interface Props {
@@ -91,6 +93,7 @@ export function SourceDropdown({
             <button
               key={item.id}
               type="button"
+              title={item.headline || undefined}
               onClick={() => onToggle(item.id)}
               className="flex w-full items-start gap-2 rounded-btn px-2 py-1.5 text-left hover:bg-elevated"
             >
@@ -102,10 +105,17 @@ export function SourceDropdown({
               </span>
               <span className="min-w-0">
                 <span className="block truncate text-xs text-foreground">{item.name}</span>
+                {item.concepts && item.concepts.length > 0 && (
+                  <span className="mt-0.5 flex flex-wrap gap-1">
+                    {item.concepts.map(tag => (
+                      <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
+                    ))}
+                  </span>
+                )}
                 {item.mentions != null ? (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">
                     提及 {item.mentions} · 来源 {item.sourceCount ?? 0}
-                    {item.updatedAt ? ` · ${item.updatedAt}` : ''}
+                    {item.updatedAt ? ` · 首见 ${item.updatedAt}` : ''}
                   </span>
                 ) : item.description ? (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">{item.description}</span>

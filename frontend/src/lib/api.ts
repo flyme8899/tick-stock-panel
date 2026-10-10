@@ -2284,6 +2284,9 @@ export interface PickerSourceItem {
   mentions?: number
   source_count?: number
   updated_at?: string | null
+  first_seen?: string | null
+  concepts?: string[]
+  headline?: string | null
 }
 
 export interface PickerSourceGroup {

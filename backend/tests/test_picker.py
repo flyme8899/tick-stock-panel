@@ -1,7 +1,7 @@
 """选股合并、过滤、快照和来源降级。"""
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import polars as pl
@@ -397,16 +397,24 @@ def _publish(day: date, hour: int, minute: int = 0) -> datetime:
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=CN_TZ)
 
 
-def _insert_news(source: str, source_id: str, published: datetime, sectors: list[str], stocks: list[str]) -> None:
+def _insert_news(
+    source: str,
+    source_id: str,
+    published: datetime,
+    sectors: list[str],
+    stocks: list[str],
+    title: str | None = None,
+) -> None:
     mentions = [("sector", name, name, "", "structured") for name in sectors]
     mentions += [("stock", symbol, symbol, symbol[:6], "structured") for symbol in stocks]
+    headline = title or source_id
     status = get_store().insert_item(
         source=source,
         source_id=source_id,
         published_at=published,
         author="",
-        title=source_id,
-        clean_text="热门事件测试正文。",
+        title=headline,
+        clean_text=headline,
         raw=None,
         content_hash=source_id,
         url="",
@@ -419,22 +427,72 @@ def _insert_news(source: str, source_id: str, published: datetime, sectors: list
 
 
 def _seed_friday(tmp_path) -> None:
-    """周五交易日的板块热度。周六的闲聊即使更多也不应盖过这一天。"""
+    """周五的具体事件。宽行业标签和周六闲聊都不能盖过这些标题。"""
     reset_store_for_tests(tmp_path / "news.sqlite")
     friday = date(2026, 10, 9)
-    _insert_news("cls", "ai-1", _publish(friday, 15, 1), ["人工智能"], ["600519.SH", "601318.SH"])
-    _insert_news("wscn", "ai-2", _publish(friday, 15, 2), ["人工智能"], ["600519.SH"])
-    _insert_news("dws", "ai-3", _publish(friday, 15, 4), ["人工智能"], ["000001.SZ"])
-    for index in range(3):
-        _insert_news("cls", f"robot-{index}", _publish(friday, 14, index), ["机器人"], [])
-    _insert_news("cls", "semi-1", _publish(friday, 13, 1), ["半导体"], [])
-    _insert_news("wscn", "semi-2", _publish(friday, 13, 2), ["半导体"], [])
-    _insert_news("cls", "ne-1", _publish(friday, 12, 1), ["新能源"], [])
-    _insert_news("cls", "ne-2", _publish(friday, 12, 2), ["新能源"], [])
-    _insert_news("wscn", "med-1", _publish(friday, 11, 1), ["医药"], [])
-    _insert_news("cls", "bank-1", _publish(friday, 11, 2), ["银行"], [])
+    _insert_news(
+        "cls", "ai-1", _publish(friday, 14, 52),
+        ["人工智能", "昇腾"], ["600519.SH"],
+        title="华为发布盘古新模型，昇腾链走强",
+    )
+    _insert_news(
+        "wscn", "ai-2", _publish(friday, 14, 58),
+        ["昇腾"], ["600519.SH"],
+        title="华为发布盘古新模型",
+    )
+    _insert_news(
+        "dws", "ai-3", _publish(friday, 15, 4),
+        ["人工智能"], ["000001.SZ"],
+        title="盘古新模型发布带动算力",
+    )
+    _insert_news(
+        "cls", "nv-1", _publish(friday, 9, 0),
+        ["人工智能"], [],
+        title="英伟达追加订单传闻",
+    )
+    for index, minute in enumerate((10, 20, 30)):
+        _insert_news(
+            "cls", f"robot-{index}", _publish(friday, 11, minute),
+            ["机器人", "工业机器人"],
+            ["600519.SH"] if index == 0 else [],
+            title="工信部出台机器人补贴政策",
+        )
+    _insert_news(
+        "cls", "semi-1", _publish(friday, 14, 20),
+        ["半导体", "存储芯片"], [],
+        title="存储芯片厂宣布涨价",
+    )
+    _insert_news(
+        "wscn", "semi-2", _publish(friday, 14, 40),
+        ["半导体", "存储芯片"], [],
+        title="存储芯片厂宣布涨价",
+    )
+    _insert_news(
+        "cls", "ne-1", _publish(friday, 13, 40),
+        ["新能源", "碳酸锂"], [],
+        title="碳酸锂报价继续上涨",
+    )
+    _insert_news(
+        "cls", "ne-2", _publish(friday, 13, 50),
+        ["新能源", "碳酸锂"], [],
+        title="碳酸锂报价继续上涨",
+    )
+    _insert_news(
+        "wscn", "med-1", _publish(friday, 10, 10),
+        ["医药", "创新药"], [],
+        title="创新药临床获批",
+    )
+    _insert_news(
+        "cls", "bank-1", _publish(friday, 9, 5),
+        ["银行"], ["601318.SH"],
+        title="平安银行回购股份",
+    )
     for index in range(4):
-        _insert_news("cls", f"sat-{index}", _publish(date(2026, 10, 10), 9, index), ["周六闲聊"], [])
+        _insert_news(
+            "cls", f"sat-{index}", _publish(date(2026, 10, 10), 9, index),
+            ["周六闲聊"], [],
+            title="周六闲聊不影响交易日",
+        )
     item_id = get_store()._conn.execute(
         "SELECT id FROM news_items WHERE source_id = 'ai-1'"
     ).fetchone()["id"]
@@ -459,9 +517,11 @@ def _hot_market() -> list[dict]:
 def _hot_dimensions() -> Dimensions:
     return Dimensions(concepts={
         "000001.SZ": ["人工智能"],
-        "300001.SZ": ["人工智能"],
-        "600519.SH": ["机器人"],
+        "300001.SZ": ["昇腾"],
+        "300002.SZ": ["昇腾"],
+        "600519.SH": ["工业机器人"],
         "601318.SH": ["银行"],
+        "999999.SZ": ["人工智能"],
     })
 
 
@@ -473,26 +533,36 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert snapshot["fallback"] is False
     assert snapshot["hint"] == "交易日 10月9日 · 更新于 15:04"
     names = [event["name"] for event in snapshot["events"]]
-    assert names[:5] == ["人工智能", "机器人", "半导体", "新能源", "医药"]
-    assert "银行" in names
-    assert "周六闲聊" not in names
+    assert names[:5] == [
+        "华为发布盘古新模型",
+        "存储芯片厂涨价",
+        "工信部出台机器人补贴政策",
+        "碳酸锂报价继续上涨",
+        "创新药临床获批",
+    ]
+    assert "人工智能" not in names
+    assert "半导体" not in names
+    assert "周六闲聊不影响交易日" not in names
     assert "50" not in names
+    assert "英伟达追加订单传闻" in names
     head = snapshot["events"][0]
     assert head["mentions"] == 3
     assert head["source_count"] == 3
-    assert head["updated_at"] == "10-09 15:04"
-    assert [stock["key"] for stock in head["frequent_stocks"]] == ["600519.SH"]
-    assert head["frequent_stocks"][0]["mentions"] == 2
+    assert head["concepts"] == ["昇腾"]
+    assert head["headline"] == "华为发布盘古新模型，昇腾链走强"
+    assert head["first_seen"] == "10-09 14:52"
+    assert [stock["key"] for stock in head["mentioned_stocks"]] == ["600519.SH", "000001.SZ"]
+    assert head["mentioned_stocks"][0]["mentions"] == 2
 
     friday_afternoon = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
     same_day = top_hot_events(friday_afternoon)
     assert same_day["fallback"] is False
     assert same_day["hint"] == "更新于 15:04"
-    assert same_day["events"][0]["updated_at"] == "15:04"
+    assert same_day["events"][0]["first_seen"] == "14:52"
 
     scores, _labels, note = map_selected_hot_event(head, Dimensions(), {"600519.SH", "000001.SZ"})
-    assert note is not None and "只纳入多次提及" in note
-    assert set(scores) == {"600519.SH"}
+    assert note is not None and "只纳入资讯里提到的个股" in note
+    assert set(scores) == {"600519.SH", "000001.SZ"}
 
     deps = _deps(
         tmp_path,
@@ -500,23 +570,29 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
         load_dimensions=_hot_dimensions,
         load_top_events=load_top_events_from_news,
     )
-    picked = run_picker([SourceSpec("hot_events", "人工智能")], "or", FilterSpec(), deps)
-    assert {row["symbol"] for row in picked["rows"]} == {"000001.SZ", "300001.SZ", "600519.SH"}
+    picked = run_picker([SourceSpec("hot_events", head["key"])], "or", FilterSpec(), deps)
+    assert {row["symbol"] for row in picked["rows"]} == {
+        "000001.SZ", "300001.SZ", "300002.SZ", "600519.SH",
+    }
+    assert "999999.SZ" not in {row["symbol"] for row in picked["rows"]}
     assert "601318.SH" not in {row["symbol"] for row in picked["rows"]}
-    assert {row["event"] for row in picked["rows"]} == {"人工智能 · 3源"}
+    assert {row["event"] for row in picked["rows"]} == {"华为发布盘古新模型 · 3源"}
     assert picked["rows"][0]["score"] == 36.0
     assert picked["summary"]["hot_hint"] == "交易日 10月9日 · 更新于 15:04"
 
+    robot = next(event for event in snapshot["events"] if event["name"].startswith("工信部"))
     overlapped = run_picker(
-        [SourceSpec("hot_events", "人工智能"), SourceSpec("hot_events", "机器人")],
+        [SourceSpec("hot_events", head["key"]), SourceSpec("hot_events", robot["key"])],
         "and",
         FilterSpec(),
         deps,
     )
     assert {row["symbol"] for row in overlapped["rows"]} == {"600519.SH"}
 
-    bank = run_picker([SourceSpec("hot_events", "银行")], "or", FilterSpec(), deps)
-    assert [row["symbol"] for row in bank["rows"]] == ["601318.SH"]
+    bank = next(event for event in snapshot["events"] if event["name"] == "平安银行回购")
+    assert names.index(bank["name"]) >= 5
+    bought = run_picker([SourceSpec("hot_events", bank["key"])], "or", FilterSpec(), deps)
+    assert [row["symbol"] for row in bought["rows"]] == ["601318.SH"]
 
     app = FastAPI()
     app.include_router(picker_api.router)
@@ -525,17 +601,21 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     catalog = client.get("/api/picker/sources")
     assert catalog.status_code == 200
     group = next(item for item in catalog.json()["groups"] if item["id"] == "hot_events")
-    assert [item["name"] for item in group["items"]] == ["人工智能", "机器人", "半导体", "新能源", "医药"]
-    assert all("frequent_stocks" not in item for item in group["items"])
+    assert [item["name"] for item in group["items"]] == names[:5]
+    assert all("mentioned_stocks" not in item for item in group["items"])
     assert group["items"][0]["description"] == "提及 3 · 来源 3"
+    assert group["items"][0]["concepts"] == ["昇腾"]
+    assert group["items"][0]["headline"] == "华为发布盘古新模型，昇腾链走强"
     assert group["hint"] == "交易日 10月9日 · 更新于 15:04"
     assert group["fallback"] is False
     ran = client.post("/api/picker/run", json={
-        "sources": [{"type": "hot_events", "id": "人工智能"}],
+        "sources": [{"type": "hot_events", "id": head["key"]}],
         "combine": "or",
     })
     assert ran.status_code == 200
-    assert {row["symbol"] for row in ran.json()["rows"]} == {"000001.SZ", "300001.SZ", "600519.SH"}
+    assert {row["symbol"] for row in ran.json()["rows"]} == {
+        "000001.SZ", "300001.SZ", "300002.SZ", "600519.SH",
+    }
     rejected = client.post("/api/picker/run", json={
         "sources": [{"type": "hot_events", "id": "a/b"}],
         "combine": "or",
@@ -545,14 +625,18 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
 
 def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
     reset_store_for_tests(tmp_path / "news.sqlite")
-    _insert_news("cls", "thu-1", _publish(date(2026, 10, 8), 18, 12), ["白酒"], [])
+    _insert_news(
+        "cls", "thu-1", _publish(date(2026, 10, 8), 18, 12), ["白酒"], [],
+        title="茅台批价上调",
+    )
     snapshot = top_hot_events(NOW)
     assert snapshot["fallback"] is True
     assert snapshot["as_of"] == "2026-10-08"
     assert snapshot["trading_day"] == "2026-10-09"
     assert snapshot["hint"] == "暂无10月9日数据，显示10月8日 · 更新于 18:12"
-    assert snapshot["events"][0]["updated_at"] == "10-08 18:12"
-    assert snapshot["events"][0]["name"] == "白酒"
+    assert snapshot["events"][0]["first_seen"] == "10-08 18:12"
+    assert snapshot["events"][0]["name"] == "茅台批价上调"
+    assert snapshot["events"][0]["concepts"] == []
 
     reset_store_for_tests(tmp_path / "weekend.sqlite")
     _insert_news(
@@ -628,20 +712,148 @@ def test_hot_event_failure_does_not_drop_other_sources_but_true_miss_does(tmp_pa
     assert any("未识别" in item for item in missed["summary"]["warnings"])
 
     reset_store_for_tests(tmp_path / "miss.sqlite")
-    _insert_news("cls", "med-1", _publish(date(2026, 10, 9), 11, 1), ["医药"], [])
+    _insert_news(
+        "cls", "med-1", _publish(date(2026, 10, 9), 11, 1), ["医药"], [],
+        title="医药板块午后走强",
+    )
+    missed_event = top_hot_events(NOW)["events"][0]
+    assert missed_event["concepts"] == []
     true_miss = _deps(
         tmp_path,
         list_strategies=strategies,
         run_strategies=hits,
         load_market=lambda: (AS_OF, market),
-        load_dimensions=lambda: Dimensions(concepts={"000001.SZ": ["银行"]}),
+        load_dimensions=lambda: Dimensions(concepts={"000001.SZ": ["医药"], "300001.SZ": ["医药"]}),
         load_top_events=load_top_events_from_news,
     )
     emptied = run_picker(
-        [SourceSpec("hot_events", "医药"), SourceSpec("technical", "macd_golden")],
+        [SourceSpec("hot_events", missed_event["key"]), SourceSpec("technical", "macd_golden")],
         "and",
         FilterSpec(),
         true_miss,
     )
     assert emptied["rows"] == []
     assert any("没有匹配到成分股" in item for item in emptied["summary"]["warnings"])
+
+
+def test_hot_event_constituents_are_capped_by_market_cap():
+    concepts = {f"{index:06d}.SZ": ["存储芯片"] for index in range(1, 36)}
+    concepts["600000.SH"] = ["其他"]
+    caps = {f"{index:06d}.SZ": float(index) for index in range(1, 36)}
+    event = {
+        "key": "ev_cap",
+        "name": "存储芯片厂涨价",
+        "concepts": ["存储芯片"],
+        "mentions": 2,
+        "source_count": 2,
+        "mentioned_stocks": [{"key": "600000.SH", "name": "小市值", "mentions": 1, "source_count": 1}],
+    }
+    scores, _, note = map_selected_hot_event(
+        event,
+        Dimensions(concepts=concepts),
+        set(concepts),
+        market_caps=caps,
+    )
+    assert note is None
+    assert "600000.SH" in scores
+    assert len(scores) == 31
+    assert "000035.SZ" in scores
+    assert "000006.SZ" in scores
+    assert "000005.SZ" not in scores
+
+
+def test_hot_events_do_not_merge_across_the_time_window(tmp_path):
+    reset_store_for_tests(tmp_path / "window.sqlite")
+    friday = date(2026, 10, 9)
+    _insert_news(
+        "cls", "early", _publish(friday, 9, 0), ["昇腾"], [],
+        title="华为发布盘古新模型",
+    )
+    _insert_news(
+        "wscn", "late", _publish(friday, 17, 30), ["昇腾"], [],
+        title="华为发布盘古新模型",
+    )
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert names.count("华为发布盘古新模型") == 2
+
+
+def test_hot_event_recency_breaks_equal_item_source_products(tmp_path):
+    reset_store_for_tests(tmp_path / "decay.sqlite")
+    friday = date(2026, 10, 9)
+    for index in range(4):
+        _insert_news(
+            "cls", f"old-{index}", _publish(friday, 8, index), ["创新药"], [],
+            title="药监局出台创新药细则",
+        )
+    _insert_news(
+        "cls", "new-1", _publish(friday, 15, 30), ["昇腾"], [],
+        title="华为发布盘古新模型",
+    )
+    _insert_news(
+        "wscn", "new-2", _publish(friday, 15, 40), ["昇腾"], [],
+        title="华为发布盘古新模型",
+    )
+    noon = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
+    names = [event["name"] for event in top_hot_events(noon)["events"]]
+    assert names[0] == "华为发布盘古新模型"
+
+
+def test_hot_event_snapshot_is_cached_for_ten_minutes(tmp_path):
+    reset_store_for_tests(tmp_path / "cache.sqlite")
+    _insert_news(
+        "cls", "one", _publish(date(2026, 10, 9), 11, 0), ["创新药"], [],
+        title="创新药临床获批",
+    )
+    store = get_store()
+    calls = {"n": 0}
+    original = store.items_between
+
+    def wrapped(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    store.items_between = wrapped
+    assert top_hot_events(NOW)["events"][0]["name"] == "创新药临床获批"
+    assert top_hot_events(NOW)["events"][0]["name"] == "创新药临床获批"
+    assert calls["n"] == 1
+    assert top_hot_events(NOW + timedelta(minutes=11))["events"]
+    assert calls["n"] == 2
+
+
+def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(tmp_path, monkeypatch):
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    reset_store_for_tests(tmp_path / "llm.sqlite")
+    friday = date(2026, 10, 9)
+    _insert_news(
+        "cls", "ai-1", _publish(friday, 14, 52), ["人工智能", "昇腾"], [],
+        title="华为发布盘古新模型，昇腾链走强",
+    )
+    prompts = []
+
+    def fake_text(prompt: str) -> str:
+        prompts.append(prompt)
+        return '{"title":"华为发布新模型","concepts":["昇腾","人工智能"],"stocks":[{"name":"不存在的公司","code":"999999"}]}'
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", fake_text)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    named = top_hot_events(NOW)
+    assert named["events"][0]["name"] == "华为发布新模型"
+    assert named["events"][0]["concepts"] == ["昇腾"]
+    assert named["events"][0]["mentioned_stocks"] == []
+    assert len(prompts) == 1
+    assert "不超过20个字" in prompts[0]
+
+    hot_mod.clear_hot_event_cache(llm=False)
+    again = top_hot_events(NOW + timedelta(minutes=11))
+    assert again["events"][0]["name"] == "华为发布新模型"
+    assert len(prompts) == 1
+
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: False)
+    hot_mod.clear_hot_event_cache()
+    fallback = top_hot_events(NOW + timedelta(minutes=22))
+    assert fallback["events"][0]["name"] == "华为发布盘古新模型"
+    assert len(prompts) == 1
