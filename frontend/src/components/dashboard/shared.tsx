@@ -71,7 +71,7 @@ export function SectionTitle({ icon: Icon, title, hint }: { icon: typeof Activit
   )
 }
 
-export function MiniMetric({ label, value, cls = 'text-foreground' }: { label: string; value: string; cls?: string }) {
+export function MiniMetric({ label, value, cls = 'text-foreground' }: { label: string; value: ReactNode; cls?: string }) {
   return (
     <div className="rounded-md bg-elevated/45 px-2 py-1.5 border border-border/40">
       <div className="text-[10px] text-muted">{label}</div>

@@ -99,7 +99,16 @@ function TrendWidget({ ctx }: { ctx: WidgetCtx }) {
           <MiniMetric label="炸板" value={`${data.limit.broken ?? 0}`} cls="text-warning" />
           <MiniMetric label="跌停" value={`${data.limit.limit_down ?? 0}`} cls="text-bear" />
           <MiniMetric label="站上MA60" value={`${data.trend.above_ma60_pct.toFixed(0)}%`} cls="text-accent" />
-          <MiniMetric label="新高/新低" value={`${compactCount(data.trend.new_high)}/${compactCount(data.trend.new_low)}`} cls={data.trend.new_high >= data.trend.new_low ? 'text-bull' : 'text-bear'} />
+          <MiniMetric
+            label="新高/新低"
+            value={
+              <>
+                <span className="text-bull">{compactCount(data.trend.new_high)}</span>
+                <span className="text-muted">/</span>
+                <span className="text-bear">{compactCount(data.trend.new_low)}</span>
+              </>
+            }
+          />
           <MiniMetric label="高换手数" value={`${data.activity.high_turnover}`} cls="text-accent" />
           <MiniMetric label="放量占比" value={`${fmtPrice(data.activity.high_vol_ratio, 1)}%`} cls="text-accent" />
         </div>

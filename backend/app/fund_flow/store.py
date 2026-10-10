@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
@@ -272,6 +273,41 @@ def code_count(frame: pl.DataFrame) -> int:
 def latest_date(data_dir: Path, kind: str) -> str | None:
     dates = list_dates(data_dir, kind)
     return dates[-1] if dates else None
+
+
+# 深市汇总在源里是亿元（约 1e4），库内口径是元（约 1e12）。
+# 绝对值小于 1e7 且非 0 的深市汇总仍是亿元。已换成元的余额远大于这条线，再跑不会乘第二次。
+_SZSE_SUMMARY_YI_MAX = 1e7
+_SZSE_SUMMARY_MONEY = ("margin_balance", "short_balance", "margin_buy")
+
+
+def repair_szse_margin_summaries(data_dir: Path) -> int:
+    """把仍以亿元落盘的深市两融汇总乘成元。只改 szse 的 summary，明细和沪市不动。
+
+    返回这次乘过的字段个数。没有需要改的分区时不写文件。
+    """
+    scaled = 0
+    for day in list_dates(data_dir, "margin"):
+        frame = read_partition(data_dir, "margin", day)
+        if frame.is_empty() or "row_kind" not in frame.columns:
+            continue
+        rows = frame.to_dicts()
+        touched = False
+        for row in rows:
+            if str(row.get("market") or "") != "szse" or str(row.get("row_kind") or "") != "summary":
+                continue
+            for field in _SZSE_SUMMARY_MONEY:
+                value = row.get(field)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                if not math.isfinite(value) or value == 0 or abs(value) >= _SZSE_SUMMARY_YI_MAX:
+                    continue
+                row[field] = float(value) * 1e8
+                touched = True
+                scaled += 1
+        if touched:
+            write_rows(data_dir, "margin", day, rows)
+    return scaled
 
 
 def state_path(data_dir: Path) -> Path:

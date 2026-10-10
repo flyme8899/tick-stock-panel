@@ -120,7 +120,7 @@ class NewsStore:
                     raw_text,
                     content_hash,
                     url[:500],
-                    level[:16],
+                    str(level if level is not None else "")[:16],
                     json.dumps(media_ids, ensure_ascii=False),
                     json.dumps(extra or {}, ensure_ascii=False)[:_RAW_LIMIT],
                     now,

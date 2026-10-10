@@ -745,7 +745,7 @@ def test_szse_empty_keeps_sse_and_tries_previous_day(tmp_path) -> None:
             }]
         if name == "stock_margin_szse":
             if kwargs.get("date") == "20261008":
-                return [{"融资余额": 1_238_027_000_000, "融券余额": 2e8}]
+                return [{"融资余额": 12380.27, "融券余额": 2.0}]
             raise ValueError(
                 "Length mismatch: Expected axis has 0 elements, new values have 6 elements",
             )
@@ -954,3 +954,64 @@ def test_margin_board_labels_single_exchange_and_sums_both(tmp_path) -> None:
     assert day["margin_balance"] == 1_298_438_000_000 + szse
     assert day["sse_margin_balance"] == 1_298_438_000_000
     assert day["szse_margin_balance"] == szse
+
+
+def test_szse_margin_summary_converts_yi_and_repairs_old_partitions(tmp_path) -> None:
+    """深市汇总按亿元入库前要换成元；已经是元的行、沪市和明细不能再乘。"""
+    rows = normalize.normalize_margin_summary(
+        [{"融资余额": 12380.27, "融券余额": 2.0, "融资买入额": 100.5}],
+        market="szse",
+        trade_date="2026-10-09",
+    )
+    assert rows[0]["margin_balance"] == pytest.approx(1_238_027_000_000)
+    assert rows[0]["short_balance"] == pytest.approx(2e8)
+    assert rows[0]["margin_buy"] == pytest.approx(100.5 * 1e8)
+
+    sse = normalize.normalize_margin_summary(
+        [{"信用交易日期": "2026-10-09", "融资余额": 1_291_437_000_000}],
+        market="sse",
+    )
+    assert sse[0]["margin_balance"] == 1_291_437_000_000
+
+    detail = normalize.normalize_margin_detail(
+        [{"证券代码": "000001", "证券简称": "平安银行", "融资余额": 12380.27}],
+        market="szse",
+        trade_date="2026-10-09",
+    )
+    assert detail[0]["margin_balance"] == 12380.27
+    assert detail[0]["row_kind"] == "detail"
+
+    store.write_rows(tmp_path, "margin", "2026-10-09", [
+        {
+            "market": "szse", "symbol": "", "name": "", "trade_date": "2026-10-09",
+            "row_kind": "summary", "margin_balance": 12380.27, "short_balance": 2.0,
+            "margin_buy": 0, "source": "akshare",
+        },
+        {
+            "market": "sse", "symbol": "", "name": "", "trade_date": "2026-10-09",
+            "row_kind": "summary", "margin_balance": 1_291_437_000_000, "short_balance": 1e8,
+            "margin_buy": None, "source": "akshare",
+        },
+        {
+            "market": "szse", "symbol": "000001", "name": "平安银行", "trade_date": "2026-10-09",
+            "row_kind": "detail", "margin_balance": 12380.27, "short_balance": None,
+            "margin_buy": None, "source": "akshare",
+        },
+    ])
+    assert store.repair_szse_margin_summaries(tmp_path) == 2
+    assert store.repair_szse_margin_summaries(tmp_path) == 0
+    frame = store.read_partition(tmp_path, "margin", "2026-10-09")
+    summary = frame.filter(pl.col("row_kind") == "summary")
+    szse = summary.filter(pl.col("market") == "szse").row(0, named=True)
+    sse_row = summary.filter(pl.col("market") == "sse").row(0, named=True)
+    assert szse["margin_balance"] == pytest.approx(1_238_027_000_000)
+    assert szse["short_balance"] == pytest.approx(2e8)
+    assert szse["margin_buy"] == 0
+    assert sse_row["margin_balance"] == 1_291_437_000_000
+    detail_row = frame.filter(pl.col("row_kind") == "detail").row(0, named=True)
+    assert detail_row["margin_balance"] == pytest.approx(12380.27)
+
+    day = query.board(tmp_path)["margin"]["days"][0]
+    assert day["label"] == "沪深合计"
+    assert day["szse_margin_balance"] == pytest.approx(1_238_027_000_000)
+    assert day["margin_balance"] == pytest.approx(1_291_437_000_000 + 1_238_027_000_000)
