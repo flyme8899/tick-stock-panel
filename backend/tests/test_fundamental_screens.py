@@ -8,7 +8,13 @@ from pathlib import Path
 import polars as pl
 
 from app.strategy.engine import StrategyEngine
-from app.strategy.fundamental_screens import filter_history_m1, run_screen
+from app.strategy.fundamental_screens import (
+    SCREEN_NAMES,
+    _score_m1,
+    _take_scored,
+    filter_history_m1,
+    run_screen,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 AS_OF = date(2024, 8, 16)
@@ -223,14 +229,149 @@ def test_presets_register_with_descriptions():
     engine = StrategyEngine(strategy_dirs=[ROOT / "app" / "strategy" / "builtin"])
     listed = {item["id"]: item for item in engine.list_strategies()}
     for strategy_id, phrase in (
-        ("fundamental_m1", "主推"),
+        ("fundamental_m1", "前 30"),
         ("fundamental_m2", "资本成本"),
-        ("fundamental_m3", "中位数"),
+        ("fundamental_m3", "总市值"),
     ):
         assert phrase in listed[strategy_id]["description"]
         assert listed[strategy_id]["asset_types"] == ["stock"]
         assert engine.get(strategy_id).basic_filter["enabled"] is False
+    assert listed["fundamental_m1"]["name"] == SCREEN_NAMES["m1"] == "成长质量精选"
+    assert listed["fundamental_m2"]["name"] == SCREEN_NAMES["m2"] == "长期价值白马"
+    assert listed["fundamental_m3"]["name"] == SCREEN_NAMES["m3"] == "稳健现金流"
+    assert listed["fundamental_m1"]["params"][0]["default"] == 30
+    assert listed["fundamental_m3"]["params"][0]["default"] == 30
+    assert engine.get("fundamental_m2").meta["params"][0]["id"] == "wacc"
     assert engine.get("fundamental_m2").meta["params"][0]["default"] == 0.08
+    assert all(item["id"] != "top_n" for item in listed["fundamental_m2"]["params"])
+
+
+def test_m1_composite_top_n_is_per_day_and_skips_nonpositive_pe():
+    slow, _ = _m1_pack("000001.SZ", roe=50)
+    fast, _ = _m1_pack("000002.SZ", roe=15)
+    fast = _with_prior_deducted(fast, 160)
+    cheap, _ = _m1_pack("000003.SZ", roe=20)
+    tables = _merge([slow, fast, cheap])
+    industry = _industry([
+        ("000001.SZ", "消费-食品-饮料"),
+        ("000002.SZ", "消费-白酒-白酒"),
+        ("000003.SZ", "医药-化学制药-化学制药"),
+    ])
+    day2 = date(2024, 8, 19)
+    panel = _panel([
+        ("000001.SZ", AS_OF, 60.0),
+        ("000002.SZ", AS_OF, 60.0),
+        ("000003.SZ", AS_OF, 24.0),
+        ("000001.SZ", day2, 24.0),
+        ("000002.SZ", day2, 60.0),
+        ("000003.SZ", day2, 90.0),
+    ])
+    first = _hits(panel, tables, industry, params={"top_n": 1})
+    assert first == {("000003.SZ", AS_OF), ("000001.SZ", day2)}
+    second = _hits(panel, tables, industry, params={"top_n": 2})
+    assert ("000002.SZ", AS_OF) not in second
+    assert ("000001.SZ", AS_OF) in second
+    assert _hits(panel, tables, industry) == {
+        ("000001.SZ", AS_OF), ("000002.SZ", AS_OF), ("000003.SZ", AS_OF),
+        ("000001.SZ", day2), ("000002.SZ", day2), ("000003.SZ", day2),
+    }
+    tied = _merge([_m1_pack("000002.SZ", roe=20)[0], _m1_pack("000001.SZ", roe=20)[0]])
+    tie_industry = _industry([
+        ("000001.SZ", "消费-食品-饮料"),
+        ("000002.SZ", "医药-化学制药-化学制药"),
+    ])
+    tie_panel = _panel([("000002.SZ", AS_OF, 48.0), ("000001.SZ", AS_OF, 48.0)])
+    assert _hits(tie_panel, tied, tie_industry, params={"top_n": 1}) == {("000001.SZ", AS_OF)}
+
+
+def test_m1_rank_ignores_missing_growth_and_nonpositive_pe():
+    day = date(2024, 8, 16)
+    frame = _score_m1(pl.DataFrame({
+        "symbol": ["000001.SZ", "000002.SZ", "000003.SZ"],
+        "date": [day, day, day],
+        "_pass": [True, True, True],
+        "g0": [30.0, None, 80.0],
+        "pe": [20.0, 5.0, 0.0],
+        "m0_roe": [10.0, 40.0, 40.0],
+    }))
+    kept = frame.filter(pl.col("_ok"))
+    assert kept["symbol"].to_list() == ["000001.SZ"]
+    assert kept["score"].to_list() == [1.0]
+
+
+def test_take_scored_drops_missing_inputs_inside_each_day():
+    day = date(2024, 8, 16)
+    later = date(2024, 8, 19)
+    frame = pl.DataFrame({
+        "symbol": ["000002.SZ", "000001.SZ", "000003.SZ", "000009.SZ"],
+        "date": [day, day, day, later],
+        "score": [1.0, 1.0, None, 3.0],
+        "_ok": [True, True, True, True],
+    })
+    out = _take_scored(frame, higher_is_better=False, n=1, keep_score=True)
+    assert set(zip(out["symbol"].to_list(), out["date"].to_list(), strict=True)) == {
+        ("000001.SZ", day),
+        ("000009.SZ", later),
+    }
+
+
+def test_m2_keeps_the_full_passing_set():
+    first = _m2_tables()
+    second = _rename_symbol(_m2_tables(), "600001.SH")
+    tables = _merge([first, second])
+    industry = _industry([
+        ("600000.SH", "消费-食品-饮料"),
+        ("600001.SH", "医药-化学制药-化学制药"),
+    ])
+    panel = _panel([
+        ("600000.SH", date(2024, 5, 1), 20.0),
+        ("600001.SH", date(2024, 5, 1), 20.0),
+    ])
+    expected = {("600000.SH", date(2024, 5, 1)), ("600001.SH", date(2024, 5, 1))}
+    assert _hits(panel, tables, industry, "m2") == expected
+    assert _hits(panel, tables, industry, "m2", {"top_n": 1}) == expected
+
+
+def test_m3_top_n_keeps_the_largest_total_market_cap():
+    packs = [
+        _m3_tables("000011.SZ", roic=0.22, ocf_path=(10, 12, 11, 14)),
+        _m3_tables("000012.SZ", roic=0.20, ocf_path=(10, 12, 11, 14)),
+        _m3_tables("000013.SZ", roic=0.12, ocf_path=(10, 12, 11, 14)),
+        _m3_tables("000014.SZ", roic=0.10, ocf_path=(10, 12, 11, 14)),
+    ]
+    tables = _merge(packs)
+    industry = _industry([(symbol, "消费-食品-饮料") for symbol in ("000011.SZ", "000012.SZ", "000013.SZ", "000014.SZ")])
+    panel = _panel([
+        ("000011.SZ", AS_OF, 80.0),
+        ("000012.SZ", AS_OF, 40.0),
+        ("000013.SZ", AS_OF, 48.0),
+        ("000014.SZ", AS_OF, 48.0),
+    ])
+    assert _hits(panel, tables, industry, "m3", {"top_n": 1}) == {("000011.SZ", AS_OF)}
+    assert _hits(panel, tables, industry, "m3", {"top_n": 2}) == {
+        ("000011.SZ", AS_OF),
+        ("000012.SZ", AS_OF),
+    }
+
+
+def _with_prior_deducted(tables: dict[str, pl.DataFrame], value: float) -> dict[str, pl.DataFrame]:
+    income = tables["income"].with_columns(
+        pl.when(pl.col("period_end") == "2023-06-30")
+        .then(pl.lit(value))
+        .otherwise(pl.col("net_income_deducted"))
+        .alias("net_income_deducted")
+    )
+    return {**tables, "income": income}
+
+
+def _rename_symbol(tables: dict[str, pl.DataFrame], symbol: str) -> dict[str, pl.DataFrame]:
+    renamed = {}
+    for name, frame in tables.items():
+        if frame.is_empty() or "symbol" not in frame.columns:
+            renamed[name] = frame
+        else:
+            renamed[name] = frame.with_columns(pl.lit(symbol).alias("symbol"))
+    return renamed
 
 
 def _m2_tables() -> dict[str, pl.DataFrame]:

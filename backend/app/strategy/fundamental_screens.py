@@ -5,6 +5,8 @@
 
 行业用当前同花顺快照（ext_hy_ths），不是历史成分。M1 的 ROE 排名和 M3 的
 ROIC 中位数都在二级行业内计算。
+
+展示名只写在 SCREEN_NAMES。策略 id 不变。
 """
 
 from __future__ import annotations
@@ -20,6 +22,24 @@ LOOKBACK_DAYS = 2
 BASIC_FILTER = {"enabled": False}
 _RESULT_LIMIT = 8000
 _BANKS = ("银行", "非银金融")
+TOP_N_DEFAULT = 30
+
+# 选股卡片和回测都读这里。名字若再改，只改这一处。
+SCREEN_NAMES = {
+    "m1": "成长质量精选",
+    "m2": "长期价值白马",
+    "m3": "稳健现金流",
+}
+
+_TOP_N_PARAM = {
+    "id": "top_n",
+    "label": "入选数量",
+    "type": "int",
+    "default": TOP_N_DEFAULT,
+    "min": 1,
+    "max": 500,
+    "step": 1,
+}
 
 _INCOME_COLS = (
     "revenue", "operating_cost", "operating_profit", "income_tax", "total_profit",
@@ -38,23 +58,25 @@ _METRICS_COLS = (
 def meta_m1() -> dict:
     return _meta(
         "fundamental_m1",
-        "基本面 M1 主推",
-        "主推。扣非净利同比在 0 到 400% 之间，且增速环比变化率大于 -10%；"
+        SCREEN_NAMES["m1"],
+        "扣非净利同比在 0 到 400% 之间，且增速环比变化率大于 -10%；"
         "同花顺二级行业 ROE 前 30%；营收同比为正且增速环比变化率大于 -10%；"
         "单季毛利率环比不低于 -1 个百分点；资产负债率低于 70%；商誉/总资产低于 25%；"
-        "经营现金流为正；PE(TTM) 大于 0 且小于 80。公告次日生效。",
-        [],
+        "经营现金流为正；PE(TTM) 大于 0 且小于 80。"
+        "通过后按 ROE（越高越好）、扣非增速（越高越好）、PE（越低越好）三项名次的平均值排序，"
+        "扣非增速缺失或 PE 小于等于 0 的不参与；默认保留前 30 只。公告次日生效。",
+        [dict(_TOP_N_PARAM)],
     )
 
 
 def meta_m2() -> dict:
     return _meta(
         "fundamental_m2",
-        "基本面 M2",
+        SCREEN_NAMES["m2"],
         "三年平均 ROE/PB 大于 2.5%，最近三份季报净利率都大于 10% 且平均净利增速大于 20%，"
         "三年平均 ROE 大于 10%，最新年报 ROIC 大于资本成本（默认 8%），"
         "连续五个会计年度经营现金流为正，最新年报净利增速高于上年。"
-        "排除同花顺一级行业银行和非银金融。公告次日生效。",
+        "排除同花顺一级行业银行和非银金融。保留全部通过的股票。公告次日生效。",
         [{
             "id": "wacc",
             "label": "资本成本 WACC（0.08 表示 8%）",
@@ -70,16 +92,18 @@ def meta_m2() -> dict:
 def meta_m3() -> dict:
     return _meta(
         "fundamental_m3",
-        "基本面 M3",
+        SCREEN_NAMES["m3"],
         "资产负债率低于 55%，经营现金流/营收大于 5%，营收同比为正，"
         "最近三个会计年度 ROIC 都高于同花顺二级行业中位数，"
         "最近三年经营现金流都为正且四年里至少两年同比增加，"
-        "PE(TTM) 大于 0 且小于 80。公告次日生效。",
-        [],
+        "PE(TTM) 大于 0 且小于 80。"
+        "通过后按总市值从高到低排序，默认保留前 30 只。公告次日生效。",
+        [dict(_TOP_N_PARAM)],
+        descending=True,
     )
 
 
-def _meta(strategy_id: str, name: str, description: str, params: list) -> dict:
+def _meta(strategy_id: str, name: str, description: str, params: list, *, descending: bool = False) -> dict:
     return {
         "id": strategy_id,
         "name": name,
@@ -90,7 +114,7 @@ def _meta(strategy_id: str, name: str, description: str, params: list) -> dict:
         "params": params,
         "scoring": {},
         "order_by": "symbol",
-        "descending": False,
+        "descending": descending,
         "limit": _RESULT_LIMIT,
     }
 
@@ -126,13 +150,15 @@ def run_screen(
     base = _panel_base(panel)
     if base.is_empty():
         return panel.head(0)
-    passed = base.filter(_mask(base, tables, industry, model, options)).select("symbol", "date")
+    passed = _pick(base, tables, industry, model, options)
     if passed.is_empty():
         return panel.head(0)
     dated = panel.with_columns(
         pl.col("symbol").cast(pl.Utf8),
         _as_date("date").alias("_screen_date"),
     )
+    if "score" in dated.columns:
+        dated = dated.drop("score")
     return dated.join(
         passed.rename({"date": "_screen_date"}),
         on=["symbol", "_screen_date"],
@@ -140,7 +166,7 @@ def run_screen(
     ).drop("_screen_date")
 
 
-def _mask(base, tables, industry, model: str, params: dict) -> pl.Series:
+def _pick(base, tables, industry, model: str, params: dict) -> pl.DataFrame:
     income = _with_np(_quarter_versions(tables.get("income"), _INCOME_COLS))
     balance = _quarter_versions(tables.get("balance_sheet"), _BALANCE_COLS)
     cash = _quarter_versions(tables.get("cash_flow"), _CASH_COLS)
@@ -150,17 +176,17 @@ def _mask(base, tables, industry, model: str, params: dict) -> pl.Series:
     frame = _attach_latest(work, _union_keys(income, metrics), "latest_qkey")
     frame = _with_industry(frame, industry)
     if model == "m1":
-        return _m1(frame, income, balance, cash, metrics, shares)
+        return _m1(frame, income, balance, cash, metrics, shares, params)
     annual = _annual_only(_union_keys(income, metrics, cash))
     frame = _attach_latest(frame, annual, "annual_qkey")
     if model == "m2":
         return _m2(frame, income, balance, cash, metrics, params)
     if model == "m3":
-        return _m3(frame, income, balance, cash, metrics, shares)
+        return _m3(frame, income, balance, cash, metrics, shares, params)
     raise ValueError(f"unknown fundamental screen {model}")
 
 
-def _m1(frame, income, balance, cash, metrics, shares) -> pl.Series:
+def _m1(frame, income, balance, cash, metrics, shares, params: dict) -> pl.DataFrame:
     frame = _offsets(frame, income, "latest_qkey", (0, 1, 2, 3, 4, 5), (
         "net_income_deducted", "revenue", "operating_cost", "np_attr", "month",
     ), "i")
@@ -193,10 +219,12 @@ def _m1(frame, income, balance, cash, metrics, shares) -> pl.Series:
         & (pl.col("c0_net_operating_cash_flow") > 0)
         & (pl.col("pe") > 0) & (pl.col("pe") < 80)
     )
-    return _hit(frame, ok)
+    frame = _dedupe_ord(frame).with_columns(ok.fill_null(False).alias("_pass"))
+    frame = _score_m1(frame)
+    return _take_scored(frame, higher_is_better=False, n=_top_n(params), keep_score=True)
 
 
-def _m2(frame, income, balance, cash, metrics, params: dict) -> pl.Series:
+def _m2(frame, income, balance, cash, metrics, params: dict) -> pl.DataFrame:
     frame = _offsets(frame, metrics, "latest_qkey", (0, 1, 2), (
         "net_margin", "net_income_yoy", "bps",
     ), "q")
@@ -221,10 +249,14 @@ def _m2(frame, income, balance, cash, metrics, params: dict) -> pl.Series:
         & pl.col("industry_l1").is_not_null()
         & ~pl.col("industry_l1").is_in(list(_BANKS))
     )
-    return _hit(frame, ok)
+    frame = _dedupe_ord(frame).with_columns(
+        ok.fill_null(False).alias("_ok"),
+        pl.lit(None, dtype=pl.Float64).alias("score"),
+    )
+    return _take_scored(frame, higher_is_better=False, n=None, keep_score=False)
 
 
-def _m3(frame, income, balance, cash, metrics, shares) -> pl.Series:
+def _m3(frame, income, balance, cash, metrics, shares, params: dict) -> pl.DataFrame:
     frame = _offsets(frame, metrics, "latest_qkey", (0,), ("debt_to_asset_ratio", "revenue_yoy"), "m")
     frame = _offsets(frame, income, "latest_qkey", (0, 1, 2, 3, 4), (
         "revenue", "np_attr", "month",
@@ -251,14 +283,75 @@ def _m3(frame, income, balance, cash, metrics, shares) -> pl.Series:
         & (pl.sum_horizontal(item.cast(pl.Int8) for item in increases) >= 2)
         & (pl.col("pe") > 0) & (pl.col("pe") < 80)
     )
-    return _hit(frame, ok)
+    mcap = (
+        pl.when((pl.col("_px") > 0) & (pl.col("s0_total_shares") > 0))
+        .then(pl.col("_px") * pl.col("s0_total_shares"))
+        .otherwise(None)
+    )
+    frame = _dedupe_ord(frame).with_columns(
+        (ok.fill_null(False) & mcap.is_not_null()).alias("_ok"),
+        mcap.alias("score"),
+    )
+    return _take_scored(frame, higher_is_better=True, n=_top_n(params), keep_score=True)
 
 
-def _hit(frame: pl.DataFrame, expr: pl.Expr) -> pl.Series:
-    scored = frame.with_columns(expr.fill_null(False).alias("_hit"))
-    if "_ord" in scored.columns:
-        scored = scored.sort("_ord").unique("_ord", keep="last")
-    return scored["_hit"]
+def _score_m1(frame: pl.DataFrame) -> pl.DataFrame:
+    """名次只在通过筛选、且增速和正 PE 都有的股票之间计算，缺一项就不占名次。"""
+    rankable = pl.col("_pass") & pl.col("g0").is_not_null() & (pl.col("pe") > 0) & pl.col("m0_roe").is_not_null()
+    return frame.with_columns(
+        (
+            (
+                pl.when(rankable).then(pl.col("m0_roe")).otherwise(None).rank(method="average", descending=True).over("date")
+                + pl.when(rankable).then(pl.col("g0")).otherwise(None).rank(method="average", descending=True).over("date")
+                + pl.when(rankable).then(pl.col("pe")).otherwise(None).rank(method="average", descending=False).over("date")
+            )
+            / 3
+        ).alias("score"),
+        rankable.alias("_ok"),
+    )
+
+
+def _dedupe_ord(frame: pl.DataFrame) -> pl.DataFrame:
+    if "_ord" not in frame.columns:
+        return frame
+    return frame.sort("_ord").unique("_ord", keep="last")
+
+
+def _take_scored(
+    frame: pl.DataFrame,
+    *,
+    higher_is_better: bool,
+    n: int | None,
+    keep_score: bool,
+) -> pl.DataFrame:
+    """每个交易日各自截断。名次相同按代码排序，结果稳定。"""
+    picked = frame.filter(pl.col("_ok").fill_null(False))
+    if keep_score:
+        picked = picked.filter(pl.col("score").is_not_null())
+    if n is not None and not picked.is_empty():
+        picked = (
+            picked.sort(["date", "score", "symbol"], descending=[False, higher_is_better, False])
+            .with_columns((pl.col("symbol").cum_count().over("date") - 1).alias("_pos"))
+            .filter(pl.col("_pos") < n)
+        )
+    columns = ["symbol", "date"] + (["score"] if keep_score else [])
+    if picked.is_empty():
+        schema: dict[str, pl.DataType] = {"symbol": pl.Utf8, "date": pl.Date}
+        if keep_score:
+            schema["score"] = pl.Float64
+        return pl.DataFrame(schema=schema)
+    return picked.select(columns)
+
+
+def _top_n(params: dict | None) -> int:
+    raw = (params or {}).get("top_n", TOP_N_DEFAULT)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return TOP_N_DEFAULT
+    if value < 1:
+        return TOP_N_DEFAULT
+    return value
 
 
 def _with_roic_years(frame: pl.DataFrame, income, balance) -> pl.DataFrame:
