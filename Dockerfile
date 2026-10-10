@@ -141,15 +141,28 @@ COPY --from=codex-builder /opt/codex-native /usr/local/bin/codex
 RUN codex --version
 
 ENV PYTHONPATH=/app
-# 运行时 uv 镜像源持久化: CMD 用 `uv run` 启动, 锁与 pyproject 不一致等场景下
-# uv 会在容器内重新解析/安装 —— 无源配置时默认 pypi.org, 国内网络会卡死启动
-# (实测阿里云 ECS)。与构建期 RUN 内的 export 同源, 这里让它跨层存活。
+# 镜像源在构建和容器里都生效。启动时 UV_NO_SYNC=1，不会改 .venv：
+# 进程可能不是 root，写不了构建阶段留下的虚拟环境。依赖变更需要重新构建镜像。
+# 若去掉 UV_NO_SYNC，uv 会在启动时同步依赖；无源配置时默认 pypi.org，国内网络会卡住。
 ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG PYPI_FALLBACK=https://mirrors.aliyun.com/pypi/simple
 ENV UV_DEFAULT_INDEX=${PYPI_INDEX} \
     UV_EXTRA_INDEX_URL=${PYPI_FALLBACK}
+# 运行 uid 由 compose 的 APP_UID/APP_GID 决定，构建时不知道是谁。
+# debian 基础镜像的 /root 是 0700，非 root 进不去，所以家目录、uv 缓存和
+# Codex 挂载点都不放在 /root。缓存目录 1777，任意 uid 都能写。
+RUN mkdir -p /home/app/.cache/uv /home/app/.cache/pyc /codex-home /app/data \
+    && chmod 1777 /home/app /home/app/.cache /home/app/.cache/uv /home/app/.cache/pyc /app/data \
+    && chmod 755 /codex-home
+ENV HOME=/home/app \
+    XDG_CACHE_HOME=/home/app/.cache \
+    UV_CACHE_DIR=/home/app/.cache/uv \
+    UV_NO_SYNC=1 \
+    PYTHONPYCACHEPREFIX=/home/app/.cache/pyc \
+    PYTHONDONTWRITEBYTECODE=1 \
+    CODEX_HOME=/codex-home
 # 兜底时区: 交易时段判断已在代码里显式用北京时间 (app/market_time.py),
 # 此处让日志时间戳等其余 naive 时间也对齐北京时间。
 ENV TZ=Asia/Shanghai
 EXPOSE 3018
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3018"]
+CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3018"]

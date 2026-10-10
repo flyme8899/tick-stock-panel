@@ -114,6 +114,9 @@ def test_feed_time_converts_rfc822_to_beijing():
     parsed = parse_feed_time("Fri, 09 Oct 2026 14:30:00 GMT")
     assert parsed is not None
     assert parsed.isoformat(timespec="seconds") == "2026-10-09T22:30:00+08:00"
+    naive = parse_feed_time("Fri, 09 Oct 2026 14:30:00")
+    assert naive is not None
+    assert naive.isoformat(timespec="seconds") == "2026-10-09T22:30:00+08:00"
     atom = parse_feed_time("2026-10-09T16:10:00-04:00")
     assert atom is not None
     assert atom.isoformat(timespec="seconds") == "2026-10-10T04:10:00+08:00"

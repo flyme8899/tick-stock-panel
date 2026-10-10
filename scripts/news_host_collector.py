@@ -28,7 +28,22 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def ensure_supported_python(version: tuple[int, ...] | None = None) -> None:
+    """采集脚本最低 3.10。3.11 仍是推荐版本，重建步骤在 docs/news-sources.md。"""
+    info = sys.version_info if version is None else version
+    if info >= (3, 10):
+        return
+    current = ".".join(str(part) for part in info[:3])
+    print(
+        f"宿主机采集器需要 Python 3.10 或更高，当前是 {current}。"
+        "推荐用 Python 3.11 重建 ~/.venvs/tsp-collector，步骤见 docs/news-sources.md。",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
 def main() -> int:
+    ensure_supported_python()
     parser = argparse.ArgumentParser(description="宿主机只读采集钉钉和知识星球资讯")
     parser.add_argument("--data-dir", default="", help="TSP data 目录，默认 <仓库>/data 或 DATA_DIR")
     parser.add_argument("--backfill-since", default="", help="知识星球回补起点，如 2025-08-23")
