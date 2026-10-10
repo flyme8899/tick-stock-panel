@@ -12,6 +12,19 @@ const TABS = [
   { key: 'stock' as const, label: '热门个股' },
 ]
 
+function fundFlowText(item: NewsCandidate): string {
+  const flow = item.fund_flow
+  if (!flow) return ''
+  if (item.kind === 'stock' && flow.main_net_5d != null) {
+    return `主力净流入5日 ${(flow.main_net_5d / 1e8).toFixed(2)} 亿`
+  }
+  if (flow.sector_net_inflow_rank != null) {
+    const name = flow.sector_name ? `${flow.sector_name} ` : ''
+    return `${name}净流入排名 ${flow.sector_net_inflow_rank}`
+  }
+  return ''
+}
+
 function authLabel(source: NewsSourceHealth): string {
   if (!source.configured) return '未配置'
   if (source.auth_state === 'expired') return '登录失效'
@@ -123,6 +136,7 @@ export function HotEvents() {
                   </div>
                   <div className="mt-1 text-xs text-muted">
                     {item.story_count} 条故事 · {item.sources.length} 个来源 · 相对基线 {item.growth} 倍
+                    {fundFlowText(item) ? ` · ${fundFlowText(item)}` : ''}
                   </div>
                 </button>
               </li>

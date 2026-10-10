@@ -50,8 +50,9 @@ def test_upsert_edit_invalidates_cache(tmp_path):
     store.upsert(_config("cfg_a", "old"))
     assert store.load_all()[0].label == "old"
 
-    store.upsert(_config("cfg_a", "new"))
-    assert store.load_all()[0].label == "new"
+    # 两次写入的字节数必须不同。mtime 分辨率较粗时，同大小替换不会改变目录签名。
+    store.upsert(_config("cfg_a", "replaced"))
+    assert store.load_all()[0].label == "replaced"
 
 
 def test_delete_invalidates_cache(tmp_path):

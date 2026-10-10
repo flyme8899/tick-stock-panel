@@ -126,6 +126,22 @@ def _install_etf_job() -> None:
     module.install_import_hook()
 
 
+def _install_fund_flow_bridge() -> None:
+    """把本地资金进出摘要接到 DSA 大盘复盘。失败不挡住启动。"""
+    import importlib.util
+
+    path = Path(__file__).resolve().with_name("fund_flow_bridge.py")
+    if not path.is_file():
+        logger.info("未找到 fund_flow_bridge.py，DSA 不读取资金进出")
+        return
+    spec = importlib.util.spec_from_file_location("tsp_fund_flow_bridge", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install()
+
+
 def main() -> None:
     try:
         install()
@@ -139,6 +155,10 @@ def main() -> None:
         _install_etf_job()
     except Exception:
         logger.exception("ETF 轮动入口未安装，继续启动 DSA")
+    try:
+        _install_fund_flow_bridge()
+    except Exception:
+        logger.exception("TSP 资金进出桥未安装，继续启动 DSA")
     if len(sys.argv) < 2:
         sys.argv = ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     else:

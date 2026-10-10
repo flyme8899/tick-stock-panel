@@ -1390,6 +1390,13 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         logger.info("scheduled_review enabled @%02d:%02d mon-fri",
                     review_sched["hour"], review_sched["minute"])
 
+    try:
+        from app.fund_flow.scheduler import register_jobs
+
+        register_jobs(scheduler)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fund-flow scheduler job not registered: %s", e)
+
     scheduler.start()
     logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",
                 inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],

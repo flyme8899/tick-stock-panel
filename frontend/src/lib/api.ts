@@ -2191,6 +2191,12 @@ export interface NewsCandidate {
   sources: string[]
   growth: number
   baseline_effective: number
+  fund_flow?: {
+    main_net_5d?: number | null
+    sector_net_inflow_rank?: number | null
+    sector_net_inflow?: number | null
+    sector_name?: string | null
+  } | null
 }
 
 export interface NewsMessage {

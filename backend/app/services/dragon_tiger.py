@@ -132,6 +132,9 @@ def get_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
 
     provider = _provider()
     if provider is None:
+        backup = _lhb_backup(data_dir, trade_date)
+        if backup is not None:
+            return backup
         return {"state": "source_unavailable"}
 
     from app.plugins.fuyao.client import FuyaoError
@@ -180,7 +183,23 @@ def get_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
                 except FuyaoError:
                     pass
         logger.warning("龙虎榜拉取失败: %s", e)
+        backup = _lhb_backup(data_dir, trade_date)
+        if backup is not None:
+            return backup
         return {"state": "no_data", "message": str(e)}
+
+
+def _lhb_backup(data_dir: Path, trade_date: date_cls | None) -> dict | None:
+    """fuyao 没有结果时读 akshare 备份。备份也没有就返回 None，调用方保持原状态。"""
+    if trade_date is None:
+        return None
+    try:
+        from app.fund_flow.query import lhb_backup_payload
+
+        return lhb_backup_payload(data_dir, trade_date.isoformat())
+    except Exception:  # noqa: BLE001
+        logger.debug("龙虎榜备份不可用", exc_info=True)
+        return None
 
 
 def build_recap_context(data_dir: Path) -> str:

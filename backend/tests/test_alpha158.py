@@ -89,7 +89,7 @@ def test_default_views_exclude_group_until_opt_in() -> None:
     assert all_factors(asset_type="etf")
     assert not any(spec.id.startswith("a158_") for spec in all_factors(asset_type="etf"))
     stock_stable = all_factors(asset_type="stock", stable_only=True)
-    assert len(stock_stable) == 77
+    assert len(stock_stable) == 79  # 77 个稳定目录因子 + 2 个股票资金因子
     assert get_factor("a158_kmid") is not None
     with pytest.raises(ValueError, match="内置因子不可注销"):
         unregister_factor("a158_kmid")

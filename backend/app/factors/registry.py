@@ -375,6 +375,18 @@ def _ensure_ext_factors() -> None:
         logging.getLogger(__name__).debug("ext factor sync skipped", exc_info=True)
 
 
+def _ensure_fund_flow_factors() -> None:
+    """资金因子元数据。失败不阻断注册表读取。"""
+    try:
+        from app.fund_flow.factors import ensure_registered
+
+        ensure_registered()
+    except Exception:  # noqa: BLE001 — 资金因子元数据失败不阻断注册表
+        import logging
+
+        logging.getLogger(__name__).debug("fund flow factor sync skipped", exc_info=True)
+
+
 def all_factors(
     asset_type: str | None = None,
     stable_only: bool = False,
@@ -390,6 +402,7 @@ def all_factors(
     因子库列表和 AI 提示词看到同一份扩展字段清单。
     """
     _ensure_ext_factors()
+    _ensure_fund_flow_factors()
     return [
         spec for spec in _ordered_specs()
         if (asset_type is None or asset_type in spec.asset_types)
@@ -418,8 +431,10 @@ def factor_columns_view(*, include_experimental: bool = False) -> list[dict]:
 
     带 alpha158 标签的实验组默认不出现在挖掘候选和检验列里。
     include_experimental=True 时才追加。
+    fund_flow 标签的资金因子给选股和热门事件用，不进挖掘目录，避免改动前 48 个和黄金快照。
     """
     specs = _ordered_specs()
+    specs = [spec for spec in specs if "fund_flow" not in spec.tags]
     if not include_experimental:
         specs = [spec for spec in specs if "alpha158" not in spec.tags]
     return [spec.column_view() for spec in specs]
