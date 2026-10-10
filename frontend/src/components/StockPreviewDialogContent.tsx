@@ -537,6 +537,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                   symbol={symbol}
                   height={420}
                   showIntraday
+                  showTradeMarks
                   dateRange={dateRange}
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}

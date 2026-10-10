@@ -7,6 +7,8 @@ import { StockFinancialSearch } from '@/components/financials/StockFinancialSear
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
+import { StockIntradayChart } from '@/components/StockIntradayChart'
+import { TradeMarksOverlay } from '@/components/trade-marks/TradeMarksPanel'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { api } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
@@ -209,6 +211,8 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
   }
 
   const levels = (levelsQ.data?.levels ?? {}) as Record<LevelType, PriceLevel[]>
+  const rangeStart = String(rows[0].date).slice(0, 10)
+  const rangeEnd = String(rows[rows.length - 1].date).slice(0, 10)
 
   // 涨跌色:最后一根 K 线收 vs 前一根收(无前日则按开收判断)
   const last = rows[rows.length - 1]
@@ -235,14 +239,41 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
         </div>
       </div>
       <div className="p-3">
-        <AnalysisKChart
-          rows={rows}
-          levels={levels}
-          series={levelsQ.data?.series}
-          seriesDates={levelsQ.data?.dates}
-          defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
-          height={480}
-        />
+        <TradeMarksOverlay
+          symbol={symbol}
+          start={rangeStart}
+          end={rangeEnd}
+          intradayDate={rangeEnd}
+        >
+          {overlay => (
+            <>
+              <AnalysisKChart
+                rows={rows}
+                levels={levels}
+                series={levelsQ.data?.series}
+                seriesDates={levelsQ.data?.dates}
+                defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
+                markers={overlay.markers}
+                extraPriceLines={overlay.priceLines}
+                onMarkerHover={overlay.onMarkerHover}
+                height={480}
+              />
+              {overlay.showT && (
+                <div className="mt-3 border-t border-border/40 pt-3">
+                  <div className="mb-1 text-[10px] text-muted">做T提醒 · {rangeEnd}</div>
+                  <StockIntradayChart
+                    symbol={symbol}
+                    date={rangeEnd}
+                    height={280}
+                    prevClose={prev?.close}
+                    vwapBand={overlay.vwapBand}
+                    tMarks={overlay.tMarks}
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </TradeMarksOverlay>
       </div>
     </div>
   )

@@ -82,6 +82,9 @@ export interface ChartMarker {
   label?: string
   color?: string
   above?: boolean
+  kind?: 'buy' | 'sell' | 'neutral'
+  style?: 'triangle' | 'breakout' | 'circle'
+  markerId?: string
 }
 export interface ChartRange {
   start: string
@@ -99,12 +102,15 @@ interface Props {
   seriesDates?: string[]
   /** 默认开启的价位组 */
   defaultLevelTypes?: LevelType[]
-  /** 预留:新闻/暴雷/利好日期标记 */
+  /** 预留:新闻/暴雷/利好日期标记。带 kind 的买卖点改画三角 / 菱形 / 圆点。 */
   markers?: ChartMarker[]
+  /** 买卖点等额外水平价位，走和关键价位一样的右侧标签线。 */
+  extraPriceLines?: { value: number; label?: string; color?: string }[]
   /** 预留:事件区间高亮 */
   ranges?: ChartRange[]
   /** 预留:点击某根 K 线 */
   onDateClick?: (date: string) => void
+  onMarkerHover?: (markerId: string | null) => void
   height?: number
   className?: string
 }
@@ -118,13 +124,17 @@ export function AnalysisKChart({
   seriesDates,
   defaultLevelTypes = ['sr', 'pivot', 'keltner_s'],
   markers,
+  extraPriceLines,
   ranges,
   onDateClick,
+  onMarkerHover,
   height = 460,
   className,
 }: Props) {
   const chartRef = useRef<HTMLDivElement>(null)
   const chartInstRef = useRef<ECharts | null>(null)
+  const onMarkerHoverRef = useRef(onMarkerHover)
+  onMarkerHoverRef.current = onMarkerHover
   /** seriesIndex → levelKey 映射, buildOption 填充, ECharts hover 事件反查 */
   const seriesKeyMapRef = useRef<Map<number, string>>(new Map())
   // 主题: buildOption 内部用 CT() 动态取色, 这里只负责切换时触发重建
@@ -203,15 +213,35 @@ export function AnalysisKChart({
     const volTop = PAD_TOP + mainH + GAP_MAIN_VOL
     const sliderBottom = PAD_BOTTOM
 
-    // 预留:markPoint(新闻标记)
     const markPointData: any[] = (markers ?? [])
       .filter(m => dateIndex.has(m.date))
-      .map(m => ({
-        coord: [m.date, rows[dateIndex.get(m.date)!].high],
-        symbol: 'pin', symbolSize: 32,
-        itemStyle: { color: m.color ?? '#EAB308' },
-        label: { show: !!m.label, formatter: m.label ?? '', fontSize: 9, color: '#fff' },
-      }))
+      .map(m => {
+        const row = rows[dateIndex.get(m.date)!]
+        if (m.kind === 'buy' || m.kind === 'sell') {
+          const below = m.kind === 'buy'
+          const symbol = m.style === 'breakout' ? 'diamond' : m.style === 'circle' ? 'circle' : 'triangle'
+          const color = m.color ?? (below ? '#12B76A' : '#F04438')
+          return {
+            name: m.date,
+            markerId: m.markerId,
+            coord: [m.date, below ? row.low : row.high],
+            symbol,
+            symbolSize: m.style === 'circle' ? 16 : 12,
+            symbolRotate: symbol === 'triangle' && !below ? 180 : 0,
+            symbolOffset: below ? [0, 10] : [0, -10],
+            itemStyle: { color },
+            label: m.style === 'circle'
+              ? { show: true, formatter: below ? 'B' : 'S', color: '#fff', fontSize: 9, fontWeight: 'bold' }
+              : { show: false },
+          }
+        }
+        return {
+          coord: [m.date, row.high],
+          symbol: 'pin', symbolSize: 32,
+          itemStyle: { color: m.color ?? '#EAB308' },
+          label: { show: !!m.label, formatter: m.label ?? '', fontSize: 9, color: '#fff' },
+        }
+      })
 
     // 预留:markArea(事件区间)
     const markAreaData: any[] = (ranges ?? [])
@@ -324,6 +354,32 @@ export function AnalysisKChart({
     }
     seriesKeyMapRef.current = keyMap
 
+    for (const line of extraPriceLines ?? []) {
+      if (!Number.isFinite(line.value) || line.value <= 0) continue
+      series.push({
+        name: line.label ?? '价位',
+        type: 'line',
+        silent: true,
+        animation: false,
+        symbol: 'none',
+        data: dates.map(() => line.value),
+        z: 1,
+        lineStyle: { width: 1, color: line.color ?? CT().text, type: 'dashed', opacity: 0.9 },
+        itemStyle: { color: line.color ?? CT().text },
+        endLabel: line.label ? {
+          show: true,
+          formatter: () => line.label,
+          color: line.color ?? CT().text,
+          fontSize: 9,
+          fontFamily: 'JetBrains Mono, monospace',
+          backgroundColor: CT().infoBarBg,
+          padding: [2, 5],
+          borderRadius: 2,
+          distance: 6,
+        } : undefined,
+      })
+    }
+
     return {
       animation: false,
       backgroundColor: 'transparent',
@@ -382,16 +438,29 @@ export function AnalysisKChart({
       })
       // hover 价位线/曲线 endLabel → 联动高亮(与下方文字行双向联动)
       chartInstRef.current.on('mouseover', (params: any) => {
+        if (params.componentType === 'markPoint') {
+          const id = params.data?.markerId as string | undefined
+          if (id) onMarkerHoverRef.current?.(id)
+          return
+        }
         if (params.componentType === 'series') {
           const k = seriesKeyMapRef.current.get(params.seriesIndex as number)
           if (k) setHoveredKey(k)
         }
       })
-      chartInstRef.current.on('globalout', () => setHoveredKey(null))
+      chartInstRef.current.on('mouseout', (params: any) => {
+        if (params.componentType === 'markPoint' && params.data?.markerId) {
+          onMarkerHoverRef.current?.(null)
+        }
+      })
+      chartInstRef.current.on('globalout', () => {
+        setHoveredKey(null)
+        onMarkerHoverRef.current?.(null)
+      })
     }
     chartInstRef.current.setOption(buildOption(), true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey])
+  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, extraPriceLines, ranges, height, theme, hoveredKey])
 
   // resize
   useEffect(() => {

@@ -29,6 +29,10 @@ interface Props {
   priceLines?: { value: number; label?: string; color?: string }[]
   showLimitLines?: boolean
   showAvgLine?: boolean
+  /** 分时均价上下带，例如 0.015。空则不画。 */
+  vwapBand?: number | null
+  /** 做T提醒标记，time 为 HH:MM。 */
+  tMarks?: { time: string; side: 'buy' | 'sell' | 'neutral'; price?: number | null }[]
 }
 
 function fmtAmt(v: number | null | undefined): string {
@@ -64,7 +68,42 @@ function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
   return { limitUp, limitDown, upPct, downPct }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
+function bandSeries(avgData: (number | null)[], band: number) {
+  const style = { width: 1, type: 'dashed' as const, color: 'rgba(245,158,11,0.55)' }
+  const scale = (sign: number) => avgData.map(value => (
+    value == null ? null : Math.round(value * (1 + sign * band) * 10000) / 10000
+  ))
+  return [
+    { name: '均价上沿', type: 'line' as const, data: scale(1), smooth: false, symbol: 'none', silent: true, connectNulls: true, lineStyle: style },
+    { name: '均价下沿', type: 'line' as const, data: scale(-1), smooth: false, symbol: 'none', silent: true, connectNulls: true, lineStyle: style },
+  ]
+}
+
+function tMarkPoints(
+  marks: Props['tMarks'],
+  closes: (number | null)[],
+  avgData: (number | null)[],
+  timeIndexMap: Map<string, number>,
+) {
+  const data = (marks ?? []).flatMap(mark => {
+    const idx = timeIndexMap.get(mark.time)
+    if (idx == null) return []
+    const y = mark.price ?? closes[idx] ?? avgData[idx]
+    if (y == null || !Number.isFinite(y)) return []
+    const color = mark.side === 'buy' ? '#12B76A' : mark.side === 'sell' ? '#F04438' : '#A1A1AA'
+    return [{
+      name: mark.time,
+      coord: [mark.time, y],
+      symbol: 'circle',
+      symbolSize: 10,
+      itemStyle: { color },
+      label: { show: true, formatter: 'T', color: '#fff', fontSize: 8, fontWeight: 'bold' as const },
+    }]
+  })
+  return data.length > 0 ? { data, animation: false } : undefined
+}
+
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], vwapBand: number | null = null, tMarks: Props['tMarks'] = []): EChartsOption {
   // 无涨跌幅标的 (注册制新股上市初期窗口, 后端 no_limit 标记): 不存在可信
   // 涨跌停带, 自适应/涨跌停两类模式都退化为纯数据对称范围, 也不画涨跌停虚线
   const limitLinesActive = showLimitLines && !priceLimit?.no_limit
@@ -154,6 +193,14 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         if (!isValidPrice(v)) continue
         const diff = Math.abs(v - prevClose)
         if (diff > maxDiff) maxDiff = diff
+      }
+    }
+
+    const band = vwapBand != null && vwapBand > 0 ? vwapBand : 0
+    if (showAvgLine && band > 0) {
+      for (const v of avgData) {
+        if (!isValidPrice(v)) continue
+        maxDiff = Math.max(maxDiff, Math.abs(v * (1 + band) - prevClose), Math.abs(v * (1 - band) - prevClose))
       }
     }
 
@@ -381,6 +428,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         areaStyle,
         connectNulls: true,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
+        markPoint: tMarkPoints(tMarks, closes, avgData, timeIndexMap),
       },
       ...(showAvgLine ? [{
         name: '均价',
@@ -392,6 +440,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         lineStyle: { width: 1, color: THEME.avgLine },
         connectNulls: true,
       }] : []),
+      ...(showAvgLine && vwapBand != null && vwapBand > 0 ? bandSeries(avgData, vwapBand) : []),
       {
         name: '成交量',
         type: 'bar',
@@ -417,6 +466,8 @@ export function EChartsIntraday({
   priceLines,
   showLimitLines = true,
   showAvgLine = true,
+  vwapBand = null,
+  tMarks,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -529,12 +580,12 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, vwapBand, tMarks), true)
     } else {
       fullDayToDataIdx.current = new Map()
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, vwapBand, tMarks])
 
   useEffect(() => {
     return () => {

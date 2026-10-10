@@ -113,3 +113,55 @@ it('切股后鼠标未离开图表, 竖虚线重新命中即恢复「至今/周�
   await act(async () => { surface.dispatchEvent(new MouseEvent('mouseleave')) })
   expect(host.textContent).not.toContain('至今')
 })
+
+it('买卖点用三角、菱形和圆点，旧箭头标记保持不变', async () => {
+  const hover = vi.fn()
+  await act(async () => root.render(
+    <EChartsCandlestick
+      data={rows(10)}
+      height={400}
+      showInfoBar={false}
+      visibleBars="all"
+      activeIndicators={[]}
+      onMarkerHover={hover}
+      markers={[
+        { date: DAYS[10], kind: 'buy', label: 'OLD' },
+        { date: DAYS[11], kind: 'buy', style: 'triangle', markerId: 'b1', color: '#12B76A' },
+        { date: DAYS[12], kind: 'buy', style: 'breakout', markerId: 'b2' },
+        { date: DAYS[13], kind: 'sell', style: 'triangle', markerId: 's1' },
+        { date: DAYS[14], kind: 'buy', style: 'circle', markerId: 'f1' },
+      ]}
+    />,
+  ))
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  const points = option.series.find((series: any) => series.name === 'K').markPoint.data
+  expect(points.find((point: any) => point.name === 'OLD').symbol).toBe('arrow')
+  const buy = points.find((point: any) => point.markerId === 'b1')
+  expect(buy.symbol).toBe('triangle')
+  expect(buy.symbolRotate).toBe(0)
+  expect(buy.itemStyle.color).toBe('#12B76A')
+  expect(buy.coord[1]).toBe(rows(10)[11].low)
+  const breakout = points.find((point: any) => point.markerId === 'b2')
+  expect(breakout.symbol).toBe('diamond')
+  const sell = points.find((point: any) => point.markerId === 's1')
+  expect(sell.symbol).toBe('triangle')
+  expect(sell.symbolRotate).toBe(180)
+  expect(sell.itemStyle.color).toBe('#F04438')
+  expect(sell.coord[1]).toBe(rows(10)[13].high)
+  const fill = points.find((point: any) => point.markerId === 'f1')
+  expect(fill.symbol).toBe('circle')
+  expect(fill.label.formatter).toBe('B')
+
+  await act(async () => {
+    chart.handlers.mouseover?.({
+      componentType: 'markPoint',
+      data: { markerId: 'b1' },
+      event: { offsetX: 12, offsetY: 20 },
+    })
+  })
+  expect(hover).toHaveBeenCalledWith('b1', { x: 12, y: 20 })
+  await act(async () => {
+    chart.handlers.mouseout?.({ componentType: 'markPoint', data: { markerId: 'b1' } })
+  })
+  expect(hover).toHaveBeenCalledWith(null)
+})

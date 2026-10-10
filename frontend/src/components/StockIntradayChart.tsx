@@ -20,6 +20,8 @@ interface Props {
   priceLines?: { value: number; label?: string; color?: string }[]
   /** 自动刷新间隔(ms)。undefined/0 = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
   refetchIntervalMs?: number
+  vwapBand?: number | null
+  tMarks?: { time: string; side: 'buy' | 'sell' | 'neutral'; price?: number | null }[]
 }
 
 export function StockIntradayChart({
@@ -34,6 +36,8 @@ export function StockIntradayChart({
   currentPrice,
   priceLines,
   refetchIntervalMs,
+  vwapBand,
+  tMarks,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
@@ -136,6 +140,8 @@ export function StockIntradayChart({
           onPriceDoubleClick={onPriceDoubleClick}
           currentPrice={currentPrice}
           priceLines={priceLines}
+          vwapBand={vwapBand}
+          tMarks={tMarks}
         />
       )}
     </div>

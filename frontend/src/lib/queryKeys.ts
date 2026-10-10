@@ -99,6 +99,9 @@ export const QK = {
 
   // Custom Signals
   customSignals:        ['custom-signals'] as const,
+  // 个股买卖点。结果随标的、策略和区间变化，不进 SSE 行情失效。
+  tradeSignals:         (symbol: string, strategy: string, start: string, end: string, intraday: string) =>
+                          ['trade-signals', symbol, strategy, start, end, intraday] as const,
   customSignalsOptions: ['custom-signals-options'] as const,
 
   // Monitor (监控规则 + 触发记录)
