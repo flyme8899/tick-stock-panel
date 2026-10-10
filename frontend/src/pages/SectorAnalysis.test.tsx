@@ -6,10 +6,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SectorAnalysis } from './SectorAnalysis'
 
-vi.mock('@/components/SectorRotationCard', () => ({
-  SectorRotationCard: ({ kind }: { kind: string }) => <div data-rotation={kind}>板块切换</div>,
-}))
-
 vi.mock('@/lib/api', () => ({
   api: {
     extDataList: async () => ({
@@ -71,6 +67,38 @@ vi.mock('@/lib/api', () => ({
         { symbol: '000002.SZ', name: '万科A', change_pct: 0.03, amount: 5e8, turnover_rate: 2, vol_ratio_5d: 1.4 },
       ],
     }),
+    sectorRotation: async (params: { kind: string }) => ({
+      status: 'ok',
+      date: '2026-10-10',
+      as_of: '15:00',
+      timeline: [{
+        time: '15:00',
+        rotation: params.kind === 'industry' ? 0.31 : 0.42,
+        leader: params.kind === 'industry' ? '银行' : '银行概念',
+        leader_pct: 0.02,
+        market_pct: 0.01,
+      }],
+      sectors: [{
+        name: params.kind === 'industry' ? '银行' : '银行概念',
+        pct_now: 0.02,
+        pct_prev: 0.01,
+        rank_now: 1,
+        rank_prev: 2,
+        rank_change: 1,
+        flow: null,
+        score: 1,
+        n_members: 2,
+        n_members_with_bars: 2,
+      }],
+    }),
+    rpsRotation: async () => ({
+      dates: ['2026-10-09', '2026-10-10'],
+      columns: {
+        '2026-10-09': [['银行概念', 0.01], ['地产概念', -0.01], ['银行', 0.015]],
+        '2026-10-10': [['银行概念', 0.02], ['银行', 0.01], ['地产概念', 0.005]],
+      },
+      concept_count: 3,
+    }),
     extDataSchemaAll: async () => ({ items: [] }),
     extDataPresetFetch: async () => ({ ok: true }),
   },
@@ -101,10 +129,11 @@ afterEach(async () => {
   client.clear()
   host.remove()
   localStorage.clear()
+  delete (window as { matchMedia?: unknown }).matchMedia
 })
 
 async function settle() {
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10; i++) {
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
   }
 }
@@ -122,53 +151,98 @@ function renderAt(path: string) {
   })
 }
 
-function tab(name: string) {
-  return [...host.querySelectorAll('[role="tab"]')].find(el => el.textContent === name) as HTMLButtonElement
+function column(kind: string) {
+  const node = host.querySelector(`[data-kind="${kind}"]`)
+  if (!node) throw new Error(`missing column ${kind}`)
+  return node
 }
 
-it('defaults to the concept tab and keeps industry-only pieces off it', async () => {
+function useNarrowViewport(matches: boolean) {
+  window.matchMedia = ((query: string) => ({
+    matches: matches && query.includes('max-width'),
+    media: query,
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() { return false },
+    onchange: null,
+    addListener() {},
+    removeListener() {},
+  })) as unknown as typeof window.matchMedia
+}
+
+it('shows concept and industry side by side, with industry-only level and heatmap', async () => {
   renderAt('/sector-analysis')
   await settle()
 
   expect(host.querySelector('h1')?.textContent).toBe('板块分析')
-  expect(tab('概念').getAttribute('aria-selected')).toBe('true')
-  expect(tab('行业').getAttribute('aria-selected')).toBe('false')
-  expect(host.textContent).toContain('概念矩阵')
-  expect(host.textContent).toContain('银行概念')
-  expect(host.textContent).not.toContain('热度分布')
-  expect(host.textContent).not.toContain('级行业')
-  expect(host.querySelector('[data-rotation]')?.getAttribute('data-rotation')).toBe('concept')
+  expect(host.querySelector('[role="tablist"]')).toBeNull()
+  expect(column('concept').textContent).toContain('银行概念')
+  expect(column('concept').textContent).toContain('概念轮动')
+  expect(column('concept').textContent).toContain('切换强度 0.42')
+  expect(column('concept').textContent).not.toContain('热度分布')
+  expect(column('concept').querySelector('[aria-label="行业层级"]')).toBeNull()
+
+  expect(column('industry').textContent).toContain('1级行业')
+  expect(column('industry').textContent).toContain('热度分布')
+  expect(column('industry').textContent).toContain('银行')
+  expect(column('industry').textContent).toContain('行业轮动')
+  expect(column('industry').textContent).not.toContain('国有大行')
+  expect(column('industry').textContent).not.toContain('银行概念')
+  expect(host.querySelectorAll('[data-rotation]')).toHaveLength(2)
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('点击上方概念或行业')
+})
+
+it('opens one shared detail for whichever column is clicked', async () => {
+  renderAt('/sector-analysis')
+  await settle()
 
   await act(async () => {
-    host.querySelector<HTMLButtonElement>('button[title="配置数据源"]')?.click()
+    column('concept').querySelector<HTMLButtonElement>('[data-sector="银行概念"]')?.click()
+  })
+  await settle()
+
+  const detail = host.querySelector('#sector-detail')
+  expect(detail?.getAttribute('data-detail-kind')).toBe('concept')
+  expect(detail?.textContent).toContain('平安银行')
+  expect(detail?.textContent).toContain('本概念三龙头')
+  expect(detail?.textContent).toContain('涨幅 RPS')
+  expect(detail?.textContent).toContain('#1')
+  expect(detail?.textContent).not.toContain('级行业')
+
+  await act(async () => {
+    column('industry').querySelector<HTMLButtonElement>('[data-sector="银行"]')?.click()
+  })
+  await settle()
+  expect(host.querySelector('#sector-detail')?.getAttribute('data-detail-kind')).toBe('industry')
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('本行业三龙头')
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('浦发银行')
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('1级行业')
+})
+
+it('keeps each column config, and the industry level control, on their own side', async () => {
+  renderAt('/sector-analysis?focus=industry')
+  await settle()
+
+  expect(host.querySelector('[data-loc]')?.textContent).toBe('/sector-analysis?focus=industry')
+  expect(column('industry').getAttribute('data-focused')).toBe('true')
+  expect(column('concept').getAttribute('data-focused')).toBe('false')
+
+  await act(async () => {
+    host.querySelector<HTMLButtonElement>('button[title="配置概念数据源"]')?.click()
   })
   await settle()
   expect(host.textContent).not.toContain('统计层级')
   expect(host.textContent).not.toContain('一级行业')
-})
-
-it('shows hierarchy grouping and the heatmap only on the industry tab', async () => {
-  renderAt('/sector-analysis?tab=industry')
-  await settle()
-
-  expect(host.querySelector('[data-loc]')?.textContent).toBe('/sector-analysis?tab=industry')
-  expect(tab('行业').getAttribute('aria-selected')).toBe('true')
-  expect(host.textContent).toContain('1级行业')
-  expect(host.textContent).toContain('行业矩阵')
-  expect(host.textContent).toContain('热度分布')
-  expect(host.textContent).toContain('银行')
-  expect(host.textContent).not.toContain('国有大行')
-  expect(host.textContent).not.toContain('银行概念')
-  expect(host.querySelector('[data-rotation]')?.getAttribute('data-rotation')).toBe('industry')
-
   await act(async () => {
-    host.querySelector<HTMLButtonElement>('button[title="配置数据源"]')?.click()
+    ;[...host.querySelectorAll('button')].find(el => el.textContent === '取消')?.click()
+  })
+
+  const conceptConfig = localStorage.getItem('concept-analysis-config')
+  await act(async () => {
+    host.querySelector<HTMLButtonElement>('button[title="配置行业数据源"]')?.click()
   })
   await settle()
   expect(host.textContent).toContain('统计层级')
-  expect(host.textContent).toContain('一级行业')
-
-  const conceptConfig = localStorage.getItem('concept-analysis-config')
   await act(async () => {
     ;[...host.querySelectorAll('button')].find(el => el.textContent === '保存')?.click()
   })
@@ -176,11 +250,29 @@ it('shows hierarchy grouping and the heatmap only on the industry tab', async ()
   expect(localStorage.getItem('concept-analysis-config')).toBe(conceptConfig)
   expect(JSON.parse(localStorage.getItem('industry-analysis-config') || '{}').hierarchyLevel).toBe(1)
 
-  await act(async () => { tab('概念').click() })
+  await act(async () => {
+    ;[...column('industry').querySelectorAll('button')].find(el => el.textContent === '3级')?.click()
+  })
   await settle()
-  expect(host.querySelector('[data-loc]')?.textContent).toBe('/sector-analysis?tab=concept')
-  expect(host.textContent).toContain('概念矩阵')
-  expect(host.textContent).toContain('银行概念')
-  expect(host.textContent).not.toContain('热度分布')
-  expect(host.textContent).not.toContain('1级行业')
+  expect(column('industry').textContent).toContain('大型')
+  expect(column('industry').textContent).not.toContain('国有大行')
+  expect(JSON.parse(localStorage.getItem('industry-analysis-config') || '{}').hierarchyLevel).toBe(3)
+  expect(JSON.parse(localStorage.getItem('concept-analysis-config') || '{}').dimensionField).toBe('所属概念')
+})
+
+it('stacks the columns and collapses the other one when a narrow screen is focused', async () => {
+  useNarrowViewport(true)
+  renderAt('/sector-analysis?focus=concept')
+  await settle()
+
+  expect(column('concept').getAttribute('data-collapsed')).toBe('false')
+  expect(column('industry').getAttribute('data-collapsed')).toBe('true')
+  expect(column('industry').querySelector('#sector-column-body-industry')).toBeNull()
+
+  await act(async () => {
+    column('industry').querySelector<HTMLButtonElement>('[aria-controls="sector-column-body-industry"]')?.click()
+  })
+  await settle()
+  expect(column('industry').getAttribute('data-collapsed')).toBe('false')
+  expect(column('industry').textContent).toContain('热度分布')
 })

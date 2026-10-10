@@ -166,10 +166,10 @@ export const storage = {
     result: any
   } | null>('strategy-backtest-last'),
 
-  /** 板块分析 · 概念标签的字段配置（与行业标签分开保存） */
+  /** 板块分析 · 概念列的字段配置（与行业列分开保存） */
   conceptAnalysisConfig: kv<Record<string, any>>('concept-analysis-config'),
 
-  /** 板块分析 · 行业标签的字段配置（与概念标签分开保存） */
+  /** 板块分析 · 行业列的字段配置（与概念列分开保存） */
   industryAnalysisConfig: kv<Record<string, any>>('industry-analysis-config'),
 
   /** 数据页画像卡片显隐 (卡片key → 是否显示) */

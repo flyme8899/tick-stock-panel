@@ -13,6 +13,10 @@ interface Props {
   onClose: () => void
   /** 维度: concept 概念(默认) / industry 行业 */
   kind?: 'concept' | 'industry'
+  /** 从板块详情打开时，高亮该板块在矩阵里的轨迹 */
+  initialSelected?: string | null
+  /** 与行业列当前的 1/2/3 级对齐；概念不使用 */
+  initialLevel?: 1 | 2 | 3
 }
 
 const DEFAULT_DAYS = 12
@@ -47,14 +51,14 @@ function rankColorClass(rank: number, total: number): string {
   return 'text-accent'
 }
 
-export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
+export function RpsRotationDialog({ onClose, kind = 'concept', initialSelected = null, initialLevel }: Props) {
   // 维度文案: concept→概念, industry→行业
   const dimLabel = kind === 'industry' ? '行业' : '概念'
   const [days, setDays] = useState(DEFAULT_DAYS)
   const [reversed, setReversed] = useState(false)        // false=高→低, true=低→高
-  const [selected, setSelected] = useState<string | null>(null)  // 点中的成员名, 高亮追踪
+  const [selected, setSelected] = useState<string | null>(initialSelected)  // 点中的成员名, 高亮追踪
   // 行业层级(仅 industry): 1/2/3 级, 默认 2 级。concept 时为 null 不生效。
-  const [level, setLevel] = useState<number>(kind === 'industry' ? 2 : 0)
+  const [level, setLevel] = useState<number>(kind === 'industry' ? (initialLevel ?? 2) : 0)
 
   // ---- AI 轮动分析状态 (组件内, 不建全局 store: 切页即关对话框) ----
   const [analysis, setAnalysis] = useState('')            // 累积的 Markdown 报告

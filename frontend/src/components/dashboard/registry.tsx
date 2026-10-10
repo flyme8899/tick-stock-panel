@@ -179,7 +179,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
   {
     id: 'concept-rank', label: '概念热度', icon: Flame, minW: 3, minH: 6, defW: 6, defH: 8,
     render: ctx => (
-      <HotRankCard title="概念热度" rank={ctx.data.concept_rank} configUrl="/sector-analysis?tab=concept"
+      <HotRankCard title="概念热度" rank={ctx.data.concept_rank} configUrl="/sector-analysis?focus=concept"
         activeSymbol={ctx.activeSymbol('concept')}
         onStockClick={(symbol, name) => ctx.openStock('concept', symbol, name, rankNav(ctx.data.concept_rank))}
         onDimensionClick={ctx.openDimension} />
@@ -188,7 +188,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
   {
     id: 'industry-rank', label: '行业热度', icon: Flame, minW: 3, minH: 6, defW: 6, defH: 8,
     render: ctx => (
-      <HotRankCard title="行业热度" rank={ctx.data.industry_rank} configUrl="/sector-analysis?tab=industry"
+      <HotRankCard title="行业热度" rank={ctx.data.industry_rank} configUrl="/sector-analysis?focus=industry"
         activeSymbol={ctx.activeSymbol('industry')}
         onStockClick={(symbol, name) => ctx.openStock('industry', symbol, name, rankNav(ctx.data.industry_rank))}
         onDimensionClick={ctx.openDimension} />

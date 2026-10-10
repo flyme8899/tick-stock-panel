@@ -1,17 +1,16 @@
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
 import {
   Activity,
+  ChevronDown,
   Crown,
   Layers3,
   RefreshCw,
   Repeat,
   Search,
   Settings2,
-  TrendingDown,
-  TrendingUp,
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
@@ -30,8 +29,7 @@ import {
   type DimensionGroup,
   type StockRow,
 } from '@/lib/analysis-adapter'
-import { SectorRotationCard } from '@/components/SectorRotationCard'
-import { parseSectorTab, sectorAnalysisSearch, type SectorKind } from '@/lib/sectorTab'
+import { parseSectorFocus, type SectorKind } from '@/lib/sectorTab'
 
 const PAGE_LIMIT = 12000
 const MAX_RENDERED_GROUPS = 120
@@ -81,7 +79,7 @@ const KIND_SPEC: Record<SectorKind, KindSpec> = {
     unmatchedFallback: '请检查扩展数据是否包含概念/题材相关字段',
     heroStrong: '最强主线',
     heroBreadth: '涨跌板块',
-    railTitle: '概念矩阵',
+    railTitle: '热度 / 涨跌',
     searchPlaceholder: '搜索概念',
     leaderStageTitle: '本概念三龙头',
     gradient: 'bg-[radial-gradient(circle_at_12%_0%,rgba(59,130,246,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)]',
@@ -106,7 +104,7 @@ const KIND_SPEC: Record<SectorKind, KindSpec> = {
     unmatchedFallback: '请检查扩展数据是否包含行业/板块相关字段',
     heroStrong: '最强行业',
     heroBreadth: '涨跌行业',
-    railTitle: '行业矩阵',
+    railTitle: '热度 / 涨跌',
     searchPlaceholder: '搜索行业',
     leaderStageTitle: '本行业三龙头',
     gradient: 'bg-[radial-gradient(circle_at_12%_0%,rgba(245,158,11,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)]',
@@ -316,64 +314,36 @@ function statSort(mode: SortMode) {
   }
 }
 
-function SectorTabs({ kind, onChange }: { kind: SectorKind; onChange: (next: SectorKind) => void }) {
-  return (
-    <div className="flex gap-2" role="tablist" aria-label="板块维度">
-      {([
-        ['concept', '概念'],
-        ['industry', '行业'],
-      ] as const).map(([key, label]) => (
-        <button
-          key={key}
-          type="button"
-          role="tab"
-          aria-selected={kind === key}
-          className={cn(
-            'rounded-md border px-2.5 py-1 text-xs',
-            kind === key
-              ? 'border-accent bg-accent/10 text-foreground'
-              : 'border-border text-muted',
-          )}
-          onClick={() => onChange(key)}
-        >
-          {label}
-        </button>
-      ))}
-    </div>
+const NARROW_QUERY = '(max-width: 1023px)'
+
+function useNarrow(): boolean {
+  return useSyncExternalStore(
+    onChange => {
+      if (typeof window.matchMedia !== 'function') return () => {}
+      const mql = window.matchMedia(NARROW_QUERY)
+      mql.addEventListener('change', onChange)
+      return () => mql.removeEventListener('change', onChange)
+    },
+    () => typeof window.matchMedia === 'function' && window.matchMedia(NARROW_QUERY).matches,
+    () => false,
   )
 }
 
-export function SectorAnalysis() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const kind = parseSectorTab(searchParams.get('tab'))
-  const setKind = (next: SectorKind) => {
-    if (next === kind) return
-    setSearchParams(sectorAnalysisSearch(next, searchParams), { replace: true })
-  }
-  return <SectorAnalysisBody key={kind} kind={kind} onKindChange={setKind} />
+interface SectorSelection {
+  kind: SectorKind
+  key: string
 }
 
-function SectorAnalysisBody({ kind, onKindChange }: { kind: SectorKind; onKindChange: (next: SectorKind) => void }) {
+function useSectorBoard(kind: SectorKind) {
   const spec = KIND_SPEC[kind]
   const [fieldConfig, setFieldConfig] = useState<AnalysisFieldConfig>(() => configStore(kind).get({}) as AnalysisFieldConfig)
   const [showConfig, setShowConfig] = useState(false)
   const [search, setSearch] = useState('')
-  const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [sortMode, setSortMode] = useState<SortMode>('heat')
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
-  const [previewName, setPreviewName] = useState('')
-  const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
-  const handleStockClick = useCallback((symbol: string, name?: string, navList?: NavItem[]) => {
-    setPreviewSymbol(symbol)
-    setPreviewName(name ?? '')
-    setPreviewNavList(navList ?? [])
-  }, [])
-  const [showRps, setShowRps] = useState(false)
 
   const configsQuery = useQuery({ queryKey: QK.extData, queryFn: api.extDataList })
   const availableConfigs = configsQuery.data?.items ?? []
-  // 用户配置的 configId 可能已失效 (扩展数据被删除), 此时回退到自动选择,
-  // 避免用失效 ID 请求接口报错; 用户仍可点配置按钮重新选择。
+  // 用户配置的 configId 可能已失效 (扩展数据被删除), 此时回退到自动选择。
   const preferredConfigId = fieldConfig.configId || pickBestConfig(availableConfigs, spec.keywords)
   const preferredConfig = availableConfigs.find(c => c.id === preferredConfigId)
   const activeConfigId = preferredConfig ? preferredConfigId : pickBestConfig(availableConfigs, spec.keywords)
@@ -413,7 +383,7 @@ function SectorAnalysisBody({ kind, onKindChange }: { kind: SectorKind; onKindCh
     [rowsQuery.data, activeConfig, fieldConfig.dimensionField, spec.candidateFields],
   )
 
-  const industryLevel = fieldConfig.hierarchyLevel ?? 2
+  const industryLevel = (fieldConfig.hierarchyLevel ?? 2) as 1 | 2 | 3
   const groups = useMemo(
     () => spec.hierarchy ? groupByIndustryLevel(resolved.groups, industryLevel) : resolved.groups,
     [spec.hierarchy, resolved.groups, industryLevel],
@@ -431,25 +401,6 @@ function SectorAnalysisBody({ kind, onKindChange }: { kind: SectorKind; onKindCh
     return [...base].sort(statSort(sortMode))
   }, [stats, search, sortMode])
 
-  const selected = filteredStats.find(s => s.key === selectedKey) ?? filteredStats[0] ?? null
-  const leading = useMemo(() => [...stats].sort(statSort('heat')).slice(0, 10), [stats])
-  const falling = useMemo(() => [...stats].sort(statSort('down')).slice(0, 10), [stats])
-  const activeSector = useMemo(() => [...stats].sort(statSort('amount'))[0] ?? null, [stats])
-  const breadth = useMemo(() => {
-    const priced = stats.filter(s => s.avgPct != null)
-    return {
-      up: priced.filter(s => (s.avgPct ?? 0) > 0).length,
-      down: priced.filter(s => (s.avgPct ?? 0) < 0).length,
-      flat: priced.filter(s => s.avgPct === 0).length,
-    }
-  }, [stats])
-
-  const totalSymbols = useMemo(() => {
-    const set = new Set<string>()
-    stats.forEach(s => s.stocks.forEach(st => { if (st.symbol) set.add(st.symbol) }))
-    return set.size
-  }, [stats])
-
   const heatmapQuoteMap = useMemo(() => {
     if (!spec.heatmap) return null
     const map = new Map<string, { symbol: string; pct?: number; change_pct?: number; name?: string; [k: string]: unknown }>()
@@ -463,59 +414,181 @@ function SectorAnalysisBody({ kind, onKindChange }: { kind: SectorKind; onKindCh
     return map
   }, [spec.heatmap, marketMap])
 
-  const handleSaveConfig = (c: AnalysisFieldConfig) => {
-    setFieldConfig(c)
-    configStore(kind).set(c)
-    setSelectedKey(null)
+  const setIndustryLevel = (level: 1 | 2 | 3) => {
+    if (!spec.hierarchy || level === industryLevel) return
+    const next = { ...fieldConfig, hierarchyLevel: level }
+    setFieldConfig(next)
+    configStore(kind).set(next)
   }
 
-  const asOf = marketQuery.data?.as_of ?? rowsQuery.data?.date ?? '最新'
-  const subtitle = spec.hierarchy
-    ? `${industryLevel}级行业 · ${asOf} · ${stats.length} 个行业 · ${totalSymbols} 只标的`
-    : `${asOf} · ${stats.length} 个概念 · ${totalSymbols} 只标的`
+  return {
+    spec,
+    fieldConfig,
+    setFieldConfig,
+    showConfig,
+    setShowConfig,
+    search,
+    setSearch,
+    sortMode,
+    setSortMode,
+    configsLoading: configsQuery.isLoading,
+    activeConfig,
+    rowsLoading: rowsQuery.isLoading,
+    fetching: rowsQuery.isFetching || marketQuery.isFetching,
+    needsPresetFetch,
+    fetchPending: fetchMutation.isPending,
+    fetchError: fetchMutation.error,
+    fetchPreset: () => fetchMutation.mutate(),
+    refetch: () => { rowsQuery.refetch(); marketQuery.refetch() },
+    groups,
+    stats,
+    filteredStats,
+    heatmapQuoteMap,
+    industryLevel,
+    setIndustryLevel,
+    resolvedHint: resolved.hint || '',
+    marketAsOf: marketQuery.data?.as_of ?? null,
+  }
+}
 
-  const configButton = (
-    <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置数据源">
-      <Settings2 className="h-4 w-4" />
-    </button>
-  )
+type SectorBoard = ReturnType<typeof useSectorBoard>
+
+export function SectorAnalysis() {
+  const [searchParams] = useSearchParams()
+  const focus = parseSectorFocus(searchParams.get('focus') ?? searchParams.get('tab'))
+  const narrow = useNarrow()
+  const concept = useSectorBoard('concept')
+  const industry = useSectorBoard('industry')
+  const [open, setOpen] = useState({ concept: true, industry: true })
+  const [selected, setSelected] = useState<SectorSelection | null>(null)
+  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
+  const [previewName, setPreviewName] = useState('')
+  const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
+  const [matrix, setMatrix] = useState<{ kind: SectorKind; name: string; level?: 1 | 2 | 3 } | null>(null)
+  const queryClient = useQueryClient()
+
+  const handleStockClick = useCallback((symbol: string, name?: string, navList?: NavItem[]) => {
+    setPreviewSymbol(symbol)
+    setPreviewName(name ?? '')
+    setPreviewNavList(navList ?? [])
+  }, [])
+
+  // 旧地址带 focus 进来：窄屏只展开那一列，并把它滚进视口。
+  useEffect(() => {
+    if (!focus) return
+    const narrowNow = typeof window.matchMedia === 'function' && window.matchMedia(NARROW_QUERY).matches
+    if (narrowNow) setOpen({ concept: focus === 'concept', industry: focus === 'industry' })
+    document.getElementById(`sector-column-${focus}`)?.scrollIntoView?.({ block: 'nearest' })
+  }, [focus])
+
+  const selectSector = (kind: SectorKind, key: string) => {
+    setSelected({ kind, key })
+    if (narrow) {
+      window.setTimeout(() => document.getElementById('sector-detail')?.scrollIntoView?.({ block: 'nearest' }), 0)
+    }
+  }
+
+  const saveConfig = (kind: SectorKind, config: AnalysisFieldConfig) => {
+    const board = kind === 'industry' ? industry : concept
+    board.setFieldConfig(config)
+    configStore(kind).set(config)
+    setSelected(current => (current?.kind === kind ? null : current))
+  }
+
+  const asOf = concept.marketAsOf ?? industry.marketAsOf
+  const selectedBoard = selected?.kind === 'industry' ? industry : concept
+  const selectedStat = selected ? selectedBoard.stats.find(s => s.key === selected.key) ?? null : null
 
   const header = (
     <PageHeader
       title="板块分析"
-      subtitle={activeConfig ? subtitle : undefined}
-      right={activeConfig ? (
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setShowRps(true)}
-            className="inline-flex items-center gap-1 rounded-btn border border-amber-400/40 bg-amber-400/15 px-2.5 py-1.5 text-[11px] text-amber-400 font-medium transition-colors hover:bg-amber-400/25 hover:border-amber-400/60"
-            title={`${spec.dimLabel}涨幅轮动矩阵`}
-          >
-            <Repeat className="h-3.5 w-3.5" />涨幅RPS轮动分析
-          </button>
-          <button
-            onClick={() => { rowsQuery.refetch(); marketQuery.refetch() }}
-            disabled={rowsQuery.isFetching || marketQuery.isFetching}
-            className="p-1.5 text-muted hover:bg-surface disabled:opacity-50"
-            title="刷新"
-          >
-            <RefreshCw className={cn('h-4 w-4', (rowsQuery.isFetching || marketQuery.isFetching) && 'animate-spin')} />
-          </button>
-          {configButton}
-        </div>
-      ) : configButton}
+      subtitle={asOf ? `概念与行业并排 · ${asOf}` : '概念与行业并排，点击板块查看成分、龙头和 RPS'}
+      right={(
+        <button
+          onClick={() => {
+            concept.refetch()
+            industry.refetch()
+            queryClient.invalidateQueries({ queryKey: ['sector-rotation'] })
+            queryClient.invalidateQueries({ queryKey: ['rps-rotation'] })
+          }}
+          disabled={concept.fetching || industry.fetching}
+          className="p-1.5 text-muted hover:bg-surface disabled:opacity-50"
+          title="刷新"
+        >
+          <RefreshCw className={cn('h-4 w-4', (concept.fetching || industry.fetching) && 'animate-spin')} />
+        </button>
+      )}
     />
   )
 
-  const dialogs = (
+  if (concept.configsLoading || industry.configsLoading) {
+    return (
+      <>
+        {header}
+        <div className="flex flex-1 items-center justify-center">
+          <RefreshCw className="h-5 w-5 animate-spin text-muted" />
+        </div>
+      </>
+    )
+  }
+
+  return (
     <>
+      {header}
+      <div className="min-h-full px-4 py-5 sm:px-6">
+        <div className="mx-auto max-w-[1440px] space-y-4">
+          <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+            <SectorColumn
+              board={concept}
+              focused={focus === 'concept'}
+              collapsed={narrow && !open.concept}
+              collapsible={narrow}
+              onToggle={() => setOpen(v => ({ ...v, concept: !v.concept }))}
+              selectedKey={selected?.kind === 'concept' ? selected.key : null}
+              onSelect={key => selectSector('concept', key)}
+            />
+            <SectorColumn
+              board={industry}
+              focused={focus === 'industry'}
+              collapsed={narrow && !open.industry}
+              collapsible={narrow}
+              onToggle={() => setOpen(v => ({ ...v, industry: !v.industry }))}
+              selectedKey={selected?.kind === 'industry' ? selected.key : null}
+              onSelect={key => selectSector('industry', key)}
+            />
+          </div>
+          <SectorDetail
+            selection={selected}
+            stat={selectedStat}
+            level={industry.industryLevel}
+            activeSymbol={previewSymbol}
+            onStockClick={handleStockClick}
+            onOpenMatrix={() => {
+              if (!selected) return
+              setMatrix({
+                kind: selected.kind,
+                name: selected.key,
+                level: selected.kind === 'industry' ? industry.industryLevel : undefined,
+              })
+            }}
+          />
+        </div>
+      </div>
+
       <AnimatePresence>
-        {showConfig && (
+        {concept.showConfig && (
           <AnalysisConfigDialog
-            currentConfig={fieldConfig}
-            onSave={handleSaveConfig}
-            onClose={() => setShowConfig(false)}
-            showHierarchyLevel={spec.hierarchy}
+            currentConfig={concept.fieldConfig}
+            onSave={config => saveConfig('concept', config)}
+            onClose={() => concept.setShowConfig(false)}
+          />
+        )}
+        {industry.showConfig && (
+          <AnalysisConfigDialog
+            currentConfig={industry.fieldConfig}
+            onSave={config => saveConfig('industry', config)}
+            onClose={() => industry.setShowConfig(false)}
+            showHierarchyLevel
           />
         )}
       </AnimatePresence>
@@ -529,299 +602,237 @@ function SectorAnalysisBody({ kind, onKindChange }: { kind: SectorKind; onKindCh
         />
       )}
       <AnimatePresence>
-        {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} kind={kind} />}
+        {matrix && (
+          <RpsRotationDialog
+            onClose={() => setMatrix(null)}
+            kind={matrix.kind}
+            initialSelected={matrix.name}
+            initialLevel={matrix.level}
+          />
+        )}
       </AnimatePresence>
     </>
   )
+}
 
-  if (configsQuery.isLoading) {
-    return (
-      <>
-        {header}
-        <div className="flex flex-1 items-center justify-center">
-          <RefreshCw className="h-5 w-5 animate-spin text-muted" />
-        </div>
-      </>
-    )
-  }
-
-  if (!activeConfig) {
-    return (
-      <>
-        <div className="flex h-full flex-col">
-          {header}
-          <div className="px-6 pt-5">
-            <SectorTabs kind={kind} onChange={onKindChange} />
-          </div>
-          <PresetFetchState
-            title={spec.emptyTitle}
-            hint={spec.emptyHint}
-            isLoading={fetchMutation.isPending}
-            error={fetchMutation.error}
-            onFetch={() => fetchMutation.mutate()}
-          />
-        </div>
-        {dialogs}
-      </>
-    )
-  }
+function SectorColumn({
+  board,
+  focused,
+  collapsed,
+  collapsible,
+  onToggle,
+  selectedKey,
+  onSelect,
+}: {
+  board: SectorBoard
+  focused: boolean
+  collapsed: boolean
+  collapsible: boolean
+  onToggle: () => void
+  selectedKey: string | null
+  onSelect: (key: string) => void
+}) {
+  const { spec } = board
+  const priced = board.stats.filter(s => s.avgPct != null)
+  const up = priced.filter(s => (s.avgPct ?? 0) > 0).length
+  const down = priced.filter(s => (s.avgPct ?? 0) < 0).length
+  const strongest = [...board.stats].sort(statSort('heat'))[0]
 
   return (
-    <>
-      {header}
-      <div className={cn('min-h-full px-6 py-5', spec.gradient)}>
-        <div className="mx-auto max-w-[1440px] space-y-5">
-          <SectorTabs kind={kind} onChange={onKindChange} />
-
-          <SectorRotationCard kind={kind} />
-
-          <HeroPanel
-            spec={spec}
-            leading={leading[0]}
-            falling={falling[0]}
-            activeSector={activeSector}
-            breadth={breadth}
-          />
-
-          <MarketPulse
-            leading={leading}
-            falling={falling}
-            selectedKey={selected?.key ?? null}
-            onSelect={setSelectedKey}
-            activeSymbol={previewSymbol}
-            onStockClick={handleStockClick}
-          />
-
-          {spec.heatmap && heatmapQuoteMap && groups.length > 0 && (
-            <DimensionHeatmap
-              groups={groups}
-              quoteMap={heatmapQuoteMap}
-              selectedKey={selectedKey}
-              onSelect={k => setSelectedKey(k)}
-              colorScheme="amber"
-            />
+    <section
+      id={`sector-column-${spec.kind}`}
+      data-kind={spec.kind}
+      data-focused={focused ? 'true' : 'false'}
+      data-collapsed={collapsed ? 'true' : 'false'}
+      className={cn(
+        'scroll-mt-4 rounded-2xl border bg-surface/70 p-3',
+        spec.kind === 'concept' ? 'border-blue-400/25' : 'border-amber-400/30',
+        focused && 'ring-2 ring-accent/45',
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left lg:pointer-events-none"
+          aria-expanded={!collapsed}
+          aria-controls={`sector-column-body-${spec.kind}`}
+          tabIndex={collapsible ? 0 : -1}
+          onClick={() => { if (collapsible) onToggle() }}
+        >
+          <h2 className="text-sm font-semibold text-foreground">{spec.dimLabel}</h2>
+          {board.activeConfig && (
+            <span className="truncate text-[11px] text-muted">
+              {spec.hierarchy ? `${board.industryLevel}级行业 · ` : ''}
+              {board.stats.length} 个
+              {priced.length > 0 && (
+                <>
+                  <span className="mx-1 text-muted/40">·</span>
+                  <span className="text-bull">{up}</span>
+                  <span className="mx-0.5">/</span>
+                  <span className="text-bear">{down}</span>
+                </>
+              )}
+            </span>
           )}
+          <ChevronDown className={cn('ml-auto h-4 w-4 shrink-0 text-muted transition-transform lg:hidden', !collapsed && 'rotate-180')} />
+        </button>
+        {spec.hierarchy && (
+          <div className="flex items-center rounded-md border border-border bg-base/60 p-0.5" role="group" aria-label="行业层级">
+            {([1, 2, 3] as const).map(level => (
+              <button
+                key={level}
+                type="button"
+                aria-pressed={board.industryLevel === level}
+                onClick={() => board.setIndustryLevel(level)}
+                className={cn(
+                  'h-6 rounded px-2 text-[10px] font-medium',
+                  board.industryLevel === level ? 'bg-accent text-white' : 'text-secondary hover:text-foreground',
+                )}
+              >
+                {level}级
+              </button>
+            ))}
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => board.setShowConfig(true)}
+          className="p-1.5 text-muted hover:bg-elevated hover:text-accent"
+          title={`配置${spec.dimLabel}数据源`}
+        >
+          <Settings2 className="h-4 w-4" />
+        </button>
+      </div>
 
-          {stats.length > 0 ? (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[18rem_1fr]">
-              <SectorRail
-                spec={spec}
-                stats={filteredStats.slice(0, MAX_RENDERED_GROUPS)}
-                selectedKey={selected?.key ?? null}
-                search={search}
-                sortMode={sortMode}
-                onSearch={v => { setSearch(v); setSelectedKey(null) }}
-                onSort={setSortMode}
-                onSelect={setSelectedKey}
-              />
-              <SectorFocus
-                spec={spec}
-                stat={selected}
-                activeSymbol={previewSymbol}
-                onStockClick={handleStockClick}
-              />
-            </div>
-          ) : rowsQuery.isLoading ? (
-            <div className="rounded-2xl border border-border bg-surface px-6 py-16 text-center text-sm text-muted">{spec.loadingText}</div>
-          ) : needsPresetFetch ? (
+      {!collapsed && (
+        <div id={`sector-column-body-${spec.kind}`} className="mt-3 space-y-3">
+          {!board.activeConfig ? (
             <PresetFetchState
-              title={spec.missingTitle}
-              hint={spec.missingHint}
-              isLoading={fetchMutation.isPending}
-              error={fetchMutation.error}
-              onFetch={() => fetchMutation.mutate()}
+              title={spec.emptyTitle}
+              hint={spec.emptyHint}
+              isLoading={board.fetchPending}
+              error={board.fetchError}
+              onFetch={board.fetchPreset}
             />
           ) : (
-            <EmptyState icon={Layers3} title={spec.unmatchedTitle} hint={resolved.hint || spec.unmatchedFallback} />
+            <>
+              <RotationSummary kind={spec.kind} dimLabel={spec.dimLabel} strongest={strongest} breadthLabel={spec.heroBreadth} strongestLabel={spec.heroStrong} onSelect={onSelect} />
+              {board.stats.length > 0 ? (
+                <>
+                  <SectorRankList
+                    spec={spec}
+                    stats={board.filteredStats.slice(0, MAX_RENDERED_GROUPS)}
+                    total={board.stats.length}
+                    selectedKey={selectedKey}
+                    search={board.search}
+                    sortMode={board.sortMode}
+                    onSearch={board.setSearch}
+                    onSort={board.setSortMode}
+                    onSelect={onSelect}
+                  />
+                  {spec.heatmap && board.heatmapQuoteMap && board.groups.length > 0 && (
+                    <DimensionHeatmap
+                      groups={board.groups}
+                      quoteMap={board.heatmapQuoteMap}
+                      selectedKey={selectedKey}
+                      onSelect={key => { if (key) onSelect(key) }}
+                      colorScheme="amber"
+                    />
+                  )}
+                </>
+              ) : board.rowsLoading ? (
+                <div className="rounded-xl border border-border bg-surface px-4 py-10 text-center text-sm text-muted">{spec.loadingText}</div>
+              ) : board.needsPresetFetch ? (
+                <PresetFetchState
+                  title={spec.missingTitle}
+                  hint={spec.missingHint}
+                  isLoading={board.fetchPending}
+                  error={board.fetchError}
+                  onFetch={board.fetchPreset}
+                />
+              ) : (
+                <EmptyState icon={Layers3} title={spec.unmatchedTitle} hint={board.resolvedHint || spec.unmatchedFallback} />
+              )}
+            </>
           )}
         </div>
-      </div>
-      {dialogs}
-    </>
+      )}
+    </section>
   )
 }
 
-function HeroPanel({
-  spec,
-  leading,
-  falling,
-  activeSector,
-  breadth,
-}: {
-  spec: KindSpec
-  leading?: SectorStat
-  falling?: SectorStat
-  activeSector?: SectorStat | null
-  breadth: { up: number; down: number; flat: number }
-}) {
-  return (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-      <HeroMetric icon={TrendingUp} label={spec.heroStrong} value={leading?.key ?? '—'} hint={leading?.avgPct != null ? <span className={priceColorClass(leading.avgPct)}>{fmtPct(leading.avgPct)}</span> : '等待行情'} tone="up" />
-      <HeroMetric icon={TrendingDown} label="最大风险" value={falling?.key ?? '—'} hint={falling?.avgPct != null ? <span className={priceColorClass(falling.avgPct)}>{fmtPct(falling.avgPct)}</span> : '等待行情'} tone="down" />
-      <HeroMetric
-        icon={Activity}
-        label={spec.heroBreadth}
-        value={<><span className="text-bull">{breadth.up}</span><span className="mx-1 text-muted">/</span><span className="text-bear">{breadth.down}</span></>}
-        hint={<><span className="text-bull">上涨</span><span className="mx-1 text-muted">/</span><span className="text-bear">下跌</span>{breadth.flat ? <span className="text-muted"> · 平 {breadth.flat}</span> : null}</>}
-        tone="blue"
-      />
-      <HeroMetric icon={Activity} label="资金活跃" value={activeSector?.key ?? '—'} hint={activeSector ? fmtBigNum(activeSector.totalAmount) : '等待行情'} tone="blue" />
-      <HeroMetric icon={Crown} label="龙头算法" value="6 因子" hint="强势 + 承接 + 容量" tone="gold" />
-    </div>
-  )
-}
-
-function HeroMetric({ icon: Icon, label, value, hint, tone }: {
-  icon: typeof TrendingUp
-  label: string
-  value: ReactNode
-  hint: ReactNode
-  tone: 'up' | 'down' | 'gold' | 'blue'
-}) {
-  const toneClass = {
-    up: 'text-bull bg-bull/10',
-    down: 'text-bear bg-bear/10',
-    gold: 'text-amber-300 bg-amber-400/10',
-    blue: 'text-blue-300 bg-blue-400/10',
-  }[tone]
-  const valueClass = {
-    up: 'text-bull',
-    down: 'text-bear',
-    gold: 'text-amber-300',
-    blue: 'text-foreground',
-  }[tone]
-  return (
-    <div className="rounded-xl border border-border bg-surface px-3 py-2">
-      <div className="flex items-center justify-between text-[11px] text-muted">
-        <span>{label}</span>
-        <span className={cn('rounded-md p-1', toneClass)}><Icon className="h-3.5 w-3.5" /></span>
-      </div>
-      <div className={cn('mt-1 truncate text-sm font-semibold', valueClass)}>{value}</div>
-      <div className="mt-0.5 truncate text-[11px] text-muted">{hint}</div>
-    </div>
-  )
-}
-
-function MarketPulse({
-  leading,
-  falling,
-  selectedKey,
+function RotationSummary({
+  kind,
+  dimLabel,
+  strongest,
+  strongestLabel,
+  breadthLabel,
   onSelect,
-  onStockClick,
-  activeSymbol,
 }: {
-  leading: SectorStat[]
-  falling: SectorStat[]
-  selectedKey: string | null
+  kind: SectorKind
+  dimLabel: string
+  strongest?: SectorStat
+  strongestLabel: string
+  breadthLabel: string
   onSelect: (key: string) => void
-  onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void
-  activeSymbol: string | null
 }) {
-  return (
-    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-      <PulseList title="领涨主线" items={leading} mode="up" selectedKey={selectedKey} onSelect={onSelect} onStockClick={onStockClick} activeSymbol={activeSymbol} />
-      <PulseList title="领跌方向" items={falling} mode="down" selectedKey={selectedKey} onSelect={onSelect} onStockClick={onStockClick} activeSymbol={activeSymbol} />
-    </div>
-  )
-}
-
-function PulseList({
-  title,
-  items,
-  mode,
-  selectedKey,
-  onSelect,
-  onStockClick,
-  activeSymbol,
-}: {
-  title: string
-  items: SectorStat[]
-  mode: 'up' | 'down'
-  selectedKey: string | null
-  onSelect: (key: string) => void
-  onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void
-  activeSymbol: string | null
-}) {
-  const toneText = mode === 'up' ? 'text-bull' : 'text-bear'
-  const toneBorder = mode === 'up' ? 'border-bull/20' : 'border-bear/20'
-  const toneBg = mode === 'up' ? 'bg-bull/10' : 'bg-bear/10'
-  const toneHover = mode === 'up' ? 'hover:border-bull/35' : 'hover:border-bear/35'
+  const query = useQuery({
+    queryKey: QK.sectorRotation(kind, undefined, 5, '', 'summary'),
+    queryFn: () => api.sectorRotation({ kind, top: 5, autoRows: 5, bucket: 5, sortBy: 'activity' }),
+    staleTime: 60_000,
+  })
+  const latest = query.data?.status === 'ok' ? query.data.timeline.at(-1) : undefined
+  const sectors = (query.data?.status === 'ok' ? query.data.sectors : []).slice(0, 5)
 
   return (
-    <div className={cn('rounded-xl border bg-base/35 p-2', toneBorder)}>
-      <div className="mb-1.5 flex items-center justify-between px-1">
-        <div className={cn('flex items-center gap-1.5 text-xs font-medium', toneText)}>
-          {mode === 'up' ? <TrendingUp className="h-3.5 w-3.5" /> : <TrendingDown className="h-3.5 w-3.5" />}
-          {title}
-        </div>
-        <span className="rounded-full bg-elevated/60 px-2 py-0.5 text-[10px] text-muted">Top 10</span>
+    <div data-rotation={kind} className="rounded-xl border border-border bg-base/40 p-2.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+        <Activity className="h-3.5 w-3.5 text-amber-400" />
+        <span className="font-medium text-foreground">{dimLabel}轮动</span>
+        {query.isLoading ? (
+          <span className="text-muted">正在汇总…</span>
+        ) : latest ? (
+          <span className="text-muted">
+            切换强度 {latest.rotation.toFixed(2)}
+            {latest.leader ? ` · 领涨 ${latest.leader}` : ''}
+          </span>
+        ) : (
+          <span className="text-muted">暂无轮动摘要</span>
+        )}
       </div>
-      <div className="space-y-1">
-        {items.map((item, idx) => {
-          const active = selectedKey === item.key
-          const sortedStocks = [...item.stocks].sort((a, b) => b.leaderScore - a.leaderScore)
-          const leaders = sortedStocks.slice(0, 3)
-          const upPct = item.count > 0 ? (item.upCount / item.count) * 100 : 0
-          const downPct = item.count > 0 ? (item.downCount / item.count) * 100 : 0
-          const flatPct = Math.max(0, 100 - upPct - downPct)
-          return (
+      {sectors.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {sectors.map(sector => (
             <button
-              key={item.key}
-              onClick={() => onSelect(item.key)}
-              className={cn(
-                'block w-full rounded-lg border border-transparent bg-surface/45 px-2 py-1.5 text-left transition-colors',
-                active ? cn('bg-blue-400/[0.08]', toneBorder) : cn('hover:bg-elevated/35', toneHover),
-              )}
+              key={sector.name}
+              type="button"
+              onClick={() => onSelect(sector.name)}
+              className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/70 bg-surface px-2 py-1 text-[11px] hover:border-accent/40"
             >
-              <div className="grid gap-2 md:grid-cols-[minmax(0,0.9fr)_minmax(16rem,1.1fr)] md:items-center">
-                <div className="min-w-0">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className={cn('flex h-5 w-5 shrink-0 items-center justify-center rounded-md font-mono text-[10px]', idx < 3 ? cn(toneBg, toneText) : 'bg-elevated/70 text-muted')}>{idx + 1}</span>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span className="truncate text-xs font-medium text-foreground">{item.key}</span>
-                        <span className="shrink-0 text-[10px] text-muted">
-                          <span className="text-bull">{item.upCount}</span>涨
-                          <span className="mx-0.5 text-muted/40">/</span>
-                          <span className="text-bear">{item.downCount}</span>跌
-                        </span>
-                        <span className={cn('ml-auto shrink-0 font-mono text-[10px] tabular-nums', priceColorClass(item.avgPct))}>{item.avgPct != null ? fmtPct(item.avgPct) : '—'}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="ml-7 mt-1">
-                    <div className="flex h-1 overflow-hidden rounded-full bg-elevated">
-                      <div className="h-full bg-bull/70" style={{ width: `${upPct}%` }} />
-                      {flatPct > 0 && <div className="h-full bg-muted/25" style={{ width: `${flatPct}%` }} />}
-                      <div className="h-full bg-bear/70" style={{ width: `${downPct}%` }} />
-                    </div>
-                  </div>
-                </div>
-                <div className="grid min-w-0 grid-cols-3 gap-1">
-                  {Array.from({ length: 3 }).map((_, i) => {
-                    const stock = leaders[i]
-                    return stock ? (
-                      <span key={stock.symbol} title={stock.name || stock.symbol} onClick={e => { e.stopPropagation(); onStockClick(stock.symbol, stock.name || undefined, toNavItems(sortedStocks.slice(0, MAX_RENDERED_STOCKS))) }} className={cn('flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] cursor-pointer hover:brightness-125', i === 0 ? 'bg-amber-300/10 text-foreground' : 'bg-elevated/60 text-secondary', stock.symbol === activeSymbol && 'ring-1 ring-accent/60')}>
-                        <span className="flex min-w-0 items-center gap-1">
-                          <span className="min-w-0 truncate font-medium">{stock.name || stock.symbol}</span>
-                        </span>
-                        <span className={cn('shrink-0 font-mono', priceColorClass(stock.change_pct))}>{stock.change_pct != null ? fmtPct(stock.change_pct) : '—'}</span>
-                      </span>
-                    ) : <span key={i} className="rounded-md bg-elevated/30 px-1.5 py-0.5 text-[10px] text-muted/40">—</span>
-                  })}
-                </div>
-              </div>
+              <span className="truncate text-foreground">{sector.name}</span>
+              <span className={cn('shrink-0 font-mono tabular-nums', priceColorClass(sector.pct_now))}>
+                {sector.pct_now != null ? fmtPct(sector.pct_now) : '—'}
+              </span>
             </button>
-          )
-        })}
-      </div>
+          ))}
+        </div>
+      )}
+      {strongest && (
+        <div className="mt-2 truncate text-[11px] text-muted">
+          {strongestLabel} {strongest.key}
+          {strongest.avgPct != null && <span className={cn('ml-1 font-mono', priceColorClass(strongest.avgPct))}>{fmtPct(strongest.avgPct)}</span>}
+          <span className="mx-1 text-muted/40">·</span>
+          {breadthLabel}
+        </div>
+      )}
     </div>
   )
 }
 
-function SectorRail({
+function SectorRankList({
   spec,
   stats,
+  total,
   selectedKey,
   search,
   sortMode,
@@ -831,40 +842,65 @@ function SectorRail({
 }: {
   spec: KindSpec
   stats: SectorStat[]
+  total: number
   selectedKey: string | null
   search: string
   sortMode: SortMode
-  onSearch: (v: string) => void
-  onSort: (v: SortMode) => void
-  onSelect: (v: string) => void
+  onSearch: (value: string) => void
+  onSort: (value: SortMode) => void
+  onSelect: (key: string) => void
 }) {
   return (
-    <section className="rounded-2xl border border-border bg-surface p-2.5">
-      <div className="px-1 pb-2.5">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-foreground">{spec.railTitle}</h3>
-          <span className="text-[10px] text-muted">Top {stats.length}</span>
-        </div>
-        <div className="mt-2 relative">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
-          <input value={search} onChange={e => onSearch(e.target.value)} placeholder={spec.searchPlaceholder} className="h-8 w-full rounded-lg border border-border bg-base pl-8 pr-3 text-xs text-foreground outline-none focus:border-accent/50" />
-        </div>
-        <div className="mt-2 grid grid-cols-5 overflow-hidden rounded-lg border border-border text-[10px]">
-          {([
-            ['heat', '强度'], ['avgPct', '涨幅'], ['leader', '龙头'], ['amount', '成交'], ['down', '跌幅'],
-          ] as [SortMode, string][]).map(([key, label]) => (
-            <button key={key} onClick={() => onSort(key)} className={cn('py-1.5 transition-colors', sortMode === key ? spec.sortActiveClass : 'bg-base text-muted hover:text-foreground')}>{label}</button>
-          ))}
-        </div>
+    <div className="rounded-xl border border-border bg-surface p-2">
+      <div className="flex items-center justify-between px-1 pb-2">
+        <h3 className="text-xs font-semibold text-foreground">{spec.railTitle}</h3>
+        <span className="text-[10px] text-muted">{stats.length}/{total}</span>
       </div>
-      <div className="max-h-[620px] overflow-auto rounded-lg border border-border/50">
+      <div className="relative">
+        <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+        <input
+          value={search}
+          onChange={event => onSearch(event.target.value)}
+          placeholder={spec.searchPlaceholder}
+          className="h-8 w-full rounded-lg border border-border bg-base pl-8 pr-3 text-xs text-foreground outline-none focus:border-accent/50"
+        />
+      </div>
+      <div className="mt-2 grid grid-cols-5 overflow-hidden rounded-lg border border-border text-[10px]">
+        {([
+          ['heat', '热度'],
+          ['avgPct', '涨幅'],
+          ['down', '跌幅'],
+          ['leader', '龙头'],
+          ['amount', '成交'],
+        ] as [SortMode, string][]).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            aria-pressed={sortMode === key}
+            onClick={() => onSort(key)}
+            className={cn('py-1.5 transition-colors', sortMode === key ? spec.sortActiveClass : 'bg-base text-muted hover:text-foreground')}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="mt-2 max-h-[28rem] overflow-auto rounded-lg border border-border/50">
         {stats.map(item => {
           const active = selectedKey === item.key
           return (
-            <button key={item.key} onClick={() => onSelect(item.key)} className={cn('w-full border-b border-border/50 px-2.5 py-2 text-left transition-colors last:border-b-0', active ? spec.railActiveClass : 'hover:bg-elevated/40')}>
+            <button
+              key={item.key}
+              type="button"
+              data-sector={item.key}
+              onClick={() => onSelect(item.key)}
+              className={cn(
+                'w-full border-b border-border/50 px-2.5 py-2 text-left transition-colors last:border-b-0',
+                active ? spec.railActiveClass : 'hover:bg-elevated/40',
+              )}
+            >
               <div className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">{item.key}</span>
-                <span className={cn('font-mono text-xs', priceColorClass(item.avgPct))}>{item.avgPct != null ? fmtPct(item.avgPct) : '—'}</span>
+                <span className={cn('font-mono text-xs tabular-nums', priceColorClass(item.avgPct))}>{item.avgPct != null ? fmtPct(item.avgPct) : '—'}</span>
               </div>
               <div className="mt-1 flex items-center gap-2 text-[10px] text-muted">
                 <span>{item.count}只</span>
@@ -875,49 +911,84 @@ function SectorRail({
             </button>
           )
         })}
+        {stats.length === 0 && <div className="px-3 py-6 text-center text-[11px] text-muted">没有匹配的{spec.dimLabel}</div>}
       </div>
+    </div>
+  )
+}
+
+function SectorDetail({
+  selection,
+  stat,
+  level,
+  activeSymbol,
+  onStockClick,
+  onOpenMatrix,
+}: {
+  selection: SectorSelection | null
+  stat: SectorStat | null
+  level: 1 | 2 | 3
+  activeSymbol: string | null
+  onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void
+  onOpenMatrix: () => void
+}) {
+  if (!selection) {
+    return (
+      <section id="sector-detail" className="rounded-2xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
+        点击上方概念或行业，在这里查看成分股、龙头和 RPS
+      </section>
+    )
+  }
+
+  const spec = KIND_SPEC[selection.kind]
+  return (
+    <section id="sector-detail" data-detail-kind={selection.kind} className="overflow-hidden rounded-2xl border border-border bg-surface">
+      <div className="border-b border-border px-4 py-4 sm:px-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={cn('rounded-full px-2 py-0.5 text-[10px]', spec.heatBadgeClass)}>{spec.dimLabel}</span>
+          <h3 className="text-xl font-semibold text-foreground">{selection.key}</h3>
+          {spec.hierarchy && <span className="text-[11px] text-muted">{level}级行业</span>}
+          {stat && <span className={cn('rounded-full px-2 py-0.5 text-[10px]', spec.heatBadgeClass)}>强度 {stat.heatScore.toFixed(0)}</span>}
+        </div>
+        {stat ? (
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+            <span>{stat.count} 只成分</span>
+            <span className={priceColorClass(stat.avgPct)}>平均 {stat.avgPct != null ? fmtPct(stat.avgPct) : '—'}</span>
+            <span>上涨占比 {(stat.upRate * 100).toFixed(0)}%</span>
+            <span>成交额 {fmtBigNum(stat.totalAmount)}</span>
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-muted">当前列表里没有这个{spec.dimLabel}，下面仍显示它的 RPS 轨迹。</p>
+        )}
+      </div>
+
+      {stat && <SectorConstituents spec={spec} stat={stat} activeSymbol={activeSymbol} onStockClick={onStockClick} />}
+      <SectorRpsStrip kind={selection.kind} name={selection.key} level={spec.hierarchy ? level : undefined} onOpenMatrix={onOpenMatrix} />
     </section>
   )
 }
 
-function SectorFocus({ spec, stat, onStockClick, activeSymbol }: { spec: KindSpec; stat: SectorStat | null; onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void; activeSymbol: string | null }) {
-  if (!stat) return null
+function SectorConstituents({
+  spec,
+  stat,
+  activeSymbol,
+  onStockClick,
+}: {
+  spec: KindSpec
+  stat: SectorStat
+  activeSymbol: string | null
+  onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void
+}) {
   const stocks = [...stat.stocks].sort((a, b) => b.leaderScore - a.leaderScore).slice(0, MAX_RENDERED_STOCKS)
   const topLeaders = stocks.slice(0, 3)
-  const focusNav: NavItem[] = toNavItems(stocks)
+  const focusNav = toNavItems(stocks)
   return (
-    <section className="flex max-h-[720px] flex-col overflow-hidden rounded-2xl border border-border bg-surface">
-      <div className="shrink-0 border-b border-border px-5 py-4">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="min-w-0">
-            <div className="flex items-center gap-3">
-              <h3 className="truncate text-xl font-semibold text-foreground">{stat.key}</h3>
-              <span className={cn('rounded-full px-2 py-0.5 text-[10px]', spec.heatBadgeClass)}>强度 {stat.heatScore.toFixed(0)}</span>
-            </div>
-            <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-              <span>{stat.count} 只成分</span>
-              <span className={priceColorClass(stat.avgPct)}>平均 {stat.avgPct != null ? fmtPct(stat.avgPct) : '—'}</span>
-              <span>上涨占比 {(stat.upRate * 100).toFixed(0)}%</span>
-              <span>成交额 {fmtBigNum(stat.totalAmount)}</span>
-              {stat.avgTurnover != null && <span>均换手 {stat.avgTurnover.toFixed(2)}%</span>}
-            </div>
-          </div>
-          <div className="grid grid-cols-5 gap-2 lg:w-[520px]">
-            <MiniStat label="均涨" value={stat.avgPct != null ? fmtPct(stat.avgPct) : '—'} cls={priceColorClass(stat.avgPct)} />
-            <MiniStat label="中位" value={stat.medianPct != null ? fmtPct(stat.medianPct) : '—'} cls={priceColorClass(stat.medianPct)} />
-            <MiniStat label="强势" value={`${stat.strongCount}`} cls="text-bull" />
-            <MiniStat label="弱势" value={`${stat.weakCount}`} cls="text-bear" />
-            <MiniStat label="量比" value={stat.avgVolRatio != null ? stat.avgVolRatio.toFixed(2) : '—'} cls="text-foreground" />
-          </div>
-        </div>
-      </div>
-
-      <div className="grid shrink-0 gap-3 border-b border-border bg-base/25 p-4 lg:grid-cols-[1fr_1.15fr]">
+    <>
+      <div className="grid gap-3 border-b border-border bg-base/25 p-4 lg:grid-cols-[1fr_1.15fr]">
         <LeaderStage title={spec.leaderStageTitle} stocks={topLeaders} activeSymbol={activeSymbol} onStockClick={(sym, name) => onStockClick(sym, name, focusNav)} />
         <ScoreExplain stock={topLeaders[0]} />
       </div>
-
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="max-h-[32rem] overflow-auto">
         <table className="min-w-full text-left text-xs">
           <thead className="bg-elevated/60 text-[11px] text-muted">
             <tr>
@@ -932,22 +1003,26 @@ function SectorFocus({ spec, stat, onStockClick, activeSymbol }: { spec: KindSpe
             </tr>
           </thead>
           <tbody className="divide-y divide-border/70">
-            {stocks.map((s, idx) => (
-              <tr key={`${s.symbol}-${idx}`} className={cn('cursor-pointer', s.symbol === activeSymbol ? 'bg-accent/10 hover:bg-accent/15' : 'hover:bg-elevated/30')} onClick={() => onStockClick(s.symbol, s.name || undefined, focusNav)}>
+            {stocks.map((stock, idx) => (
+              <tr
+                key={`${stock.symbol}-${idx}`}
+                className={cn('cursor-pointer', stock.symbol === activeSymbol ? 'bg-accent/10 hover:bg-accent/15' : 'hover:bg-elevated/30')}
+                onClick={() => onStockClick(stock.symbol, stock.name || undefined, focusNav)}
+              >
                 <td className="px-4 py-2 font-mono text-muted">{idx + 1}</td>
                 <td className="px-4 py-2">
-                  <div className="font-medium text-foreground">{s.name || '—'}</div>
-                  <div className="font-mono text-[10px] text-muted">{s.symbol}</div>
+                  <div className="font-medium text-foreground">{stock.name || '—'}</div>
+                  <div className="font-mono text-[10px] text-muted">{stock.symbol}</div>
                 </td>
-                <td className={cn('px-4 py-2 font-mono tabular-nums', priceColorClass(s.change_pct))}>{s.change_pct != null ? fmtPct(s.change_pct) : '—'}</td>
-                <td className="px-4 py-2 font-mono text-foreground">{s.turnover_rate != null ? `${s.turnover_rate.toFixed(2)}%` : '—'}</td>
-                <td className="px-4 py-2 font-mono text-foreground">{fmtBigNum(s.amount)}</td>
-                <td className="px-4 py-2 font-mono text-foreground">{fmtBigNum(s.float_market_cap ?? s.market_cap)}</td>
-                <td className="px-4 py-2 font-mono text-foreground">{s.vol_ratio_5d != null ? s.vol_ratio_5d.toFixed(2) : '—'}</td>
+                <td className={cn('px-4 py-2 font-mono tabular-nums', priceColorClass(stock.change_pct))}>{stock.change_pct != null ? fmtPct(stock.change_pct) : '—'}</td>
+                <td className="px-4 py-2 font-mono text-foreground">{stock.turnover_rate != null ? `${stock.turnover_rate.toFixed(2)}%` : '—'}</td>
+                <td className="px-4 py-2 font-mono text-foreground">{fmtBigNum(stock.amount)}</td>
+                <td className="px-4 py-2 font-mono text-foreground">{fmtBigNum(stock.float_market_cap ?? stock.market_cap)}</td>
+                <td className="px-4 py-2 font-mono text-foreground">{stock.vol_ratio_5d != null ? stock.vol_ratio_5d.toFixed(2) : '—'}</td>
                 <td className="px-4 py-2">
                   <div className="flex items-center gap-2">
-                    <span className="w-9 font-mono text-amber-300">{s.leaderScore.toFixed(0)}</span>
-                    <div className="h-1.5 w-16 rounded-full bg-elevated"><div className="h-full rounded-full bg-amber-300" style={{ width: `${Math.max(4, s.leaderScore)}%` }} /></div>
+                    <span className="w-9 font-mono text-amber-300">{stock.leaderScore.toFixed(0)}</span>
+                    <div className="h-1.5 w-16 rounded-full bg-elevated"><div className="h-full rounded-full bg-amber-300" style={{ width: `${Math.max(4, stock.leaderScore)}%` }} /></div>
                   </div>
                 </td>
               </tr>
@@ -955,13 +1030,78 @@ function SectorFocus({ spec, stat, onStockClick, activeSymbol }: { spec: KindSpe
           </tbody>
         </table>
       </div>
-      {stat.stocks.length > MAX_RENDERED_STOCKS && <div className="shrink-0 border-t border-border px-4 py-2 text-center text-[11px] text-muted">仅展示龙头分前 {MAX_RENDERED_STOCKS} 只，共 {stat.stocks.length} 只</div>}
-    </section>
+      {stat.stocks.length > MAX_RENDERED_STOCKS && (
+        <div className="border-t border-border px-4 py-2 text-center text-[11px] text-muted">仅展示龙头分前 {MAX_RENDERED_STOCKS} 只，共 {stat.stocks.length} 只</div>
+      )}
+    </>
   )
 }
 
-function MiniStat({ label, value, cls }: { label: string; value: string; cls: string }) {
-  return <div className="rounded-lg border border-border/60 bg-base/35 px-2 py-1.5"><div className="text-[10px] text-muted">{label}</div><div className={cn('mt-0.5 truncate text-sm font-semibold', cls)}>{value}</div></div>
+function shortDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value)
+  if (!match) return value
+  return `${Number(match[2])}/${match[3]}`
+}
+
+function SectorRpsStrip({
+  kind,
+  name,
+  level,
+  onOpenMatrix,
+}: {
+  kind: SectorKind
+  name: string
+  level?: 1 | 2 | 3
+  onOpenMatrix: () => void
+}) {
+  const days = 12
+  const { data, isLoading, isError } = useQuery({
+    queryKey: [...QK.rpsRotation(days), kind, level],
+    queryFn: () => api.rpsRotation(days, kind, level),
+    staleTime: 5 * 60 * 1000,
+  })
+  const dates = data?.dates ?? []
+  const cells = dates.map(date => {
+    const column = data?.columns[date] ?? []
+    const index = column.findIndex(([sector]) => sector === name)
+    return index >= 0 ? { date, rank: index + 1, pct: column[index][1] } : { date, rank: null as number | null, pct: null as number | null }
+  })
+
+  return (
+    <div className="border-t border-border px-4 py-3 sm:px-5">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+          <Repeat className="h-3.5 w-3.5 text-amber-400" />
+          涨幅 RPS
+          {level ? <span className="text-[10px] font-normal text-muted">{level}级</span> : null}
+        </div>
+        <button
+          type="button"
+          onClick={onOpenMatrix}
+          className="rounded-md border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-[11px] text-amber-400 hover:bg-amber-400/20"
+        >
+          完整矩阵
+        </button>
+      </div>
+      {isLoading ? (
+        <div className="text-[11px] text-muted">正在读取 RPS…</div>
+      ) : isError || cells.length === 0 ? (
+        <div className="text-[11px] text-muted">暂无 RPS 数据</div>
+      ) : (
+        <div className="flex gap-1.5 overflow-x-auto pb-1">
+          {cells.map(cell => (
+            <div key={cell.date} className="min-w-[4.25rem] rounded-md border border-border/70 bg-base/40 px-1.5 py-1 text-center">
+              <div className="text-[10px] text-muted">{shortDate(cell.date)}</div>
+              <div className={cn('font-mono text-[11px]', cell.rank != null && cell.rank <= 10 ? 'text-bull' : 'text-secondary')}>
+                {cell.rank != null ? `#${cell.rank}` : '—'}
+              </div>
+              <div className={cn('font-mono text-[10px] tabular-nums', priceColorClass(cell.pct))}>{cell.pct != null ? fmtPct(cell.pct) : '—'}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function LeaderStage({ title, stocks, onStockClick, activeSymbol }: { title: string; stocks: EnrichedStock[]; onStockClick: (symbol: string, name?: string) => void; activeSymbol: string | null }) {

@@ -1,6 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate, useSearchParams } from 'react-router-dom'
-import { sectorAnalysisSearch, type SectorKind } from './lib/sectorTab'
+import { sectorFocusSearch, type SectorKind } from './lib/sectorTab'
 import { Layout } from './components/Layout'
 import { useSettings } from './lib/useSharedQueries'
 import { Logo } from './components/Logo'
@@ -94,7 +94,7 @@ function MiningRedirect() {
 
 function LegacySectorRedirect({ tab }: { tab: SectorKind }) {
   const [searchParams] = useSearchParams()
-  return <Navigate to={`/sector-analysis?${sectorAnalysisSearch(tab, searchParams)}`} replace />
+  return <Navigate to={`/sector-analysis?${sectorFocusSearch(tab, searchParams)}`} replace />
 }
 
 // 首次使用守卫 —— 未完成向导则重定向到 /onboarding
