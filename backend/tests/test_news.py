@@ -955,7 +955,7 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     assert head["source_count"] == 2
     assert head["headline"] == "华为发布盘古新模型，昇腾链走强"
     assert head["importance"] == "重大"
-    assert set(head["breakdown"]) == {"importance", "mapping", "freshness", "heat"}
+    assert set(head["breakdown"]) == {"importance", "confirmation", "mapping", "freshness", "heat"}
     assert head["score"] > head["heat"]
     assert head["stocks"][0]["key"] == "600519.SH"
     assert "item_ids" not in head

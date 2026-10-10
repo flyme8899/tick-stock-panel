@@ -200,6 +200,17 @@ export function HotEvents() {
                           item.importance === '重大' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
                         )}>{item.importance}</span>
                       )}
+                      {item.confirmation && (
+                        <span className={cn(
+                          'rounded px-1 text-[10px] leading-4',
+                          item.confirmation.strength === '强' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
+                        )}>
+                          盘面验证 {item.confirmation.strength}
+                          {item.confirmation.persistence && item.confirmation.persistence !== '无'
+                            ? ` · ${item.confirmation.persistence}` : ''}
+                          {item.confirmation.label && !item.confirmation.live ? ` · ${item.confirmation.label}` : ''}
+                        </span>
+                      )}
                       {item.category && (
                         <span className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{item.category}</span>
                       )}

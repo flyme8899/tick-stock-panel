@@ -8,7 +8,7 @@
 - 公告日当天的财报不参与选股，下一交易日才生效，与回测财务因子一致。
 - 来源运行失败（例如 DSA 连不上）不参与交集/并集，避免一次失败把其他来源清空。
   来源成功但一只都没有，仍然参与合并。
-- 热门事件按北京时间当前交易日的资讯标题聚类，取热度前 8。热度是条数乘来源数，再按更新时间衰减。
+- 热门事件按北京时间当前交易日的资讯标题聚类，取排序前 8。重要性与盘面验证优先，热度只作加分。
   选中后并入该事件直接提到的个股，以及细分概念的成分股（最多 30 只），不展开宽行业。
 """
 from __future__ import annotations
@@ -826,6 +826,7 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             "category": str(event.get("category") or ""),
             "direction": str(event.get("direction") or ""),
             "importance": str(event.get("importance") or ""),
+            "confirmation": _confirmation_brief(event.get("confirmation")),
             "mapped_stocks": mapped,
         })
     return {
@@ -839,6 +840,22 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
         "hint": snapshot.get("hint") or None,
         "error": error,
         "items": items,
+    }
+
+
+def _confirmation_brief(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    strength = str(raw.get("strength") or "")
+    persistence = str(raw.get("persistence") or "")
+    label = str(raw.get("label") or "")
+    if not strength and not label:
+        return None
+    return {
+        "strength": strength,
+        "persistence": persistence,
+        "label": label,
+        "live": bool(raw.get("live")),
     }
 
 

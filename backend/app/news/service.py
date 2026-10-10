@@ -426,8 +426,9 @@ def public_hot_event(event: dict) -> dict:
     raw_parts = event.get("breakdown") if isinstance(event.get("breakdown"), dict) else {}
     breakdown = {
         part: _public_score_part(raw_parts.get(part))
-        for part in ("importance", "mapping", "freshness", "heat")
+        for part in ("importance", "confirmation", "mapping", "freshness", "heat")
     }
+    confirmation = _public_confirmation(event.get("confirmation"))
     return {
         "key": str(event.get("key") or ""),
         "name": str(event.get("name") or ""),
@@ -445,9 +446,52 @@ def public_hot_event(event: dict) -> dict:
         "importance": importance,
         "score": score,
         "breakdown": breakdown,
+        "confirmation": confirmation,
         "stocks": stocks,
         "etfs": etfs,
     }
+
+
+def _public_confirmation(raw) -> dict:
+    payload = raw if isinstance(raw, dict) else {}
+    detail = payload.get("detail") if isinstance(payload.get("detail"), dict) else {}
+    strength = str(payload.get("strength") or "无")
+    if strength not in {"强", "中", "弱", "无"}:
+        strength = "无"
+    persistence = str(payload.get("persistence") or "无")
+    if persistence not in {"持续", "短暂", "无"}:
+        persistence = "无"
+    return {
+        "label": str(payload.get("label") or "暂无行情"),
+        "session": payload.get("session") or None,
+        "live": bool(payload.get("live")),
+        "score": _public_score_part(payload.get("score")),
+        "abnormal": bool(payload.get("abnormal")),
+        "strength": strength,
+        "persistence": persistence,
+        "detail": {
+            "excess_pct": _optional_score(detail.get("excess_pct")),
+            "breadth": _optional_score(detail.get("breadth")),
+            "limit_count": int(detail.get("limit_count") or 0),
+            "vol_ratio": _optional_score(detail.get("vol_ratio")),
+            "main_net": _optional_score(detail.get("main_net")),
+            "sector_net_inflow": _optional_score(detail.get("sector_net_inflow")),
+            "windows": int(detail.get("windows") or 0),
+            "windows_hit": int(detail.get("windows_hit") or 0),
+        },
+    }
+
+
+def _optional_score(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = round(float(value), 4)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
 
 
 def _public_score_part(value) -> float:
@@ -502,8 +546,8 @@ def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> d
 def top_hot_events(now: datetime | None = None) -> dict:
     """当前交易日分量最高的具体事件。
 
-    同一交易日的标题按主体、动作和细概念聚类。排序先看事件重要性，再看 A 股映射、
-    首见新鲜度，热度（条数乘来源数，再按更新时间衰减）只作加分。
+    同一交易日的标题按主体、动作和细概念聚类。排序把事件重要性和首见之后的盘面验证
+    放在同一档，再看 A 股映射和首见新鲜度。热度（条数乘来源数，再按更新时间衰减）只作加分。
     当天没有资讯时，改用不晚于今天、且落在回看窗口里的最近一天，并在 hint 里标明。
     结果缓存约 10 分钟。模型不可用时保留关键词标题和规则分级。
     """

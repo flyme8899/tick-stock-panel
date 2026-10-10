@@ -2239,6 +2239,26 @@ export interface NewsHotStock {
   direction?: '利好' | '利空' | string
 }
 
+export interface NewsHotConfirmation {
+  label: string
+  session?: string | null
+  live?: boolean
+  score?: number
+  abnormal?: boolean
+  strength: '强' | '中' | '弱' | '无' | string
+  persistence: '持续' | '短暂' | '无' | string
+  detail?: {
+    excess_pct?: number | null
+    breadth?: number | null
+    limit_count?: number
+    vol_ratio?: number | null
+    main_net?: number | null
+    sector_net_inflow?: number | null
+    windows?: number
+    windows_hit?: number
+  }
+}
+
 export interface NewsHotMapping {
   name: string
   kind: string
@@ -2263,10 +2283,12 @@ export interface NewsHotEvent {
   score?: number
   breakdown?: {
     importance: number
+    confirmation?: number
     mapping: number
     freshness: number
     heat: number
   }
+  confirmation?: NewsHotConfirmation
   stocks: NewsHotStock[]
   etfs?: NewsHotStock[]
 }
@@ -2342,6 +2364,7 @@ export interface PickerSourceItem {
   category?: string
   direction?: string
   importance?: string
+  confirmation?: { strength?: string; persistence?: string; label?: string; live?: boolean } | null
   mapped_stocks?: string[]
 }
 

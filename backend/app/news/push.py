@@ -191,7 +191,13 @@ def format_hot_markdown(
             tag = str(row.get("category") or "").strip()
             direction = str(row.get("direction") or "").strip()
             level = str(row.get("importance") or "").strip()
-            label = "".join(f" · {part}" for part in (level, tag, direction) if part)
+            confirm = row.get("confirmation") if isinstance(row.get("confirmation"), dict) else {}
+            checked = ""
+            if str(confirm.get("strength") or "") not in {"", "无"}:
+                checked = f"盘面验证 {confirm.get('strength')}"
+                if str(confirm.get("persistence") or "") not in {"", "无"}:
+                    checked += f"·{confirm.get('persistence')}"
+            label = "".join(f" · {part}" for part in (level, checked, tag, direction) if part)
             lines.append(
                 f"{index}. {row.get('name') or row.get('key')}{label}{concept_text} · "
                 f"提及 {row.get('story_count', 0)} · "
@@ -607,6 +613,8 @@ def _snapshot_rows(items: list[dict]) -> list[dict]:
             row["direction"] = item["direction"]
         if item.get("importance"):
             row["importance"] = item["importance"]
+        if isinstance(item.get("confirmation"), dict):
+            row["confirmation"] = item["confirmation"]
         concepts = [str(concept) for concept in (item.get("concepts") or []) if str(concept).strip()]
         if concepts:
             row["concepts"] = concepts
@@ -894,6 +902,7 @@ def _load_hot() -> list[dict]:
             "category": event.get("category") or "",
             "direction": event.get("direction") or "",
             "importance": event.get("importance") or "",
+            "confirmation": event.get("confirmation") or {},
         })
     for kind in ("sector", "stock", "etf"):
         for item in hot_candidates(kind=kind, limit=top_n()):

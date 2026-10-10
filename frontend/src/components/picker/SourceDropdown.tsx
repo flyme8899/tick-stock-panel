@@ -15,6 +15,7 @@ export interface SourceOption {
   category?: string
   direction?: string
   importance?: string
+  confirmationLabel?: string
   mappedStocks?: string[]
 }
 
@@ -111,7 +112,7 @@ export function SourceDropdown({
                 <span className="block truncate text-xs text-foreground">{item.name}</span>
                 {(item.importance || item.category || item.direction) && (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">
-                    {[item.importance, item.category, item.direction, ...(item.mappedStocks ?? []).slice(0, 2)].filter(Boolean).join(' · ')}
+                    {[item.importance, item.confirmationLabel, item.category, item.direction, ...(item.mappedStocks ?? []).slice(0, 2)].filter(Boolean).join(' · ')}
                   </span>
                 )}
                 {item.concepts && item.concepts.length > 0 && (

@@ -673,7 +673,7 @@ def test_major_event_with_few_mentions_outranks_routine_heat(tmp_path):
     assert head["mentions"] == 1
     assert head["source_count"] == 1
     parts = head["breakdown"]
-    assert set(parts) == {"importance", "mapping", "freshness", "heat"}
+    assert set(parts) == {"importance", "confirmation", "mapping", "freshness", "heat"}
     assert parts["importance"] > parts["mapping"] + parts["freshness"] + parts["heat"]
     routine = next(event for event in events if event["name"] == "存储芯片厂涨价")
     assert routine["importance"] == "重要"

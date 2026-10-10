@@ -207,6 +207,9 @@ export function StockPicker() {
               category: item.category,
               direction: item.direction,
               importance: item.importance,
+              confirmationLabel: item.confirmation?.strength && item.confirmation.strength !== '无'
+                ? `盘面验证 ${item.confirmation.strength}`
+                : undefined,
               mappedStocks: item.mapped_stocks,
             }))}
             selectedIds={idsOf(picks, 'hot_events')}

@@ -85,7 +85,8 @@ _BULL_CUES = ("补贴", "获批", "订单", "涨价", "回购", "发布", "出�
 _NOISE_EXACT = frozenset({"图片", "广告", "视频", "转发", "分享", "推广", "赞助"})
 _NOISE_HINTS = ("闲聊", "广告", "推广", "赞助", "加微信", "点击领取", "转发微博")
 _RELEVANCE_MIN = 3
-# 重要性的档距大于映射、新鲜度和热度封顶之和，避免条数把寻常涨价顶过降息、政策或制裁。
+# 重要性高于映射、新鲜度和热度。热度封顶，避免条数把寻常涨价顶过降息或政策。
+# 盘面验证另计，权重和重要性同级，不放进这个封顶。
 _IMPORTANCE_POINTS = {"琐碎": 0, "一般": 20, "重要": 55, "重大": 130}
 _IMPORTANCE_ORDER = ("琐碎", "一般", "重要", "重大")
 _MAPPING_CONCEPT = 15
@@ -170,6 +171,9 @@ def _compute(now: datetime, store: NewsStore) -> dict:
             "events": [],
         }
     events = ranked[chosen]
+    from app.news.market_confirm import attach_confirmations
+    attach_confirmations(events, now)
+    events = _rank_events(events, now, grade=False)
     _label_with_llm(events)
     events = _rank_events(events, now, grade=False)
     latest = max(event.pop("_latest") for event in events)
@@ -446,13 +450,27 @@ def _score_event(event: dict, now: datetime) -> None:
     except (TypeError, ValueError):
         heat = 0.0
     heat_bonus = min(_HEAT_BONUS_CAP, max(0.0, heat))
+    confirmation = _confirmation_points(event.get("confirmation"))
     event["breakdown"] = {
         "importance": importance,
+        "confirmation": confirmation,
         "mapping": mapping,
         "freshness": round(freshness, 4),
         "heat": round(heat_bonus, 4),
     }
-    event["score"] = round(importance + mapping + freshness + heat_bonus, 4)
+    event["score"] = round(importance + confirmation + mapping + freshness + heat_bonus, 4)
+
+
+def _confirmation_points(raw) -> float:
+    if not isinstance(raw, dict):
+        return 0.0
+    try:
+        points = float(raw.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if points != points:
+        return 0.0
+    return round(min(80.0, max(0.0, points)), 4)
 
 
 def _event_text(event: dict) -> str:
