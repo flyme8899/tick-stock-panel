@@ -43,6 +43,7 @@ from app.news.service import (
     feed_for_source,
     get_store,
     hot_candidates,
+    hot_messages,
     ingest_items,
     reset_store_for_tests,
 )
@@ -145,7 +146,7 @@ def test_sector_fragments_and_fund_names_do_not_become_candidates():
             ("512100.SH", "中证1000ETF南方", "512100"),
             ("600519.SH", "贵州茅台", "600519"),
         ],
-        ["50", "A50", "500", "中证500", "半导体"],
+        ["50", "A50", "500", "中", "沪50", "中证500", "半导体"],
     )
     text = "350亿、50万吨、标普500、富时A50，中证5000与中证500，还有中证1000ETF南方"
     mentions = lexicon.extract(text)
@@ -153,8 +154,49 @@ def test_sector_fragments_and_fund_names_do_not_become_candidates():
     stocks = {item.key for item in mentions if item.kind == "stock"}
     assert sectors == {"中证500"}
     assert stocks == set()
+    structured = lexicon.extract("", None, ["50", "中", "沪50", "A50", "中证500"])
+    assert {item.key for item in structured if item.kind == "sector"} == {"中证500"}
     coded = lexicon.extract("代码 512100.SH")
     assert {item.key for item in coded} == {"512100.SH"}
+
+
+def test_legacy_bad_sector_names_leave_the_hot_list(tmp_path):
+    path = tmp_path / "news.sqlite"
+    reset_store_for_tests(path)
+    when = cn_now()
+    ingest_items([
+        Item(
+            source="cls",
+            source_id="sec-1",
+            published_at=when,
+            text="白酒板块的讨论写得长一些，避免被当成短讯。",
+            title="白酒",
+            sectors=["白酒"],
+        ),
+    ], Lexicon([], ["白酒"]))
+    store = get_store()
+    item_id = store._conn.execute("SELECT id FROM news_items").fetchone()["id"]
+    store._conn.executemany(
+        """
+        INSERT INTO news_mentions (item_id, kind, key, name, code, origin)
+        VALUES (?, 'sector', ?, ?, '', 'text')
+        """,
+        [(item_id, key, key) for key in ("50", "中", "A50", "沪50")],
+    )
+    store._conn.commit()
+    ranked = hot_candidates(kind="sector", window_hours=24, baseline_days=1)
+    assert [item.key for item in ranked] == ["白酒"]
+    feed = feed_for_source("cls", limit=10)
+    assert feed["items"][0]["sectors"] == ["白酒"]
+    assert hot_messages("sector", "50") == []
+    reset_store_for_tests(path)
+    keys = [
+        row["key"]
+        for row in get_store()._conn.execute(
+            "SELECT key FROM news_mentions WHERE kind = 'sector' ORDER BY key"
+        )
+    ]
+    assert keys == ["白酒"]
 
 
 def test_extract_rejects_bare_numbers_and_attributions():

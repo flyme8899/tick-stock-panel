@@ -56,6 +56,7 @@ from app.news.extract import (
     Lexicon,
     Mention,
     StructuredStock,
+    _usable_sector_name,
     parse_llm_payload,
     parse_llm_summary,
 )
@@ -242,6 +243,8 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
         published = parse_time(row["published_at"])
         if published is None:
             continue
+        if row["kind"] == "sector" and not _sector_name_ok(row["key"], row["name"]):
+            continue
         events.append(MentionEvent(
             kind=row["kind"],
             key=row["key"],
@@ -271,6 +274,8 @@ def message_view(row, *, limit: int = 240) -> dict:
 
 
 def hot_messages(kind: str, key: str, *, window_hours: int = 24, limit: int = 30) -> list[dict]:
+    if kind == "sector" and not _usable_sector_name(key):
+        return []
     start = cn_now() - timedelta(hours=window_hours)
     rows = get_store().messages_for(kind=kind, key=key, start=start, limit=limit)
     seen: set[str] = set()
@@ -309,7 +314,7 @@ def feed_for_source(source: str, *, limit: int = 50) -> dict:
         for mention in row["mentions"]:
             if mention["kind"] == "stock":
                 symbols.append(mention["key"])
-            elif mention["kind"] == "sector":
+            elif mention["kind"] == "sector" and _usable_sector_name(mention["key"]):
                 sectors.append(mention["key"])
         items.append({
             "source_id": row["source_id"],
@@ -820,6 +825,10 @@ def _row_summary(row, limit: int) -> str:
     if zh:
         return excerpt(zh, limit)
     return excerpt(row["clean_text"] or "", limit)
+
+
+def _sector_name_ok(key: str, name: str) -> bool:
+    return _usable_sector_name(key) and _usable_sector_name(name or key)
 
 
 def _sector_names(repo) -> list[str]:

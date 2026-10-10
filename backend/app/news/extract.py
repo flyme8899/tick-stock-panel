@@ -17,6 +17,7 @@ _EXCHANGE = {"SS": "SH", "SH": "SH", "SZ": "SZ", "BJ": "BJ"}
 _COMMON_STOCK_NAMES = {"机器人", "太阳能", "农产品"}
 _ATTRIBUTION_SUFFIXES = ("研报", "指出", "认为", "数据", "Choice", "choice")
 _ASCII_ALNUM = re.compile(r"[A-Za-z0-9]+")
+_CJK_CHAR = re.compile(r"[\u4e00-\u9fff]")
 _FUND_NAME = re.compile(r"ETF|LOF|基金", re.IGNORECASE)
 
 
@@ -173,11 +174,13 @@ def _code_in_text_ok(body: str, match: re.Match, lexicon: Lexicon) -> bool:
 
 
 def _usable_sector_name(name: str) -> bool:
-    """纯数字和过短的字母数字板块名会嵌进「350亿」「富时A50」。"""
+    """纯数字、汉字不足两个，以及过短的字母数字名会嵌进「350亿」「富时A50」。"""
     text = (name or "").strip()
     if len(text) < 2 or text.isdigit():
         return False
-    return not (_ASCII_ALNUM.fullmatch(text) and len(text) < 4)
+    if _ASCII_ALNUM.fullmatch(text) and len(text) < 4:
+        return False
+    return len(_CJK_CHAR.findall(text)) >= 2
 
 
 def _is_fund_name(name: str) -> bool:
