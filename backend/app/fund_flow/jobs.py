@@ -289,6 +289,25 @@ def sync_margin(
     return result
 
 
+def backfill_etf_shares(
+    data_dir: Path,
+    clients: SourceClients,
+    *,
+    trade_dates: list[str],
+    breaker: CircuitBreaker,
+    sleeper: Sleeper | None = None,
+) -> RunResult:
+    """按日回补 ETF 份额。每一天都经 ``normalize_etf_shares`` 再 ``store.write_rows``。"""
+    result = RunResult(kind="etf_shares")
+    for trade_date in trade_dates:
+        one = sync_etf_shares(
+            data_dir, clients, trade_date=trade_date, breaker=breaker, sleeper=sleeper,
+        )
+        result.wrote += one.wrote
+        result.errors.extend(one.errors)
+    return result
+
+
 def sync_etf_shares(
     data_dir: Path,
     clients: SourceClients,

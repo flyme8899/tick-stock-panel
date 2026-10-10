@@ -143,20 +143,66 @@ def frame_of(kind: str, rows: list[dict]) -> pl.DataFrame:
     return df.select(exprs)
 
 
+def _looks_like_raw_etf(rows: list[dict]) -> bool:
+    return any("基金份额" in row or "基金代码" in row for row in rows)
+
+
+def prepare_rows(kind: str, rows: list[dict]) -> list[dict]:
+    """ETF 原始行先收成内部字段。其它种类不在这里猜列名。"""
+    if kind == "etf_shares" and _looks_like_raw_etf(rows):
+        from app.fund_flow.normalize import normalize_etf_shares
+
+        return normalize_etf_shares(rows)
+    return rows
+
+
+def assert_schema(kind: str, rows: list[dict]) -> None:
+    """写入前核对列名和主键。原始中文列不能进 parquet。"""
+    schema = _SCHEMAS[kind]
+    keys = KEYS[kind]
+    for row in rows:
+        unknown = sorted(name for name in row if name not in schema)
+        if unknown:
+            raise ValueError(f"{kind} 写入含未知列: {', '.join(unknown)}")
+        missing = [name for name in keys if name not in row or row[name] is None]
+        if missing:
+            raise ValueError(f"{kind} 写入缺少主键: {', '.join(missing)}")
+
+
+def align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
+    """把分区收成内部列。缺主键的分区能按 ETF 原始列还原，否则整段跳过。"""
+    schema = _SCHEMAS[kind]
+    if frame.is_empty():
+        return empty_frame(kind)
+    names = set(frame.columns)
+    if set(schema).issubset(names):
+        return frame.select(list(schema.keys()))
+    rows = frame.to_dicts()
+    if kind == "etf_shares" and _looks_like_raw_etf(rows):
+        prepared = prepare_rows(kind, rows)
+        if prepared:
+            return frame_of(kind, prepared)
+    if all(name in names for name in KEYS[kind]):
+        return frame_of(kind, rows)
+    return empty_frame(kind)
+
+
 def write_rows(data_dir: Path, kind: str, trade_date: str, rows: list[dict]) -> int:
     """合并写入一个交易日分区。返回该分区合并后的行数。"""
     _check(kind, trade_date)
-    incoming = frame_of(kind, rows)
-    if incoming.is_empty():
+    rows = prepare_rows(kind, rows)
+    if not rows:
         path = partition_file(data_dir, kind, trade_date)
         if path.exists():
-            return pl.read_parquet(path).height
+            return align_frame(kind, pl.read_parquet(path)).height
         return 0
+    assert_schema(kind, rows)
+    incoming = frame_of(kind, rows)
     path = partition_file(data_dir, kind, trade_date)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        previous = pl.read_parquet(path)
-        merged = pl.concat([frame_of(kind, previous.to_dicts()), incoming], how="vertical_relaxed")
+        previous = align_frame(kind, pl.read_parquet(path))
+        merged = pl.concat([previous, incoming], how="vertical_relaxed")
     else:
         merged = incoming
     keys = [key for key in KEYS[kind] if key in merged.columns]
@@ -169,7 +215,11 @@ def read_partition(data_dir: Path, kind: str, trade_date: str) -> pl.DataFrame:
     path = partition_file(data_dir, kind, trade_date)
     if not path.exists():
         return empty_frame(kind)
-    return pl.read_parquet(path)
+    try:
+        frame = pl.read_parquet(path)
+    except Exception:  # noqa: BLE001
+        return empty_frame(kind)
+    return align_frame(kind, frame)
 
 
 def list_dates(data_dir: Path, kind: str) -> list[str]:

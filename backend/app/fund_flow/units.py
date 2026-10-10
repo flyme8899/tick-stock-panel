@@ -11,6 +11,7 @@ BARE_YUAN = "yuan"
 BARE_YI = "yi"  # 亿元
 BARE_WAN = "wan"  # 万
 BARE_WAN_SHARES = "wan_shares"  # 万份
+BARE_SHARES = "shares"  # 份
 
 
 def money_to_yuan(value: object, *, bare: str) -> float | None:
@@ -39,8 +40,12 @@ def money_to_yuan(value: object, *, bare: str) -> float | None:
     return _scale(number, bare)
 
 
-def shares_to_count(value: object, *, bare: str = BARE_WAN_SHARES) -> float | None:
-    """基金份额换成份。上交所接口的裸数字是万份。"""
+def shares_to_count(value: object, *, bare: str = BARE_SHARES) -> float | None:
+    """基金份额换成份。
+
+    akshare 1.19.1 的 ``fund_etf_scale_sse`` 在返回前把上交所的万份乘了 10000，
+    裸数字已经是份。字符串里的「亿」「万」仍按后缀换，不看数值大小猜单位。
+    """
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):

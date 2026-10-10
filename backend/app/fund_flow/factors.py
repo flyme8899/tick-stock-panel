@@ -102,7 +102,8 @@ def latest_sector_ranks(data_dir: Path, kind: str, trade_date: str | None = None
     if day is None:
         return empty
     frame = store.read_partition(data_dir, kind, day)
-    if frame.is_empty():
+    needed = ("snapshot", "captured_at", "name", "rank", "net_inflow", "trade_date")
+    if frame.is_empty() or any(name not in frame.columns for name in needed):
         return empty
     close = frame.filter(pl.col("snapshot") == "close")
     chosen = close if not close.is_empty() else frame.sort("captured_at").unique(subset=["name"], keep="last")
