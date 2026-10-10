@@ -971,7 +971,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     )
     prompts = []
 
-    def fake_text(prompt: str) -> str:
+    def fake_text(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
         return (
             '{"title":"华为发布新模型","category":"地缘政治","direction":"利空",'
@@ -992,7 +992,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert named["events"][0]["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利空"}]
     assert named["events"][0]["mentioned_stocks"] == []
     assert len(prompts) == 1
-    assert "不超过20个字" in prompts[0]
+    assert "不超过28个字" in prompts[0]
     assert "国内政策/宏观" in prompts[0]
 
     hot_mod.clear_hot_event_cache(llm=False)
@@ -1009,7 +1009,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert fallback["events"][0]["importance"] == "重大"
     assert len(prompts) == 1
 
-    def trivial(prompt: str) -> str:
+    def trivial(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
         return '{"title":"华为发布新模型","importance":"琐碎"}'
 
@@ -1021,24 +1021,34 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert kept["events"][0]["importance"] == "一般"
 
 
-def test_hot_event_llm_labels_at_most_eight(tmp_path, monkeypatch):
+def test_hot_event_llm_labels_top_twenty_in_one_batch(tmp_path, monkeypatch):
+    """展示标题一次批量问完前 20 条；不合格再问一次，第 21 条不进提示。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
     reset_store_for_tests(tmp_path / "llm-cap.sqlite")
     friday = date(2026, 10, 9)
-    subjects = "甲乙丙丁戊己庚辛壬"
-    objects = "子丑寅卯辰巳午未申"
-    for index in range(9):
+    marks = "子丑寅卯辰巳午未申酉戌亥金木水火土山川风雨雷电"
+    titles = [f"{marks[index]}厂宣布涨价" for index in range(21)]
+    for index, title in enumerate(titles):
         _insert_news(
             "cls", f"cap-{index}", _publish(friday, 15, index), [], [],
-            title=f"{subjects[index]}厂涨价{objects[index]}材",
+            title=title,
         )
     prompts: list[str] = []
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
-    monkeypatch.setattr(news_service, "_llm_text", lambda prompt: prompts.append(prompt) or "{}")
+    monkeypatch.setattr(
+        news_service,
+        "_llm_text",
+        lambda prompt, **_kwargs: prompts.append(prompt) or "{}",
+    )
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     snapshot = top_hot_events(NOW)
-    assert len(snapshot["events"]) == 9
-    assert len(prompts) == 8
+    assert len(snapshot["events"]) == 21
+    assert len(prompts) == 2
+    assert "不超过28个字" in prompts[0]
+    assert "上一轮标题不合格" in prompts[1]
+    in_first = [title for title in titles if title in prompts[0]]
+    assert len(in_first) == 20
+    assert len({title for title in titles if title not in prompts[0]}) == 1

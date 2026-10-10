@@ -2292,6 +2292,7 @@ export interface NewsHotEvent {
   headline: string
   headlines?: string[]
   mentions: number
+  red_count?: number
   source_count: number
   first_seen: string
   heat: number
@@ -2331,6 +2332,7 @@ export interface NewsMessage {
   excerpt: string
   url: string
   level: string
+  red?: boolean
 }
 
 export interface NewsSourceHealth {
@@ -2373,6 +2375,7 @@ export interface PickerSourceItem {
   description: string
   mentions?: number
   source_count?: number
+  red_count?: number
   updated_at?: string | null
   first_seen?: string | null
   concepts?: string[]

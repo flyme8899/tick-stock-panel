@@ -62,6 +62,7 @@ function authLabel(source: NewsSourceHealth): string {
 export function HotEvents() {
   const [tab, setTab] = useState<HotTab>('event')
   const [category, setCategory] = useState<string>('全部')
+  const [redOnly, setRedOnly] = useState(false)
   const [picked, setPicked] = useState<NewsCandidate | null>(null)
   const [pickedEvent, setPickedEvent] = useState<NewsHotEvent | null>(null)
   const [pushNote, setPushNote] = useState('')
@@ -114,6 +115,9 @@ export function HotEvents() {
 
   const candidates = hot.data?.candidates ?? []
   const events = (hot.data?.events ?? []).filter(item => category === '全部' || item.category === category)
+    .filter(item => !redOnly || (item.red_count ?? 0) > 0)
+  const eventItems = (eventDetail.data?.items ?? []).filter(item => !redOnly || item.red)
+  const messageItems = (messages.data?.items ?? []).filter(item => !redOnly || item.red)
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -149,9 +153,11 @@ export function HotEvents() {
           {hot.isError && <p className="text-sm text-danger">热门候选加载失败</p>}
           {hot.isSuccess && tab === 'event' && events.length === 0 && (
             <p className="text-sm text-muted">
-              {category !== '全部'
-                ? '这个分类下还没有事件。'
-                : (hot.data?.hint || '今天还没有收成具体事件。打开右侧来源并等待采集后，这里会列出当天的事件。')}
+              {redOnly
+                ? '没有加红事件。'
+                : category !== '全部'
+                  ? '这个分类下还没有事件。'
+                  : (hot.data?.hint || '今天还没有收成具体事件。打开右侧来源并等待采集后，这里会列出当天的事件。')}
             </p>
           )}
           {hot.isSuccess && tab !== 'event' && candidates.length === 0 && (
@@ -179,6 +185,19 @@ export function HotEvents() {
                   {name}
                 </button>
               ))}
+              <button
+                type="button"
+                className={cn(
+                  'rounded-full border px-2 py-0.5 text-xs',
+                  redOnly ? 'border-bull bg-bull/15 text-bull' : 'border-border text-muted',
+                )}
+                onClick={() => {
+                  setRedOnly(value => !value)
+                  setPickedEvent(null)
+                }}
+              >
+                只看加红
+              </button>
             </div>
           )}
 
@@ -202,7 +221,12 @@ export function HotEvents() {
                     onClick={() => setPickedEvent(item)}
                   >
                     <div className="flex items-baseline justify-between gap-3">
-                      <span className="font-medium">{item.name}</span>
+                      <span className="font-medium">
+                        {item.name}
+                        {(item.red_count ?? 0) > 0 && (
+                          <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
+                        )}
+                      </span>
                       <span className="shrink-0 text-xs text-muted">热度 {item.heat}</span>
                     </div>
                     <div className="mt-1 flex flex-wrap gap-1">
@@ -293,15 +317,16 @@ export function HotEvents() {
               )}
               {eventDetail.isLoading && <p className="text-sm text-muted">加载摘录…</p>}
               {eventDetail.isError && <p className="text-sm text-danger">摘录加载失败</p>}
-              {eventDetail.isSuccess && eventDetail.data.items.length === 0 && (
-                <p className="text-sm text-muted">这个事件里没有可展示的摘录。</p>
+              {eventDetail.isSuccess && eventItems.length === 0 && (
+                <p className="text-sm text-muted">{redOnly ? '这个事件里没有加红摘录。' : '这个事件里没有可展示的摘录。'}</p>
               )}
               <ul className="space-y-3">
-                {(eventDetail.data?.items ?? []).map(item => (
+                {eventItems.map(item => (
                   <li key={`${item.source}-${item.published_at}-${item.title}`} className="text-sm">
                     <div className="text-xs text-muted">
                       {item.source_label} · {item.published_at}
                       {item.level ? ` · ${item.level}` : ''}
+                      {item.red && <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>}
                     </div>
                     {item.title && <div className="font-medium">{item.title}</div>}
                     <p className="text-secondary">{item.excerpt}</p>
@@ -321,15 +346,16 @@ export function HotEvents() {
               <h2 className="mb-2 text-sm font-medium">{picked.name} 的相关摘录</h2>
               {messages.isLoading && <p className="text-sm text-muted">加载摘录…</p>}
               {messages.isError && <p className="text-sm text-danger">摘录加载失败</p>}
-              {messages.isSuccess && messages.data.items.length === 0 && (
-                <p className="text-sm text-muted">这个窗口里没有可展示的摘录。</p>
+              {messages.isSuccess && messageItems.length === 0 && (
+                <p className="text-sm text-muted">{redOnly ? '这个窗口里没有加红摘录。' : '这个窗口里没有可展示的摘录。'}</p>
               )}
               <ul className="space-y-3">
-                {(messages.data?.items ?? []).map(item => (
+                {messageItems.map(item => (
                   <li key={`${item.source}-${item.published_at}-${item.title}`} className="text-sm">
                     <div className="text-xs text-muted">
                       {item.source_label} · {item.published_at}
                       {item.level ? ` · ${item.level}` : ''}
+                      {item.red && <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>}
                     </div>
                     {item.title && <div className="font-medium">{item.title}</div>}
                     <p className="text-secondary">{item.excerpt}</p>

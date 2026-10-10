@@ -5,13 +5,15 @@
 或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
 共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
 
-标题优先用合格的关键词或模型说法。两者都没有时，用去掉来源前缀的代表分句。
-分句尽量整句留下，最长大约 28 字：不切在数字或日期中间，不把宾语丢掉，也不留
-【】碎片。没有可读标题，或标题只剩「事件」，这条就不进列表。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v4。
+模型要给出完整中文标题，不超过 28 字，写明主体、动作和宾语，不带时间戳、括号和省略号。
+规则只做校验：不合格就再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
+清理会去掉开头的钟点或【前的分钟数字、【】标签和末尾省略号，并停在句号前。
+栏目标题，以及只有点评、重点、没有动作的稿，不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
-词典没写到的无关概念仍然丢掉。同一时间窗里，财政部、国务院这类国内政策主体
-即使一个写发布、一个写出台，也并成一件事。
+事件自己没有概念时，模型只能从这张词典里选。词典没写到的无关概念仍然丢掉。
+同一时间窗里，财政部、国务院这类国内政策主体即使一个写发布、一个写出台，也并成一件事。
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 
 from app.market_time import CN_TZ, cn_now, current_trading_day
-from app.news.collectors import parse_time
+from app.news.collectors import is_red, parse_time
 from app.news.extract import _usable_sector_name
 from app.news.store import NewsStore
 
@@ -35,7 +37,11 @@ _LOOKBACK_DAYS = 21
 _CACHE_SECONDS = 600
 _CLUSTER_WINDOW = timedelta(hours=6)
 _HEAT_HALF_LIFE_HOURS = 12
-_LLM_PER_PASS = 8
+# 加红稿在热度里按 2.5 条计，普通稿仍按 1 条。
+_RED_MENTION_WEIGHT = 2.5
+# 要展示的事件一次批量起标题，不再逐条各问一次。
+_LLM_TITLE_BATCH = 20
+_LLM_TITLE_TOKENS = 1600
 _TITLE_LIMIT = 20
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
 _TITLE_HARD = 28
@@ -224,6 +230,15 @@ _SOURCE_LABEL = re.compile(
     r"^(?:" + "|".join(_SOURCE_HEADS) + r"|快讯|突发|独家|刚刚)[：:|｜]"
 )
 _REUTERS_TAIL = re.compile(r"(?:[-|｜]\s*)?(?:Reuters|路透社|路透)$")
+# 15:32【财联社】被冒号切开后，会剩「32【…】」这种钟点碎片。
+_CLOCK_PREFIX = re.compile(r"^(?:\d{1,2}[:：]\d{2})+")
+_MINUTE_BEFORE_BRACKET = re.compile(r"^\d{1,2}(?=【)")
+_LEFTOVER_MINUTE = re.compile(r"^\d{1,2}(?![年月日号点时分])(?=[\u4e00-\u9fff])")
+_TRAILING_ELLIPSIS = re.compile(r"(?:\.{2,}|…+|。{2,})+$")
+_SENTENCE_END = re.compile(r"[。；！？\n]")
+_SECTION_MATERIAL = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,12}材料$")
+# 价格叙述后面再出现这些动作，就是下一句被粘进了标题。
+_UNGLUE_VERBS = _GLUE_FOLLOWUPS | frozenset({"涨价", "降价", "提价"})
 
 _CACHE: dict[tuple, dict] = {}
 _LLM_CACHE: dict[str, dict] = {}
@@ -282,7 +297,9 @@ def _compute(now: datetime, store: NewsStore) -> dict:
     attach_confirmations(events, now)
     events = _rank_events(events, now, grade=False)
     _label_with_llm(events)
-    events = [event for event in events if _display_name_ok(event.get("name"))]
+    for event in events:
+        _ensure_shown_name(event)
+    events = [event for event in events if _keep_shown_event(event)]
     if not events:
         return {
             "as_of": None,
@@ -297,6 +314,8 @@ def _compute(now: datetime, store: NewsStore) -> dict:
     for event in events:
         event.pop("_fp", None)
         event.pop("_first", None)
+        event.pop("_batch_id", None)
+        event.pop("_llm_title_applied", None)
     updated_hm = latest.astimezone(CN_TZ).strftime("%H:%M")
     return {
         "as_of": chosen.isoformat(),
@@ -330,7 +349,7 @@ def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
         groups[find(index)].append(doc)
     events = [
         event for event in (_event_from(members, now) for members in groups.values())
-        if _display_name_ok(event.get("name"))
+        if _cleaned_display_ok(event.get("name"))
     ]
     return _rank_events(events, now, grade=True)
 
@@ -366,9 +385,11 @@ def _doc(row: dict) -> dict | None:
     if not entities and _subject_is_vague(lead):
         entities = _explicit_entities(summary[:200])
     tokens = _title_tokens(lead, obj, concepts, title or summary[:80], entities)
+    source = str(row.get("source") or "")
     return {
         "item_id": row.get("id"),
-        "source": str(row.get("source") or ""),
+        "source": source,
+        "red": is_red(source, row.get("level")),
         "published": published,
         "title": title or summary[:80],
         "entity_text": entity_text,
@@ -486,6 +507,8 @@ def _event_from(members: list[dict], now: datetime) -> dict:
     age_hours = max(0.0, (now - latest).total_seconds() / 3600)
     decay = math.exp(-math.log(2) * age_hours / _HEAT_HALF_LIFE_HOURS)
     mentions = len(members)
+    red_count = sum(1 for item in members if item.get("red"))
+    weighted_mentions = (mentions - red_count) + red_count * _RED_MENTION_WEIGHT
     source_count = len(sources) or 1
     name = _keyword_title(members)
     focused = _representative_members(members, name)
@@ -550,10 +573,11 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         "headline": headline,
         "headlines": headlines,
         "mentions": mentions,
+        "red_count": red_count,
         "source_count": len(sources),
         "first_seen": first_seen,
         "updated_at": first_seen,
-        "heat": round(mentions * source_count * decay, 4),
+        "heat": round(weighted_mentions * source_count * decay, 4),
         "mentioned_stocks": mentioned,
         "item_ids": item_ids,
         "_latest": latest,
@@ -680,6 +704,8 @@ def _drop_minor(event: dict) -> bool:
     if label != "一般":
         return False
     if float(event["breakdown"]["mapping"]) > 0:
+        return False
+    if int(event.get("red_count") or 0) > 0:
         return False
     return int(event.get("mentions") or 0) <= 1 and int(event.get("source_count") or 0) <= 1
 
@@ -928,6 +954,18 @@ def _relevant_concepts(counts: Counter[str], titles: list[str], subjects: set[st
     return _specific_concepts(filtered)
 
 
+def _dictionary_names() -> tuple[str, ...]:
+    names: list[str] = []
+    for _keys, concepts in _SUBJECT_CONCEPTS:
+        for name in concepts:
+            if name not in names:
+                names.append(name)
+    for name in ("基建", "地方债"):
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
 def _dictionary_concepts(blob: str) -> list[str]:
     """主体在标题里、提及却是空的时候，补上对应的 A 股概念。"""
     found: list[str] = []
@@ -1029,8 +1067,9 @@ def _stitch_subject_verb(body: str) -> str:
 
 
 def _cleaned_headline(text: str) -> str:
-    """去掉来源前缀，取第一个有内容的分句，过长时停在分句内部的自然断点。"""
-    body = _stitch_subject_verb(_strip_source_prefix(text))
+    """去掉来源前缀和钟点，停在第一句，过长时再停在分句内部的自然断点。"""
+    body = _first_sentence(_stitch_subject_verb(_strip_source_prefix(text)))
+    body = _cut_glued_sentence(body)
     if not body or body == "事件":
         return ""
     parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()] or [body]
@@ -1073,6 +1112,7 @@ def _clip_at_boundary(text: str) -> str:
     if (
         len(window) >= 4
         and window != "事件"
+        and not _is_section_label(window)
         and not _ends_abruptly(window)
         and not _ends_split_verb(window)
         and not _ends_mid_number(window)
@@ -1142,14 +1182,14 @@ def _keyword_title(members: list[dict]) -> str:
             if counts[clause] != best:
                 continue
             ensured = _ensure_subject(clause, blob)
-            if _display_name_ok(ensured):
+            if _cleaned_display_ok(ensured):
                 return ensured
     for item in members:
         cleaned = _cleaned_headline(str(item.get("title") or ""))
         if not cleaned:
             continue
         ensured = _ensure_subject(cleaned, blob)
-        if _display_name_ok(ensured):
+        if _cleaned_display_ok(ensured):
             return ensured
     return ""
 
@@ -1207,6 +1247,8 @@ def _compact(text: str) -> str:
 
 def _strip_source_prefix(text: str) -> str:
     body = _compact(text)
+    body = _CLOCK_PREFIX.sub("", body)
+    body = _MINUTE_BEFORE_BRACKET.sub("", body)
     changed = True
     while body and changed:
         changed = False
@@ -1219,7 +1261,17 @@ def _strip_source_prefix(text: str) -> str:
     body = _BROKEN_BRACKET.sub("", body)
     body = _BRACKET_PAIR.sub("", body)
     body = _STRAY_BRACKET.sub("", body)
+    body = _LEFTOVER_MINUTE.sub("", body)
+    body = _TRAILING_ELLIPSIS.sub("", body)
     return body.strip("，。！？、；：")
+
+
+def _first_sentence(text: str) -> str:
+    body = (text or "").strip()
+    if not body:
+        return ""
+    parts = [part.strip() for part in _SENTENCE_END.split(body) if part.strip()]
+    return parts[0] if parts else body
 
 
 def _starts_fragment(text: str) -> bool:
@@ -1328,6 +1380,21 @@ def _split_headline(text: str) -> tuple[str, str, str]:
     return lead, verb, obj.strip("，。！？、；：")
 
 
+def _cut_glued_sentence(text: str) -> str:
+    """价格叙述后面又接涨价、发布，标题就停在下一句动作之前。"""
+    body = _compact(text)
+    if not body:
+        return ""
+    index, verb = _narrative_action(body)
+    if index < 0 or not _subject_ok(body[:index]):
+        return body
+    rest = body[index + len(verb):]
+    later, later_verb = _tuple_action(rest)
+    if later <= 0 or later_verb not in _UNGLUE_VERBS:
+        return body
+    return body[:index + len(verb) + later].rstrip("，。！？、；：")
+
+
 def _title_ok(title: str) -> bool:
     """完整、有主体和动作、不超过 20 字，且不是半句话或词中间截断。"""
     text = _compact(title)
@@ -1410,7 +1477,8 @@ def _fit_clause(clause: str) -> str:
 
 
 def _representative_clause(text: str) -> str:
-    body = _stitch_subject_verb(_strip_source_prefix(text))
+    body = _first_sentence(_stitch_subject_verb(_strip_source_prefix(text)))
+    body = _cut_glued_sentence(body)
     if not body:
         return ""
     for part in _CLAUSE.split(body):
@@ -1443,70 +1511,226 @@ def _month_day(day: date) -> str:
     return f"{day.month}月{day.day}日"
 
 
+def _is_section_label(name: object) -> bool:
+    """栏目、材料分区，以及没有动作的点评、重点，都不是事件。"""
+    text = _TRAILING_ELLIPSIS.sub("", _compact(str(name or "")))
+    if not text:
+        return False
+    if text == "重点" or _SECTION_MATERIAL.fullmatch(text):
+        return True
+    if _tuple_action(text)[0] >= 0 or _narrative_action(text)[0] >= 0:
+        return False
+    return "点评" in text or text.startswith("重点")
+
+
+def _llm_title_ok(title: str) -> bool:
+    """模型标题只验收：完整中文、有主体动作宾语、不超过 28 字，且不是钟点、标签或半句。"""
+    text = _compact(title)
+    if (
+        not text
+        or text == "事件"
+        or len(text) < 6
+        or len(text) > _TITLE_HARD
+        or _is_section_label(text)
+    ):
+        return False
+    if text[0].isdigit() or any(char in text for char in "【】[]"):
+        return False
+    if "..." in text or "…" in text or _starts_fragment(text):
+        return False
+    if _ends_abruptly(text) or _ends_split_verb(text) or _ends_mid_number(text):
+        return False
+    if sum(1 for char in text if "\u4e00" <= char <= "\u9fff") < 2:
+        return False
+    if _cut_glued_sentence(text) != text:
+        return False
+    lead, action, obj = _split_headline(text)
+    return bool(action and obj and _subject_ok(lead))
+
+
+def _cleaned_display_ok(name: object) -> bool:
+    """关键词回退不要求满 6 字，但钟点、括号、省略号和栏目标题不能上屏。"""
+    text = _compact(str(name or ""))
+    if not _display_name_ok(text) or _is_section_label(text):
+        return False
+    if text[0].isdigit() or any(char in text for char in "【】[]"):
+        return False
+    return "..." not in text and "…" not in text
+
+
+def _fallback_cleaned_name(event: dict) -> str:
+    sources = [str(item) for item in (event.get("headlines") or [])]
+    sources.append(str(event.get("headline") or ""))
+    sources.append(str(event.get("name") or ""))
+    for text in sources:
+        cleaned = _cleaned_headline(text)
+        if _cleaned_display_ok(cleaned):
+            return cleaned
+    return ""
+
+
+def _ensure_shown_name(event: dict) -> None:
+    if event.get("_llm_title_applied") and _llm_title_ok(str(event.get("name") or "")):
+        return
+    name = str(event.get("name") or "")
+    if _cleaned_display_ok(name):
+        return
+    event["name"] = _fallback_cleaned_name(event)
+    event.pop("_llm_title_applied", None)
+
+
+def _keep_shown_event(event: dict) -> bool:
+    name = str(event.get("name") or "")
+    if event.get("_llm_title_applied"):
+        return _llm_title_ok(name)
+    return _cleaned_display_ok(name)
+
+
+def _cached_title_usable(cached: dict) -> bool:
+    if cached.get("_miss"):
+        return True
+    title = str(cached.get("title") or "")
+    return not title or _llm_title_ok(title)
+
+
+def _event_source_text(event: dict) -> str:
+    parts = [str(event.get("headline") or ""), str(event.get("name") or "")]
+    parts.extend(str(item) for item in (event.get("headlines") or []))
+    return "\n".join(part for part in parts if part)
+
+
+def _title_prompt(events: list[dict], *, retry: bool) -> str:
+    blocks = []
+    for event in events:
+        headlines = [
+            str(item).strip()
+            for item in (event.get("headlines") or [])
+            if str(item).strip()
+        ]
+        if not headlines:
+            fallback = str(event.get("headline") or event.get("name") or "").strip()
+            headlines = [fallback] if fallback else []
+        blocks.append(f"{event.get('_batch_id')}. " + " / ".join(headlines))
+    retry_line = "上一轮标题不合格，请重写。\n" if retry else ""
+    names = "、".join(_dictionary_names())
+    return (
+        "下面每条是一件与资本市场有关的资讯。为每一条写展示标题。"
+        "只输出 JSON："
+        '{"events":[{"id":"1","title":"","concepts":[],"category":"",'
+        '"direction":"利好或利空","importance":"重大或重要或一般或琐碎"}]}。'
+        "title 必须是完整的中文标题，不超过28个字，写明主体、动作和宾语，"
+        "例如美联储降息25基点。不要半句话，不要时间戳，不要【】，不要省略号，"
+        "不要以数字或钟点开头，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
+        "不要把下一句粘进来。不要用「事件」当标题。不要输出重点、点评或栏目标签。"
+        "主体必须写明，例如美联储、国务院、财政部。"
+        f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
+        "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
+        "寻常涨价、获批、订单是重要。"
+        f"concepts 只在该事件还没有概念时填写，并且只能从这些名称里选：{names}。"
+        "对不上就留空。不要新造概念。"
+        "direction 表示对 A 股相关方向是利好还是利空。"
+        "没有把握就留空，不要编造标题里没出现的事实。\n"
+        f"{retry_line}\n"
+        + "\n".join(blocks)
+    )
+
+
+def _request_titles(events: list[dict], *, retry: bool) -> str:
+    from app.news.service import _llm_text
+
+    try:
+        return _llm_text(_title_prompt(events, retry=retry), max_tokens=_LLM_TITLE_TOKENS)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("热门事件标题生成失败: %s", exc)
+        return ""
+
+
 def _label_with_llm(events: list[dict]) -> None:
     from app.news.config import llm_extract_enabled
 
     if not events or not llm_extract_enabled():
         return
-    from app.news.service import _llm_text, _reserve_llm_call
+    from app.news.service import _reserve_llm_call
 
     _purge_stale_title_cache()
-    used = 0
-    for event in events[:_LLM_PER_PASS]:
-        fingerprint = str(event.get("_fp") or "")
-        cache_key = _title_cache_key(fingerprint)
+    pending: list[dict] = []
+    for event in events[:_LLM_TITLE_BATCH]:
+        cache_key = _title_cache_key(str(event.get("_fp") or ""))
         cached = _LLM_CACHE.get(cache_key)
-        cached_title = str((cached or {}).get("title") or "")
-        if cached is not None and (not cached_title or _title_ok(cached_title)):
-            _apply_llm(event, cached)
+        if isinstance(cached, dict) and _cached_title_usable(cached):
+            if not cached.get("_miss"):
+                _apply_llm(event, cached)
             continue
         if cached is not None:
             _LLM_CACHE.pop(cache_key, None)
-        if used >= _LLM_PER_PASS:
-            break
-        if not _reserve_llm_call():
-            break
-        used += 1
-        headlines = "\n".join(str(item) for item in (event.get("headlines") or [event.get("headline") or ""]))
-        prompt = (
-            "下面几条标题是同一件与资本市场有关的资讯。收成一个具体事件，不要用宽泛行业名当标题。"
-            "只输出 JSON："
-            '{"title":"不超过20个字","category":"","direction":"利好或利空",'
-            '"importance":"重大或重要或一般或琐碎",'
-            '"concepts":[{"name":"细分概念","direction":"利好或利空"}],'
-            '"stocks":[{"name":"","code":"","direction":"利好或利空"}]}。'
-            "title 必须是完整具体的事件标题，不超过20个字，包含主体和动作，"
-            "例如美联储降息25基点。不要半句话，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
-            "不要用「事件」当标题。主体必须写明，例如美联储、国务院、政治局，"
-            "不要只写可能还会、宏观经济运行情况这种没有主体的说法。"
-            f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
-            "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
-            "寻常涨价、获批、订单是重要。"
-            "concepts 写受影响的细概念，不要写人工智能、半导体、医药这种大行业。"
-            "direction 表示对 A 股相关方向是利好还是利空。"
-            "没有把握就留空，不要编造标题里没出现的事实。\n\n"
-            f"标题：\n{headlines}"
-        )
-        try:
-            raw = _llm_text(prompt)
-        except Exception as exc:  # noqa: BLE001
-            logger.info("热门事件标题生成失败: %s", exc)
-            raw = ""
-        parsed = _parse_llm_event(raw, str(event.get("headline") or ""))
-        _LLM_CACHE[cache_key] = parsed or {}
-        if parsed:
-            _apply_llm(event, parsed)
+        event["_batch_id"] = str(len(pending) + 1)
+        pending.append(event)
+    if not pending or not _reserve_llm_call():
+        return
+    first = _parse_title_batch(_request_titles(pending, retry=False), pending)
+    failed = [
+        event for event in pending
+        if not _accept_title(event, first.get(str(event.get("_batch_id"))))
+    ]
+    if not failed:
+        return
+    second: dict[str, dict] = {}
+    if _reserve_llm_call():
+        second = _parse_title_batch(_request_titles(failed, retry=True), failed)
+    for event in failed:
+        batch_id = str(event.get("_batch_id"))
+        parsed = second.get(batch_id)
+        if _accept_title(event, parsed):
+            continue
+        fallback = parsed or first.get(batch_id)
+        if fallback:
+            blank = dict(fallback)
+            blank["title"] = ""
+            _apply_llm(event, blank)
+        _LLM_CACHE[_title_cache_key(str(event.get("_fp") or ""))] = {"_miss": True}
 
 
-def _parse_llm_event(raw: str, text: str) -> dict | None:
+def _accept_title(event: dict, parsed: dict | None) -> bool:
+    if not parsed or not _llm_title_ok(str(parsed.get("title") or "")):
+        return False
+    _apply_llm(event, parsed)
+    _LLM_CACHE[_title_cache_key(str(event.get("_fp") or ""))] = parsed
+    return True
+
+
+def _parse_title_batch(raw: str, events: list[dict]) -> dict[str, dict]:
     from app.news.extract import _llm_object
 
     payload = _llm_object(raw)
     if not payload:
-        return None
+        return {}
+    rows = payload.get("events")
+    if not isinstance(rows, list):
+        keys = ("title", "concepts", "category", "direction", "importance", "stocks")
+        rows = [payload] if len(events) == 1 and any(key in payload for key in keys) else []
+    normalized = [row for row in rows if isinstance(row, dict)]
+    missing_ids = normalized and all(not str(row.get("id") or "").strip() for row in normalized)
+    if missing_ids and len(normalized) == len(events):
+        for event, row in zip(events, normalized, strict=True):
+            row["id"] = event.get("_batch_id")
+    found: dict[str, dict] = {}
+    by_id = {str(event.get("_batch_id")): event for event in events}
+    for row in normalized:
+        batch_id = str(row.get("id") or "").strip()
+        if not batch_id and len(events) == 1:
+            batch_id = str(events[0].get("_batch_id") or "")
+        event = by_id.get(batch_id)
+        if event is None:
+            continue
+        parsed = _parse_llm_payload(row, _event_source_text(event))
+        if parsed:
+            found[batch_id] = parsed
+    return found
+
+
+def _parse_llm_payload(payload: dict, text: str) -> dict | None:
     title = _compact(str(payload.get("title") or ""))
-    if not _title_ok(title):
-        title = ""
+    allowed = set(_dictionary_names())
     concepts = []
     concept_directions: dict[str, str] = {}
     for item in payload.get("concepts") or payload.get("sectors") or []:
@@ -1515,7 +1739,8 @@ def _parse_llm_event(raw: str, text: str) -> dict | None:
             direct = str(item.get("direction") or "")
         else:
             name, direct = str(item or "").strip(), ""
-        if name and name in text and _fine_concept(name, name) and name not in concepts:
+        in_text = bool(name) and name in text and _fine_concept(name, name)
+        if name and name not in concepts and (in_text or name in allowed):
             concepts.append(name)
             if direct in {"利好", "利空"}:
                 concept_directions[name] = direct
@@ -1557,15 +1782,10 @@ def _parse_llm_event(raw: str, text: str) -> dict | None:
 
 
 def _apply_llm(event: dict, parsed: dict) -> None:
-    title = str(parsed.get("title") or "")
-    if _title_ok(title):
-        blob = "\n".join(
-            [str(event.get("headline") or "")]
-            + [str(item) for item in (event.get("headlines") or [])]
-        )
-        ensured = _ensure_subject(title, blob)
-        if _title_ok(ensured) and _display_name_ok(ensured):
-            event["name"] = ensured
+    title = _compact(str(parsed.get("title") or ""))
+    if _llm_title_ok(title):
+        event["name"] = title
+        event["_llm_title_applied"] = True
     category = str(parsed.get("category") or "")
     if category in CATEGORY_NAMES:
         event["category"] = category
@@ -1577,19 +1797,30 @@ def _apply_llm(event: dict, parsed: dict) -> None:
         importance = "一般"
     if importance in _IMPORTANCE_POINTS:
         event["importance"] = importance
-    for name in parsed.get("concepts") or []:
-        if name not in event["concepts"] and len(event["concepts"]) < _CONCEPT_LIMIT:
-            event["concepts"].append(name)
-    texts = [str(event.get("name") or ""), str(event.get("headline") or "")]
-    texts.extend(str(item) for item in (event.get("headlines") or []))
-    event["concepts"] = _merge_mapped_concepts(
-        _relevant_concepts(
-            Counter({str(name): 1 for name in event.get("concepts") or []}),
-            texts,
-            _subject_set(str(event.get("name") or ""), []),
-        ),
-        "\n".join(texts),
-    )
+    had_concepts = any(str(name).strip() for name in (event.get("concepts") or []))
+    if had_concepts:
+        for name in parsed.get("concepts") or []:
+            if name not in event["concepts"] and len(event["concepts"]) < _CONCEPT_LIMIT:
+                event["concepts"].append(name)
+        texts = [str(event.get("name") or ""), str(event.get("headline") or "")]
+        texts.extend(str(item) for item in (event.get("headlines") or []))
+        event["concepts"] = _merge_mapped_concepts(
+            _relevant_concepts(
+                Counter({str(name): 1 for name in event.get("concepts") or []}),
+                texts,
+                _subject_set(str(event.get("name") or ""), []),
+            ),
+            "\n".join(texts),
+        )
+    else:
+        allowed = set(_dictionary_names())
+        picked: list[str] = []
+        for name in parsed.get("concepts") or []:
+            if name in allowed and name not in picked:
+                picked.append(str(name))
+            if len(picked) >= _CONCEPT_LIMIT:
+                break
+        event["concepts"] = picked
     directions = parsed.get("concept_directions") or {}
     event["mapping"] = [
         {

@@ -33,6 +33,7 @@ from app.news.collectors import (
     ima_headers,
     ima_next_cursor,
     ima_retcode,
+    is_red,
     latest_date_folders,
     latest_reuters_news_sitemaps,
     load_inbox_payload,
@@ -440,6 +441,7 @@ def public_hot_event(event: dict) -> dict:
         "headline": headline or (headlines[0] if headlines else ""),
         "headlines": headlines[:3],
         "mentions": int(event.get("mentions") or 0),
+        "red_count": int(event.get("red_count") or 0),
         "source_count": int(event.get("source_count") or 0),
         "first_seen": str(event.get("first_seen") or ""),
         "heat": round(heat, 4),
@@ -583,6 +585,7 @@ def message_view(row, *, limit: int = 240) -> dict:
         "excerpt": _row_summary(row, limit),
         "url": row["url"] or "",
         "level": row["level"] or "",
+        "red": is_red(row["source"], row["level"]),
     }
 
 
@@ -1292,7 +1295,7 @@ def _reserve_llm_call() -> bool:
         return True
 
 
-def _llm_text(prompt: str) -> str:
+def _llm_text(prompt: str, *, max_tokens: int = 400) -> str:
     try:
         import asyncio
 
@@ -1301,7 +1304,7 @@ def _llm_text(prompt: str) -> str:
         raw = asyncio.run(generate_ai_text(
             [{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=400,
+            max_tokens=max_tokens,
             timeout=30,
         ))
     except Exception as exc:  # noqa: BLE001
