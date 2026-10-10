@@ -11,6 +11,7 @@ from app.news.collectors import (
     REDDIT_USER_AGENT,
     parse_reddit_atom,
     reddit_feed_url,
+    reddit_retry_after_seconds,
 )
 from app.news.config import reddit_oauth_ready, reddit_subreddits
 from app.news.scheduler import next_delay
@@ -195,6 +196,12 @@ def test_round_robin_one_subreddit_and_seventy_five_second_gap(tmp_path, monkeyp
     assert feed_for_source("reddit")["name"] == "Reddit"
     health = {row["source"]: row for row in get_store().health_rows()}
     assert health["reddit"]["last_error"] == ""
+
+
+def test_retry_after_naive_http_date_uses_utc():
+    """没有时区的 Retry-After 按 UTC 解析，不能引用未导入的 UTC。"""
+    assert reddit_retry_after_seconds("Thu, 01 Jan 1970 00:03:20", 0) == 200
+    assert reddit_retry_after_seconds("120", 0) == 120
 
 
 def test_retry_after_holds_the_same_subreddit(tmp_path, monkeypatch):
