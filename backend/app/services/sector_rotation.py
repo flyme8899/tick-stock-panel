@@ -321,6 +321,20 @@ def _rank_for_mode(
     return [item["name"] for item in sectors]
 
 
+def _collapse_industry_level(map_df: pl.DataFrame, column: str, level: int) -> tuple[pl.DataFrame, int]:
+    """把「一级-二级-三级」收成指定层级, 同级成分合并。"""
+    if map_df.is_empty() or column not in map_df.columns:
+        return map_df, 0
+    parts = pl.col(column).str.split("-")
+    idx = pl.min_horizontal(pl.lit(level - 1), pl.col(column).str.count_matches("-"))
+    collapsed = (
+        map_df.with_columns(parts.list.get(idx).str.strip_chars().alias(column))
+        .filter(pl.col(column).is_not_null() & (pl.col(column) != ""))
+        .unique()
+    )
+    return collapsed, int(collapsed[column].n_unique())
+
+
 def build_sector_rotation(
     repo,
     *,
@@ -332,6 +346,7 @@ def build_sector_rotation(
     exclude_sectors: list[str] | None = None,
     auto_rows: int | None = None,
     sort_by: str = "activity",
+    level: int | None = None,
 ) -> dict:
     """计算盘中板块切换走势 (概念/行业二选一)。
 
@@ -363,6 +378,11 @@ def build_sector_rotation(
     """
     if kind not in ("concept", "industry"):
         raise ValueError(f"不支持的板块维度: {kind} (可选 concept/industry)")
+    # 层级只对行业路径有意义; 概念列忽略, 避免同一批概念被拆成多份缓存。
+    if kind != "industry":
+        level = None
+    elif level is not None and level not in (1, 2, 3):
+        raise ValueError(f"不支持的行业层级: {level} (可选 1/2/3)")
     if sort_by not in _SORT_MODES:
         raise ValueError(f"不支持的排序维度: {sort_by} (可选 {_SORT_MODES})")
     bucket_minutes = int(bucket_minutes)
@@ -384,14 +404,17 @@ def build_sector_rotation(
     data_dir: Path = repo.store.data_dir
     cache_key = (
         kind, flow_field or "", top, bucket_minutes, tuple(series_names or ()),
-        exclude_effective, rows_limit, sort_by,
+        exclude_effective, rows_limit, sort_by, level,
     )
     now = time.monotonic()
     hit = _cache.get(cache_key)
     if hit is not None and (now - _cache_ts.get(cache_key, 0.0)) < _CACHE_TTL:
         return hit
 
-    result = _compute(repo, data_dir, kind, flow_field, top, bucket_minutes, series_names, exclude_effective, rows_limit, sort_by)
+    result = _compute(
+        repo, data_dir, kind, flow_field, top, bucket_minutes, series_names,
+        exclude_effective, rows_limit, sort_by, level,
+    )
     _cache[cache_key] = result
     _cache_ts[cache_key] = time.monotonic()
     while len(_cache) > _CACHE_MAX_ENTRIES:
@@ -403,13 +426,27 @@ def build_sector_rotation(
     return result
 
 
-def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, bucket_minutes: int, series_names: list[str] | None, exclude_sectors: tuple[str, ...], auto_rows: int, sort_by: str) -> dict:
+def _compute(
+    repo,
+    data_dir: Path,
+    kind: str,
+    flow_field: str | None,
+    top: int,
+    bucket_minutes: int,
+    series_names: list[str] | None,
+    exclude_sectors: tuple[str, ...],
+    auto_rows: int,
+    sort_by: str,
+    level: int | None = None,
+) -> dict:
     minute_dir = data_dir / "kline_minute"
     target = _latest_minute_partition(minute_dir)
     if not target:
         return {"status": "no_data", "reason": "minute_missing", "kind": kind}
 
     map_df, member_count = _load_concept_map_df(repo, kind)
+    if kind == "industry" and level is not None:
+        map_df, member_count = _collapse_industry_level(map_df, kind, level)
     if map_df.is_empty() or member_count == 0:
         return {"status": "no_data", "reason": "members_missing", "date": target, "kind": kind}
 

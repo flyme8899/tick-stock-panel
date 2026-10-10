@@ -25,6 +25,7 @@ def get_sector_rotation(
         "activity",
         description="自动榜排序维度: activity=近30分钟成交额, score=综合分, pct=现涨幅, rank_change=1h排名跃升, momentum=近1小时动量(走强→走弱), flow=扩展资金流",
     ),
+    level: int | None = Query(None, ge=1, le=3, description="行业层级(仅 kind=industry): 1/2/3 级"),
 ):
     """盘中板块切换走势: 全量分钟K聚合到板块, 涨幅 + 扩展资金流综合评分。
 
@@ -50,6 +51,7 @@ def get_sector_rotation(
         exclude_sectors=excluded,
         auto_rows=auto_rows,
         sort_by=sort_by,
+        level=level,
     )
 
 

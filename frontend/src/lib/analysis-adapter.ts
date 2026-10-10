@@ -9,6 +9,7 @@
  */
 
 import type { ExtDataConfig, ExtDataField, ExtDataRowsResult } from '@/lib/api'
+import type { SectorKind } from '@/lib/sectorTab'
 
 // ===== 公共类型 =====
 
@@ -99,8 +100,82 @@ export function pickDimensionField(
     )
     if (m) return m.name
   }
-  // 回退：第一个非数值字段
+  // 回退：第一个非数值字段。板块分析列不能走这条路，否则概念字段会灌进行业列。
   return nonMeta.find(f => f.dtype !== 'int' && f.dtype !== 'float')?.name ?? nonMeta[0]?.name ?? ''
+}
+
+const CONCEPT_FIELD_TOKENS = ['概念', 'concept', 'theme', '题材']
+const INDUSTRY_FIELD_TOKENS = ['行业', 'industry', '申万', '中信', 'sector']
+const PRESET_ID: Record<SectorKind, string> = {
+  concept: 'ext_gn_ths',
+  industry: 'ext_hy_ths',
+}
+
+/** 字段名/标签归类。概念和行业词同时命中时算概念，避免概念行进入行业列。 */
+export function classifyDimensionField(name: string, label?: string): SectorKind | null {
+  const text = `${name} ${label ?? ''}`.toLowerCase()
+  const concept = CONCEPT_FIELD_TOKENS.some(token => text.includes(token.toLowerCase()))
+  const industry = INDUSTRY_FIELD_TOKENS.some(token => text.includes(token.toLowerCase()))
+  if (concept) return 'concept'
+  if (industry) return 'industry'
+  return null
+}
+
+export function pickKindDimensionField(fields: ExtDataField[], kind: SectorKind): string {
+  for (const field of fields) {
+    if (['symbol', 'code', 'name', '股票简称', '股票代码', 'date'].includes(field.name)) continue
+    if (classifyDimensionField(field.name, field.label) === kind) return field.name
+  }
+  return ''
+}
+
+export interface SectorConfigLike {
+  id: string
+  fields: { name: string; label?: string }[]
+}
+
+/**
+ * 概念列和行业列各自绑定数据源。
+ * 内置预设优先；用户保存的 configId 只有在字段归类一致时才生效。
+ * 另一列的预设、以及「名字像行业但字段是概念」的表，都不能被选中。
+ */
+export function selectSectorConfig<T extends SectorConfigLike>(
+  kind: SectorKind,
+  configs: T[],
+  savedConfigId?: string,
+): T | null {
+  const presetId = PRESET_ID[kind]
+  const otherId = PRESET_ID[kind === 'industry' ? 'concept' : 'industry']
+  const matches = configs.filter(config => {
+    if (config.id === otherId) return false
+    if (config.id === presetId) return true
+    return config.fields.some(field => classifyDimensionField(field.name, field.label) === kind)
+  })
+  if (savedConfigId) {
+    const saved = matches.find(config => config.id === savedConfigId)
+    if (saved) return saved
+  }
+  return matches.find(config => config.id === presetId) ?? matches[0] ?? null
+}
+
+/**
+ * 概念榜要排除的宽基/交易属性/指数成分标签。
+ * 与 backend sector_rotation._DEFAULT_EXCLUDE_SECTORS 同口径（名称子串），
+ * 并补上 HS300、标普、沪深股通这几个页面上会混进来的写法。
+ */
+export const MEMBERSHIP_TAG_NEEDLES = [
+  '融资融券', '转融券', '转债标的', '含可转债', '沪股通', '深股通', '沪深股通',
+  'AH股', 'B股', 'GDR', 'MSCI', '富时罗素', '标普', 'HS300',
+  '上证50', '上证180', '沪深300', '中证500', '中证800', '中证1000', '科创50',
+  '重仓', '证金持股', '汇金概念',
+  '预盈预增', '预亏预减', '昨日涨停', '昨日连板', '昨日触涨停', '昨日曾涨停',
+  '次新', 'ST板块', 'ST股', '破净', '壳资源', '股权激励', '员工持股', '并购重组',
+]
+
+export function isMembershipTag(name: string): boolean {
+  const text = name.trim().toLowerCase()
+  if (!text) return false
+  return MEMBERSHIP_TAG_NEEDLES.some(needle => text.includes(needle.toLowerCase()))
 }
 
 /** 判断字段是否为数值类型 */
@@ -233,10 +308,21 @@ function computeMetrics(
 
 // ===== 主入口：自动探测 + 解析 =====
 
+export interface ResolveDimensionOptions {
+  /** 指定后只接受归类一致的字段，不再回退到第一个字符串列。 */
+  kind?: SectorKind
+  preferredField?: string
+}
+
+function labelOf(fields: ExtDataField[], name: string): string | undefined {
+  return fields.find(field => field.name === name)?.label
+}
+
 export function resolveDimension(
   data: ExtDataRowsResult | null | undefined,
   config: ExtDataConfig | null | undefined,
   candidateFields: string[],
+  options?: ResolveDimensionOptions,
 ): ResolvedDimension {
   if (!data || !config || !data.rows.length) {
     return { ok: false, structure: 'unknown', dimensionField: '', groups: [], allStocks: [] }
@@ -245,11 +331,25 @@ export function resolveDimension(
   const fields = data.fields ?? config.fields
   const rows = data.rows
   const numericFields = fields.filter(f => isNumericField(f)).map(f => f.name)
+  const kind = options?.kind
 
   // 先检测是否为结构 B（板块维度）
   const constituentField = detectConstituentField(fields)
   if (constituentField) {
     const nameField = detectDimensionNameField(fields) ?? 'name'
+    if (kind) {
+      const classified = classifyDimensionField(nameField, labelOf(fields, nameField))
+      if (classified && classified !== kind) {
+        return {
+          ok: false,
+          structure: 'unknown',
+          dimensionField: '',
+          groups: [],
+          allStocks: [],
+          hint: '维度字段与当前列不一致',
+        }
+      }
+    }
     const groups = parsePerDimension(rows, constituentField, nameField, numericFields)
     const allStocks = groups.flatMap(g => g.stocks)
     return {
@@ -262,8 +362,17 @@ export function resolveDimension(
     }
   }
 
-  // 结构 A（个股维度）
-  const dimensionField = pickDimensionField(fields, candidateFields)
+  // 结构 A（个股维度）。带 kind 时禁止回退到另一类字段。
+  let dimensionField = ''
+  if (kind) {
+    const preferred = options?.preferredField
+    const preferredOk = !!preferred
+      && fields.some(field => field.name === preferred)
+      && classifyDimensionField(preferred, labelOf(fields, preferred) ?? preferred) === kind
+    dimensionField = preferredOk ? preferred : pickKindDimensionField(fields, kind)
+  } else {
+    dimensionField = pickDimensionField(fields, candidateFields)
+  }
   if (!dimensionField) {
     return {
       ok: false,
@@ -271,7 +380,7 @@ export function resolveDimension(
       dimensionField: '',
       groups: [],
       allStocks: rows as StockRow[],
-      hint: '未找到合适的维度字段',
+      hint: kind ? '未找到与当前列匹配的维度字段' : '未找到合适的维度字段',
     }
   }
 

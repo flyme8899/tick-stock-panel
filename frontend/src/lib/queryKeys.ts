@@ -74,6 +74,8 @@ export const QK = {
   pipelineJob:          (id: string) => ['pipeline-job', id] as const,
   extData:              ['ext-data'] as const,
   extDataRows:          (id: string, date?: string, limit?: number, columns?: string) => ['ext-data-rows', id, date, limit, columns] as const,
+  // 板块分析两列分开缓存。kind 必须进键，避免行业列和概念列共用同一份行。
+  sectorBoardRows:      (kind: string, configId: string, limit?: number) => ['sector-board-rows', kind, configId, limit ?? 0] as const,
   dimensionMembers:     (id: string, field: string, value: string, date?: string) => ['dimension-members', id, field, value, date] as const,
   dimensionIntraday:    (id: string, field: string, value: string, date?: string) => ['dimension-intraday', id, field, value, date] as const,
   analysisMenus:        ['analysis-menus'] as const,
@@ -138,7 +140,7 @@ export const QK = {
   regimeMainline:       (kind: string, start?: string, end?: string) => ['regime-mainline', kind, start ?? '', end ?? ''] as const,
   // 板块切换 (盘中轮动, 全量分钟聚合) — 30s 前端轮询刷新; seriesKey = 自定义展示板块清单,
   // filterKey = 自动活跃榜行数与排除名单 (会改变结果的参数必须进查询键)
-  sectorRotation:       (kind: string, flow?: string, bucket?: number, seriesKey?: string, filterKey?: string) => ['sector-rotation', kind, flow ?? '', bucket ?? 5, seriesKey ?? '', filterKey ?? ''] as const,
+  sectorRotation:       (kind: string, flow?: string, bucket?: number, seriesKey?: string, filterKey?: string, level?: number) => ['sector-rotation', kind, flow ?? '', bucket ?? 5, seriesKey ?? '', filterKey ?? '', level ?? 0] as const,
   // 板块切换的指数叠加线 (核心四只, 默认上证) — 分钟取当日, 日K取昨收基准
   sectorRotationIndexMinute: (symbol: string, date?: string) => ['sector-rotation-index-minute', symbol, date ?? ''] as const,
   sectorRotationIndexDaily:  (symbol: string) => ['sector-rotation-index-daily', symbol] as const,
