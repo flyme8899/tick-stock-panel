@@ -10,7 +10,13 @@ import pytest
 
 from app.config import settings
 from app.market_time import CN_TZ
-from app.news.config import source_configured, source_enabled, vision_base_url, vision_model
+from app.news.config import (
+    source_configured,
+    source_enabled,
+    vision_base_url,
+    vision_generation,
+    vision_model,
+)
 from app.news.etf_flow import (
     ArticleRef,
     ExtractFailedError,
@@ -238,7 +244,35 @@ def test_vision_payload_uses_image_url_and_drops_other_hosts():
     assert body["max_tokens"] >= 8192
     assert "thinking" not in body
     assert "enable_thinking" not in body
+    assert "reasoning_effort" not in body
     assert "deepseek" not in json.dumps(body)
+
+
+def test_short_vision_tasks_disable_thinking_without_touching_ocr():
+    ocr_models = (
+        "deepseek/deepseek-v4-flash-vision-exp",
+        "glm-5.3-flash",
+        "mimo-v2.6-flash",
+    )
+    for model in ocr_models:
+        body = vision_payload(["https://nimg.ws.126.net/a.jpg"], model=model)
+        assert body["max_tokens"] >= 8192
+        assert "thinking" not in body
+        assert "reasoning_effort" not in body
+        assert vision_generation(model, ocr=True) == {"max_tokens": body["max_tokens"]}
+    deepseek = vision_generation("deepseek/deepseek-v4-flash-vision-exp", ocr=False)
+    assert deepseek["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in deepseek
+    assert deepseek["max_tokens"] < 8192
+    glm = vision_generation("glm-5.3-flash", ocr=False)
+    assert glm == {"max_tokens": deepseek["max_tokens"], "reasoning_effort": "low"}
+    assert "thinking" not in glm
+    mimo = vision_generation("mimo-v2.6-flash", ocr=False)
+    assert mimo["thinking"] == {"type": "disabled"}
+    unknown = vision_generation("other-vision", ocr=False)
+    assert unknown["max_tokens"] >= 8192
+    assert "thinking" not in unknown
+    assert "reasoning_effort" not in unknown
 
 
 def _completion(content) -> dict:
@@ -296,6 +330,7 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
         assert body["max_tokens"] >= 8192
         assert "thinking" not in body
         assert "enable_thinking" not in body
+        assert "reasoning_effort" not in body
         urls = [
             part["image_url"]["url"]
             for part in body["messages"][0]["content"]
@@ -516,6 +551,7 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
         assert body["max_tokens"] >= 8192
         assert "thinking" not in body
         assert "enable_thinking" not in body
+        assert "reasoning_effort" not in body
         parts = [
             part["image_url"]["url"]
             for part in body["messages"][0]["content"]

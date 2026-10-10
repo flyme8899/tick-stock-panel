@@ -11,9 +11,10 @@ https://www.163.com/dy/media/T1730214999977.html ；列表里没有当天稿件�
 报成故障。交易日历不可用时，周一到周五视作开市。
 
 表格交给视觉模型。密钥只用 VISION_AI_*，不读取文本模型的 AI_API_KEY。
-默认模型是 deepseek/deepseek-v4-flash-vision-exp，备选 glm-5.3-flash。
-两者都会思考，不能关。max_tokens 低于 8192 时预算被 reasoning 用完，content
-为空。一张图一次请求；空内容再试一次。有两份结果时，正负号不一致的格子留空。
+默认模型是 deepseek/deepseek-v4-flash-vision-exp。表格 OCR 保持思考，
+max_tokens 至少 8192；关掉思考会让表格识别变差。备选 glm-5.3-flash、
+mimo-v2.6-flash 不改默认。一张图一次请求；空内容再试一次。有两份结果时，
+正负号不一致的格子留空。
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ import httpx
 from app.config import settings
 from app.market_time import CN_TZ
 from app.news.collectors import Item, parse_time
-from app.news.config import vision_api_key, vision_base_url, vision_model
+from app.news.config import vision_api_key, vision_base_url, vision_generation, vision_model
 from app.news.extract import StructuredStock
 from app.news.host_collector import send_dingtalk
 
@@ -54,7 +55,6 @@ SOGOU_MIN_GAP = timedelta(minutes=20)
 MAX_VISION_IMAGES = 6
 # 一张表大约 20 只 ETF。思考占掉 completion 预算，多张图叠在一次请求里会把正文挤空。
 VISION_BATCH_SIZE = 1
-VISION_MAX_TOKENS = 8192
 VISION_EMPTY_RETRIES = 1
 MAX_STORED_IMAGES = 12
 MAX_BROAD = 20
@@ -371,7 +371,7 @@ def wechat_article_id(url: str) -> str:
 
 
 def vision_payload(images: list[str], *, model: str) -> dict:
-    """一次请求只放一批图片。不发送关闭思考的字段，那个字段会 400。"""
+    """一次请求只放一张表。表格 OCR 不关思考。"""
     content: list[dict] = [{"type": "text", "text": VISION_PROMPT}]
     kept = 0
     for url in images:
@@ -382,12 +382,13 @@ def vision_payload(images: list[str], *, model: str) -> dict:
         kept += 1
         if kept >= VISION_BATCH_SIZE:
             break
-    return {
+    body = {
         "model": model,
         "temperature": 0,
-        "max_tokens": VISION_MAX_TOKENS,
         "messages": [{"role": "user", "content": content}],
     }
+    body.update(vision_generation(model, ocr=True))
+    return body
 
 
 def _message_text(payload: dict) -> str:

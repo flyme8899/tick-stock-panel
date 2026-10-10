@@ -25,7 +25,9 @@
 
 主源是同一作者的网易号列表：<https://www.163.com/dy/media/T1730214999977.html>。列表里没有当天这篇，或列表请求失败时，才用搜狗微信搜索公众号「ETF领航者」，再打开 `mp.weixin.qq.com` 文章。不登录微信。搜狗一天最多 4 次，两次至少隔 20 分钟。
 
-表格交给视觉模型，走 OpenAI 兼容的 `chat/completions`，图片放在 `image_url`。只用下面三个变量，不读取文本模型的 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`，也不走 `NEWS_LLM_EXTRACT`。默认模型 `deepseek/deepseek-v4-flash-vision-exp` 会读图片，单张表大约 16 秒，和 `glm-5.3-flash`（大约 23 秒）一样能抽出约 20 行 ETF。两个模型都会思考：`enable_thinking` 不生效，请求里带 `thinking.type=disabled` 会让 glm 返回 400，所以程序不发送这两个字段。`max_tokens` 低于 8192 时，预算被思考用完，`content` 是空的。每张图单独请求，`max_tokens` 为 8192。空内容时同一张图再试一次；第一次已经抽出数字时，再请求一次核对正负号。同一格两次正负号相反就留空，不猜哪一次对。代码只保留恰好 6 位的数字。备选模型把 `VISION_AI_MODEL` 设为 `glm-5.3-flash`。
+表格交给视觉模型，走 OpenAI 兼容的 `chat/completions`，图片放在 `image_url`。只用下面三个变量，不读取文本模型的 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`，也不走 `NEWS_LLM_EXTRACT`。默认模型 `deepseek/deepseek-v4-flash-vision-exp` 会读图片，单张表大约 16 秒。`glm-5.3-flash` 大约 23 秒，`mimo-v2.6-flash` 也能读图，但表格识别并不更好，所以这两个只作备选，不改默认。
+
+申赎表格保持思考，`max_tokens` 为 8192。低于这个值时预算被思考用完，`content` 为空。deepseek 视觉模型可以用 `thinking.type=disabled` 或 `reasoning_effort=none` 关掉思考，但表格识别会变差，所以这条链路不关。非表格的短视觉请求才关：deepseek 和 mimo 传 `thinking.type=disabled`；glm 传这个字段会 400，只传 `reasoning_effort=low`。每张图单独请求。空内容时同一张图再试一次；第一次已经抽出数字时，再请求一次核对正负号。同一格两次正负号相反就留空，不猜哪一次对。代码只保留恰好 6 位的数字。
 
 ```ini
 VISION_AI_API_KEY=
