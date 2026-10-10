@@ -276,6 +276,82 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
     return ranked[: max(1, min(limit, 50))]
 
 
+def public_hot_event(event: dict) -> dict:
+    """给页面和推送的事件字段。不带内部条目 id。"""
+    stocks = []
+    for stock in event.get("mentioned_stocks") or []:
+        if not isinstance(stock, dict):
+            continue
+        key = str(stock.get("key") or "").strip()
+        if not key:
+            continue
+        try:
+            mentions = int(stock.get("mentions") or 0)
+        except (TypeError, ValueError):
+            mentions = 0
+        stocks.append({
+            "key": key,
+            "name": str(stock.get("name") or key),
+            "mentions": mentions,
+        })
+    try:
+        heat = float(event.get("heat") or 0)
+    except (TypeError, ValueError):
+        heat = 0.0
+    return {
+        "key": str(event.get("key") or ""),
+        "name": str(event.get("name") or ""),
+        "concepts": [str(item) for item in (event.get("concepts") or []) if str(item).strip()],
+        "headline": str(event.get("headline") or ""),
+        "mentions": int(event.get("mentions") or 0),
+        "source_count": int(event.get("source_count") or 0),
+        "first_seen": str(event.get("first_seen") or ""),
+        "heat": round(heat, 4),
+        "stocks": stocks,
+    }
+
+
+def hot_event_listing(now: datetime | None = None, *, limit: int = 20) -> dict:
+    """热门事件页的主列表。和选股用同一套聚类，按热度从高到低。"""
+    snapshot = top_hot_events(now)
+    events = [public_hot_event(item) for item in snapshot.get("events") or [] if isinstance(item, dict)]
+    return {
+        "events": events[: max(1, min(limit, 50))],
+        "as_of": snapshot.get("as_of"),
+        "trading_day": snapshot.get("trading_day"),
+        "fallback": bool(snapshot.get("fallback")),
+        "hint": snapshot.get("hint"),
+        "updated_at": snapshot.get("updated_at"),
+    }
+
+
+def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> dict:
+    """点开一个具体事件：簇里的资讯摘录，以及正文里提到的个股。"""
+    wanted = (key or "").strip()
+    snapshot = top_hot_events(now)
+    event = next(
+        (item for item in snapshot.get("events") or [] if isinstance(item, dict) and item.get("key") == wanted),
+        None,
+    )
+    if event is None:
+        return {"kind": "event", "key": wanted, "event": None, "stocks": [], "items": []}
+    ids: list[int] = []
+    for raw in event.get("item_ids") or []:
+        try:
+            ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    rows = get_store().items_by_ids(ids)
+    public = public_hot_event(event)
+    return {
+        "kind": "event",
+        "key": wanted,
+        "event": public,
+        "stocks": public["stocks"],
+        "items": [message_view(row) for row in rows[: max(1, min(limit, 50))]],
+    }
+
+
 def top_hot_events(now: datetime | None = None) -> dict:
     """当前交易日热度最高的具体事件。
 
@@ -302,6 +378,8 @@ def message_view(row, *, limit: int = 240) -> dict:
 
 
 def hot_messages(kind: str, key: str, *, window_hours: int = 24, limit: int = 30) -> list[dict]:
+    if kind == "event":
+        return event_detail(key, limit=limit)["items"]
     if kind == "sector" and not _usable_sector_name(key):
         return []
     start = cn_now() - timedelta(hours=window_hours)
@@ -332,7 +410,7 @@ def news_for_symbol(symbol: str, *, hours: int = 72, limit: int = 30) -> dict:
 def feed_for_source(source: str, *, limit: int = 50) -> dict:
     limit = max(1, min(limit, 50))
     if source == "hot":
-        return {"source": "hot", "name": SOURCE_LABELS["hot"], "items": _hot_feed_items()}
+        return {"source": "hot", "name": SOURCE_LABELS["hot"], "items": _hot_feed_items(limit)}
     if source not in SOURCE_ORDER:
         raise ValueError(f"未知来源 {source}")
     items = []
@@ -924,9 +1002,28 @@ def _read_host_auth(health_dir: Path) -> None:
             )
 
 
-def _hot_feed_items() -> list[dict]:
+def _hot_feed_items(limit: int = 50) -> list[dict]:
+    """DSA 热门候选源。有具体事件时先给事件；没有时仍给板块和个股升温榜。"""
     today = cn_now().date().isoformat()
     items = []
+    listing = hot_event_listing(limit=limit)
+    for event in listing["events"]:
+        items.append({
+            "source_id": f"hot:event:{event['key']}:{today}",
+            "title": event["name"],
+            "summary": (
+                f"具体事件。提及 {event['mentions']} 条，来源 {event['source_count']} 个，"
+                f"首见 {event['first_seen'] or '未知'}。"
+                f"代表标题：{event['headline'] or event['name']}。"
+                "仅供内部研究。"
+            ),
+            "url": "",
+            "published_at": cn_now().isoformat(timespec="seconds"),
+            "symbols": [stock["key"] for stock in event["stocks"]][:8],
+            "sectors": list(event["concepts"])[:6],
+        })
+    if items:
+        return items[:limit]
     for kind, label in (("sector", "热门板块"), ("stock", "热门个股")):
         for candidate in hot_candidates(kind=kind, limit=8):
             symbols = [candidate.key] if kind == "stock" else []
@@ -944,7 +1041,7 @@ def _hot_feed_items() -> list[dict]:
                 "symbols": symbols,
                 "sectors": sectors,
             })
-    return items
+    return items[:limit]
 
 
 def _symbol_keys(symbol: str) -> list[str]:

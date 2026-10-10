@@ -2232,6 +2232,37 @@ export interface NewsCandidate {
   } | null
 }
 
+export interface NewsHotStock {
+  key: string
+  name: string
+  mentions: number
+}
+
+export interface NewsHotEvent {
+  key: string
+  name: string
+  concepts: string[]
+  headline: string
+  mentions: number
+  source_count: number
+  first_seen: string
+  heat: number
+  stocks: NewsHotStock[]
+}
+
+export interface NewsHotResponse {
+  kind: string
+  window_hours: number
+  baseline_days: number
+  candidates: NewsCandidate[]
+  events?: NewsHotEvent[]
+  hint?: string | null
+  fallback?: boolean
+  as_of?: string | null
+  trading_day?: string | null
+  updated_at?: string | null
+}
+
 export interface NewsMessage {
   source: string
   source_label: string
@@ -4270,14 +4301,19 @@ export const api = {
 
   fundFlowBoard: () => request<FundFlowBoard>('/api/fund-flow/board'),
 
-  newsHot: (kind: 'all' | 'stock' | 'sector' = 'all') =>
-    request<{ kind: string; window_hours: number; baseline_days: number; candidates: NewsCandidate[] }>(
+  newsHot: (kind: 'all' | 'stock' | 'sector' | 'event' = 'all') =>
+    request<NewsHotResponse>(
       `/api/news/hot?kind=${kind}&limit=20`,
     ),
 
   newsMessages: (kind: 'stock' | 'sector', key: string) =>
     request<{ kind: string; key: string; items: NewsMessage[] }>(
       `/api/news/messages?kind=${kind}&key=${encodeURIComponent(key)}`,
+    ),
+
+  newsEventMessages: (key: string) =>
+    request<{ kind: 'event'; key: string; event: NewsHotEvent | null; stocks: NewsHotStock[]; items: NewsMessage[] }>(
+      `/api/news/messages?kind=event&key=${encodeURIComponent(key)}`,
     ),
 
   newsHealth: () => request<NewsHealth>('/api/news/health'),

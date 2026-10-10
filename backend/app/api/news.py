@@ -13,9 +13,11 @@ from app.news.config import (
 )
 from app.news.push import send_test
 from app.news.service import (
+    event_detail,
     feed_for_source,
     health_payload,
     hot_candidates,
+    hot_event_listing,
     hot_messages,
     news_for_symbol,
 )
@@ -44,37 +46,49 @@ class PushTest(BaseModel):
 
 @router.get("/hot")
 def hot(
-    kind: str = Query("all", pattern="all|stock|sector"),
+    kind: str = Query("all", pattern="all|stock|sector|event"),
     window_hours: int = Query(24, ge=1, le=168),
     baseline_days: int = Query(4, ge=1, le=14),
     limit: int = Query(20, ge=1, le=50),
 ):
-    rows = hot_candidates(
-        kind=kind,
-        window_hours=window_hours,
-        baseline_days=baseline_days,
-        limit=limit,
-    )
-    candidates = [
-        {
-            "kind": item.kind,
-            "key": item.key,
-            "name": item.name,
-            "score": item.score,
-            "story_count": item.story_count,
-            "effective_mentions": item.effective_mentions,
-            "sources": list(item.sources),
-            "growth": item.growth,
-            "baseline_effective": item.baseline_effective,
-        }
-        for item in rows
-    ]
-    return {
+    """具体事件是主列表。板块和个股仍是近 24 小时相对基线的升温榜。"""
+    payload = {
         "kind": kind,
         "window_hours": window_hours,
         "baseline_days": baseline_days,
-        "candidates": _attach_fund_flow(candidates),
+        "candidates": [],
     }
+    if kind in {"all", "event"}:
+        listing = hot_event_listing(limit=limit)
+        payload["events"] = listing["events"]
+        payload["as_of"] = listing["as_of"]
+        payload["trading_day"] = listing["trading_day"]
+        payload["fallback"] = listing["fallback"]
+        payload["hint"] = listing["hint"]
+        payload["updated_at"] = listing["updated_at"]
+    if kind != "event":
+        rows = hot_candidates(
+            kind=kind,
+            window_hours=window_hours,
+            baseline_days=baseline_days,
+            limit=limit,
+        )
+        candidates = [
+            {
+                "kind": item.kind,
+                "key": item.key,
+                "name": item.name,
+                "score": item.score,
+                "story_count": item.story_count,
+                "effective_mentions": item.effective_mentions,
+                "sources": list(item.sources),
+                "growth": item.growth,
+                "baseline_effective": item.baseline_effective,
+            }
+            for item in rows
+        ]
+        payload["candidates"] = _attach_fund_flow(candidates)
+    return payload
 
 
 def _attach_fund_flow(candidates: list[dict]) -> list[dict]:
@@ -90,11 +104,15 @@ def _attach_fund_flow(candidates: list[dict]) -> list[dict]:
 
 @router.get("/messages")
 def messages(
-    kind: str = Query(..., pattern="stock|sector"),
+    kind: str = Query(..., pattern="stock|sector|event"),
     key: str = Query(..., min_length=1, max_length=64),
     window_hours: int = Query(24, ge=1, le=168),
     limit: int = Query(30, ge=1, le=50),
 ):
+    if kind == "event":
+        if "/" in key or ".." in key:
+            raise HTTPException(status_code=422, detail="事件 id 无效")
+        return event_detail(key, limit=limit)
     return {
         "kind": kind,
         "key": key,

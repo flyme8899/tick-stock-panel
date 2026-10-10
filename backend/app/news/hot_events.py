@@ -304,6 +304,7 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         "updated_at": first_seen,
         "heat": round(mentions * source_count * decay, 4),
         "mentioned_stocks": mentioned,
+        "item_ids": item_ids,
         "_latest": latest,
         "_fp": hashlib.sha1("\n".join(item["title"] for item in members).encode("utf-8")).hexdigest(),
     }

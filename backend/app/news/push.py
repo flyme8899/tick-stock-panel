@@ -171,9 +171,35 @@ def _ref_text(ref: dict) -> str:
     return str(ref.get("label") or "")
 
 
-def format_hot_markdown(sectors: list[dict], stocks: list[dict], *, heading: str) -> tuple[str, str] | None:
-    """热点候选。heading 已含【热点候选】。没有候选时不发。"""
+def format_hot_markdown(
+    sectors: list[dict],
+    stocks: list[dict],
+    *,
+    heading: str,
+    events: list[dict] | None = None,
+) -> tuple[str, str] | None:
+    """热点候选。具体事件在前，板块和个股升温榜在后。没有内容时不发。"""
     blocks = []
+    if events:
+        lines = ["**具体事件**"]
+        for index, row in enumerate(events, start=1):
+            concepts = "、".join(str(item) for item in (row.get("concepts") or []) if str(item).strip())
+            concept_text = f" · {concepts}" if concepts else ""
+            seen = row.get("first_seen") or ""
+            seen_text = f" · 首见 {seen}" if seen else ""
+            lines.append(
+                f"{index}. {row.get('name') or row.get('key')}{concept_text} · "
+                f"提及 {row.get('story_count', 0)} · "
+                f"来源 {row.get('source_count', 0)}{seen_text}"
+            )
+            headline = str(row.get("headline") or "")
+            if headline and headline != (row.get("name") or ""):
+                lines.append(f"   - {headline}")
+            for ref in row.get("refs") or []:
+                text = _ref_text(ref)
+                if text:
+                    lines.append(f"   - {text}")
+        blocks.append("\n".join(lines))
     for title, rows in (("热门板块", sectors), ("热门个股", stocks)):
         if not rows:
             continue
@@ -214,7 +240,7 @@ def format_test_markdown() -> tuple[str, str]:
     text = (
         "### 【测试】热点候选推送\n\n"
         "这是一条手动测试，没有附带资讯正文。\n\n"
-        "示例：半导体 · 提及 3 · 来源 2 · 相对基线 1.8 倍\n\n"
+        "示例：华为发布新模型 · 昇腾 · 提及 3 · 来源 2 · 首见 14:52\n\n"
         "正式推送会标成【热点候选】、【异动监控】或【做T提醒】。"
         "登录失效仍是单独的短文本。"
     )
@@ -552,16 +578,28 @@ def _snapshot_rows(items: list[dict]) -> list[dict]:
     for item in items:
         kind = item["kind"]
         rank[kind] = rank.get(kind, 0) + 1
-        rows.append({
+        sources = item.get("sources") or []
+        source_count = item.get("source_count")
+        if source_count is None:
+            source_count = len(sources)
+        row = {
             "kind": kind,
             "key": item["key"],
             "name": item.get("name") or item["key"],
             "score": item.get("score") or 0,
             "story_count": item.get("story_count") or 0,
-            "source_count": len(item.get("sources") or []),
+            "source_count": int(source_count or 0),
             "growth": item.get("growth") or 0,
             "rank": rank[kind],
-        })
+        }
+        if item.get("first_seen"):
+            row["first_seen"] = item["first_seen"]
+        if item.get("headline"):
+            row["headline"] = item["headline"]
+        concepts = [str(concept) for concept in (item.get("concepts") or []) if str(concept).strip()]
+        if concepts:
+            row["concepts"] = concepts
+        rows.append(row)
     return rows
 
 
@@ -689,11 +727,12 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         state.data["hot_day"] = day
         return False
     limit = top_n()
+    events = [row for row in snapshot if row["kind"] == "event"][:limit]
     sectors = [row for row in snapshot if row["kind"] == "sector"][:limit]
     stocks = [row for row in snapshot if row["kind"] == "stock"][:limit]
     if loader is None:
-        _attach_refs(sectors, stocks)
-    packed = format_hot_markdown(sectors, stocks, heading=heading)
+        _attach_refs(sectors, stocks, events)
+    packed = format_hot_markdown(sectors, stocks, heading=heading, events=events)
     if packed is None:
         state.data["last_hot_check"] = stamp
         return False
@@ -826,8 +865,21 @@ def _detail_lookup(kind: str, fresh) -> dict:
 
 
 def _load_hot() -> list[dict]:
-    from app.news.service import hot_candidates
+    from app.news.service import hot_candidates, hot_event_listing
     rows = []
+    for event in hot_event_listing(limit=top_n())["events"]:
+        rows.append({
+            "kind": "event",
+            "key": event["key"],
+            "name": event["name"],
+            "score": event["heat"],
+            "story_count": event["mentions"],
+            "source_count": event["source_count"],
+            "growth": 0,
+            "first_seen": event["first_seen"],
+            "concepts": event["concepts"],
+            "headline": event["headline"],
+        })
     for kind in ("sector", "stock"):
         for item in hot_candidates(kind=kind, limit=top_n()):
             rows.append({
@@ -842,11 +894,14 @@ def _load_hot() -> list[dict]:
     return rows
 
 
-def _attach_refs(sectors: list[dict], stocks: list[dict]) -> None:
-    from app.news.service import hot_messages
-    for row in [*sectors, *stocks]:
+def _attach_refs(sectors: list[dict], stocks: list[dict], events: list[dict] | None = None) -> None:
+    from app.news.service import event_detail, hot_messages
+    for row in [*(events or []), *sectors, *stocks]:
         try:
-            messages = hot_messages(row["kind"], row["key"], limit=8)
+            if row.get("kind") == "event":
+                messages = event_detail(str(row.get("key") or ""), limit=8)["items"]
+            else:
+                messages = hot_messages(row["kind"], row["key"], limit=8)
         except Exception as exc:  # noqa: BLE001
             logger.debug("读取候选出处失败 %s: %s", row.get("key"), exc)
             messages = []

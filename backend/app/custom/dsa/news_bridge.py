@@ -41,7 +41,7 @@ _SOURCES = (
         "Reddit 的 wallstreetbets、stocks、investing 新帖 Atom，只存标题、摘要、链接、作者和时间。每次只请求一个子版。",
     ),
     ("sec", "SEC 8-K", "SEC 最新 8-K Atom，只存标题、摘要和申报链接。"),
-    ("hot", "TSP热门候选", "TSP 按多源提及算出的热门板块和个股，供大盘复盘引用。"),
+    ("hot", "TSP热门候选", "TSP 按当天资讯聚类的具体事件；没有事件时仍给热门板块和个股，供大盘复盘引用。"),
 )
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "app", "tsp"}
 _COOLDOWN_S = 180
