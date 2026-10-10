@@ -1,13 +1,17 @@
-"""财联社、华尔街见闻、ima 与宿主机收件箱的解析。
+"""财联社、华尔街见闻、外文 RSS、SEC Atom、ima 与宿主机收件箱的解析。
 
 网络调用由 service 注入，这里只负责请求参数和响应归一，方便离线测试。
+外文源只取标题、摘要、链接、guid 和发布时间，不读 content:encoded 或 Atom content。
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from xml.etree import ElementTree as ET
 
 from app.market_time import CN_TZ
 from app.news.cleaning import media_ids_from_text
@@ -342,6 +346,157 @@ def load_inbox_payload(text: str) -> tuple[str, object]:
     if source not in {"dws", "zsxq"}:
         raise ValueError(f"收件箱来源不支持: {source}")
     return source, payload.get("payload")
+
+
+# 第一批外文源。公开 RSS / Atom，不需要 API key。只请求这些 feed 地址。
+_CNBC_TOP = (
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml"
+    "?partnerId=wrss01&id=100003114"
+)
+_CNBC_MARKETS = (
+    "https://search.cnbc.com/rs/search/combinedcms/view.xml"
+    "?partnerId=wrss01&id=20910258"
+)
+_MW_TOP = "https://feeds.content.dowjones.io/public/rss/mw_topstories"
+_WSJ_MARKETS = "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain"
+_BBG_MARKETS = "https://feeds.bloomberg.com/markets/news.rss"
+_BBG_TECH = "https://feeds.bloomberg.com/technology/news.rss"
+_SEC_8K = (
+    "https://www.sec.gov/cgi-bin/browse-edgar"
+    "?action=getcurrent&type=8-K&count=40&output=atom"
+)
+
+FOREIGN_RSS_SOURCES = frozenset({"cnbc", "marketwatch", "wsj", "bloomberg"})
+FOREIGN_SOURCES = FOREIGN_RSS_SOURCES | {"sec"}
+_SUMMARY_LIMIT = 2000
+_TAG = re.compile(r"<[^>]+>")
+
+
+@dataclass(frozen=True)
+class Feed:
+    source: str
+    url: str
+
+
+FOREIGN_FEEDS: dict[str, tuple[Feed, ...]] = {
+    "cnbc": (
+        Feed("cnbc", _CNBC_TOP),
+        Feed("cnbc", _CNBC_MARKETS),
+    ),
+    "marketwatch": (Feed("marketwatch", _MW_TOP),),
+    "wsj": (Feed("wsj", _WSJ_MARKETS),),
+    "bloomberg": (
+        Feed("bloomberg", _BBG_MARKETS),
+        Feed("bloomberg", _BBG_TECH),
+    ),
+    "sec": (Feed("sec", _SEC_8K),),
+}
+
+
+def parse_feed_time(value: str) -> datetime | None:
+    """RSS pubDate（RFC 822）和 Atom 的 ISO 时间，统一到北京时间。"""
+    text = (value or "").strip()
+    if not text:
+        return None
+    parsed = parse_time(text)
+    if parsed is not None:
+        return parsed
+    try:
+        parsed_rfc = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if parsed_rfc is None:
+        return None
+    if parsed_rfc.tzinfo is None:
+        parsed_rfc = parsed_rfc.replace(tzinfo=UTC)
+    return parsed_rfc.astimezone(CN_TZ)
+
+
+def parse_feed_xml(xml_text: str, source: str, *, feed_url: str = "") -> list[Item]:
+    """解析 RSS 2.0 或 Atom。没有 guid 时用链接做 source_id。
+
+    故意不读 content:encoded 和 Atom content。华尔街日报、彭博的正文在付费墙后，
+    feed 里的长正文也不能入库。
+    """
+    raw_xml = (xml_text or "").lstrip("\ufeff").strip()
+    if not raw_xml:
+        raise ValueError("RSS/Atom 为空")
+    try:
+        # 带 encoding 声明的 Unicode 字符串不能直接交给 ElementTree。
+        root = ET.fromstring(raw_xml.encode("utf-8"))
+    except ET.ParseError as exc:
+        raise ValueError("RSS/Atom 解析失败") from exc
+    items: list[Item] = []
+    for node in root.iter():
+        if _local(node.tag) not in {"item", "entry"}:
+            continue
+        title = _plain(_first(node, ("title",)))
+        summary = _plain(_first(node, ("description", "summary")), _SUMMARY_LIMIT)
+        link = _entry_link(node)[:500]
+        guid = _first(node, ("guid", "id")).strip()[:500]
+        source_id = guid or link
+        published = parse_feed_time(_first(node, ("pubDate", "published", "updated", "date")))
+        if not source_id or published is None or not (title or summary):
+            continue
+        items.append(Item(
+            source=source,
+            source_id=source_id,
+            published_at=published,
+            title=title[:180],
+            text=summary or title,
+            url=link,
+            raw={"guid": guid, "feed": feed_url},
+        ))
+    return items
+
+
+def _local(tag: str) -> str:
+    if not isinstance(tag, str):
+        return ""
+    if tag.startswith("{"):
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _first(node: ET.Element, names: tuple[str, ...]) -> str:
+    for name in names:
+        for child in list(node):
+            if _local(child.tag) != name:
+                continue
+            text = "".join(child.itertext()).strip()
+            if text:
+                return text
+    return ""
+
+
+def _entry_link(node: ET.Element) -> str:
+    """优先 alternate。RSS 的 link 文本和 Atom 的 href 都认。"""
+    alternate = ""
+    fallback = ""
+    for child in list(node):
+        if _local(child.tag) != "link":
+            continue
+        href = (child.get("href") or "").strip()
+        text = "".join(child.itertext()).strip()
+        candidate = text or href
+        if not candidate:
+            continue
+        rel = (child.get("rel") or "").strip().lower()
+        if rel in {"", "alternate"} and not alternate:
+            alternate = candidate
+        elif not fallback:
+            fallback = candidate
+    return alternate or fallback
+
+
+def _plain(value: str, limit: int = 2000) -> str:
+    text = html.unescape(value or "")
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p>", "\n", text)
+    text = _TAG.sub(" ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()[:limit]
 
 
 def _names(rows, field: str) -> list[str]:

@@ -207,18 +207,30 @@ def _scan(text: str, index: dict[str, list[str]]) -> list[tuple[str, int, int]]:
     return hits
 
 
-def parse_llm_payload(raw: str, lexicon: Lexicon) -> list[Mention]:
-    """只接受词典里存在的名称或代码，丢掉模型编出来的标的。"""
+def _llm_object(raw: str) -> dict:
     text = (raw or "").strip()
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
-        return []
+        return {}
     try:
         payload = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        return []
-    if not isinstance(payload, dict):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def parse_llm_summary(raw: str) -> str:
+    """外文摘要的一句中文。超长截断，避免把模型扩写的正文存下来。"""
+    text = str(_llm_object(raw).get("summary_zh") or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:400]
+
+
+def parse_llm_payload(raw: str, lexicon: Lexicon) -> list[Mention]:
+    """只接受词典里存在的名称或代码，丢掉模型编出来的标的。"""
+    payload = _llm_object(raw)
+    if not payload:
         return []
     stocks: list[StructuredStock] = []
     for item in payload.get("stocks") or []:

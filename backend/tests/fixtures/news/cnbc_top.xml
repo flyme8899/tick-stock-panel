@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>CNBC Top News</title>
+    <item>
+      <title>Fed holds rates, mentions Kweichow Moutai</title>
+      <link>https://www.cnbc.com/2026/10/09/fed-holds-rates.html</link>
+      <description>The Federal Reserve left its benchmark rate unchanged.</description>
+      <pubDate>Fri, 09 Oct 2026 14:30:00 GMT</pubDate>
+      <guid isPermaLink="false">cnbc-1001</guid>
+    </item>
+    <item>
+      <title>Stocks were mixed</title>
+      <link>https://www.cnbc.com/2026/10/09/markets-overlap.html</link>
+      <description>Overlap item on the top feed.</description>
+      <pubDate>Fri, 09 Oct 2026 15:00:00 GMT</pubDate>
+      <guid>cnbc-1002</guid>
+    </item>
+  </channel>
+</rss>

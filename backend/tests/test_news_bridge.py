@@ -6,12 +6,20 @@ from datetime import datetime
 import pytest
 
 from app.custom.dsa.news_bridge import (
+    _SOURCES,
     _fetch_tsp_source,
     expand_item,
     hot_news_rows,
     install,
     is_tsp_feed_url,
 )
+from app.news.config import SOURCE_LABELS, SOURCE_ORDER
+
+
+def test_bridge_sources_follow_the_news_catalog():
+    keys = [row[0] for row in _SOURCES]
+    assert keys == [*SOURCE_ORDER, "hot"]
+    assert [row[1] for row in _SOURCES] == [SOURCE_LABELS[key] for key in keys]
 
 
 def test_feed_url_allowlist(monkeypatch):

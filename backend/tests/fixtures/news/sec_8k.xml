@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Latest 8-K Filings</title>
+  <updated>2026-10-09T16:10:00-04:00</updated>
+  <entry>
+    <title>8-K - EXAMPLE CORP (0001234567) (Filer)</title>
+    <link rel="self" href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent"/>
+    <link rel="alternate" type="text/html" href="https://www.sec.gov/Archives/edgar/data/1234567/000123456726000008/0001234567-26-000008-index.html"/>
+    <summary type="html">&lt;b&gt;Filed:&lt;/b&gt; 2026-10-09 &lt;b&gt;AccNo:&lt;/b&gt; 0001234567-26-000008 &lt;b&gt;Form:&lt;/b&gt; 8-K</summary>
+    <content type="html">FULL FILING BODY should not be stored</content>
+    <updated>2026-10-09T16:10:00-04:00</updated>
+    <id>urn:tag:sec.gov,2008:accession-number=0001234567-26-000008</id>
+  </entry>
+</feed>
