@@ -29,6 +29,8 @@ import {
   sampleRecords,
   dsaCommand,
   dsaEtfRotation,
+  type EtfRotationHolding,
+  type EtfRotationView,
   dsaUpstream,
   fetchDsaCatalog,
   fetchDsaQuantEvidence,
@@ -557,16 +559,143 @@ function Screening({ sample, reachable }: { sample: boolean; reachable: boolean 
   )
 }
 
+function formatEtfScore(kind: string | undefined, score: number | null) {
+  if (score == null || Number.isNaN(score)) return '—'
+  if (kind === 'momentum') return `${(score * 100).toFixed(1)}%`
+  if (kind === 'none') return '—'
+  return score.toFixed(2)
+}
+
+export function EtfRotationCard({ result }: { result: EtfRotationView }) {
+  const kind = result.score_kind
+  const scoreLabel = kind === 'momentum' ? '动量' : kind === 'none' ? '得分' : '平均排名'
+  const showBucket = result.holdings.some(row => row.bucket)
+  const basis = result.position_basis === 'target'
+    ? '今日为调仓日，下表是目标持仓，下一交易日收盘执行。'
+    : '下表是当前规则持仓。'
+  return (
+    <div className="mt-3 overflow-hidden rounded-lg border border-border bg-base">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-3 py-2.5">
+        <div>
+          <div className="text-sm text-foreground">{result.mode_label || result.mode}</div>
+          <div className="mt-0.5 text-[11px] text-muted">信号日 {result.signal_date}</div>
+        </div>
+        <div className="text-right text-[11px] leading-5 text-secondary">
+          <div>上次调仓 {result.last_rebalance || '—'}</div>
+          <div>下次调仓 {result.next_rebalance || '—'}</div>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead className="text-muted">
+            <tr>
+              <th className="px-3 py-1.5 font-normal">标的</th>
+              {showBucket && <th className="py-1.5 font-normal">分桶</th>}
+              <th className="py-1.5 font-normal">权重</th>
+              <th className="px-3 py-1.5 font-normal">{scoreLabel}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {result.holdings.map(row => (
+              <EtfHoldingRow key={`${row.code}-${row.bucket}`} row={row} kind={kind} showBucket={showBucket} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="space-y-1 px-3 py-2 text-[11px] leading-relaxed text-muted">
+        <p>{basis}</p>
+        {result.risk_off && <p>组合回撤已触发防守仓位。</p>}
+        {result.score_hint && <p>{result.score_hint}</p>}
+        <p>{result.disclaimer}</p>
+      </div>
+    </div>
+  )
+}
+
+function EtfHoldingRow({ row, kind, showBucket }: { row: EtfRotationHolding; kind: string | undefined; showBucket: boolean }) {
+  const title = row.name && row.name !== row.code ? `${row.name} ${row.code}` : row.code
+  return (
+    <tr className="border-t border-border">
+      <td className="px-3 py-1.5 text-foreground">{title}</td>
+      {showBucket && <td className="py-1.5 text-secondary">{row.bucket || '—'}</td>}
+      <td className="num py-1.5">{(row.weight * 100).toFixed(1)}%</td>
+      <td className="num px-3 py-1.5">{formatEtfScore(kind, row.score)}</td>
+    </tr>
+  )
+}
+
+export function EtfRotationPanel({
+  pending,
+  error,
+  detail,
+  result,
+  onRun,
+}: {
+  pending: boolean
+  error: unknown
+  detail: string
+  result: EtfRotationView | null
+  onRun: () => void
+}) {
+  return (
+    <Panel title="ETF 轮动" hint="不调用大模型。默认分桶混合动量，每月调仓。Docker 下在 dsa 服务里执行。">
+      <button className={primaryBtn} type="button" disabled={pending} onClick={onRun}>
+        {pending ? '正在计算…' : '运行轮动'}
+      </button>
+      {error != null && <div className="mt-2"><Failure error={error} /></div>}
+      {!result && !detail && !pending && (
+        <p className="mt-3 text-xs leading-relaxed text-muted">
+          信号在收盘计算，下一交易日收盘执行。规则结果不代表未来收益，不构成投资建议。没有 sidecar 时会说明原因。
+        </p>
+      )}
+      {result && <EtfRotationCard result={result} />}
+      {!result && detail && <div className="mt-3"><Notice>{detail}</Notice></div>}
+      {result && detail && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs text-secondary">运行日志</summary>
+          <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-secondary">{detail}</pre>
+        </details>
+      )}
+    </Panel>
+  )
+}
+
+function asEtfView(value: unknown): EtfRotationView | null {
+  if (!isRecord(value) || !Array.isArray(value.holdings) || typeof value.signal_date !== 'string') return null
+  const holdings = value.holdings.filter(isRecord).map(row => ({
+    code: textOf(row.code, ''),
+    name: textOf(row.name, textOf(row.code, '')),
+    bucket: textOf(row.bucket, ''),
+    weight: typeof row.weight === 'number' ? row.weight : Number(row.weight) || 0,
+    score: typeof row.score === 'number' ? row.score : null,
+  }))
+  return {
+    signal_date: value.signal_date,
+    mode: textOf(value.mode, ''),
+    mode_label: textOf(value.mode_label, textOf(value.mode, '')),
+    holdings,
+    last_rebalance: typeof value.last_rebalance === 'string' ? value.last_rebalance : null,
+    next_rebalance: typeof value.next_rebalance === 'string' ? value.next_rebalance : null,
+    disclaimer: textOf(value.disclaimer, '规则结果不代表未来收益，不构成投资建议。'),
+    score_kind: textOf(value.score_kind, 'avg_rank'),
+    score_hint: textOf(value.score_hint, ''),
+    position_basis: textOf(value.position_basis, 'current'),
+    risk_off: value.risk_off === true,
+  }
+}
+
 function EtfRotation() {
   const run = useMutation({ mutationFn: dsaEtfRotation })
   const detail = isRecord(run.data) ? textOf(run.data.detail, '') : ''
+  const result = isRecord(run.data) && run.data.ok !== false ? asEtfView(run.data.result) : null
   return (
-    <Panel title="ETF 双动量" hint="不调用大模型。股票池、避险资产和换仓周期读 ETF_ROTATION_* 环境变量。Docker 下在 dsa 服务里执行。">
-      <button className={primaryBtn} type="button" disabled={run.isPending} onClick={() => run.mutate()}>运行轮动</button>
-      {run.isError && <div className="mt-2"><Failure error={run.error} /></div>}
-      {detail && <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-secondary">{detail}</pre>}
-      {!detail && <p className="mt-3 text-xs text-muted">没有 sidecar 时会说明原因。Docker 使用 dsa 容器里的源码，不会改用 app 容器里的其他 Python。</p>}
-    </Panel>
+    <EtfRotationPanel
+      pending={run.isPending}
+      error={run.isError ? run.error : null}
+      detail={detail}
+      result={result}
+      onRun={() => run.mutate()}
+    />
   )
 }
 

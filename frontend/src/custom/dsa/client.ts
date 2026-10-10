@@ -112,7 +112,36 @@ export function dsaCommand(text: string): Promise<{ ok: boolean; command: string
   }).then(res => parse(res))
 }
 
-export function dsaEtfRotation(): Promise<{ ok: boolean; detail: string; command: string }> {
+export interface EtfRotationHolding {
+  code: string
+  name: string
+  bucket: string
+  weight: number
+  score: number | null
+}
+
+export interface EtfRotationView {
+  signal_date: string
+  mode: string
+  mode_label: string
+  holdings: EtfRotationHolding[]
+  last_rebalance: string | null
+  next_rebalance: string | null
+  disclaimer: string
+  score_kind?: 'avg_rank' | 'momentum' | 'none' | string
+  score_hint?: string
+  position_basis?: 'target' | 'current' | string
+  risk_off?: boolean
+}
+
+export interface EtfRotationJob {
+  ok: boolean
+  detail: string
+  command: string
+  result?: EtfRotationView
+}
+
+export function dsaEtfRotation(): Promise<EtfRotationJob> {
   return fetch('/api/dsa/jobs/etf-rotation', { method: 'POST' }).then(res => parse(res))
 }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
+import json
 import logging
 import math
 from typing import Callable, Dict, List, Optional, Sequence
@@ -19,17 +20,18 @@ import pandas as pd
 from src.core.etf_rotation import (
     CASH,
     DAYS_PER_YEAR,
+    RESULT_PREFIX,
     BacktestResult,
     RotationParams,
     MAX_FORWARD_FILL_DAYS,
     annual_returns,
+    compose_snapshot,
     compute_metrics,
-    holdings_to_weights,
-    is_rebalance_day,
-    latest_ranking,
     parameter_sweep,
-    run_backtest,
-    select_holdings,
+    parse_buckets,
+    parse_lookbacks,
+    parse_mode,
+    parse_weighting,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,16 +65,64 @@ class RotationReport:
     target_weights: Dict[str, float] = field(default_factory=dict)
     failed_codes: Dict[str, str] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
+    snapshot: Dict[str, object] = field(default_factory=dict)
 
 
 def params_from_config(config) -> RotationParams:
+    mode = parse_mode(getattr(config, "etf_rotation_mode", None))
     return RotationParams(
         lookback_days=config.etf_rotation_lookback_days,
         rebalance=config.etf_rotation_rebalance,
         top_n=config.etf_rotation_top_n,
         switch_buffer_pct=config.etf_rotation_switch_buffer_pct,
         cost_bps=config.etf_rotation_cost_bps,
+        mode=mode,
+        lookbacks=parse_lookbacks(
+            ",".join(str(days) for days in getattr(config, "etf_rotation_lookbacks", ()) or ())
+        ),
+        weighting=parse_weighting(getattr(config, "etf_rotation_weighting", None), mode),
+        buckets=parse_buckets(getattr(config, "etf_rotation_buckets", None)) if mode == "blended_bucket" else (),
+        drawdown_risk_off=bool(getattr(config, "etf_rotation_drawdown_risk_off", False)),
+        drawdown_limit=float(getattr(config, "etf_rotation_drawdown_limit", 0.15) or 0.15),
     )
+
+
+def _clone_tickflow_forward(fetcher):
+    """Request-local forward adjust. Does not change the shared fetcher."""
+    from data_provider.tickflow_fetcher import TickFlowFetcher
+
+    return TickFlowFetcher(
+        api_key=getattr(fetcher, "api_key", ""),
+        timeout=float(getattr(fetcher, "timeout", 30.0) or 30.0),
+        kline_adjust="forward",
+        batch_daily_enabled=bool(getattr(fetcher, "batch_daily_enabled", True)),
+        batch_size=int(getattr(fetcher, "batch_size", 100) or 100),
+        priority=getattr(fetcher, "priority", 2),
+    )
+
+
+def etf_daily_fetchers(fetchers: Sequence) -> list:
+    """Forward-adjusted ETF sources, ordered by each fetcher's priority.
+
+    TickFlow stays in the chain at ``TICKFLOW_PRIORITY`` even when the shared
+    fetcher is not already set to forward adjustment. The clone is request-local
+    and does not change that shared fetcher.
+    """
+    selected = []
+    for fetcher in fetchers:
+        name = getattr(fetcher, "name", "")
+        if name in {"EfinanceFetcher", "AkshareFetcher", "BaostockFetcher"}:
+            selected.append(fetcher)
+            continue
+        if name != "TickFlowFetcher":
+            continue
+        adjust = getattr(fetcher, "kline_adjust", "none")
+        if adjust == "forward":
+            selected.append(fetcher)
+            continue
+        selected.append(_clone_tickflow_forward(fetcher))
+    selected.sort(key=lambda item: getattr(item, "priority", 99))
+    return selected
 
 
 def _close_series(code: str, df: Optional[pd.DataFrame], end_day: date) -> pd.Series:
@@ -118,12 +168,12 @@ def load_closes(
     # Never change the shared manager or quietly use raw-price fallback sources.
     adjusted_manager = None
     if isinstance(fetcher_manager, DataFetcherManager):
-        eligible = [
-            fetcher for fetcher in fetcher_manager._get_fetchers_snapshot()
-            if fetcher.name in {"EfinanceFetcher", "AkshareFetcher", "BaostockFetcher"}
-            or (fetcher.name == "TickFlowFetcher" and fetcher.kline_adjust == "forward")
-        ]
+        eligible = etf_daily_fetchers(fetcher_manager._get_fetchers_snapshot())
         if eligible:
+            logger.info(
+                "[ETF轮动] 日线数据源按优先级: %s",
+                ", ".join(f"{item.name}(P{getattr(item, 'priority', '?')})" for item in eligible),
+            )
             adjusted_manager = DataFetcherManager(fetchers=eligible)
 
     for code in codes:
@@ -236,36 +286,44 @@ def _weights_text(weights: Dict[str, float], names: Dict[str, str]) -> str:
     return " + ".join(f"{_label(c, names)} {w * 100:.0f}%" for c, w in ordered)
 
 
-def _signal_conclusion(changed: bool, rebalance_day: Optional[bool], rebalance: str) -> str:
-    if rebalance_day:
-        return "**需要调仓**，下一交易日收盘按目标持仓执行" if changed else "维持不变"
-    period = "本周" if rebalance == "weekly" else "本月"
-    outlook = "届时需要调仓" if changed else "届时维持不变"
-    reason = "今天不是调仓日" if rebalance_day is False else "交易日历不可用，无法确认今天是否为调仓日"
-    return f"{reason}，目标持仓仅供参考，正式信号以{period}最后一个交易日收盘为准；按当前排名{outlook}"
-
-
-def _render_signal(
-    as_of: pd.Timestamp,
-    ranking: pd.Series,
-    current: Dict[str, float],
-    target: Dict[str, float],
-    conclusion: str,
-    names: Dict[str, str],
-) -> List[str]:
+def _render_signal(snapshot: Dict[str, object], names: Dict[str, str]) -> List[str]:
+    basis = snapshot.get("position_basis")
+    if basis == "target":
+        conclusion = "今日为调仓日，下表是目标持仓，下一交易日收盘执行"
+    else:
+        conclusion = "今日不是调仓日，下表是当前规则持仓"
+    score_kind = snapshot.get("score_kind")
+    score_header = "平均排名" if score_kind == "avg_rank" else "动量" if score_kind == "momentum" else "得分"
     lines = [
-        f"## 最新信号（基于 {as_of:%Y-%m-%d} 收盘）",
+        f"## 最新信号（基于 {snapshot.get('signal_date')} 收盘）",
         "",
-        f"- 当前规则持仓：{_weights_text(current, names)}",
-        f"- 最新收盘目标：{_weights_text(target, names)}",
+        f"- 模式：{snapshot.get('mode_label')}",
+        f"- 上次调仓：{snapshot.get('last_rebalance') or '—'}",
+        f"- 下次调仓：{snapshot.get('next_rebalance') or '—'}",
         f"- 结论：{conclusion}",
         "",
-        "| 排名 | 标的 | 动量 | 是否合格 |",
+        f"| 标的 | 分桶 | 权重 | {score_header} |",
         "| --- | --- | --- | --- |",
     ]
-    for rank, (code, score) in enumerate(ranking.items(), start=1):
-        eligible = "是" if pd.notna(score) and score > 0 else "否"
-        lines.append(f"| {rank} | {_label(code, names)} | {_pct(score)} | {eligible} |")
+    for row in snapshot.get("holdings") or []:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code") or "")
+        score = row.get("score")
+        if score_kind == "momentum" and isinstance(score, (int, float)):
+            score_text = _pct(float(score))
+        elif isinstance(score, (int, float)):
+            score_text = f"{float(score):.2f}"
+        else:
+            score_text = "—"
+        weight = float(row.get("weight") or 0.0)
+        lines.append(
+            f"| {_label(code, names)} | {row.get('bucket') or '—'} | {weight * 100:.1f}% | {score_text} |"
+        )
+    hint = snapshot.get("score_hint")
+    if hint:
+        lines += ["", str(hint)]
+    lines += ["", f"> {snapshot.get('disclaimer')}"]
     return lines
 
 
@@ -333,13 +391,31 @@ def _render_trades(result: BacktestResult, names: Dict[str, str]) -> List[str]:
 def _render_rules(params: RotationParams, safe_asset: Optional[str], names: Dict[str, str]) -> List[str]:
     period = "每周最后一个交易日" if params.rebalance == "weekly" else "每月最后一个交易日"
     defensive = _label(safe_asset, names) if safe_asset else CASH_LABEL
+    if params.mode == "equal_weight":
+        body = [
+            f"- {period}收盘把风险池恢复为等权，下一交易日收盘执行",
+            f"- 交易成本按单边 {params.cost_bps:g} bp 乘以换手率扣除",
+        ]
+    elif params.mode == "legacy":
+        body = [
+            f"- {period}收盘计算 {params.lookback_days} 日动量，下一交易日收盘执行",
+            f"- 持有动量最强且为正的前 {params.top_n} 只，每只 {100 / params.top_n:.0f}%；空出的仓位切到 {defensive}",
+            f"- 已持有标的在合格且落后幅度不超过 {params.switch_buffer_pct:g}% 时继续持有",
+            f"- 交易成本按单边 {params.cost_bps:g} bp 乘以换手率扣除",
+        ]
+    else:
+        days = "、".join(str(days) for days in params.lookbacks)
+        weighting = "60 日波动率倒数" if params.weighting == "inv_vol" else "等权"
+        body = [
+            f"- {period}收盘按 {days} 日收益的平均排名给每个分桶打分，只保留桶内最强的一只",
+            f"- 只持有混合动量为正的前 {params.top_n} 个分桶，权重按{weighting}；没选满的仓位切到 {defensive}",
+            f"- 交易成本按单边 {params.cost_bps:g} bp 乘以换手率扣除",
+            "- 组合回撤风控默认关闭",
+        ]
     return [
         "## 规则说明",
         "",
-        f"- {period}收盘计算 {params.lookback_days} 日动量，下一交易日收盘执行",
-        f"- 持有动量最强且为正的前 {params.top_n} 只，每只 {100 / params.top_n:.0f}%；空出的仓位切到 {defensive}",
-        f"- 已持有标的在合格且落后幅度不超过 {params.switch_buffer_pct:g}% 时继续持有",
-        f"- 交易成本按单边 {params.cost_bps:g} bp 乘以换手率扣除",
+        *body,
         "- 对比基准为风险池等权持有（日再平衡、不扣成本），与策略同从首次建仓日起算",
         "",
         "> 规则化的回测结果不代表未来收益，不构成投资建议。趋势策略在震荡市会反复止损，在急涨行情中会反应滞后。",
@@ -357,16 +433,15 @@ def build_report(
 ) -> RotationReport:
     """Render the report; ``next_session`` resolves the trading day after a date."""
     risk = [c for c in risk_assets if c in closes.columns]
-    result = run_backtest(closes, risk, safe_asset, params)
-    as_of, ranking = latest_ranking(closes, risk, params)
+    result, snapshot = compose_snapshot(closes, risk, safe_asset, params, names, next_session)
+    as_of = pd.Timestamp(str(snapshot["signal_date"]))
     safe_close = closes.loc[as_of, safe_asset] if safe_asset and safe_asset in closes.columns else math.nan
     usable_safe = safe_asset if pd.notna(safe_close) and math.isfinite(safe_close) and safe_close > 0 else None
-    target_holdings = select_holdings(ranking, result.final_holdings, params)
-    target = holdings_to_weights(target_holdings, params.top_n, usable_safe)
-    # Compare holdings, not weights: live weights drift away from the exact 1/top_n split.
-    changed = set(target) != set(result.final_weights)
-    following = next_session(as_of.date()) if next_session else None
-    rebalance_day = is_rebalance_day(as_of, pd.Timestamp(following), params.rebalance) if following else None
+    shown = {
+        str(row["code"]): float(row["weight"])
+        for row in snapshot.get("holdings") or []
+        if isinstance(row, dict) and row.get("code")
+    }
 
     notes = list(warnings)
     if safe_asset and not usable_safe:
@@ -385,14 +460,13 @@ def build_report(
     lines = [f"# ETF 轮动信号 {as_of:%Y-%m-%d}", ""]
     if notes:
         lines += ["## ⚠️ 数据告警", ""] + [f"- {note}" for note in notes] + [""]
-    conclusion = _signal_conclusion(changed, rebalance_day, params.rebalance)
     backtest_blocks = (
         (_render_metrics(result), _render_annual(result), _render_sweep(sweep, params.lookback_days),
          _render_trades(result, names))
         if has_backtest else ()
     )
     for block in (
-        _render_signal(as_of, ranking, result.final_weights, target, conclusion, names),
+        _render_signal(snapshot, names),
         *backtest_blocks,
         _render_rules(params, usable_safe, names),
     ):
@@ -402,8 +476,9 @@ def build_report(
     return RotationReport(
         markdown="\n".join(lines).rstrip() + "\n",
         as_of=as_of,
-        target_weights=target,
+        target_weights=shown,
         warnings=notes,
+        snapshot=snapshot,
     )
 
 
@@ -451,11 +526,14 @@ def run_etf_rotation(
     """
     from src.core.trading_calendar import get_effective_trading_date, get_next_trading_date
 
-    pool = [c for c in config.etf_rotation_pool if c]
+    params = params_from_config(config)
+    if params.mode == "blended_bucket":
+        pool = [code for bucket in params.buckets for code in bucket.members]
+    else:
+        pool = [c for c in config.etf_rotation_pool if c]
     if not pool:
         raise ValueError("ETF_ROTATION_POOL 为空，请至少配置一只 ETF")
     safe_asset = config.etf_rotation_safe_asset or None
-    params = params_from_config(config)
 
     if fetcher_manager is None:
         from data_provider import DataFetcherManager
@@ -483,4 +561,6 @@ def run_etf_rotation(
     )
 
     _deliver(report, send_notification, notifier)
+    if report.snapshot:
+        print(RESULT_PREFIX + json.dumps(report.snapshot, ensure_ascii=False), flush=True)
     return report

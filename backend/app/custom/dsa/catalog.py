@@ -63,9 +63,9 @@ FEATURES = (
         "id": "etf_rotation",
         "label": "ETF 轮动",
         "section": "etf",
-        "summary": "规则化 ETF 双动量轮动信号与回测，不调用大模型。Docker 下在 dsa 服务内执行。",
+        "summary": "规则化 ETF 轮动。默认分桶混合动量，也可等权或经典双动量。不调用大模型。Docker 下在 dsa 服务内执行。",
         "upstream": "POST /api/v1/tsp/etf-rotation",
-        "overlap": "TSP 板块轮动看概念和行业。ETF 双动量是 DSA 的独立规则，不并入板块页。",
+        "overlap": "TSP 板块轮动看概念和行业。ETF 轮动是 DSA 的独立规则，不并入板块页。",
     },
     {
         "id": "chat",
@@ -199,8 +199,13 @@ ENV_VARS = (
     {"name": "DISCORD_WEBHOOK_URL", "required": False, "purpose": "Discord Webhook"},
     {"name": "SLACK_BOT_TOKEN", "required": False, "purpose": "Slack，需同时配置 SLACK_CHANNEL_ID"},
     {"name": "EMAIL_SENDER", "required": False, "purpose": "邮件推送，需同时配置 EMAIL_PASSWORD"},
-    {"name": "ETF_ROTATION_POOL", "required": False, "purpose": "ETF 轮动池，逗号分隔"},
-    {"name": "ETF_ROTATION_SAFE_ASSET", "required": False, "purpose": "避险资产代码，如 511880"},
+    {"name": "ETF_ROTATION_MODE", "required": False, "purpose": "blended_bucket（默认，分桶混合动量）、equal_weight（池内等权，每月再平衡）或 legacy（周频单窗口前 2）"},
+    {"name": "ETF_ROTATION_LOOKBACKS", "required": False, "purpose": "混合动量窗口，默认 20,60,120。得分是这几段收益的平均排名"},
+    {"name": "ETF_ROTATION_BUCKETS", "required": False, "purpose": "分桶。默认 A股:510300|510500|159915;512890;513100;518880。冒号桶只留最强的一只"},
+    {"name": "ETF_ROTATION_WEIGHTING", "required": False, "purpose": "blended_bucket 默认 inv_vol（60 日波动率倒数）。equal_weight 与 legacy 固定等权"},
+    {"name": "ETF_ROTATION_DRAWDOWN_RISK_OFF", "required": False, "purpose": "组合回撤风控。默认 false，钩子关闭时不改变持仓"},
+    {"name": "ETF_ROTATION_POOL", "required": False, "purpose": "等权和经典模式的 ETF 池，逗号分隔。分桶模式改读 ETF_ROTATION_BUCKETS"},
+    {"name": "ETF_ROTATION_SAFE_ASSET", "required": False, "purpose": "防守资产，默认 511880。只在入选分桶少于 TOP_N 时补足剩余仓位"},
     {"name": "ADMIN_AUTH_ENABLED", "required": False, "purpose": "DSA 管理登录。本地 sidecar 建议保持关闭"},
 )
 
