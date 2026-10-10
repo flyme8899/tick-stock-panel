@@ -487,6 +487,16 @@ def _seed_friday(tmp_path) -> None:
         ["银行"], ["601318.SH"],
         title="平安银行回购股份",
     )
+    _insert_news(
+        "cls", "rare-1", _publish(friday, 8, 20),
+        [], [],
+        title="稀土出口配额收紧",
+    )
+    _insert_news(
+        "cls", "pv-1", _publish(friday, 8, 0),
+        [], [],
+        title="光伏组件厂下调报价",
+    )
     for index in range(4):
         _insert_news(
             "cls", f"sat-{index}", _publish(date(2026, 10, 10), 9, index),
@@ -601,7 +611,8 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     catalog = client.get("/api/picker/sources")
     assert catalog.status_code == 200
     group = next(item for item in catalog.json()["groups"] if item["id"] == "hot_events")
-    assert [item["name"] for item in group["items"]] == names[:5]
+    assert [item["name"] for item in group["items"]] == names[:8]
+    assert "光伏组件厂下调报价" not in {item["name"] for item in group["items"]}
     assert all("mentioned_stocks" not in item for item in group["items"])
     assert group["items"][0]["description"] == "提及 3 · 来源 3"
     assert group["items"][0]["concepts"] == ["昇腾"]
@@ -857,3 +868,26 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     fallback = top_hot_events(NOW + timedelta(minutes=22))
     assert fallback["events"][0]["name"] == "华为发布盘古新模型"
     assert len(prompts) == 1
+
+
+def test_hot_event_llm_labels_at_most_eight(tmp_path, monkeypatch):
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    reset_store_for_tests(tmp_path / "llm-cap.sqlite")
+    friday = date(2026, 10, 9)
+    subjects = "甲乙丙丁戊己庚辛壬"
+    objects = "子丑寅卯辰巳午未申"
+    for index in range(9):
+        _insert_news(
+            "cls", f"cap-{index}", _publish(friday, 15, index), [], [],
+            title=f"{subjects[index]}厂发布{objects[index]}材",
+        )
+    prompts: list[str] = []
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", lambda prompt: prompts.append(prompt) or "{}")
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    snapshot = top_hot_events(NOW)
+    assert len(snapshot["events"]) == 9
+    assert len(prompts) == 8
