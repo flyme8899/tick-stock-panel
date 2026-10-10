@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from datetime import timedelta
@@ -18,6 +19,8 @@ from app.news.collectors import (
     FOREIGN_FEEDS,
     FOREIGN_SOURCES,
     IMA_BASE,
+    REDDIT_MIN_GAP,
+    REDDIT_USER_AGENT,
     REUTERS_GOOGLE_NEWS,
     REUTERS_SITEMAP_INDEX,
     WSCN_URL,
@@ -36,12 +39,16 @@ from app.news.collectors import (
     parse_dws_payload,
     parse_feed_xml,
     parse_ima_titles,
+    parse_reddit_atom,
     parse_reuters_google_news,
     parse_reuters_news_sitemap,
     parse_time,
     parse_wscn,
     parse_zsxq_payload,
     pick_knowledge_base,
+    reddit_backoff_seconds,
+    reddit_feed_url,
+    reddit_retry_after_seconds,
     split_ima_list,
     wscn_next_cursor,
     wscn_params,
@@ -50,6 +57,7 @@ from app.news.config import (
     SOURCE_LABELS,
     SOURCE_ORDER,
     llm_extract_enabled,
+    reddit_subreddits,
     sec_configured,
     sec_user_agent,
     source_configured,
@@ -554,6 +562,8 @@ def run_due(source: str) -> dict:
         return collect_inbox()
     if source == "etf_flow":
         return collect_etf_flow()
+    if source == "reddit":
+        return collect_reddit()
     if source == "reuters":
         return collect_reuters()
     if source in FOREIGN_FEEDS:
@@ -671,6 +681,128 @@ def _reuters_primary(client: httpx.Client, headers: dict[str, str]) -> tuple[lis
     if errors:
         logger.warning("路透部分 news sitemap 失败: %s", errors[0])
     return items, None
+
+
+_REDDIT_CURSOR = "reddit:cursor"
+_REDDIT_NOT_BEFORE = "reddit:not-before"
+_REDDIT_BACKOFF = "reddit:backoff"
+_REDDIT_BACKOFF_CAP = 3600
+
+
+def collect_reddit(client: httpx.Client | None = None, *, now: float | None = None) -> dict:
+    """每次只请求一个子版的 /new/.rss。两次请求至少隔 75 秒，不在这条线程里 sleep。
+
+    429 读 Retry-After，没有这个头就从 75 秒起倍增。成功或 304 才轮到下一个子版。
+    不读取 REDDIT_CLIENT_ID / SECRET，也不带 Authorization。
+    """
+    moment = time.time() if now is None else float(now)
+    subs = reddit_subreddits()
+    if not subs:
+        message = "Reddit 子版列表没有合法名称"
+        get_store().mark_health("reddit", ok=False, error=message, auth_state="n/a")
+        return {"inserted": 0, "duplicate": 0, "error": message}
+    not_before = _reddit_stamp(_REDDIT_NOT_BEFORE)
+    if moment < not_before:
+        remaining = max(1, math.ceil(not_before - moment))
+        return {
+            "inserted": 0,
+            "duplicate": 0,
+            "skipped": True,
+            "retry_after": min(remaining, _REDDIT_BACKOFF_CAP),
+        }
+    cursor = _reddit_stamp(_REDDIT_CURSOR)
+    sub = subs[cursor % len(subs)]
+    url = reddit_feed_url(sub)
+    own = client is None
+    client = client or httpx.Client(timeout=15.0, follow_redirects=True)
+    headers = {
+        "User-Agent": REDDIT_USER_AGENT,
+        "Accept": "application/atom+xml, application/xml, text/xml",
+    }
+    try:
+        try:
+            response = _conditional_get(client, url, headers)
+        except Exception as exc:  # noqa: BLE001
+            _reddit_arm(moment, REDDIT_MIN_GAP)
+            message = str(exc)[:180]
+            logger.warning("Reddit 采集失败: %s", exc)
+            get_store().mark_health("reddit", ok=False, error=message, auth_state="n/a")
+            return {
+                "inserted": 0,
+                "duplicate": 0,
+                "error": message,
+                "retry_after": REDDIT_MIN_GAP,
+            }
+        status = int(getattr(response, "status_code", 200))
+        if status == 429:
+            header = reddit_retry_after_seconds(
+                _header(getattr(response, "headers", None), "retry-after"),
+                moment,
+            )
+            wait = reddit_backoff_seconds(header, _reddit_stamp(_REDDIT_BACKOFF))
+            _reddit_put(_REDDIT_BACKOFF, wait)
+            _reddit_arm(moment, wait)
+            message = f"HTTP 429，{wait}s 后再试"
+            get_store().mark_health("reddit", ok=False, error=message, auth_state="n/a")
+            return {"inserted": 0, "duplicate": 0, "error": message, "retry_after": wait}
+        if status == 304:
+            _reddit_success_gate(moment, cursor)
+            get_store().mark_health("reddit", ok=True, auth_state="n/a")
+            return {"inserted": 0, "duplicate": 0, "retry_after": REDDIT_MIN_GAP}
+        if status >= 400:
+            _reddit_arm(moment, REDDIT_MIN_GAP)
+            message = f"HTTP {status}"
+            get_store().mark_health("reddit", ok=False, error=message, auth_state="n/a")
+            return {
+                "inserted": 0,
+                "duplicate": 0,
+                "error": message,
+                "retry_after": REDDIT_MIN_GAP,
+            }
+        try:
+            items = parse_reddit_atom(response.text, feed_url=url, subreddit=sub)
+        except Exception as exc:  # noqa: BLE001
+            _reddit_arm(moment, REDDIT_MIN_GAP)
+            message = str(exc)[:180]
+            logger.warning("Reddit 解析失败: %s", exc)
+            get_store().mark_health("reddit", ok=False, error=message, auth_state="n/a")
+            return {
+                "inserted": 0,
+                "duplicate": 0,
+                "error": message,
+                "retry_after": REDDIT_MIN_GAP,
+            }
+        result = ingest_items(items) if items else {"inserted": 0, "duplicate": 0}
+        # 入库成功后再记 ETag 和轮转。中途失败下一轮仍拉这一版的完整响应。
+        _remember_feed(url, response)
+        _reddit_success_gate(moment, cursor)
+        get_store().mark_health("reddit", ok=True, auth_state="n/a")
+        return {**result, "retry_after": REDDIT_MIN_GAP}
+    finally:
+        if own:
+            client.close()
+
+
+def _reddit_success_gate(moment: float, cursor: int) -> None:
+    _reddit_put(_REDDIT_CURSOR, cursor + 1)
+    _reddit_put(_REDDIT_BACKOFF, 0)
+    _reddit_arm(moment, REDDIT_MIN_GAP)
+
+
+def _reddit_arm(moment: float, wait: int) -> None:
+    _reddit_put(_REDDIT_NOT_BEFORE, math.ceil(moment + wait))
+
+
+def _reddit_stamp(key: str) -> int:
+    raw, _modified = get_store().get_feed_cache(key)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reddit_put(key: str, value: int) -> None:
+    get_store().save_feed_cache(key, str(int(value)), "")
 
 
 def _reuters_google(client: httpx.Client, headers: dict[str, str]) -> tuple[list[Item], str | None]:

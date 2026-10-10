@@ -185,7 +185,7 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 ## 多源资讯（可选）
 
-热门事件和 DSA 情报桥的变量、宿主机采集见 [news-sources.md](./news-sources.md)。`NEWS_DWS_ENABLED`、`NEWS_ZSXQ_ENABLED`、`NEWS_IMA_ENABLED`、`NEWS_CLS_ENABLED`、`NEWS_WSCN_ENABLED`、`NEWS_ETF_FLOW_ENABLED`、`NEWS_CNBC_ENABLED`、`NEWS_MARKETWATCH_ENABLED`、`NEWS_WSJ_ENABLED`、`NEWS_BLOOMBERG_ENABLED`、`NEWS_SCMP_ENABLED`、`NEWS_REUTERS_ENABLED`、`NEWS_SEC_ENABLED` 默认留空，来源关闭。`NEWS_DSA_FEED_TOKEN` 留空时 DSA 不拉取。ima 需要 `IMA_CLIENT_ID` 与 `IMA_API_KEY`。ETF 申赎表格用 `VISION_AI_API_KEY`（可选 `VISION_AI_BASE_URL`、`VISION_AI_MODEL`，默认 `deepseek/deepseek-v4-flash-vision-exp`，备选 `glm-5.3-flash` 与 `mimo-v2.6-flash`），不复用 `AI_API_KEY`。表格 OCR 保持思考，`max_tokens` 至少 8192。只有非表格的短视觉请求才按模型关掉思考。SEC 8-K 需要带联系邮箱的 `SEC_USER_AGENT`，否则不会请求 sec.gov。CNBC、MarketWatch、华尔街日报、彭博和南华早报不需要 API key，只存标题和摘要。路透也不需要 API key，只存标题和链接。
+热门事件和 DSA 情报桥的变量、宿主机采集见 [news-sources.md](./news-sources.md)。`NEWS_DWS_ENABLED`、`NEWS_ZSXQ_ENABLED`、`NEWS_IMA_ENABLED`、`NEWS_CLS_ENABLED`、`NEWS_WSCN_ENABLED`、`NEWS_ETF_FLOW_ENABLED`、`NEWS_CNBC_ENABLED`、`NEWS_MARKETWATCH_ENABLED`、`NEWS_WSJ_ENABLED`、`NEWS_BLOOMBERG_ENABLED`、`NEWS_SCMP_ENABLED`、`NEWS_REUTERS_ENABLED`、`NEWS_REDDIT_ENABLED`、`NEWS_SEC_ENABLED` 默认留空，来源关闭。`NEWS_DSA_FEED_TOKEN` 留空时 DSA 不拉取。ima 需要 `IMA_CLIENT_ID` 与 `IMA_API_KEY`。ETF 申赎表格用 `VISION_AI_API_KEY`（可选 `VISION_AI_BASE_URL`、`VISION_AI_MODEL`，默认 `deepseek/deepseek-v4-flash-vision-exp`，备选 `glm-5.3-flash` 与 `mimo-v2.6-flash`），不复用 `AI_API_KEY`。表格 OCR 保持思考，`max_tokens` 至少 8192。只有非表格的短视觉请求才按模型关掉思考。SEC 8-K 需要带联系邮箱的 `SEC_USER_AGENT`，否则不会请求 sec.gov。CNBC、MarketWatch、华尔街日报、彭博和南华早报不需要 API key，只存标题和摘要。路透也不需要 API key，只存标题和链接。Reddit 不需要 API key，只存标题、摘要、链接、作者和时间；可选 `NEWS_REDDIT_SUBREDDITS` 改子版列表。`REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` 只是预留，当前采集不使用。
 
 ## 配置优先级
 

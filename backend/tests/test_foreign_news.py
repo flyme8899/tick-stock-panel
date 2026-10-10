@@ -87,6 +87,8 @@ def _clear_flags(monkeypatch) -> None:
         "NEWS_BLOOMBERG_ENABLED",
         "NEWS_SCMP_ENABLED",
         "NEWS_REUTERS_ENABLED",
+        "NEWS_REDDIT_ENABLED",
+        "NEWS_REDDIT_SUBREDDITS",
         "NEWS_SEC_ENABLED",
         "SEC_USER_AGENT",
     )
@@ -99,6 +101,8 @@ def _clear_flags(monkeypatch) -> None:
         "news_bloomberg_enabled",
         "news_scmp_enabled",
         "news_reuters_enabled",
+        "news_reddit_enabled",
+        "news_reddit_subreddits",
         "news_sec_enabled",
         "sec_user_agent",
     ):
@@ -409,6 +413,8 @@ def test_intervals_stay_flat_outside_the_a_share_session():
     assert interval_seconds("scmp", night) == 900
     assert interval_seconds("reuters", morning) == 900
     assert interval_seconds("reuters", night) == 900
+    assert interval_seconds("reddit", morning) == 75
+    assert interval_seconds("reddit", night) == 75
     assert interval_seconds("sec", morning) == 180
     assert interval_seconds("sec", night) == 180
 
@@ -443,18 +449,27 @@ def test_run_due_and_health_include_foreign_sources(tmp_path, monkeypatch):
     assert scmp["enabled"] is False
     assert reuters["configured"] is True
     assert reuters["enabled"] is False
+    reddit = next(row for row in health_payload()["sources"] if row["id"] == "reddit")
+    assert reddit["label"] == "Reddit"
+    assert reddit["configured"] is True
+    assert reddit["enabled"] is False
     monkeypatch.setenv("NEWS_SCMP_ENABLED", "true")
     monkeypatch.setenv("NEWS_REUTERS_ENABLED", "false")
+    monkeypatch.setenv("NEWS_REDDIT_ENABLED", "true")
     assert source_enabled("scmp") is True
     assert source_locked("scmp") is True
     assert source_enabled("reuters") is False
     assert source_locked("reuters") is True
+    assert source_enabled("reddit") is True
+    assert source_locked("reddit") is True
 
 
 def test_dsa_feed_pattern_accepts_foreign_sources():
     from app.api.news import _FEED_SOURCE_PATTERN
 
-    for source in ("cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "sec", "hot"):
+    for source in (
+        "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "reddit", "sec", "hot",
+    ):
         assert re.fullmatch(_FEED_SOURCE_PATTERN, source)
     assert re.fullmatch(_FEED_SOURCE_PATTERN, "sec.gov") is None
     assert re.fullmatch(_FEED_SOURCE_PATTERN, "cnbc-extra") is None

@@ -1,7 +1,8 @@
-"""财联社、华尔街见闻、外文 RSS、路透 sitemap、SEC Atom、ima 与宿主机收件箱的解析。
+"""财联社、华尔街见闻、外文 RSS、路透 sitemap、Reddit Atom、SEC Atom、ima 与宿主机收件箱的解析。
 
 网络调用由 service 注入，这里只负责请求参数和响应归一，方便离线测试。
 外文源只取标题、摘要、链接、guid 和发布时间，不读 content:encoded 或 Atom content。
+Reddit 是例外：摘要在 Atom content 里，解析时去掉 HTML 和页脚，不保存图片地址。
 """
 from __future__ import annotations
 
@@ -448,11 +449,18 @@ REUTERS_GOOGLE_NEWS = (
 )
 REUTERS_SECTIONS = frozenset({"business", "markets", "world"})
 _REUTERS_TITLE_SUFFIX = re.compile(r"\s+[-–—]\s+Reuters\s*$")
+# JSON 接口会 403。只请求 /new/.rss。匿名限额大约每分钟 1 次，间隔单独计。
+REDDIT_MIN_GAP = 75
+REDDIT_USER_AGENT = "tsp-news/1.0 (contact astock888888@mail.grokbot.com)"
+REDDIT_NAME = re.compile(r"^[A-Za-z0-9_]{2,21}$")
+_SUBMITTED_BY = re.compile(r"\bsubmitted by\b", re.IGNORECASE)
+_REDDIT_FOOTER = re.compile(r"\[(?:link|comments)\]", re.IGNORECASE)
+_REDDIT_IMAGE_URL = re.compile(r"https?://(?:[\w.-]+\.)?redd\.it/\S+", re.IGNORECASE)
 
 FOREIGN_RSS_SOURCES = frozenset({"cnbc", "marketwatch", "wsj", "bloomberg"})
-# 南华早报和路透固定 15 分钟，不跟 CNBC 那一档的 5 分钟。
+# 南华早报和路透固定 15 分钟，不跟 CNBC 那一档的 5 分钟。Reddit 另有 75 秒间隔。
 FOREIGN_SLOW_SOURCES = frozenset({"scmp", "reuters"})
-FOREIGN_SOURCES = FOREIGN_RSS_SOURCES | FOREIGN_SLOW_SOURCES | {"sec"}
+FOREIGN_SOURCES = FOREIGN_RSS_SOURCES | FOREIGN_SLOW_SOURCES | {"sec", "reddit"}
 _SUMMARY_LIMIT = 2000
 _TAG = re.compile(r"<[^>]+>")
 
@@ -734,6 +742,122 @@ def _reuters_article(url: str) -> bool:
 def _reuters_section(url: str) -> str:
     path = urlparse(url).path.strip("/")
     return path.split("/", 1)[0] if path else ""
+
+
+def reddit_feed_url(name: str) -> str:
+    """只生成 www.reddit.com 的 /new/.rss。不拼 .json，也不打开评论。"""
+    cleaned = (name or "").strip()
+    if cleaned.lower().startswith("r/"):
+        cleaned = cleaned[2:].strip()
+    cleaned = cleaned.lower()
+    if REDDIT_NAME.fullmatch(cleaned) is None:
+        raise ValueError(f"非法子版: {name}")
+    return f"https://www.reddit.com/r/{cleaned}/new/.rss"
+
+
+def reddit_retry_after_seconds(value: str, now: float) -> int | None:
+    """Retry-After 可以是秒数或 HTTP 日期。认不出来就交给指数退避。"""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if re.fullmatch(r"\d+", raw):
+        return int(raw)
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max(0, int(when.timestamp() - now))
+
+
+def reddit_backoff_seconds(header_seconds: int | None, stored_seconds: int) -> int:
+    """有 Retry-After 时至少等 75 秒。没有则从 75 秒起倍增，上限 1 小时。"""
+    cap = 3600
+    if header_seconds is not None:
+        return min(cap, max(REDDIT_MIN_GAP, header_seconds))
+    if stored_seconds <= 0:
+        return REDDIT_MIN_GAP
+    return min(cap, stored_seconds * 2)
+
+
+def parse_reddit_atom(xml_text: str, *, feed_url: str = "", subreddit: str = "") -> list[Item]:
+    """标题、摘要、评论链接、作者和时间。作者只取 name，不拼主页地址。
+
+    摘要来自 Atom content：去掉 HTML、submitted by 页脚和 redd.it 图片地址。
+    图片帖没有正文时用标题。不保存缩略图。
+    """
+    root = _xml_root(xml_text, empty="Reddit Atom 为空", invalid="Reddit Atom 解析失败")
+    if _local(root.tag) != "feed":
+        raise ValueError("不是 Reddit Atom")
+    sub = (subreddit or _subreddit_from_url(feed_url)).strip().lower()
+    items: list[Item] = []
+    for node in list(root):
+        if _local(node.tag) != "entry":
+            continue
+        title = _plain(_direct_text(node, "title"))[:180]
+        source_id = _direct_text(node, "id").strip()[:500]
+        link = _entry_link(node)[:500]
+        published = parse_feed_time(
+            _direct_text(node, "published") or _direct_text(node, "updated"),
+        )
+        summary = _reddit_summary(_element_text(node, "content"))
+        if not source_id or not link or published is None or not (title or summary):
+            continue
+        items.append(Item(
+            source="reddit",
+            source_id=source_id,
+            published_at=published,
+            author=_reddit_author(node)[:80],
+            title=title,
+            text=summary or title,
+            url=link,
+            raw={"guid": source_id, "feed": feed_url, "subreddit": sub},
+        ))
+    return items
+
+
+def _direct_text(node: ET.Element, name: str) -> str:
+    """只取这个子节点自己的文本。作者主页在 uri 里，不能用 itertext 拼进来。"""
+    for child in list(node):
+        if _local(child.tag) == name:
+            return (child.text or "").strip()
+    return ""
+
+
+def _element_text(node: ET.Element, name: str) -> str:
+    for child in list(node):
+        if _local(child.tag) == name:
+            return "".join(child.itertext())
+    return ""
+
+
+def _reddit_author(node: ET.Element) -> str:
+    for child in list(node):
+        if _local(child.tag) != "author":
+            continue
+        for sub in list(child):
+            if _local(sub.tag) == "name":
+                return (sub.text or "").strip()
+    return ""
+
+
+def _reddit_summary(html_text: str) -> str:
+    text = _plain(html_text, _SUMMARY_LIMIT)
+    text = _SUBMITTED_BY.split(text, maxsplit=1)[0]
+    text = _REDDIT_FOOTER.sub(" ", text)
+    text = _REDDIT_IMAGE_URL.sub(" ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()[:_SUMMARY_LIMIT]
+
+
+def _subreddit_from_url(url: str) -> str:
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    if len(parts) >= 2 and parts[0] == "r":
+        return parts[1]
+    return ""
 
 
 def _plain(value: str, limit: int = 2000) -> str:

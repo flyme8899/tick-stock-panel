@@ -35,6 +35,11 @@ _SOURCES = (
     ("bloomberg", "彭博", "彭博市场与科技 RSS，只存标题和摘要，不抓付费正文。"),
     ("scmp", "南华早报", "南华早报商业与中国经济 RSS，只存标题、摘要和链接，不抓付费正文。"),
     ("reuters", "路透", "路透商业、市场与国际 sitemap，只存标题和链接。主源失败时改用 Google News。"),
+    (
+        "reddit",
+        "Reddit",
+        "Reddit 的 wallstreetbets、stocks、investing 新帖 Atom，只存标题、摘要、链接、作者和时间。每次只请求一个子版。",
+    ),
     ("sec", "SEC 8-K", "SEC 最新 8-K Atom，只存标题、摘要和申报链接。"),
     ("hot", "TSP热门候选", "TSP 按多源提及算出的热门板块和个股，供大盘复盘引用。"),
 )

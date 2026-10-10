@@ -10,7 +10,7 @@ from app.config import settings
 
 SOURCE_ORDER = (
     "dws", "zsxq", "ima", "cls", "wscn", "etf_flow",
-    "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "sec",
+    "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "reddit", "sec",
 )
 
 SOURCE_LABELS = {
@@ -26,6 +26,7 @@ SOURCE_LABELS = {
     "bloomberg": "彭博",
     "scmp": "南华早报",
     "reuters": "路透",
+    "reddit": "Reddit",
     "sec": "SEC 8-K",
     "hot": "TSP热门候选",
 }
@@ -124,6 +125,43 @@ def sec_user_agent() -> str:
 
 def sec_configured() -> bool:
     return _EMAIL_IN_UA.search(sec_user_agent()) is not None
+
+
+_REDDIT_NAME = re.compile(r"^[A-Za-z0-9_]{2,21}$")
+_REDDIT_DEFAULT_SUBS = ("wallstreetbets", "stocks", "investing")
+
+
+def reddit_subreddits() -> tuple[str, ...]:
+    """逗号分隔。留空用默认三个子版。写了但没有合法名字时返回空，调用方不再请求。"""
+    env = os.environ.get("NEWS_REDDIT_SUBREDDITS")
+    if env is not None and env.strip():
+        return _parse_reddit_subs(env)
+    saved = str(getattr(settings, "news_reddit_subreddits", "") or "")
+    if saved.strip():
+        return _parse_reddit_subs(saved)
+    return _REDDIT_DEFAULT_SUBS
+
+
+def _parse_reddit_subs(raw: str) -> tuple[str, ...]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        name = part.strip()
+        if name.lower().startswith("r/"):
+            name = name[2:].strip()
+        name = name.lower()
+        if _REDDIT_NAME.fullmatch(name) is None or name in seen:
+            continue
+        seen.add(name)
+        found.append(name)
+    return tuple(found)
+
+
+def reddit_oauth_ready() -> bool:
+    """凭据是否都已填写。采集不调用这里，也不换 token。"""
+    client_id = _text_setting("REDDIT_CLIENT_ID", "reddit_client_id")
+    secret = _text_setting("REDDIT_CLIENT_SECRET", "reddit_client_secret")
+    return bool(client_id and secret)
 
 
 def source_configured(source: str) -> bool:
