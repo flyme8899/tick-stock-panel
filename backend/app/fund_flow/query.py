@@ -55,8 +55,11 @@ def health(data_dir: Path | None = None) -> dict:
 def stock_series(symbol: str, *, limit: int = 120, data_dir: Path | None = None) -> dict:
     root = _dir(data_dir)
     code = normalize.code6(symbol)
-    frame = store.read_range(root, "stock")
-    if code and not frame.is_empty():
+    try:
+        frame = store.read_range(root, "stock")
+    except (KeyError, pl.exceptions.ColumnNotFoundError):
+        frame = store.empty_frame("stock")
+    if code and not frame.is_empty() and "code" in frame.columns:
         frame = frame.filter(pl.col("code") == code).sort("trade_date")
     else:
         frame = store.empty_frame("stock")
@@ -84,8 +87,12 @@ def sectors(kind: str, *, trade_date: str | None = None, data_dir: Path | None =
         return {"kind": kind, "trade_date": None, "snapshot": None, "items": []}
     ranked = factors.latest_sector_ranks(root, kind, day)
     snapshot = "close"
-    part = store.read_partition(root, kind, day)
-    if not part.is_empty() and part.filter(pl.col("snapshot") == "close").is_empty():
+    part = _partition(root, kind, day)
+    if (
+        not part.is_empty()
+        and "snapshot" in part.columns
+        and part.filter(pl.col("snapshot") == "close").is_empty()
+    ):
         snapshot = "intraday"
     return {
         "kind": kind,
@@ -100,7 +107,9 @@ def margin(*, trade_date: str | None = None, detail_limit: int = 100, data_dir: 
     day = trade_date or store.latest_date(root, "margin")
     if day is None:
         return {"trade_date": None, "summary": [], "details": [], "detail_count": 0}
-    frame = store.read_partition(root, "margin", day)
+    frame = _partition(root, "margin", day)
+    if frame.is_empty() or "row_kind" not in frame.columns:
+        return {"trade_date": day, "summary": [], "details": [], "detail_count": 0}
     summary = frame.filter(pl.col("row_kind") == "summary").to_dicts()
     details = frame.filter(pl.col("row_kind") == "detail")
     return {
@@ -111,16 +120,27 @@ def margin(*, trade_date: str | None = None, detail_limit: int = 100, data_dir: 
     }
 
 
+def _partition(root: Path, kind: str, trade_date: str) -> pl.DataFrame:
+    """读一个分区。缺列或坏文件变成空表，不把 KeyError 变成 500。"""
+    try:
+        return store.read_partition(root, kind, trade_date)
+    except (KeyError, pl.exceptions.ColumnNotFoundError):
+        return store.empty_frame(kind)
+
+
 def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -> dict:
     root = _dir(data_dir)
     day = trade_date or store.latest_date(root, "etf_shares")
     if day is None:
         return {"trade_date": None, "etf_flow_linked": False, "items": []}
-    frame = store.read_partition(root, "etf_shares", day)
+    frame = _partition(root, "etf_shares", day)
     linked = _etf_flow_map(root, day)
     items = []
     for row in frame.to_dicts():
-        flow = linked.get(row["code"])
+        code = row.get("code")
+        if not code:
+            continue
+        flow = linked.get(code)
         items.append({**row, "flow_net": flow, "etf_flow_linked": flow is not None})
     return {
         "trade_date": day,
@@ -203,12 +223,19 @@ def dsa_context(data_dir: Path | None = None) -> dict:
     published = None
     stock_day = store.latest_date(root, "stock")
     if stock_day:
-        frame = store.read_partition(root, "stock", stock_day).sort("main_net", descending=True, nulls_last=True)
-        top = [row for row in frame.head(5).to_dicts() if row.get("main_net") is not None]
+        frame = _partition(root, "stock", stock_day)
+        if "main_net" in frame.columns:
+            frame = frame.sort("main_net", descending=True, nulls_last=True)
+            top = [
+                row for row in frame.head(5).to_dicts()
+                if row.get("main_net") is not None and row.get("symbol")
+            ]
+        else:
+            top = []
         if top:
             published = stock_day
             lines.append("主力净流入居前: " + "；".join(
-                f"{row['symbol']} {_yi(row['main_net'])}" for row in top
+                f"{row.get('symbol')} {_yi(row.get('main_net'))}" for row in top
             ))
     for kind, label in (("industry", "行业"), ("concept", "概念")):
         day = store.latest_date(root, kind)
@@ -224,8 +251,8 @@ def dsa_context(data_dir: Path | None = None) -> dict:
         ))
     south_day = store.latest_date(root, "southbound")
     if south_day:
-        south = store.read_partition(root, "southbound", south_day)
-        if not south.is_empty() and south["net_flow"][0] is not None:
+        south = _partition(root, "southbound", south_day)
+        if not south.is_empty() and "net_flow" in south.columns and south["net_flow"][0] is not None:
             published = published or south_day
             lines.append(f"南向净流入 {_yi(south['net_flow'][0])}")
     if not lines:
@@ -282,8 +309,8 @@ def _stocks_today(root: Path) -> dict:
     day = store.latest_date(root, "stock")
     if day is None:
         return {"trade_date": None, "items": []}
-    frame = store.read_partition(root, "stock", day)
-    if frame.is_empty():
+    frame = _partition(root, "stock", day)
+    if frame.is_empty() or "main_net" not in frame.columns:
         return {"trade_date": day, "items": []}
     ranked = (
         frame.filter(pl.col("main_net").is_not_null())
@@ -307,7 +334,7 @@ def _stocks_5d(root: Path) -> dict:
         .sort("ff_main_net_5d", descending=True)
         .head(_BOARD_STOCK_LIMIT)
     )
-    symbols = store.read_partition(root, "stock", str(trade_date))
+    symbols = _partition(root, "stock", str(trade_date))
     if not symbols.is_empty():
         ranked = ranked.join(symbols.select("code", "symbol"), on="code", how="left")
     else:
@@ -319,8 +346,8 @@ def _margin_trend(root: Path) -> dict:
     dates = store.list_dates(root, "margin")[-_BOARD_HISTORY:]
     items = []
     for day in dates:
-        frame = store.read_partition(root, "margin", day)
-        if frame.is_empty():
+        frame = _partition(root, "margin", day)
+        if frame.is_empty() or "row_kind" not in frame.columns:
             continue
         summary = frame.filter(pl.col("row_kind") == "summary")
         items.extend(summary.select("trade_date", "market", "margin_balance", "short_balance").to_dicts())
@@ -328,8 +355,11 @@ def _margin_trend(root: Path) -> dict:
 
 
 def _southbound_trend(root: Path) -> dict:
-    frame = store.read_range(root, "southbound")
-    if frame.is_empty():
+    try:
+        frame = store.read_range(root, "southbound")
+    except (KeyError, pl.exceptions.ColumnNotFoundError):
+        return {"items": []}
+    if frame.is_empty() or "trade_date" not in frame.columns or "net_flow" not in frame.columns:
         return {"items": []}
     ranked = frame.sort("trade_date").tail(_BOARD_HISTORY)
     return {"items": ranked.select("trade_date", "net_flow").to_dicts()}
@@ -341,29 +371,33 @@ def _etf_changes(root: Path) -> dict:
         return {"trade_date": None, "prev_trade_date": None, "items": []}
     day = dates[-1]
     prev_day = dates[-2] if len(dates) > 1 else None
-    current = store.read_partition(root, "etf_shares", day)
+    current = _partition(root, "etf_shares", day)
     previous: dict[str, float] = {}
     if prev_day is not None:
-        prev = store.read_partition(root, "etf_shares", prev_day)
+        prev = _partition(root, "etf_shares", prev_day)
         for row in prev.to_dicts():
-            if row.get("shares") is not None:
-                previous[row["code"]] = row["shares"]
+            code = row.get("code")
+            if code and row.get("shares") is not None:
+                previous[code] = row["shares"]
     linked = _etf_flow_map(root, day)
     broad = []
     others = []
     for row in current.to_dicts():
-        label = _broad_label(row.get("code"), row.get("name"))
-        prev_shares = previous.get(row["code"])
+        code = row.get("code")
+        if not code:
+            continue
+        label = _broad_label(code, row.get("name"))
+        prev_shares = previous.get(code)
         shares = row.get("shares")
         change = None if prev_shares is None or shares is None else shares - prev_shares
         item = {
-            "code": row.get("code"),
+            "code": code,
             "name": row.get("name"),
             "shares": shares,
             "prev_shares": prev_shares,
             "share_change": change,
             "broad": label,
-            "flow_net": linked.get(row["code"]),
+            "flow_net": linked.get(code),
         }
         if label:
             broad.append(item)

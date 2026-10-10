@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from app.fund_flow.units import (
-    BARE_WAN_SHARES,
+    BARE_SHARES,
     BARE_YI,
     BARE_YUAN,
     money_to_yuan,
@@ -193,17 +193,17 @@ def normalize_margin_detail(rows: list[dict], *, market: str, trade_date: str) -
 
 
 def normalize_etf_shares(rows: list[dict]) -> list[dict]:
-    """上交所基金份额。裸数字是万份，入库为份。"""
+    """上交所基金份额。akshare 返回的裸 ``基金份额`` 已是份，入库不再乘 10000。"""
     out = []
     for row in rows:
         code = code6(_text(row, "code", "基金代码", "symbol"))
-        trade_date = _date(_text(row, "trade_date", "统计日期", "日期"))
+        trade_date = _date(_text(row, "trade_date", "统计日期", "日期", "stat_date"))
         if not code or not trade_date:
             continue
         if "shares" in row and row.get("shares") is not None:
-            shares = shares_to_count(row.get("shares"), bare=BARE_YUAN)
+            shares = shares_to_count(row.get("shares"), bare=BARE_SHARES)
         else:
-            shares = shares_to_count(row.get("基金份额"), bare=BARE_WAN_SHARES)
+            shares = shares_to_count(row.get("基金份额"), bare=BARE_SHARES)
         if shares is None:
             continue
         out.append({

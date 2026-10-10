@@ -87,12 +87,21 @@ def test_sector_rank_and_etf_share_units() -> None:
     assert ranked[0]["net_inflow"] == 2e8
     assert ranked[1]["net_inflow"] == -0.5e8
     shares = normalize.normalize_etf_shares([{
+        "基金代码": "510300",
+        "基金简称": "沪深300ETF",
+        "统计日期": "2026-10-09",
+        "基金份额": 2.439e10,
+    }])
+    # akshare 1.19.1 已把万份乘 10000，510300 在 2026-10-09 是 243.9 亿份。
+    assert shares[0]["code"] == "510300"
+    assert shares[0]["shares"] == pytest.approx(2.439e10)
+    tagged = normalize.normalize_etf_shares([{
         "基金代码": "510050",
         "基金简称": "50ETF",
         "统计日期": "2026-10-09",
-        "基金份额": 5533716.68,
+        "基金份额": "553.371668万",
     }])
-    assert shares[0]["shares"] == pytest.approx(5533716.68 * 1e4)
+    assert tagged[0]["shares"] == pytest.approx(553.371668 * 1e4)
 
 
 def test_partition_merge_is_atomic(tmp_path) -> None:
@@ -498,3 +507,95 @@ def test_worker_runs_stock_without_taking_run_slot(tmp_path, monkeypatch) -> Non
     assert ran == ["stock"]
     assert calls["n"] == 1
     assert store.read_partition(tmp_path, "stock", "2026-10-09")["main_net"][0] == 8
+
+
+def _raw_parquet(root, kind: str, trade_date: str, frame: pl.DataFrame) -> None:
+    path = root / "fund_flow" / kind / f"date={trade_date}"
+    path.mkdir(parents=True)
+    frame.write_parquet(path / "part.parquet")
+
+
+def test_board_normalizes_raw_etf_partition_and_skips_other_bad_kinds(tmp_path) -> None:
+    _raw_parquet(tmp_path, "etf_shares", "2026-10-08", pl.DataFrame({
+        "序号": [1],
+        "基金代码": ["510300"],
+        "基金简称": ["沪深300ETF"],
+        "ETF类型": ["股票型"],
+        "统计日期": ["2026-10-08"],
+        "基金份额": [2.400e10],
+        "stat_date": ["2026-10-08"],
+    }))
+    _raw_parquet(tmp_path, "etf_shares", "2026-10-09", pl.DataFrame({
+        "序号": [1, 2],
+        "基金代码": ["510300", "588000"],
+        "基金简称": ["沪深300ETF", "科创50ETF"],
+        "ETF类型": ["股票型", "股票型"],
+        "统计日期": ["2026-10-09", "2026-10-09"],
+        "基金份额": [2.439e10, 4.10e9],
+        "stat_date": ["2026-10-09", "2026-10-09"],
+    }))
+    _raw_parquet(tmp_path, "stock", "2026-10-09", pl.DataFrame({"foo": [1]}))
+    _raw_parquet(tmp_path, "margin", "2026-10-09", pl.DataFrame({"融资余额": [1.0]}))
+    _raw_parquet(tmp_path, "southbound", "2026-10-09", pl.DataFrame({"当日成交净买额": [1.0]}))
+    _raw_parquet(tmp_path, "industry", "2026-10-09", pl.DataFrame({"行业": ["半导体"]}))
+    payload = query.board(tmp_path)
+    broad = {item["code"]: item for item in payload["etf_shares"]["items"]}
+    assert broad["510300"]["shares"] == pytest.approx(2.439e10)
+    assert broad["510300"]["share_change"] == pytest.approx(0.039e10)
+    assert broad["510300"]["broad"] == "沪深300"
+    assert broad["588000"]["shares"] == pytest.approx(4.10e9)
+    assert payload["stocks_today"]["items"] == []
+    assert payload["margin"]["items"] == []
+    assert payload["southbound"]["items"] == []
+    assert payload["industry"]["items"] == []
+    assert query.margin(data_dir=tmp_path)["summary"] == []
+    assert query.etf_shares(data_dir=tmp_path)["items"][0]["code"] == "510300"
+
+
+def test_write_raw_etf_normalizes_and_rejects_unknown_columns(tmp_path) -> None:
+    wrote = store.write_rows(tmp_path, "etf_shares", "2026-10-09", [{
+        "序号": 1,
+        "基金代码": "510300",
+        "基金简称": "沪深300ETF",
+        "ETF类型": "股票型",
+        "统计日期": "2026-10-09",
+        "基金份额": 2.439e10,
+        "stat_date": "2026-10-09",
+    }])
+    assert wrote == 1
+    frame = pl.read_parquet(tmp_path / "fund_flow" / "etf_shares" / "date=2026-10-09" / "part.parquet")
+    assert frame.columns == list(store._SCHEMAS["etf_shares"])
+    assert frame["shares"][0] == pytest.approx(2.439e10)
+    with pytest.raises(ValueError, match="未知列"):
+        store.write_rows(tmp_path, "stock", "2026-10-09", [{
+            "code": "600519",
+            "trade_date": "2026-10-09",
+            "主力净流入": 1,
+        }])
+
+
+def test_etf_backfill_writes_normalized_rows(tmp_path) -> None:
+    def ak(name, **kwargs):
+        assert name == "fund_etf_scale_sse"
+        day = f"{kwargs['date'][:4]}-{kwargs['date'][4:6]}-{kwargs['date'][6:]}"
+        return [{
+            "序号": 1,
+            "基金代码": "510300",
+            "基金简称": "沪深300ETF",
+            "ETF类型": "股票型",
+            "统计日期": day,
+            "基金份额": 2.439e10,
+            "stat_date": day,
+        }]
+
+    result = jobs.backfill_etf_shares(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_dates=["2026-10-08", "2026-10-09"],
+        breaker=CircuitBreaker("akshare", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+    )
+    assert result.wrote == 2
+    saved = store.read_range(tmp_path, "etf_shares").sort("trade_date")
+    assert saved["shares"].to_list() == pytest.approx([2.439e10, 2.439e10])
+    assert "基金份额" not in saved.columns
