@@ -1984,6 +1984,29 @@ class KlineRepository:
             return None
         return None
 
+    # 资产类型 → 日K视图名。往前扩展历史时按族取当前最早日, 用于算新起点。
+    _EARLIEST_DATE_VIEWS = {
+        "stock": "kline_daily",
+        "etf": "kline_etf_daily",
+        "index": "kline_index_daily",
+    }
+
+    def earliest_daily_date_for(self, asset_type: str = "stock") -> date | None:
+        """按资产类型返回本地日K的最早日期。
+
+        stock/etf/index 各自独立落盘, 深度可能不同 (例如只补过股票时
+        ETF 仍停在近一年)。未知类型回退到股票口径。
+        """
+        view = self._EARLIEST_DATE_VIEWS.get(asset_type, "kline_daily")
+        try:
+            res = self.execute_one(f"SELECT min(date) FROM {view}")  # noqa: S608 - view 来自白名单
+            if res and res[0]:
+                d = res[0]
+                return d if isinstance(d, date) else date.fromisoformat(str(d))
+        except Exception:
+            return None
+        return None
+
     def earliest_minute_date(self) -> date | None:
         """本地分钟K数据的最早日期。"""
         try:

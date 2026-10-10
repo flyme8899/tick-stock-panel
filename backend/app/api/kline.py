@@ -1424,7 +1424,8 @@ async def clear_minute(request: Request):
 async def extend_history(request: Request):
     """向前扩展历史日K数据 — 独立于盘后管道。
 
-    body: { "value": int, "unit": "day"|"month"|"year" }
+    body: { "value": int, "unit": "day"|"month"|"year", "asset_type": "stock"|"etf"|"index" }
+    asset_type 缺省为 stock (兼容旧调用)。三族各自独立落盘, 深度需分别补。
     返回 job_id,可轮询 /api/pipeline/jobs 查看进度。
     """
     import asyncio
@@ -1433,10 +1434,13 @@ async def extend_history(request: Request):
         body = await request.json()
         value = body.get("value")
         unit = body.get("unit", "month")
+        asset_type = body.get("asset_type", "stock")
         if not value or value <= 0:
             raise HTTPException(status_code=400, detail="value 必须为正整数")
         if unit not in ("day", "month", "year"):
             raise HTTPException(status_code=400, detail="unit 只支持 day/month/year")
+        if asset_type not in ("stock", "etf", "index"):
+            raise HTTPException(status_code=400, detail="asset_type 只支持 stock/etf/index")
 
         repo = request.app.state.repo
         capset = request.app.state.capabilities
@@ -1467,7 +1471,8 @@ async def extend_history(request: Request):
             try:
                 result = await loop.run_in_executor(
                     _long_task_executor, run_with_capacity, job_id,
-                    lambda: run_extend_history(repo, capset, value, unit, on_progress=progress),
+                    lambda: run_extend_history(repo, capset, value, unit,
+                                               on_progress=progress, asset_type=asset_type),
                 )
                 if "error" in result:
                     job_store.fail(job_id, result["error"])
