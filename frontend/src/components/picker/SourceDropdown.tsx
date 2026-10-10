@@ -9,6 +9,7 @@ export interface SourceOption {
   description?: string
   mentions?: number
   sourceCount?: number
+  redCount?: number
   updatedAt?: string
   concepts?: string[]
   headline?: string | null
@@ -109,7 +110,12 @@ export function SourceDropdown({
                 {on && <Check className="h-2.5 w-2.5" />}
               </span>
               <span className="min-w-0">
-                <span className="block whitespace-normal break-words text-xs text-foreground">{item.name}</span>
+                <span className="block whitespace-normal break-words text-xs text-foreground">
+                  {item.name}
+                  {(item.redCount ?? 0) > 0 && (
+                    <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
+                  )}
+                </span>
                 {(item.importance || item.category || item.direction) && (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">
                     {[item.importance, item.confirmationLabel, item.category, item.direction, ...(item.mappedStocks ?? []).slice(0, 2)].filter(Boolean).join(' · ')}

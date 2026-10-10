@@ -45,6 +45,20 @@ class Item:
     raw: dict = field(default_factory=dict)
 
 
+def is_red(source: str, level: object) -> bool:
+    """财联社 A/B 和华尔街见闻评分不低于 2 算加红。C 和 1 是普通稿。"""
+    src = str(source or "").strip().lower()
+    text = str(level or "").strip()
+    if src == "cls":
+        return text.upper() in {"A", "B"}
+    if src == "wscn":
+        try:
+            return float(text) >= 2
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 def parse_time(value) -> datetime | None:
     if value is None or value == "":
         return None

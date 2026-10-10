@@ -819,6 +819,7 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             "description": f"提及 {mentions} · 来源 {source_count}",
             "mentions": mentions,
             "source_count": source_count,
+            "red_count": int(event.get("red_count") or 0),
             "updated_at": first_seen,
             "first_seen": first_seen,
             "concepts": concepts,

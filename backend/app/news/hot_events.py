@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 
 from app.market_time import CN_TZ, cn_now, current_trading_day
-from app.news.collectors import parse_time
+from app.news.collectors import is_red, parse_time
 from app.news.extract import _usable_sector_name
 from app.news.store import NewsStore
 
@@ -35,6 +35,8 @@ _LOOKBACK_DAYS = 21
 _CACHE_SECONDS = 600
 _CLUSTER_WINDOW = timedelta(hours=6)
 _HEAT_HALF_LIFE_HOURS = 12
+# 加红稿在热度里按 2.5 条计，普通稿仍按 1 条。
+_RED_MENTION_WEIGHT = 2.5
 _LLM_PER_PASS = 8
 _TITLE_LIMIT = 20
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
@@ -366,9 +368,11 @@ def _doc(row: dict) -> dict | None:
     if not entities and _subject_is_vague(lead):
         entities = _explicit_entities(summary[:200])
     tokens = _title_tokens(lead, obj, concepts, title or summary[:80], entities)
+    source = str(row.get("source") or "")
     return {
         "item_id": row.get("id"),
-        "source": str(row.get("source") or ""),
+        "source": source,
+        "red": is_red(source, row.get("level")),
         "published": published,
         "title": title or summary[:80],
         "entity_text": entity_text,
@@ -486,6 +490,8 @@ def _event_from(members: list[dict], now: datetime) -> dict:
     age_hours = max(0.0, (now - latest).total_seconds() / 3600)
     decay = math.exp(-math.log(2) * age_hours / _HEAT_HALF_LIFE_HOURS)
     mentions = len(members)
+    red_count = sum(1 for item in members if item.get("red"))
+    weighted_mentions = (mentions - red_count) + red_count * _RED_MENTION_WEIGHT
     source_count = len(sources) or 1
     name = _keyword_title(members)
     focused = _representative_members(members, name)
@@ -550,10 +556,11 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         "headline": headline,
         "headlines": headlines,
         "mentions": mentions,
+        "red_count": red_count,
         "source_count": len(sources),
         "first_seen": first_seen,
         "updated_at": first_seen,
-        "heat": round(mentions * source_count * decay, 4),
+        "heat": round(weighted_mentions * source_count * decay, 4),
         "mentioned_stocks": mentioned,
         "item_ids": item_ids,
         "_latest": latest,
@@ -680,6 +687,8 @@ def _drop_minor(event: dict) -> bool:
     if label != "一般":
         return False
     if float(event["breakdown"]["mapping"]) > 0:
+        return False
+    if int(event.get("red_count") or 0) > 0:
         return False
     return int(event.get("mentions") or 0) <= 1 and int(event.get("source_count") or 0) <= 1
 

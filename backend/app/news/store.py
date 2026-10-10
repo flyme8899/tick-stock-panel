@@ -256,7 +256,7 @@ class NewsStore:
         with self._lock:
             rows = list(self._conn.execute(
                 """
-                SELECT id, source, published_at, title, clean_text, extra_json
+                SELECT id, source, published_at, title, clean_text, extra_json, level
                 FROM news_items
                 WHERE published_at >= ? AND published_at < ?
                 """,

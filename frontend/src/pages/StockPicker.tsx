@@ -213,6 +213,7 @@ export function StockPicker() {
               name: item.name,
               mentions: item.mentions,
               sourceCount: item.source_count,
+              redCount: item.red_count,
               updatedAt: item.first_seen ?? item.updated_at ?? undefined,
               concepts: item.concepts,
               headline: item.headline ?? undefined,

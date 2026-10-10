@@ -534,3 +534,69 @@ def test_finance_ministry_items_merge_and_subjects_map_to_concepts(tmp_path):
     again = top_hot_events(NOW + timedelta(minutes=11))
     again_fiscal = next(event for event in again["events"] if "财政" in event["name"])
     assert again_fiscal["key"] == fiscal["key"]
+
+
+def test_is_red_uses_cls_level_and_wscn_score():
+    from app.news.collectors import is_red
+
+    assert is_red("cls", "A")
+    assert is_red("cls", "b")
+    assert not is_red("cls", "C")
+    assert not is_red("cls", "")
+    assert is_red("wscn", "2")
+    assert is_red("wscn", 3)
+    assert not is_red("wscn", "1")
+    assert not is_red("wscn", "1.5")
+    assert not is_red("reddit", "A")
+
+
+def test_red_items_count_more_and_a_single_red_item_stays_listed(tmp_path):
+    """加红按 2.5 条计热度；没有映射的单条普通稿不进榜，加红的留下。"""
+    from app.news.service import event_detail, hot_event_listing
+
+    reset_store_for_tests(tmp_path / "red.sqlite")
+
+    def add(source_id: str, title: str, minute: int, *, source: str, level: str, sector: str) -> None:
+        mentions = [("sector", sector, sector, "", "structured")]
+        status = get_store().insert_item(
+            source=source,
+            source_id=source_id,
+            published_at=_publish(date(2026, 10, 9), 11, minute),
+            author="",
+            title=title,
+            clean_text=title,
+            raw=None,
+            content_hash=source_id,
+            url="",
+            level=level,
+            media_ids=[],
+            extra=None,
+            mentions=mentions,
+        )
+        assert status == "inserted"
+
+    add("rubber", "橡胶价格大涨", 0, source="cls", level="A", sector="橡胶")
+    add("soy", "豆粕价格走高", 0, source="cls", level="C", sector="豆粕")
+    add("wscn-red", "原油价格走高", 0, source="wscn", level="2", sector="原油")
+    add("plain", "螺纹价格走高", 5, source="cls", level="", sector="")
+
+    events = top_hot_events(NOW)["events"]
+    names = [event["name"] for event in events]
+    assert "螺纹价格走高" not in names
+    rubber = next(event for event in events if "橡胶" in event["name"])
+    soy = next(event for event in events if "豆粕" in event["name"])
+    crude = next(event for event in events if "原油" in event["name"])
+    assert rubber["red_count"] == 1
+    assert rubber["mentions"] == 1
+    assert soy["red_count"] == 0
+    assert crude["red_count"] == 1
+    assert abs(rubber["heat"] / soy["heat"] - 2.5) < 0.01
+
+    listed = hot_event_listing(NOW)["events"]
+    listed_rubber = next(event for event in listed if "橡胶" in event["name"])
+    assert listed_rubber["red_count"] == 1
+    detail = event_detail(listed_rubber["key"], now=NOW)
+    assert detail["items"][0]["red"] is True
+    assert detail["items"][0]["level"] == "A"
+    soy_detail = event_detail(next(event["key"] for event in listed if "豆粕" in event["name"]), now=NOW)
+    assert soy_detail["items"][0]["red"] is False
