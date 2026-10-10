@@ -28,7 +28,13 @@ from app.news.collectors import (
 )
 from app.news.config import feed_matches, group_id, source_configured
 from app.news.extract import Lexicon, StructuredStock, canonical_symbol
-from app.news.host_collector import CommandRejectedError, assert_readonly, run_host
+from app.news.host_collector import (
+    CommandRejectedError,
+    _run_dws,
+    assert_readonly,
+    dws_cursor_stamp,
+    run_host,
+)
 from app.news.scoring import MentionEvent, score_candidates
 from app.news.service import (
     _ima_post,
@@ -37,6 +43,7 @@ from app.news.service import (
     feed_for_source,
     get_store,
     hot_candidates,
+    hot_messages,
     ingest_items,
     reset_store_for_tests,
 )
@@ -131,6 +138,65 @@ def test_extract_codes_names_and_ambiguous():
     assert structured[0].key == "300037.SZ"
     assert canonical_symbol("201234") == ""
     assert not any(item.code.startswith("20") for item in lexicon.extract("代码 201234 无标的"))
+
+
+def test_sector_fragments_and_fund_names_do_not_become_candidates():
+    lexicon = Lexicon(
+        [
+            ("512100.SH", "中证1000ETF南方", "512100"),
+            ("600519.SH", "贵州茅台", "600519"),
+        ],
+        ["50", "A50", "500", "中", "沪50", "中证500", "半导体"],
+    )
+    text = "350亿、50万吨、标普500、富时A50，中证5000与中证500，还有中证1000ETF南方"
+    mentions = lexicon.extract(text)
+    sectors = {item.key for item in mentions if item.kind == "sector"}
+    stocks = {item.key for item in mentions if item.kind == "stock"}
+    assert sectors == {"中证500"}
+    assert stocks == set()
+    structured = lexicon.extract("", None, ["50", "中", "沪50", "A50", "中证500"])
+    assert {item.key for item in structured if item.kind == "sector"} == {"中证500"}
+    coded = lexicon.extract("代码 512100.SH")
+    assert {item.key for item in coded} == {"512100.SH"}
+
+
+def test_legacy_bad_sector_names_leave_the_hot_list(tmp_path):
+    path = tmp_path / "news.sqlite"
+    reset_store_for_tests(path)
+    when = cn_now()
+    ingest_items([
+        Item(
+            source="cls",
+            source_id="sec-1",
+            published_at=when,
+            text="白酒板块的讨论写得长一些，避免被当成短讯。",
+            title="白酒",
+            sectors=["白酒"],
+        ),
+    ], Lexicon([], ["白酒"]))
+    store = get_store()
+    item_id = store._conn.execute("SELECT id FROM news_items").fetchone()["id"]
+    store._conn.executemany(
+        """
+        INSERT INTO news_mentions (item_id, kind, key, name, code, origin)
+        VALUES (?, 'sector', ?, ?, '', 'text')
+        """,
+        [(item_id, key, key) for key in ("50", "中", "A50", "沪50")],
+    )
+    store._conn.commit()
+    ranked = hot_candidates(kind="sector", window_hours=24, baseline_days=1)
+    assert [item.key for item in ranked] == ["白酒"]
+    feed = feed_for_source("cls", limit=10)
+    assert feed["items"][0]["sectors"] == ["白酒"]
+    assert hot_messages("sector", "50") == []
+    reset_store_for_tests(path)
+    keys = [
+        row["key"]
+        for row in get_store()._conn.execute(
+            "SELECT key FROM news_mentions WHERE kind = 'sector' ORDER BY key"
+        )
+    ]
+    assert keys == ["白酒"]
 
 
 def test_extract_rejects_bare_numbers_and_attributions():
@@ -253,6 +319,23 @@ def test_inbox_parse_and_error_source(tmp_path):
     ])
     assert page["has_more"] is False
     assert topics[0].source_id == "t1"
+    brief, brief_page = parse_zsxq_payload({
+        "topics_brief": [{
+            "topic_id": "8848",
+            "type": "talk",
+            "title": "纳指调研",
+            "digest": "只在 topics_brief 里的正文",
+            "create_time": "2026-10-09T11:00:00.000+0800",
+            "owner": {"name": "作者", "user_id": "1"},
+        }],
+        "has_more": True,
+        "next_end_time": "2026-10-09T11:00:00.000+0800",
+    })
+    assert brief_page["has_more"] is True
+    assert brief_page["next_end_time"] == "2026-10-09T11:00:00.000+0800"
+    assert brief[0].source_id == "8848"
+    assert brief[0].text == "只在 topics_brief 里的正文"
+    assert brief[0].author == "作者"
     folders = latest_date_folders([
         {"name": "2026-10-8", "folder_id": "new"},
         {"name": "20261007", "folder_id": "old"},
@@ -408,6 +491,193 @@ def test_ima_kb_fields_and_pagination(tmp_path, monkeypatch):
     assert len(calls) == 8
 
 
+def test_cls_and_wscn_page_back_until_a_seen_id(tmp_path):
+    from app.news.collectors import (
+        Item,
+        cls_next_last_time,
+        cls_params,
+        paginate_until_seen,
+        parse_cls,
+        parse_wscn,
+        wscn_next_cursor,
+        wscn_params,
+    )
+    from app.news.service import collect_cls, collect_wscn
+
+    cls_page = {
+        "errno": 0,
+        "msg": "ok",
+        "data": {
+            "roll_data": [
+                {
+                    "id": 2500998,
+                    "ctime": 1791585757,
+                    "title": "",
+                    "content": "财联社电报：贵州茅台获机构调研",
+                    "shareurl": "https://www.cls.cn/detail/2500998",
+                    "level": "B",
+                    "is_ad": 0,
+                    "stock_list": [{"name": "贵州茅台", "StockID": "sh600519"}],
+                    "subjects": [{"subject_name": "白酒"}],
+                    "plate_list": [],
+                },
+                {"id": 9, "ctime": 1791500000, "is_ad": 1, "content": "广告"},
+            ],
+        },
+    }
+    assert cls_next_last_time(cls_page) == "1791585757"
+    assert "last_time" not in cls_params()
+    assert cls_params("1791585757")["last_time"] == "1791585757"
+    parsed = parse_cls(cls_page)
+    assert parsed[0].source_id == "2500998"
+    assert parsed[0].stocks[0].code == "sh600519"
+    assert parsed[0].sectors == ["白酒"]
+
+    wscn_page = {
+        "code": 20000,
+        "message": "OK",
+        "data": {
+            "items": [{
+                "id": 3176473,
+                "title": "",
+                "content_text": "华尔街见闻快讯正文",
+                "content": "<p>华尔街见闻快讯正文</p>",
+                "display_time": 1791586996,
+                "uri": "https://wallstreetcn.com/livenews/3176473",
+                "score": 1,
+                "author": {"display_name": "罗俊", "id": 694840},
+                "symbols": [{"name": "贵州茅台", "symbol": "600519.SH"}],
+                "related_themes": [{"name": "白酒"}],
+            }],
+            "next_cursor": "1791586211",
+            "polling_cursor": "3176473",
+        },
+    }
+    assert wscn_next_cursor(wscn_page) == "1791586211"
+    assert "cursor" not in wscn_params("global-channel")
+    assert wscn_params("a-stock-channel", "1791586211")["cursor"] == "1791586211"
+    wscn_item = parse_wscn(wscn_page, "global-channel")[0]
+    assert wscn_item.author == "罗俊"
+    assert wscn_item.url == "https://wallstreetcn.com/livenews/3176473"
+    assert wscn_item.sectors == ["白酒"]
+
+    when = datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ)
+    walked = []
+
+    def walk(token):
+        walked.append(token)
+        if token is None:
+            return [Item("cls", "3", when)], "2", False
+        if token == "2":
+            return [Item("cls", "1", when)], "1", True
+        raise AssertionError(token)
+
+    assert [item.source_id for item in paginate_until_seen(walk)] == ["3", "1"]
+    assert walked == [None, "2"]
+
+    capped = []
+
+    def always_new(token):
+        index = 0 if token is None else int(token)
+        capped.append(index)
+        return [Item("cls", str(index), when)], str(index + 1), False
+
+    assert len(paginate_until_seen(always_new, cap=10)) == 10
+    assert capped == list(range(10))
+
+    reset_store_for_tests(tmp_path / "news.sqlite")
+    store = get_store()
+    store.insert_item(
+        source="cls", source_id="111", published_at=when, author="", title="旧电报",
+        clean_text="已经见过", raw={}, content_hash="cls-111", url="", level="",
+        media_ids=[], extra={}, mentions=[],
+    )
+    store.insert_item(
+        source="wscn", source_id="3176000", published_at=when, author="", title="旧快讯",
+        clean_text="已经见过", raw={}, content_hash="wscn-old", url="", level="",
+        media_ids=[], extra={}, mentions=[],
+    )
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def roll(rows):
+        return {"errno": 0, "data": {"roll_data": [
+            {
+                "id": item_id,
+                "ctime": stamp,
+                "content": f"电报{item_id}",
+                "shareurl": f"https://www.cls.cn/detail/{item_id}",
+                "level": "C",
+            }
+            for item_id, stamp in rows
+        ]}}
+
+    cls_calls = []
+
+    class ClsClient:
+        def get(self, url, params=None, headers=None):
+            cls_calls.append(dict(params or {}))
+            last = (params or {}).get("last_time")
+            if not last:
+                return Response(roll([(2500998, 1791585757), (2500997, 1791585267)]))
+            if last == "1791585267":
+                return Response(roll([(2500996, 1791585160), (111, 1791580000)]))
+            raise AssertionError(last)
+
+    result = collect_cls(ClsClient())
+    assert [call.get("last_time") for call in cls_calls] == [None, "1791585267"]
+    assert result["inserted"] == 3
+    assert result["duplicate"] == 1
+
+    def lives(rows, cursor):
+        return {"code": 20000, "data": {
+            "items": [
+                {
+                    "id": item_id,
+                    "content_text": f"快讯{item_id}",
+                    "display_time": 1791586996,
+                    "uri": f"https://wallstreetcn.com/livenews/{item_id}",
+                    "author": {"display_name": "罗俊"},
+                }
+                for item_id in rows
+            ],
+            "next_cursor": cursor,
+            "polling_cursor": str(rows[0]),
+        }}
+
+    wscn_calls = []
+
+    class WscnClient:
+        def get(self, url, params=None, headers=None):
+            channel = (params or {})["channel"]
+            cursor = (params or {}).get("cursor")
+            wscn_calls.append((channel, cursor))
+            if channel == "global-channel":
+                return Response(lives([3176000], "1791589999"))
+            if cursor is None:
+                return Response(lives([3176456], "1791580518"))
+            if cursor == "1791580518":
+                return Response(lives([3176449, 3176000], "1791579884"))
+            raise AssertionError(cursor)
+
+    result = collect_wscn(WscnClient())
+    assert wscn_calls == [
+        ("global-channel", None),
+        ("a-stock-channel", None),
+        ("a-stock-channel", "1791580518"),
+    ]
+    assert result["inserted"] == 2
+    assert result["duplicate"] == 2
+
+
 def test_inbox_drops_disabled_files_blocking_the_queue(tmp_path, monkeypatch):
     reset_store_for_tests(tmp_path / "news.sqlite")
     monkeypatch.setattr("app.news.service.source_enabled", lambda source: source == "zsxq")
@@ -450,6 +720,23 @@ def test_inbox_drops_disabled_files_blocking_the_queue(tmp_path, monkeypatch):
     assert second["inserted"] == 1
     assert not good.exists()
     assert feed_for_source("zsxq")["items"][0]["title"]
+
+
+def test_dws_cursor_overlaps_two_minutes(tmp_path, monkeypatch):
+    moment = datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ)
+    assert dws_cursor_stamp(moment) == "2026-10-09 09:58:00"
+    monkeypatch.setattr("app.news.host_collector.cn_now", lambda: moment)
+    monkeypatch.setattr("app.news.host_collector.group_id", lambda _source: "g1")
+    monkeypatch.setattr("app.news.host_collector.which", lambda _name: "/usr/bin/dws")
+
+    class Proc:
+        returncode = 0
+        stdout = '{"messages":[]}'
+        stderr = ""
+
+    assert _run_dws(tmp_path, lambda _argv: Proc(), "", "") == "ok"
+    cursor = (tmp_path / "news" / "cursors" / "dws.txt").read_text(encoding="utf-8")
+    assert cursor == "2026-10-09 09:58:00"
 
 
 def test_host_collector_rejects_writes():
@@ -514,6 +801,13 @@ def test_systemd_unit_runs_as_user_with_hardening():
     assert "NoNewPrivileges=yes" in text
     assert "ProtectSystem=strict" in text
     assert "ReadWritePaths=/home/ubuntu/tick-stock-panel/data/news" in text
+    assert "ReadWritePaths=/home/ubuntu/.dws" in text
+    assert "ReadWritePaths=/home/ubuntu/.local/share/dws-cli" in text
+    assert "ReadWritePaths=/home/ubuntu/.config/zsxq-cli" in text
+    assert "ReadWritePaths=/home/ubuntu/.local/share/zsxq-cli" in text
+    assert "Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin" in text
+    assert "ExecStart=/home/ubuntu/.venvs/tsp-collector/bin/python " in text
+    assert "/usr/bin/python3" not in text
     assert "WorkingDirectory=/home/ubuntu/tick-stock-panel" in text
     assert "/opt/tsp" not in text
 
@@ -525,6 +819,9 @@ def test_gateway_keeps_feed_closed():
     assert required_scope("GET", "/api/news/dsa-feed") is None
     assert required_scope("GET", "/api/news/health") is None
     assert required_scope("PUT", "/api/news/sources") is None
+    assert required_scope("GET", "/api/news/push") is None
+    assert required_scope("PUT", "/api/news/push") is None
+    assert required_scope("POST", "/api/news/push/test") is None
 
 
 def _request(path: str, header: str = "", query: bytes = b"") -> Request:

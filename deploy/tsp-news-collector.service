@@ -8,13 +8,21 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/tick-stock-panel
 Environment=HOME=/home/ubuntu
 Environment=DATA_DIR=/home/ubuntu/tick-stock-panel/data
+Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-/home/ubuntu/tick-stock-panel/.env
-ExecStart=/usr/bin/python3 /home/ubuntu/tick-stock-panel/scripts/news_host_collector.py --data-dir /home/ubuntu/tick-stock-panel/data
+# 独立虚拟环境，需已安装 pydantic（采集脚本会导入 app）。不要用系统 python3。
+ExecStart=/home/ubuntu/.venvs/tsp-collector/bin/python /home/ubuntu/tick-stock-panel/scripts/news_host_collector.py --data-dir /home/ubuntu/tick-stock-panel/data
 TimeoutStartSec=3600
 NoNewPrivileges=yes
 ProtectSystem=strict
+# data/news 必须属于 User= 指定的用户，否则收件箱写不进去。
 ReadWritePaths=/home/ubuntu/tick-stock-panel/data/news
+# dws 约每 2 小时刷新令牌。ProtectHome 只读时这些目录不放开就会看成未登录。
+ReadWritePaths=/home/ubuntu/.dws
+ReadWritePaths=/home/ubuntu/.local/share/dws-cli
+ReadWritePaths=/home/ubuntu/.config/zsxq-cli
+ReadWritePaths=/home/ubuntu/.local/share/zsxq-cli
 # 只读采集。不要改成会发帖、评论或发送消息的命令。
 # 仓库不在 /home/ubuntu/tick-stock-panel 时，改 WorkingDirectory、DATA_DIR、EnvironmentFile、ExecStart 和 ReadWritePaths。
 # dws 若把登录态放在系统钥匙串或 Secret Service，systemd 没有用户 D-Bus 会话，服务里会看成未登录。部署后在同一单元里确认一次 dws auth status。

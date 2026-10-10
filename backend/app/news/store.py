@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.market_time import CN_TZ
+from app.news.extract import _usable_sector_name
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS news_items (
@@ -70,6 +74,9 @@ class NewsStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        dropped = self._purge_unusable_sectors()
+        if dropped:
+            logger.info("已删除 %s 条无效板块提及", dropped)
 
     def close(self) -> None:
         with self._lock:
@@ -129,8 +136,8 @@ class NewsStore:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (item_id, kind, key, name[:80], code[:16], origin[:16])
-                    for kind, key, name, code, origin in mentions
+                    (item_id, kind, key, name[:80], (code or "")[:16], origin[:16])
+                    for kind, key, name, code, origin in _kept_mentions(mentions)
                 ],
             )
             self._conn.execute(
@@ -344,6 +351,40 @@ class NewsStore:
                 INSERT OR IGNORE INTO news_mentions (item_id, kind, key, name, code, origin)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                [(item_id, k, key, name[:80], code[:16], origin[:16]) for k, key, name, code, origin in mentions],
+                [
+                    (item_id, k, key, name[:80], (code or "")[:16], origin[:16])
+                    for k, key, name, code, origin in _kept_mentions(mentions)
+                ],
             )
             self._conn.commit()
+
+    def _purge_unusable_sectors(self) -> int:
+        """删掉已经入库的坏板块名，避免部署后热门板块仍显示「50」。"""
+        with self._lock:
+            rows = list(self._conn.execute(
+                "SELECT id, key, name FROM news_mentions WHERE kind = 'sector'"
+            ))
+            bad = [
+                row["id"]
+                for row in rows
+                if not _usable_sector_name(row["key"]) or not _usable_sector_name(row["name"])
+            ]
+            if not bad:
+                return 0
+            for offset in range(0, len(bad), 400):
+                chunk = bad[offset:offset + 400]
+                marks = ",".join("?" for _ in chunk)
+                self._conn.execute(f"DELETE FROM news_mentions WHERE id IN ({marks})", chunk)
+            self._conn.commit()
+            return len(bad)
+
+
+def _kept_mentions(mentions: list[tuple[str, str, str, str, str]]):
+    kept = []
+    for kind, key, name, code, origin in mentions:
+        if kind == "sector" and not (
+            _usable_sector_name(key) and _usable_sector_name(name or key)
+        ):
+            continue
+        kept.append((kind, key, name, code, origin))
+    return kept

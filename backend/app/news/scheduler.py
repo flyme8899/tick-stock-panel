@@ -88,4 +88,9 @@ class NewsScheduler:
                     backfill_mentions(get_lexicon())
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("补抽提及失败: %s", exc)
+            try:
+                from app.news.push import tick
+                tick(now)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("钉钉推送失败: %s", exc)
             self._stop.wait(15)

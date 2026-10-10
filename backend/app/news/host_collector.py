@@ -4,15 +4,10 @@ dws / zsxq-cli 的登录态在宿主机，不在容器里。本模块禁止任�
 """
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
 import os
 import shutil
 import time
-import urllib.parse
-import urllib.request
 from datetime import timedelta
 from pathlib import Path
 
@@ -65,19 +60,16 @@ def auth_state(code: int, stdout: str, stderr: str) -> str:
 
 
 def send_dingtalk(webhook: str, secret: str, content: str, opener=None) -> None:
+    """登录失效提醒。只发这一句短文本，不走热点推送的 markdown。"""
     if not webhook:
         return
-    url = webhook
-    if secret:
-        stamp = str(round(time.time() * 1000))
-        digest = hmac.new(secret.encode(), f"{stamp}\n{secret}".encode(), hashlib.sha256).digest()
-        sign = urllib.parse.quote_plus(base64.b64encode(digest))
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}timestamp={stamp}&sign={sign}"
-    body = json.dumps({"msgtype": "text", "text": {"content": content}}, ensure_ascii=False).encode()
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    call = opener or urllib.request.urlopen
-    call(request, timeout=10)
+    from app.news.dingtalk import post_payload, signed_url
+
+    post_payload(
+        signed_url(webhook, secret),
+        {"msgtype": "text", "text": {"content": content}},
+        opener=opener,
+    )
 
 
 def alert_expiry(data_dir: Path, source: str, detail: str, webhook: str, secret: str) -> None:
@@ -181,6 +173,12 @@ def enabled_from_env_and_prefs(source: str, data_dir: Path) -> bool:
     return bool(row.get("enabled"))
 
 
+def dws_cursor_stamp(now=None) -> str:
+    """游标回退两分钟。本轮拉取期间新到的消息，下一轮还能扫到，入库按 messageId 去重。"""
+    moment = now or cn_now()
+    return (moment - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def read_cursor(data_dir: Path, source: str, default: str) -> str:
     path = data_dir / "news" / "cursors" / f"{source}.txt"
     if path.is_file():
@@ -230,7 +228,7 @@ def _run_dws(data_dir: Path, run, webhook: str, secret: str) -> str:
         return "fetch-failed"
     payload = json.loads(proc.stdout)
     write_inbox(data_dir, "dws", payload)
-    write_cursor(data_dir, "dws", cn_now().strftime("%Y-%m-%d %H:%M:%S"))
+    write_cursor(data_dir, "dws", dws_cursor_stamp())
     return "ok"
 
 

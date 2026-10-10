@@ -21,12 +21,14 @@ from app.news.collectors import (
     WSCN_URL,
     Feed,
     Item,
+    cls_next_last_time,
     cls_params,
     ima_headers,
     ima_next_cursor,
     ima_retcode,
     latest_date_folders,
     load_inbox_payload,
+    paginate_until_seen,
     parse_cls,
     parse_dws_payload,
     parse_feed_xml,
@@ -36,6 +38,7 @@ from app.news.collectors import (
     parse_zsxq_payload,
     pick_knowledge_base,
     split_ima_list,
+    wscn_next_cursor,
     wscn_params,
 )
 from app.news.config import (
@@ -53,6 +56,7 @@ from app.news.extract import (
     Lexicon,
     Mention,
     StructuredStock,
+    _usable_sector_name,
     parse_llm_payload,
     parse_llm_summary,
 )
@@ -92,7 +96,8 @@ def reset_store_for_tests(path: Path | None = None) -> NewsStore:
 def lexicon_from_repo(repo) -> Lexicon:
     stocks: list[tuple[str, str, str]] = []
     if repo is not None:
-        for getter in ("get_instruments", "get_etf_instruments"):
+        # ETF 不进个股候选。名称里的指数片段（中证1000ETF南方）会把指数讨论算到基金上。
+        for getter in ("get_instruments",):
             try:
                 frame = getattr(repo, getter)()
             except Exception as exc:  # noqa: BLE001
@@ -238,6 +243,8 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
         published = parse_time(row["published_at"])
         if published is None:
             continue
+        if row["kind"] == "sector" and not _sector_name_ok(row["key"], row["name"]):
+            continue
         events.append(MentionEvent(
             kind=row["kind"],
             key=row["key"],
@@ -267,6 +274,8 @@ def message_view(row, *, limit: int = 240) -> dict:
 
 
 def hot_messages(kind: str, key: str, *, window_hours: int = 24, limit: int = 30) -> list[dict]:
+    if kind == "sector" and not _usable_sector_name(key):
+        return []
     start = cn_now() - timedelta(hours=window_hours)
     rows = get_store().messages_for(kind=kind, key=key, start=start, limit=limit)
     seen: set[str] = set()
@@ -305,7 +314,7 @@ def feed_for_source(source: str, *, limit: int = 50) -> dict:
         for mention in row["mentions"]:
             if mention["kind"] == "stock":
                 symbols.append(mention["key"])
-            elif mention["kind"] == "sector":
+            elif mention["kind"] == "sector" and _usable_sector_name(mention["key"]):
                 sectors.append(mention["key"])
         items.append({
             "source_id": row["source_id"],
@@ -342,14 +351,20 @@ def collect_cls(client: httpx.Client | None = None) -> dict:
     own = client is None
     client = client or httpx.Client(timeout=12.0, follow_redirects=True)
     try:
-        response = client.get(
-            CLS_URL,
-            params=cls_params(),
-            headers={"Referer": "https://www.cls.cn/telegraph", "User-Agent": "tsp-news/1.0"},
-        )
-        response.raise_for_status()
-        items = parse_cls(response.json())
-        result = ingest_items(items)
+        def fetch(token):
+            response = client.get(
+                CLS_URL,
+                params=cls_params(token),
+                headers={"Referer": "https://www.cls.cn/telegraph", "User-Agent": "tsp-news/1.0"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            page = parse_cls(payload)
+            ids = [item.source_id for item in page]
+            hit = bool(ids) and bool(get_store().existing_ids("cls", ids))
+            return page, cls_next_last_time(payload), hit
+
+        result = ingest_items(paginate_until_seen(fetch))
         get_store().mark_health("cls", ok=True, auth_state="n/a")
         return result
     except Exception as exc:  # noqa: BLE001
@@ -367,13 +382,20 @@ def collect_wscn(client: httpx.Client | None = None) -> dict:
     try:
         items: list[Item] = []
         for channel in ("global-channel", "a-stock-channel"):
-            response = client.get(
-                WSCN_URL,
-                params=wscn_params(channel),
-                headers={"User-Agent": "tsp-news/1.0"},
-            )
-            response.raise_for_status()
-            items.extend(parse_wscn(response.json(), channel))
+            def fetch(token, channel=channel):
+                response = client.get(
+                    WSCN_URL,
+                    params=wscn_params(channel, token),
+                    headers={"User-Agent": "tsp-news/1.0"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                page = parse_wscn(payload, channel)
+                ids = [item.source_id for item in page]
+                hit = bool(ids) and bool(get_store().existing_ids("wscn", ids))
+                return page, wscn_next_cursor(payload), hit
+
+            items.extend(paginate_until_seen(fetch))
         result = ingest_items(items)
         get_store().mark_health("wscn", ok=True, auth_state="n/a")
         return result
@@ -803,6 +825,10 @@ def _row_summary(row, limit: int) -> str:
     if zh:
         return excerpt(zh, limit)
     return excerpt(row["clean_text"] or "", limit)
+
+
+def _sector_name_ok(key: str, name: str) -> bool:
+    return _usable_sector_name(key) and _usable_sector_name(name or key)
 
 
 def _sector_names(repo) -> list[str]:

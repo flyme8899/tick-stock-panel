@@ -175,6 +175,110 @@ def feed_matches(presented: str) -> bool:
         return False
 
 
+PUSH_TYPES = ("hot", "abnormal", "t_trade")
+
+_PUSH_ENV = {
+    "hot": "NEWS_PUSH_HOT_ENABLED",
+    "abnormal": "NEWS_PUSH_ABNORMAL_ENABLED",
+    "t_trade": "NEWS_PUSH_T_ENABLED",
+}
+
+
+def _push_prefs() -> dict:
+    from app.services import preferences
+    saved = preferences.load().get("news_push") or {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def webhook_configured() -> bool:
+    return bool((settings.dingtalk_webhook_url or "").strip())
+
+
+def push_master_enabled() -> bool:
+    """总开关。环境变量优先，缺省关闭。没配 webhook 时也关闭。"""
+    if not webhook_configured():
+        return False
+    flag = _flag("NEWS_PUSH_ENABLED")
+    if flag is not None:
+        return flag
+    return bool(_push_prefs().get("enabled"))
+
+
+def push_master_locked() -> bool:
+    return _flag("NEWS_PUSH_ENABLED") is not None
+
+
+def push_type_saved(type_id: str) -> bool:
+    if type_id not in PUSH_TYPES:
+        return False
+    flag = _flag(_PUSH_ENV[type_id])
+    if flag is not None:
+        return flag
+    types = _push_prefs().get("types") or {}
+    if isinstance(types, dict):
+        return bool(types.get(type_id))
+    return False
+
+
+def push_type_enabled(type_id: str) -> bool:
+    return push_master_enabled() and push_type_saved(type_id)
+
+
+def push_type_locked(type_id: str) -> bool:
+    return type_id in _PUSH_ENV and _flag(_PUSH_ENV[type_id]) is not None
+
+
+def set_push_prefs(*, enabled: bool | None = None, types: dict[str, bool] | None = None) -> dict:
+    """页面开关。环境变量锁定的项不改。未配机器人时不能打开。"""
+    if (enabled or any((types or {}).values())) and not webhook_configured():
+        raise ValueError("未配置钉钉机器人")
+    current = _push_prefs()
+    saved_enabled = bool(current.get("enabled"))
+    saved_types = dict(current.get("types") or {})
+    if enabled is not None and not push_master_locked():
+        saved_enabled = bool(enabled)
+    for type_id, value in (types or {}).items():
+        if type_id not in PUSH_TYPES or push_type_locked(type_id):
+            continue
+        saved_types[type_id] = bool(value)
+    from app.services import preferences
+    preferences.save({"news_push": {"enabled": saved_enabled, "types": saved_types}})
+    return push_status()
+
+
+def push_master_saved() -> bool:
+    flag = _flag("NEWS_PUSH_ENABLED")
+    if flag is not None:
+        return flag
+    return bool(_push_prefs().get("enabled"))
+
+
+def push_status() -> dict:
+    summaries = {
+        "hot": "交易日盘前和收盘后各一次，候选明显变化时再补一条",
+        "abnormal": "自选股的涨停、炸板、跌停、新高新低，从无到有才推",
+        "t_trade": "自选相对分时均价、日内高低和昨收的边沿提醒",
+    }
+    labels = {"hot": "热点候选", "abnormal": "异动监控", "t_trade": "做T提醒"}
+    return {
+        "configured": webhook_configured(),
+        "master_enabled": push_master_enabled(),
+        "master_saved": push_master_saved(),
+        "master_locked": push_master_locked(),
+        "types": [
+            {
+                "id": type_id,
+                "label": labels[type_id],
+                "enabled": push_type_enabled(type_id),
+                "saved": push_type_saved(type_id),
+                "locked": push_type_locked(type_id),
+                "summary": summaries[type_id],
+            }
+            for type_id in PUSH_TYPES
+        ],
+    }
+
+
 def set_source_enabled(source: str, enabled: bool) -> bool:
     """页面开关。环境变量锁定时不改偏好，返回实际是否开启。"""
     if source not in SOURCE_ORDER:

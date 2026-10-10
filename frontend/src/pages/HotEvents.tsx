@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type NewsCandidate, type NewsSourceHealth } from '@/lib/api'
+import { api, type NewsCandidate, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
@@ -24,6 +24,7 @@ function authLabel(source: NewsSourceHealth): string {
 export function HotEvents() {
   const [tab, setTab] = useState<'sector' | 'stock'>('sector')
   const [picked, setPicked] = useState<NewsCandidate | null>(null)
+  const [pushNote, setPushNote] = useState('')
   const queryClient = useQueryClient()
 
   const hot = useQuery({
@@ -47,6 +48,23 @@ export function HotEvents() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: QK.newsHealth })
     },
+  })
+  const push = useQuery({
+    queryKey: QK.newsPush,
+    queryFn: () => api.newsPush(),
+  })
+  const savePush = useMutation({
+    mutationFn: (body: { enabled?: boolean; types?: Record<string, boolean> }) => api.newsSetPush(body),
+    onSuccess: (data: NewsPushStatus) => {
+      queryClient.setQueryData(QK.newsPush, data)
+      setPushNote('')
+    },
+    onError: (error: Error) => setPushNote(error.message || '保存失败'),
+  })
+  const testPush = useMutation({
+    mutationFn: () => api.newsPushTest(),
+    onSuccess: () => setPushNote('测试消息已发送'),
+    onError: (error: Error) => setPushNote(error.message || '发送失败'),
   })
 
   const candidates = hot.data?.candidates ?? []
@@ -140,7 +158,68 @@ export function HotEvents() {
           )}
         </section>
 
-        <aside className="h-fit rounded-md border border-border p-3">
+        <aside className="h-fit space-y-4">
+          <section className="rounded-md border border-border p-3">
+            <h2 className="mb-1 text-sm font-medium">钉钉推送</h2>
+            <p className="mb-2 text-xs text-muted">
+              发到已配置的自定义机器人。默认关闭。登录失效提醒是另一条短文本，不会和这里混用。
+            </p>
+            {push.isLoading && <p className="text-sm text-muted">加载中…</p>}
+            {push.isError && <p className="text-sm text-danger">推送设置加载失败</p>}
+            {push.data && (
+              <div className="space-y-2 text-sm">
+                {!push.data.configured && (
+                  <p className="text-xs text-muted">未配置钉钉机器人，填写 DINGTALK_WEBHOOK_URL 后才能打开。</p>
+                )}
+                {push.data.configured && !push.data.master_saved && (
+                  <p className="text-xs text-muted">总开关关闭时不会发送。</p>
+                )}
+                <div className="flex items-center justify-between gap-2">
+                  <span>总开关</span>
+                  <button
+                    type="button"
+                    disabled={!push.data.configured || push.data.master_locked || savePush.isPending}
+                    className={cn(
+                      'rounded border px-2 py-0.5 text-xs',
+                      push.data.master_saved ? 'border-accent text-foreground' : 'border-border text-muted',
+                    )}
+                    onClick={() => savePush.mutate({ enabled: !push.data!.master_saved })}
+                  >
+                    {push.data.master_saved ? '已开启' : '已关闭'}
+                  </button>
+                </div>
+                {push.data.types.map(item => (
+                  <div key={item.id}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span>{item.label}</span>
+                      <button
+                        type="button"
+                        disabled={!push.data?.configured || item.locked || savePush.isPending}
+                        className={cn(
+                          'rounded border px-2 py-0.5 text-xs',
+                          item.saved ? 'border-accent text-foreground' : 'border-border text-muted',
+                        )}
+                        onClick={() => savePush.mutate({ types: { [item.id]: !item.saved } })}
+                      >
+                        {item.saved ? '已开启' : '已关闭'}
+                      </button>
+                    </div>
+                    <p className="mt-0.5 text-xs text-muted">{item.summary}</p>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  disabled={!push.data.configured || testPush.isPending}
+                  className="rounded border border-border px-2 py-1 text-xs disabled:opacity-50"
+                  onClick={() => testPush.mutate()}
+                >
+                  {testPush.isPending ? '发送中…' : '发送测试消息'}
+                </button>
+                {pushNote && <p className="text-xs text-muted">{pushNote}</p>}
+              </div>
+            )}
+          </section>
+          <section className="rounded-md border border-border p-3">
           <h2 className="mb-2 text-sm font-medium">采集来源</h2>
           {health.isLoading && <p className="text-sm text-muted">加载中…</p>}
           {health.isError && <p className="text-sm text-danger">来源状态加载失败</p>}
@@ -172,6 +251,7 @@ export function HotEvents() {
               </li>
             ))}
           </ul>
+          </section>
         </aside>
       </div>
     </div>

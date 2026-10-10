@@ -65,8 +65,34 @@ def parse_time(value) -> datetime | None:
     return parsed.astimezone(CN_TZ)
 
 
-def cls_params() -> dict[str, str]:
-    return cls_query({"rn": "20", "refresh_type": "1"})
+PAGE_CAP = 10
+
+
+def cls_params(last_time: str | None = None) -> dict[str, str]:
+    """往更早翻时带上上一页最旧一条的 ctime。第一页不带 last_time。"""
+    extra = {"rn": "20", "refresh_type": "1"}
+    if last_time:
+        extra["last_time"] = str(last_time)
+    return cls_query(extra)
+
+
+def cls_next_last_time(payload: dict) -> str:
+    """下一页 last_time。广告不参与，避免被更早的广告时间带跳页。"""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    rows = []
+    if isinstance(data, dict):
+        rows = data.get("roll_data") or data.get("items") or []
+    oldest = None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("is_ad"):
+            continue
+        stamp = row.get("ctime") if row.get("ctime") not in (None, "") else row.get("time")
+        try:
+            value = int(float(stamp))
+        except (TypeError, ValueError):
+            continue
+        oldest = value if oldest is None else min(oldest, value)
+    return "" if oldest is None else str(oldest)
 
 
 def parse_cls(payload: dict) -> list[Item]:
@@ -108,8 +134,45 @@ def parse_cls(payload: dict) -> list[Item]:
     return [item for item in items if item.source_id]
 
 
-def wscn_params(channel: str) -> dict[str, str]:
-    return {"channel": channel, "client": "pc", "limit": "20"}
+def wscn_params(channel: str, cursor: str | None = None) -> dict[str, str]:
+    """往更早翻时带 data.next_cursor。第一页不带 cursor。"""
+    params = {"channel": channel, "client": "pc", "limit": "20"}
+    if cursor:
+        params["cursor"] = str(cursor)
+    return params
+
+
+def wscn_next_cursor(payload: dict) -> str:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("next_cursor") or "").strip()
+
+
+def paginate_until_seen(fetch_page, *, cap: int = PAGE_CAP) -> list[Item]:
+    """fetch_page(token) -> (items, next_token, hit_seen)。
+
+    第一页 token 是 None。某一页里有已经入库的 id 就停，这一页仍保留。
+    下一页标记为空、和上一页相同，或满 cap 页，也停。重启后同一套逻辑补拉。
+    """
+    collected: list[Item] = []
+    seen_ids: set[str] = set()
+    token: str | None = None
+    used: set[str] = set()
+    for _ in range(max(1, cap)):
+        page, nxt, hit_seen = fetch_page(token)
+        for item in page or []:
+            if item.source_id and item.source_id not in seen_ids:
+                seen_ids.add(item.source_id)
+                collected.append(item)
+        if not page or hit_seen:
+            break
+        nxt = str(nxt or "").strip()
+        if not nxt or nxt in used or nxt == (token or ""):
+            break
+        used.add(nxt)
+        token = nxt
+    return collected
 
 
 def parse_wscn(payload: dict, channel: str) -> list[Item]:
@@ -141,7 +204,7 @@ def parse_wscn(payload: dict, channel: str) -> list[Item]:
             source="wscn",
             source_id=str(row.get("id") or ""),
             published_at=published,
-            author=str(row.get("author") or ""),
+            author=_person_name(row.get("author")),
             title=str(row.get("title") or ""),
             text=text,
             url=str(row.get("uri") or row.get("url") or ""),
@@ -188,7 +251,13 @@ def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
     topics = payload
     page = {"has_more": False, "next_end_time": ""}
     if isinstance(payload, dict):
-        topics = payload.get("topics") or payload.get("items") or payload.get("data") or []
+        topics = (
+            payload.get("topics_brief")
+            or payload.get("topics")
+            or payload.get("items")
+            or payload.get("data")
+            or []
+        )
         page["has_more"] = bool(payload.get("has_more"))
         page["next_end_time"] = str(payload.get("next_end_time") or "")
     if not isinstance(topics, list):
@@ -197,7 +266,7 @@ def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
     for row in topics:
         if not isinstance(row, dict):
             continue
-        text = str(row.get("content") or "")
+        text = str(row.get("content") or row.get("digest") or "")
         title = str(row.get("title") or "")
         owner = row.get("owner") if isinstance(row.get("owner"), dict) else {}
         images = []
@@ -497,6 +566,12 @@ def _plain(value: str, limit: int = 2000) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()[:limit]
+
+
+def _person_name(value) -> str:
+    if isinstance(value, dict):
+        return str(value.get("display_name") or value.get("name") or "")
+    return str(value or "")
 
 
 def _names(rows, field: str) -> list[str]:

@@ -56,6 +56,8 @@ VISION_AI_MODEL=deepseek/deepseek-v4-flash-vision-exp
 
 CNBC、MarketWatch、华尔街日报市场、彭博约 5 分钟一次，SEC 8-K 约 3 分钟一次。这两档固定间隔，不按 A 股交易时段加快或放慢。请求带上次响应的 `ETag` / `Last-Modified`，返回 304 时不再解析。采集只请求 feed 地址，不打开条目链接，也不保存 `content:encoded` 或 Atom `content`。
 
+财联社电报按 `last_time` 往更早翻，直到这一页里出现已经入库的 id，最多 10 页。华尔街见闻两个频道各自用 `next_cursor` 做 `cursor` 翻页，同样见到已入库 id 就停，每个频道最多 10 页。重启或中间停过之后，下一轮用同一套规则补上缺口。
+
 ## 开关
 
 每个来源独立。页面上的开关写到 `data/user_data/preferences.json` 的 `news_sources`。环境变量优先，设了之后页面不能改：
@@ -105,7 +107,13 @@ python scripts/news_host_collector.py --data-dir ./data
 python scripts/news_host_collector.py --data-dir ./data --backfill-since 2025-08-23
 ```
 
-示例 systemd 单元在 `deploy/tsp-news-collector.service` 和 `.timer`，默认每 5 分钟跑一次。单元以用户 `ubuntu` 运行，`HOME=/home/ubuntu`，工作目录是 `/home/ubuntu/tick-stock-panel`。`TimeoutStartSec=3600` 留给知识星球长回补。`ProtectSystem=strict` 下只有 `data/news` 可写。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。
+示例 systemd 单元在 `deploy/tsp-news-collector.service` 和 `.timer`，默认每 5 分钟跑一次。单元以用户 `ubuntu` 运行，`HOME=/home/ubuntu`，工作目录是 `/home/ubuntu/tick-stock-panel`。`TimeoutStartSec=3600` 留给知识星球长回补。`ExecStart` 用 `~/.venvs/tsp-collector` 里的 Python，这个环境要装上 pydantic。`PATH` 带上 `~/.local/bin`，才能找到 `dws` 和 `zsxq-cli`。
+
+`ProtectSystem=strict` 下，`data/news` 必须属于该服务用户，否则收件箱写不进去。dws 大约每 2 小时刷新一次令牌；`ProtectHome` 只读时还要放开 `~/.dws`、`~/.local/share/dws-cli`、`~/.config/zsxq-cli`、`~/.local/share/zsxq-cli`。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。
+
+钉钉游标比本次完成时间早 2 分钟，避免拉取过程中新到的消息被跳过。同一条 `messageId` 不会重复入库。
+
+板块名如果是纯数字、汉字不足两个，或不足 4 位的纯字母数字（如 `50`、`A50`、`中`），不参与正文匹配，并且命中两端不能再贴着数字。已经入库的这类板块提及会在打开库时删掉，热门板块读取时也会跳过，所以部署后 `50` 会从热门板块消失。ETF 维表不进入个股候选。名称里带 ETF、LOF 或「基金」的标的也不做简称匹配，避免「中证1000」把「中证1000ETF南方」送上个股榜。
 
 `dws` 如果把登录态放在系统钥匙串或 Secret Service，systemd 没有用户的 D-Bus 会话，服务里会看成未登录。部署后在同一单元环境里执行一次 `dws auth status` 确认。Docker 把 `./data` 挂进容器，宿主机写入的收件箱会被面板读到。
 
@@ -141,3 +149,35 @@ SQLite 在 `data/news/news.sqlite`，保留约 45 天。同一来源的 `source_
 Docker：`docker compose --profile dsa` 把桥文件只读挂到 `/opt/tsp/news_bridge.py`，并设置 `TSP_NEWS_BASE_URL=http://app:3018`。本地 `scripts/dsa.sh` 默认访问 `http://127.0.0.1:3018`。
 
 `NEWS_DSA_FEED_TOKEN` 留空时桥直接返回，DSA 照常启动。TSP 未开、网络失败或当前不是 DSA 进程，都只记日志。面板采集不依赖 DSA 是否在跑。
+
+## 钉钉推送
+
+热门事件页可以把结果发到已配置的自定义机器人（`DINGTALK_WEBHOOK_URL`，可选 `DINGTALK_SECRET` 加签）。机器人所在的群由钉钉侧决定。默认关闭：`NEWS_PUSH_ENABLED` 和下面每一类都要打开。环境变量优先于页面上的开关。
+
+页面上的「发送测试消息」只有点击后才发，正文标成【测试】，不含资讯正文。
+
+| 类型 | 环境变量 | 什么时候发 |
+| --- | --- | --- |
+| 热点候选 | `NEWS_PUSH_HOT_ENABLED` | 交易日 `NEWS_PUSH_PREMARKET`（默认 08:45）和 `NEWS_PUSH_POSTCLOSE`（默认 15:40）各一条。候选新进入前 N 且提及数达到 `NEWS_PUSH_MIN_STORIES`，或分数相对上次升高达到 `NEWS_PUSH_SCORE_JUMP`，再补一条，默认 30 分钟内不重复 |
+| 异动监控 | `NEWS_PUSH_ABNORMAL_ENABLED` | 交易日 09:25–11:30、13:00–15:05。只看自选。用实时报价对照昨收和盘前 60 日收盘极值，算涨停、炸板、跌停、翘板、60 日新高、新低。同一标的同一信号默认 30 分钟内不重复 |
+| 做T提醒 | `NEWS_PUSH_T_ENABLED` | 交易日 09:35–11:25、13:05–14:55。默认只看自选。偏离当日累计均价 ±1.5%，或贴近日内高低 0.3%，或从 1% 以外回到昨收。均价和回到昨收默认 60 分钟内不重复；贴近高低另有 `NEWS_PUSH_T_RANGE_COOLDOWN_MIN`，默认也是 60 分钟。10:00 之前不推贴近高低 |
+
+交易日优先用交易日历；日历不可用时按周一到周五。三类消息标题分别是【热点候选】【异动监控】【做T提醒】。登录失效仍是单独的短文本，不会套进这些标题。
+
+热点消息只写提及数、来源个数、相对基线和最多 3 个出处。财联社、华尔街见闻可以带链接。钉钉、知识星球、ima 只写来源名，不写标题、链接和正文。
+
+异动和做 T 用实时报价。行情服务 3 分钟内刚拉过、并且缓存日期是今天时，直接用那份最新价、日内高低和累计成交，不再打 TickFlow。否则按 `quote.batch` 的批量上限补拉自选，Expert 档大约 300 次/分钟，80 只自选一轮通常是 1 次请求。没有新鲜报价就不发，避免把盘后表里的旧信号推出去。
+
+异动默认最多 80 只自选；做 T 默认最多 40 只自选。可选 `NEWS_PUSH_ABNORMAL_INCLUDE_HOT` 把热门个股并进异动，`NEWS_PUSH_T_INCLUDE_POSITIONS` 把模拟持仓并进做 T。涨跌停、炸板、翘板用原始价对照昨收。60 日新高新低用前复权最新价对照盘前已经算好的前 59 个交易日收盘极值，和指标流水线同一口径。机器人每分钟最多发 20 条，超出的本轮丢掉、下一轮再试。做 T 另有全自选当天条数上限 `NEWS_PUSH_T_DAILY_CAP`，默认 20，设成 0 则不限制。
+
+`NEWS_PUSH_T_RANGE_ONCE_PER_DAY=true` 时，接近日内高点和接近日内低点合计起来每只股票每天最多一条。默认关闭，这两条只受各自的冷却约束。
+
+20 只活跃股、20 个交易日的分钟回放里，贴近高低在 30 分钟冷却下仍有大约每天每只 2–3.5 次，而且把区间从 0.3% 放到 0.5% 几乎不变。默认是均价 ±1.5%、区间 0.3%、冷却 60 分钟，并在开盘后 30 分钟内跳过贴近高低。贴近高低的冷却可以单独再调。仓库根目录仍可以回放别的阈值：
+
+```bash
+PYTHONPATH=backend backend/.venv/bin/python scripts/replay_push_rules.py --symbols 600519.SH,000001.SZ --days 5
+```
+
+分钟分区默认是 `data/kline_minute/date=*/part.parquet`。输出每种规则、每个阈值、每只股票、每个交易日的触发次数。
+
+放量异动、以及「上穿分时均价」那种需要分钟 K 的边沿，默认不推。

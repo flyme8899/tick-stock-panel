@@ -2221,6 +2221,23 @@ export interface NewsHealth {
   as_of: string
 }
 
+export interface NewsPushType {
+  id: 'hot' | 'abnormal' | 't_trade'
+  label: string
+  enabled: boolean
+  saved: boolean
+  locked: boolean
+  summary: string
+}
+
+export interface NewsPushStatus {
+  configured: boolean
+  master_enabled: boolean
+  master_saved: boolean
+  master_locked: boolean
+  types: NewsPushType[]
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
@@ -4130,6 +4147,20 @@ export const api = {
     request<NewsHealth & { applied: Record<string, boolean> }>('/api/news/sources', {
       method: 'PUT',
       body: JSON.stringify({ sources }),
+    }),
+
+  newsPush: () => request<NewsPushStatus>('/api/news/push'),
+
+  newsSetPush: (body: { enabled?: boolean; types?: Record<string, boolean> }) =>
+    request<NewsPushStatus>('/api/news/push', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  newsPushTest: () =>
+    request<{ ok: boolean }>('/api/news/push/test', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: true }),
     }),
 }
 
