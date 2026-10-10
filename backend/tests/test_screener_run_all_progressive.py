@@ -327,8 +327,16 @@ def test_run_all_isolates_single_strategy_failure(
             "summary_only": True,
         },
     )
-    # 后台继续: 好策略都落缓存; broken 不在结果也不在 pending, 而是进 errors
-    results = _wait_cache_results(tmp_path, ["ok_a", "ok_b"])
-    assert set(results) == {"ok_a", "ok_b"}
-    assert "broken" not in results
+    # 后台继续: 好策略落缓存; 失败策略也落一条带 error 的摘要, 卡片才能停转
+    results = _wait_cache_results(tmp_path, ["ok_a", "ok_b", "broken"])
+    assert results["ok_a"]["total"] == 1
+    assert results["ok_b"]["total"] == 1
+    assert results["broken"]["total"] == 0
+    assert results["broken"]["rows"] == []
+    assert results["broken"]["error"] == "boom: schema mismatch"
+    assert results["broken"].get("computed_at")
     assert "boom: schema mismatch" in (resp["errors"] or {}).get("broken", "")
+
+    summary = screener_api.get_cached_summary(_request(tmp_path, engine))
+    assert summary["results"]["broken"]["error"] == "boom: schema mismatch"
+    assert "error" not in summary["results"]["ok_a"]

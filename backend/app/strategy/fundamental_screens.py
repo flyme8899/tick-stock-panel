@@ -1,7 +1,11 @@
 """三套基本面选股预设。公告日次日才生效，避免用到尚未披露的报表。
 
 指标表里的 ROE、增速、利润率、资产负债率按百分数数值使用（12 表示 12%）。
-由金额现算的比率用小数。商誉、借款、增速分母缺失时不通过，不填 0。
+由金额现算的比率用小数。增速分母缺失时不通过，不填 0。
+资产负债表里商誉、短期借款、长期借款没有这一行时，落盘是 null 而不是 0
+（TickFlow 可选字段省略或 JSON null；扶摇只透传有数字的扩展列，行内 null
+表示该期未披露）。这两项 null 按 0 参与商誉/总资产和 M2 的 ROIC 资本。
+权益、总资产和增速分母仍然缺失就不通过。
 
 行业用当前同花顺快照（ext_hy_ths），不是历史成分。M1 的 ROE 排名和 M3 的
 ROIC 中位数都在二级行业内计算。
@@ -23,6 +27,10 @@ BASIC_FILTER = {"enabled": False}
 _RESULT_LIMIT = 8000
 _BANKS = ("银行", "非银金融")
 TOP_N_DEFAULT = 30
+_INDUSTRY_REQUIRED = (
+    "长期价值白马需要同花顺行业分类（ext_data/ext_hy_ths/part.parquet）。"
+    "文件缺失或没有「所属同花顺行业」列，无法排除银行和非银金融。"
+)
 
 # 选股卡片和回测都读这里。名字若再改，只改这一处。
 SCREEN_NAMES = {
@@ -172,6 +180,8 @@ def _pick(base, tables, industry, model: str, params: dict) -> pl.DataFrame:
     cash = _quarter_versions(tables.get("cash_flow"), _CASH_COLS)
     metrics = _quarter_versions(tables.get("metrics"), _METRICS_COLS)
     shares = _share_versions(tables.get("shares"))
+    if model == "m2" and _parse_industry(industry) is None:
+        raise ValueError(_INDUSTRY_REQUIRED)
     work = base.with_row_index("_ord")
     frame = _attach_latest(work, _union_keys(income, metrics), "latest_qkey")
     frame = _with_industry(frame, industry)
@@ -215,7 +225,7 @@ def _m1(frame, income, balance, cash, metrics, shares, params: dict) -> pl.DataF
         & (pl.col("roe_pct") >= 0.70)
         & (pl.col("gm_now") - pl.col("gm_prev") >= -0.01)
         & (pl.col("debt") < 70)
-        & pl.col("b0_goodwill").is_not_null() & (pl.col("gw") < 0.25)
+        & (pl.col("gw") < 0.25)
         & (pl.col("c0_net_operating_cash_flow") > 0)
         & (pl.col("pe") > 0) & (pl.col("pe") < 80)
     )
@@ -243,7 +253,7 @@ def _m2(frame, income, balance, cash, metrics, params: dict) -> pl.DataFrame:
         & (pl.col("q0_net_margin") > 10) & (pl.col("q1_net_margin") > 10) & (pl.col("q2_net_margin") > 10)
         & (((pl.col("q0_net_income_yoy") + pl.col("q1_net_income_yoy") + pl.col("q2_net_income_yoy")) / 3) > 20)
         & (roe_avg > 10)
-        & (_roic("ai0_", "ab0_") > _wacc(params))
+        & (_roic("ai0_", "ab0_", missing_debt_as_zero=True) > _wacc(params))
         & pl.all_horizontal([pl.col(f"ac{i}_net_operating_cash_flow") > 0 for i in (0, 4, 8, 12, 16)])
         & (_np_growth("a0_net_income_yoy", "ai0_", "ai4_") > _np_growth("a4_net_income_yoy", "ai4_", "ai8_"))
         & pl.col("industry_l1").is_not_null()
@@ -708,7 +718,9 @@ def _debt(reported: str, liabilities: str, assets: str) -> pl.Expr:
 
 
 def _goodwill_ratio() -> pl.Expr:
-    return pl.when(pl.col("b0_total_assets") > 0).then(pl.col("b0_goodwill") / pl.col("b0_total_assets")).otherwise(None)
+    # 报表没有商誉这一行时字段是 null，按没有商誉计算。
+    goodwill = pl.col("b0_goodwill").fill_null(0.0)
+    return pl.when(pl.col("b0_total_assets") > 0).then(goodwill / pl.col("b0_total_assets")).otherwise(None)
 
 
 def _pe() -> pl.Expr:
@@ -739,19 +751,24 @@ def _roe_pct() -> pl.Expr:
     return pl.when(eligible & (count > 0)).then(rank / count).otherwise(None)
 
 
-def _roic(income_prefix: str, balance_prefix: str) -> pl.Expr:
+def _roic(income_prefix: str, balance_prefix: str, *, missing_debt_as_zero: bool = False) -> pl.Expr:
     tax = pl.col(f"{income_prefix}income_tax")
     profit = pl.col(f"{income_prefix}total_profit")
     operating = pl.col(f"{income_prefix}operating_profit")
     equity = pl.col(f"{balance_prefix}total_equity")
     short = pl.col(f"{balance_prefix}short_term_borrowing")
     long = pl.col(f"{balance_prefix}long_term_borrowing")
+    if missing_debt_as_zero:
+        # 短期或长期借款行缺失表示没有该项借款，不把整只股票丢掉。
+        short = short.fill_null(0.0)
+        long = long.fill_null(0.0)
     rate = tax / profit
     capital = equity + short + long
+    debt_known = pl.lit(True) if missing_debt_as_zero else (short.is_not_null() & long.is_not_null())
     ok = (
         (profit > 0) & tax.is_not_null() & (rate >= 0) & (rate <= 1)
         & operating.is_not_null()
-        & equity.is_not_null() & short.is_not_null() & long.is_not_null()
+        & equity.is_not_null() & debt_known
         & (capital > 0)
     )
     return pl.when(ok).then(operating * (1 - rate) / capital).otherwise(None)

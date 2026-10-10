@@ -54,6 +54,15 @@ it('keeps the full description on the card for hover', () => {
   expect(node?.textContent).toContain('主推')
 })
 
+it('shows 失败 instead of a zero hit count when the strategy errors', () => {
+  render({ error: '长期价值白马需要同花顺行业分类', count: 0, cardSize: 'normal' })
+
+  const failed = container.querySelector('span.text-danger')
+  expect(failed?.textContent).toBe('失败')
+  expect(failed?.getAttribute('title')).toContain('同花顺')
+  expect(container.textContent).not.toContain('0')
+})
+
 it('shows nothing extra for daily strategies without awaitRun', () => {
   render({})
 

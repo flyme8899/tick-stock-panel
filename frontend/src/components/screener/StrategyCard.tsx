@@ -98,12 +98,15 @@ interface StrategyCardProps {
   computing?: boolean
   /** 等待运行 (自动计算关闭/失败时的分钟策略): 数字未出时显示「待计算」点击引导 */
   awaitRun?: boolean
+  /** 本轮计算失败的说明; 有值时不把 0 显示成命中数 */
+  error?: string
 }
 
 export function StrategyCard({
   name, description, source, active, count, expiredCount,
   loading, cardSize,
   onRun, disabled, onSettings, monitored, onToggleMonitor, timeframeBadge, computing, awaitRun,
+  error,
 }: StrategyCardProps) {
   const cs = CARD_STYLES[cardSize]
   const activeCls = active
@@ -139,7 +142,10 @@ export function StrategyCard({
             {description && (
               <span className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1" title={description}>{description}</span>
             )}
-            {count != null && !loading && (
+            {error && !loading && !computing && (
+              <span className="mt-1.5 text-[10px] text-danger" title={error}>失败</span>
+            )}
+            {count != null && !loading && !error && (
               <div className="mt-1.5 flex items-center gap-2">
                 <div className="flex items-center gap-1">
                   <span className={`text-sm font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
@@ -183,7 +189,10 @@ export function StrategyCard({
                 <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400">{timeframeBadge}</span>
               )}
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
-              {count != null && !loading && (
+              {error && !loading && !computing && (
+                <span className="text-[10px] text-danger shrink-0" title={error}>失败</span>
+              )}
+              {count != null && !loading && !error && (
                 <span className={`text-xs font-mono font-bold tabular-nums shrink-0 ${countCls}`}>{count}</span>
               )}
               {count == null && !loading && computing && (
@@ -222,7 +231,10 @@ export function StrategyCard({
             className="flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-wait">
             <span className="text-[8px] px-0.5 rounded bg-secondary/10 text-muted border border-border font-medium leading-tight">{srcLabel}</span>
             <span className="text-[10px] font-medium whitespace-nowrap text-foreground">{name}</span>
-            {count != null && !loading && (
+            {error && !loading && !computing && (
+              <span className="text-[9px] text-danger shrink-0" title={error}>失败</span>
+            )}
+            {count != null && !loading && !error && (
               <span className={`text-xs font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
             )}
             {count == null && !loading && computing && (

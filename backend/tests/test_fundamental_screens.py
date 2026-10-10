@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from app.strategy.engine import StrategyEngine
 from app.strategy.fundamental_screens import (
@@ -13,6 +14,7 @@ from app.strategy.fundamental_screens import (
     _score_m1,
     _take_scored,
     filter_history_m1,
+    filter_history_m2,
     run_screen,
 )
 
@@ -125,19 +127,25 @@ def test_m1_waits_until_the_day_after_announcement_and_ranks_inside_industry():
     assert ("000009.SZ", AS_OF) in hits
 
 
-def test_m1_rejects_boundary_and_missing_goodwill():
+def test_m1_rejects_boundaries_and_treats_blank_goodwill_as_zero():
     cases = {
         "growth": _m1_pack(deducted=1200)[0],
         "margin": _m1_pack(cost=1273)[0],
         "debt": _m1_pack(debt=70)[0],
         "goodwill": _m1_pack(goodwill=25)[0],
-        "missing_goodwill": _m1_pack(goodwill=None)[0],
         "ocf": _m1_pack(ocf=0)[0],
         "pe": _m1_pack(price=96)[0],
     }
     industry = _industry([("000001.SZ", "消费-食品-饮料")])
     panel = _panel([("000001.SZ", AS_OF, 48.0)])
-    assert _hits(panel, _m1_pack()[0], industry)
+    assert _hits(panel, _m1_pack()[0], industry) == {("000001.SZ", AS_OF)}
+    blank = _m1_pack(goodwill=None)[0]
+    assert _hits(panel, blank, industry) == {("000001.SZ", AS_OF)}
+    dropped = {
+        **blank,
+        "balance_sheet": blank["balance_sheet"].drop("goodwill"),
+    }
+    assert _hits(panel, dropped, industry) == {("000001.SZ", AS_OF)}
     for name, tables in cases.items():
         price = 96.0 if name == "pe" else 48.0
         got = _hits(_panel([("000001.SZ", AS_OF, price)]), tables, industry)
@@ -178,11 +186,27 @@ def test_m2_rules_wacc_and_bank_exclusion():
     assert _hits(panel, tables, banks, "m2") == set()
     broker = _industry([("600000.SH", "非银金融-证券-证券")])
     assert _hits(panel, tables, broker, "m2") == set()
-    broken = {
+    blank_debt = {
         **tables,
-        "balance_sheet": tables["balance_sheet"].with_columns(pl.lit(None).alias("short_term_borrowing")),
+        "balance_sheet": tables["balance_sheet"].with_columns(
+            pl.lit(None).alias("short_term_borrowing"),
+            pl.lit(None).alias("long_term_borrowing"),
+        ),
     }
-    assert _hits(panel, broken, industry, "m2") == set()
+    assert _hits(panel, blank_debt, industry, "m2") == {("600000.SH", date(2024, 5, 1))}
+    no_equity = {
+        **tables,
+        "balance_sheet": tables["balance_sheet"].with_columns(pl.lit(None).alias("total_equity")),
+    }
+    assert _hits(panel, no_equity, industry, "m2") == set()
+
+
+def test_m2_missing_industry_file_is_an_error(tmp_path: Path):
+    panel = _panel([("600000.SH", date(2024, 5, 1), 20.0)])
+    with pytest.raises(ValueError, match="长期价值白马"):
+        filter_history_m2(panel, {"data_dir": str(tmp_path)})
+    with pytest.raises(ValueError, match="ext_data/ext_hy_ths"):
+        run_screen(panel, None, model="m2", tables=_m2_tables(), industry=None)
 
 
 def test_m3_median_cashflow_streak_and_pe():
