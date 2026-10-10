@@ -47,6 +47,7 @@ interface Props {
   extColumns?: string
   /** 加入自选日 (北京时间 YYYY-MM-DD); 有值时日K主图绘制「自选」竖虚线 */
   addedDate?: string | null
+  onMarkerHover?: (markerId: string | null, point?: { x: number; y: number }) => void
 }
 
 function isValidRow(r: any): boolean {
@@ -147,6 +148,7 @@ export function StockDailyKChart({
   onPriceDoubleClick,
   extColumns,
   addedDate,
+  onMarkerHover,
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
@@ -165,8 +167,8 @@ export function StockDailyKChart({
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const allMarkers = useMemo(() => [
     ...(markers ?? []),
-    ...(showLimitMarkers ? limitMarkers : []),
-  ], [limitMarkers, markers, showLimitMarkers])
+    ...(showLimitMarkers && showMarkers ? limitMarkers : []),
+  ], [limitMarkers, markers, showLimitMarkers, showMarkers])
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -280,8 +282,8 @@ export function StockDailyKChart({
           height={chartHeight - 22}
           showMA={showMA}
           showInfoBar={showInfoBar}
-          showMarkers={showMarkers}
           stockInfo={stockInfo}
+          onMarkerHover={onMarkerHover}
           symbol={symbol}
           linkedPrice={linkedPrice}
           onDateClick={onDateClick}

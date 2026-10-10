@@ -6,6 +6,7 @@ import { klineDailyQueryOptions, klineMinuteQueryOptions, klineMinuteRangeQueryO
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, toOHLC } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
+import { TradeMarksOverlay, type TradeMarksChartBindings } from '@/components/trade-marks/TradeMarksPanel'
 import { financialMetricsQueryOptions, useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
 import { scheduleNeighborPrefetch } from '@/lib/neighborPrefetch'
@@ -53,6 +54,8 @@ interface Props {
   visibleBars?: number | 'all'
   /** 加入自选日 (北京时间 YYYY-MM-DD); 有值时日K主图绘制「自选」竖虚线 */
   addedDate?: string | null
+  /** 个股预览日K上的买卖点叠加。回测弹窗保持关闭。 */
+  showTradeMarks?: boolean
 }
 
 export { getDefaultRange }
@@ -82,6 +85,7 @@ export function StockPanel({
   dailyKlineFlex = 'flex-1',
   visibleBars,
   addedDate,
+  showTradeMarks = false,
 }: Props) {
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
@@ -204,16 +208,33 @@ export function StockPanel({
         addedDate={addedDate}
       />
 
-      {infoBarOnly ? null : (
+      {infoBarOnly ? null : showTradeMarks ? (
+        <TradeMarksOverlay
+          symbol={symbol}
+          start={dateRange.start}
+          end={dateRange.end}
+          intradayDate={selectedDate}
+          extraMarkers={markers}
+          extraPriceLines={priceLines}
+        >
+          {overlay => renderCharts(overlay)}
+        </TradeMarksOverlay>
+      ) : renderCharts()}
+    </div>
+  )
+
+  function renderCharts(overlay?: TradeMarksChartBindings) {
+    const showSideIntraday = showIntraday && !!selectedDate && (!intradayDismissed || !!overlay?.showT)
+    return (
       <div className="flex gap-3 items-start">
         <StockDailyKChart
           symbol={symbol}
           height={height}
           className={`${dailyKlineFlex} min-w-0`}
           dateRange={dateRange}
-          markers={markers}
+          markers={overlay?.markers ?? markers}
           ranges={ranges}
-          priceLines={priceLines}
+          priceLines={overlay?.priceLines ?? priceLines}
           showLimitMarkers={showLimitMarkers}
           showMarkerToggle={showMarkerToggle}
           linkedPrice={linkedPrice}
@@ -222,10 +243,12 @@ export function StockPanel({
           visibleBars={visibleBars ?? (showIntraday ? 40 : 60)}
           extColumns={extColumns}
           addedDate={addedDate}
+          onMarkerHover={overlay?.onMarkerHover}
         />
 
-        {showIntraday && selectedDate && !intradayDismissed && (
+        {showSideIntraday && selectedDate && (
           <div className="relative flex-1 min-w-0 border-l border-border pl-3">
+            {!overlay?.showT && (
             <button
               onClick={() => setIntradayDismissed(true)}
               className="absolute -left-1.5 -top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded-full border border-border bg-surface text-muted shadow-sm transition-colors hover:text-foreground hover:bg-elevated"
@@ -234,6 +257,7 @@ export function StockPanel({
             >
               <X className="h-3 w-3" />
             </button>
+            )}
             <StockIntradayChart
               symbol={symbol}
               date={selectedDate}
@@ -243,13 +267,14 @@ export function StockPanel({
               onPriceHover={setLinkedPrice}
               onPriceDoubleClick={onPriceDoubleClick}
               currentPrice={rows[rows.length - 1]?.close}
-              priceLines={priceLines}
+              priceLines={overlay?.priceLines ?? priceLines}
               refetchIntervalMs={refetchIntervalMs}
+              vwapBand={overlay?.showT ? overlay.vwapBand : null}
+              tMarks={overlay?.showT ? overlay.tMarks : undefined}
             />
           </div>
         )}
       </div>
-      )}
-    </div>
-  )
+    )
+  }
 }

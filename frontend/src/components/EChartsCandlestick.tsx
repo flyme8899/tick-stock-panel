@@ -36,6 +36,13 @@ export interface ChartMarker {
   above?: boolean
   /** 自定义标签颜色，覆盖默认的 kind 对应色。 */
   color?: string
+  /**
+   * 买卖点样式。缺省保持原箭头 / 涨停标签。
+   * triangle = 三角，breakout = 突破菱形，circle = 模拟盘 B/S。
+   */
+  style?: 'triangle' | 'breakout' | 'circle'
+  /** 悬停卡片用的稳定 id。 */
+  markerId?: string
 }
 
 export interface ChartRange {
@@ -342,6 +349,8 @@ interface Props {
   volumeCompare?: VolumeCompareConfig
   /** 加入自选日 (北京时间 YYYY-MM-DD); 有值且落在当前区间内时, 主图画一条「自选」竖虚线 */
   addedDate?: string | null
+  /** 带 markerId 的买卖点悬停。点为空表示离开标记。 */
+  onMarkerHover?: (markerId: string | null, point?: { x: number; y: number }) => void
 }
 
 // 序列颜色 (双主题通用); 画布轴/网格/文字等主题相关色走 CT() 动态取
@@ -465,6 +474,96 @@ function buildSubInfoGraphics(
   return graphics
 }
 
+const TRADE_BUY = '#12B76A'
+const TRADE_SELL = '#F04438'
+
+/** 主图 markPoint。无 style 的标记保持原箭头 / 涨停标签，供回测与异动继续使用。 */
+function buildMarkPointData(
+  markers: ChartMarker[] | undefined,
+  data: OHLC[],
+  dateIndexMap: Map<string, number>,
+  compact: boolean,
+): any[] {
+  const markPointData: any[] = []
+  if (!markers || markers.length === 0) return markPointData
+  for (const m of markers) {
+    const idx = dateIndexMap.get(m.date)
+    if (idx == null) continue
+    const d = data[idx]
+    const isBuy = m.kind === 'buy'
+    const isSell = m.kind === 'sell'
+
+    if (m.style) {
+      const placeBelow = m.kind !== 'sell'
+      const color = m.color ?? (isBuy ? TRADE_BUY : isSell ? TRADE_SELL : CT().text)
+      const symbol = m.style === 'breakout' ? 'diamond' : m.style === 'circle' ? 'circle' : 'triangle'
+      const symbolSize = compact
+        ? (m.style === 'circle' ? 12 : 8)
+        : (m.style === 'circle' ? 16 : 12)
+      markPointData.push({
+        name: m.date,
+        markerId: m.markerId,
+        coord: [m.date, placeBelow ? d.low : d.high],
+        symbol,
+        symbolSize,
+        symbolRotate: symbol === 'triangle' && !placeBelow ? 180 : 0,
+        symbolOffset: placeBelow ? [0, compact ? 8 : 12] : [0, compact ? -8 : -12],
+        itemStyle: { color, cursor: 'pointer' },
+        label: m.style === 'circle' ? {
+          show: true,
+          formatter: isBuy ? 'B' : isSell ? 'S' : (m.label ?? ''),
+          color: '#fff',
+          fontSize: compact ? 8 : 9,
+          fontWeight: 'bold',
+        } : { show: false },
+        z: 100,
+        zlevel: 10,
+      })
+      continue
+    }
+
+    if (m.above) {
+      const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
+      if (compact) {
+        markPointData.push({
+          name: m.date, coord: [m.date, d.high],
+          symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
+          itemStyle: { color: dotColor, cursor: 'pointer' },
+          label: { show: false }, z: 100, zlevel: 10,
+        })
+      } else {
+        markPointData.push({
+          name: m.date, coord: [m.date, d.high],
+          symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
+          itemStyle: { color: 'transparent' },
+          label: {
+            show: true, formatter: m.label ?? '', position: 'top', distance: 0,
+            color: dotColor, fontSize: 10, fontWeight: 'normal',
+            fontFamily: 'JetBrains Mono, monospace',
+          },
+          z: 100, zlevel: 10,
+        })
+      }
+    } else {
+      markPointData.push({
+        name: m.label ?? '',
+        coord: [m.date, isBuy ? d.low : d.high],
+        symbol: 'arrow', symbolSize: 12,
+        symbolRotate: isBuy ? 0 : 180,
+        symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
+        itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
+        label: {
+          show: !!m.label, formatter: m.label ?? '',
+          position: isBuy ? 'bottom' : 'top', distance: 8,
+          color: CT().text, fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+        },
+      })
+    }
+  }
+  return markPointData
+}
+
 function buildOption(
   data: OHLC[],
   dates: string[],
@@ -484,56 +583,7 @@ function buildOption(
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
   const hasMA = showMA && data.some(d => d.ma5 != null || d.ma10 != null || d.ma20 != null || d.ma60 != null)
-
-  const markPointData: any[] = []
-  if (markers && markers.length > 0) {
-    for (const m of markers) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
-  }
+  const markPointData = buildMarkPointData(markers, data, dateIndexMap, compact)
 
   // ====== 布局计算 ======
   const left = 60
@@ -887,6 +937,7 @@ export function EChartsCandlestick({
   activeIndicators = [],
   volumeCompare = { enabled: true, days: 1 },
   addedDate,
+  onMarkerHover,
 }: Props) {
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -897,6 +948,8 @@ export function EChartsCandlestick({
   onDateClickRef.current = onDateClick
   const onPriceDoubleClickRef = useRef(onPriceDoubleClick)
   onPriceDoubleClickRef.current = onPriceDoubleClick
+  const onMarkerHoverRef = useRef(onMarkerHover)
+  onMarkerHoverRef.current = onMarkerHover
   // 主题: buildOption/信息栏内部通过 CT() 动态取调色板, 这里只负责切换时触发重建
   const theme = useTheme()
 
@@ -1111,6 +1164,20 @@ export function EChartsCandlestick({
       if (idxChanged) triggerInfoBarUpdate()
     })
 
+    chart.on('mouseover', (params: any) => {
+      if (params.componentType !== 'markPoint') return
+      const id = params.data?.markerId as string | undefined
+      if (!id) return
+      const ev = params.event
+      const x = typeof ev?.offsetX === 'number' ? ev.offsetX : undefined
+      const y = typeof ev?.offsetY === 'number' ? ev.offsetY : undefined
+      onMarkerHoverRef.current?.(id, x != null && y != null ? { x, y } : undefined)
+    })
+    chart.on('mouseout', (params: any) => {
+      if (params.componentType !== 'markPoint') return
+      if (params.data?.markerId) onMarkerHoverRef.current?.(null)
+    })
+
     chart.on('click', (params: any) => {
       if (params.componentType === 'markPoint' && params.name) {
         onDateClickRef.current?.(params.name)
@@ -1161,6 +1228,8 @@ export function EChartsCandlestick({
       chart.off('updateAxisPointer')
       chart.off('click')
       chart.off('dataZoom')
+      chart.off('mouseover')
+      chart.off('mouseout')
       hoverEl.removeEventListener('mouseenter', handlePointerEnter)
       hoverEl.removeEventListener('mouseleave', handlePointerLeave)
       chart.getZr().off('dblclick', handlePriceDoubleClick)
@@ -1177,52 +1246,7 @@ export function EChartsCandlestick({
     const mkrs = showMarkersProp ? markers : undefined
     const compact = compactRef.current
     const seriesUpdates: any[] = []
-    const markPointData: any[] = []
-    for (const m of mkrs ?? []) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
+    const markPointData = buildMarkPointData(mkrs, data, dateIndexMap, compact)
     if (mkrs?.length) {
       seriesUpdates.push({
         name: 'K',

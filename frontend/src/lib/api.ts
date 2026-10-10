@@ -4,6 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
+import type { TradeSignalsResponse } from '@/lib/trade-marks'
 
 const BASE = ''
 
@@ -2707,6 +2708,15 @@ export const api = {
         : `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&days=${days}`)
       + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : ''),
     ),
+  tradeSignals: (
+    symbol: string,
+    params: { strategy?: string; start: string; end: string; intraday?: string },
+  ) => {
+    const query = new URLSearchParams({ start: params.start, end: params.end })
+    if (params.strategy) query.set('strategy', params.strategy)
+    if (params.intraday) query.set('intraday', params.intraday)
+    return request<TradeSignalsResponse>(`/api/signals/${encodeURIComponent(symbol)}?${query}`)
+  },
   klineDailyLatest: (symbol: string) =>
     request<KlineDailyLatestResponse>(
       `/api/kline/daily/latest?symbol=${encodeURIComponent(symbol)}`,
