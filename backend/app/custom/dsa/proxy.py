@@ -10,6 +10,14 @@ from urllib.parse import unquote
 
 import httpx
 
+from app.custom.dsa.etf_job import (
+    ETF_UPSTREAM_PATH,
+    INTERNAL_TOKEN_HEADER,
+    TOKEN_MISSING_DETAIL,
+    configured_token,
+    token_usable,
+)
+
 ALLOWED_PREFIXES = frozenset(
     {
         "health",
@@ -29,6 +37,9 @@ ALLOWED_PREFIXES = frozenset(
         "backtest",
     }
 )
+
+# 只放行这一条内部任务，不把整个 tsp/ 前缀交给转发层。
+ALLOWED_EXACT_PATHS = frozenset({ETF_UPSTREAM_PATH})
 
 _LONG_PREFIXES = frozenset({"analysis", "agent", "screening", "backtest", "intelligence"})
 _MAX_BODY = 2_500_000
@@ -57,7 +68,9 @@ def enabled() -> bool:
 
 def timeout_for(path: str) -> float:
     raw = os.getenv("DSA_TIMEOUT_SECONDS", "").strip()
-    if path.endswith("/share-image"):
+    if path == ETF_UPSTREAM_PATH:
+        default = 200.0
+    elif path.endswith("/share-image"):
         default = 90.0
     elif path.split("/", 1)[0] in _LONG_PREFIXES:
         default = 120.0
@@ -79,11 +92,12 @@ def normalize_upstream_path(path: str) -> str:
     parts = [unquote(part) for part in raw.split("/")]
     if any(part in {"", ".", ".."} for part in parts):
         raise InvalidUpstreamPathError("路径无效")
-    if parts[0] not in ALLOWED_PREFIXES:
+    normalized = "/".join(parts)
+    if normalized not in ALLOWED_EXACT_PATHS and parts[0] not in ALLOWED_PREFIXES:
         raise InvalidUpstreamPathError("未开放的上游路径")
-    if len(raw) > 512:
+    if len(normalized) > 512:
         raise InvalidUpstreamPathError("路径过长")
-    return "/".join(parts)
+    return normalized
 
 
 # 上游会话。DSA 的 dsa_session 会过期；只靠手工填的 DSA_UPSTREAM_COOKIE
@@ -295,14 +309,28 @@ def _suppress_further_refresh() -> None:
             _session["next_login_at"] = earliest
 
 
-def _request_headers(content_type: str | None) -> dict[str, str]:
+def _request_headers(content_type: str | None, path: str | None = None) -> dict[str, str]:
     headers: dict[str, str] = {}
     if content_type:
         headers["content-type"] = content_type
     cookie = _upstream_cookie()
     if cookie:
         headers["cookie"] = cookie
+    if path == ETF_UPSTREAM_PATH:
+        token = configured_token()
+        if not token_usable(token):
+            raise UpstreamError(TOKEN_MISSING_DETAIL)
+        headers[INTERNAL_TOKEN_HEADER] = token
     return headers
+
+
+def _is_internal_token_rejection(response: httpx.Response) -> bool:
+    """轮动入口自己的 401 不是会话过期，不能拿去触发自动登录。"""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("ok") is False and body.get("detail") == "未授权"
 
 
 def _should_refresh_on_unauthorized(path: str) -> bool:
@@ -317,6 +345,7 @@ def forward(
     params: list[tuple[str, str]] | None = None,
     body: bytes | None = None,
     content_type: str | None = None,
+    timeout: float | None = None,
 ) -> tuple[int, bytes, str, dict[str, str]]:
     """Return status, body, media type and a small set of response headers."""
     if not enabled():
@@ -325,9 +354,10 @@ def forward(
     if body and len(body) > _MAX_BODY:
         raise UpstreamError("请求体过大", status_code=413)
     url = f"{base_url()}/api/v1/{normalized}"
+    client_timeout = timeout_for(normalized) if timeout is None or timeout <= 0 else timeout
     try:
-        with httpx.Client(timeout=timeout_for(normalized), follow_redirects=False) as client:
-            headers = _request_headers(content_type)
+        with httpx.Client(timeout=client_timeout, follow_redirects=False) as client:
+            headers = _request_headers(content_type, normalized)
             response = client.request(
                 method.upper(),
                 url,
@@ -337,6 +367,7 @@ def forward(
             )
             if (
                 response.status_code == 401
+                and not _is_internal_token_rejection(response)
                 and _should_refresh_on_unauthorized(normalized)
                 and _invalidate_and_relogin(headers.get("cookie", ""))
             ):
@@ -345,7 +376,7 @@ def forward(
                     url,
                     params=params,
                     content=body if body else None,
-                    headers=_request_headers(content_type),
+                    headers=_request_headers(content_type, normalized),
                 )
                 if response.status_code == 401:
                     _suppress_further_refresh()

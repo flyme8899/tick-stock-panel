@@ -8,6 +8,10 @@ avoids editing ``vendor/daily_stock_analysis``.
 
 Unset or ``off`` ``TSP_QUANT_EVIDENCE_FILE`` leaves skill loading unchanged.
 A hook failure still starts DSA.
+
+The same entrypoint registers ``POST /api/v1/tsp/etf-rotation`` when DSA imports
+its FastAPI app. The panel image does not contain the vendored source, so the
+ETF rotation CLI runs in this process instead.
 """
 from __future__ import annotations
 
@@ -106,6 +110,22 @@ def _install_news_bridge() -> None:
     module.install()
 
 
+def _install_etf_job() -> None:
+    """挂上 ETF 轮动入口。文件缺失或补丁失败都不挡住启动。"""
+    import importlib.util
+
+    path = Path(__file__).resolve().with_name("etf_job.py")
+    if not path.is_file():
+        logger.info("未找到 etf_job.py，DSA 不提供 ETF 轮动入口")
+        return
+    spec = importlib.util.spec_from_file_location("tsp_etf_job", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install_import_hook()
+
+
 def main() -> None:
     try:
         install()
@@ -115,6 +135,10 @@ def main() -> None:
         _install_news_bridge()
     except Exception:
         logger.exception("TSP 资讯桥未安装，继续启动 DSA")
+    try:
+        _install_etf_job()
+    except Exception:
+        logger.exception("ETF 轮动入口未安装，继续启动 DSA")
     if len(sys.argv) < 2:
         sys.argv = ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     else:

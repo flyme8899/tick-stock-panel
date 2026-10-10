@@ -61,6 +61,8 @@ services:
       # 决策页保存定时设置时会写回这份文件。只读挂载会导致保存失败。
       - ./.env:/app/.env
       - ./backend/app/custom/dsa/dsa_bootstrap.py:/opt/tsp/dsa_bootstrap.py:ro
+      # 与 bootstrap 一起挂进容器。app 镜像没有 vendor 源码，轮动命令在这里执行。
+      - ./backend/app/custom/dsa/etf_job.py:/opt/tsp/etf_job.py:ro
       - ./backend/app/custom/dsa/news_bridge.py:/opt/tsp/news_bridge.py:ro
       - ./backend/app/custom/dsa/quant_evidence.py:/opt/tsp/quant_evidence.py:ro
       - ./backend/app/custom/dsa/quant_evidence.yaml:/opt/tsp/quant_evidence.yaml:ro
