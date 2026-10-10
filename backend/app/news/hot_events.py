@@ -5,8 +5,13 @@
 或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
 共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
 
-标题优先用合格的关键词或模型说法。两者都没有时，用去掉来源前缀、按分句截断的
-代表标题。没有可读标题，或标题只剩「事件」，这条就不进列表。
+标题优先用合格的关键词或模型说法。两者都没有时，用去掉来源前缀的代表分句。
+分句尽量整句留下，最长大约 28 字：不切在数字或日期中间，不把宾语丢掉，也不留
+【】碎片。没有可读标题，或标题只剩「事件」，这条就不进列表。
+
+概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
+词典没写到的无关概念仍然丢掉。同一时间窗里，财政部、国务院这类国内政策主体
+即使一个写发布、一个写出台，也并成一件事。
 """
 from __future__ import annotations
 
@@ -32,8 +37,10 @@ _CLUSTER_WINDOW = timedelta(hours=6)
 _HEAT_HALF_LIFE_HOURS = 12
 _LLM_PER_PASS = 8
 _TITLE_LIMIT = 20
-# 标题缓存按这个版本取。旧键里的「事件」和缺主体标题不再套用，下一轮重新生成。
-_TITLE_CACHE_VERSION = 3
+# 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
+_TITLE_HARD = 28
+# 标题缓存按这个版本取。旧键里的截断标题不再套用，下一轮重新生成。
+_TITLE_CACHE_VERSION = 4
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -192,6 +199,24 @@ _SOURCE_HEADS = (
     "路透社", "路透", "彭博", "南华早报",
 )
 _SOURCE_BRACKET = re.compile(r"^(?:【[^】]{1,16}】|\[[^\]]{1,16}\]|（[^）]{1,12}）|\([^)]{1,12}\))")
+# 残缺的前导标签，例如「新增隐债】」。成对的【】在后面整段去掉。
+_BROKEN_BRACKET = re.compile(r"^[^【】\[\]]{1,16}[】\]]")
+_BRACKET_PAIR = re.compile(r"【[^】]*】|\[[^\]]*\]")
+_STRAY_BRACKET = re.compile(r"[【】\[\]]")
+# 双字动词被从中间切开时，标题会停在第一个字上，例如「出台」变成「出」。
+_VERB_PAIRS = ("出台", "发布", "上调", "下调", "降息", "加息", "推出", "宣布")
+# 国内政策机构。同一窗口里动词不同（发布/出台）仍视为同一件事。央行利率不在这里。
+_POLICY_ORGS = (
+    "财政部", "国务院", "政治局", "发改委", "工信部", "证监会",
+    "商务部", "央行", "国常会",
+)
+# 标题里点了主体、但提及被相关性滤空时，用这张表补 A 股概念。键必须同时出现。
+_SUBJECT_CONCEPTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("橡胶",), ("橡胶", "天然橡胶")),
+    (("原油",), ("石油", "油服")),
+    (("IEA",), ("石油", "油服")),
+    (("美联储", "加息"), ("黄金", "银行")),
+)
 _SOURCE_DATELINE = re.compile(
     r"^(?:" + "|".join(_SOURCE_HEADS) + r")(?:\d{1,2}月\d{1,2}日)?(?:电|讯)[，,]?"
 )
@@ -469,7 +494,10 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         concept_counts.update(dict.fromkeys(item["concepts"], 1))
     focus_titles = [str(item.get("title") or "") for item in focused]
     subjects = _subject_set(name, focused)
-    concepts = _relevant_concepts(concept_counts, focus_titles, subjects)
+    concepts = _merge_mapped_concepts(
+        _relevant_concepts(concept_counts, focus_titles, subjects),
+        "\n".join([name, *focus_titles]),
+    )
     rejected = [label for label in concept_counts if label not in concepts and label not in BROAD_SECTORS]
     stocks: dict[str, dict] = {}
     for item in focused:
@@ -771,11 +799,33 @@ def _same_subject_action(left: dict, right: dict) -> bool:
     return bool(_subject_keys(left) & _subject_keys(right))
 
 
+def _policy_subject(doc: dict) -> str:
+    """财政部增量政策和隐债方案是同一件事，即使一条写发布、另一条写出台。"""
+    blob = "\n".join([
+        str(doc.get("title") or ""),
+        str(doc.get("lead") or ""),
+        " ".join(str(entity) for entity in (doc.get("entities") or [])),
+    ])
+    for org in _POLICY_ORGS:
+        if org in blob:
+            return org
+    if "财政" in blob and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策")):
+        return "财政部"
+    return ""
+
+
+def _same_policy_subject(left: dict, right: dict) -> bool:
+    subject = _policy_subject(left)
+    return bool(subject) and subject == _policy_subject(right)
+
+
 def _can_merge(left: dict, right: dict) -> bool:
     gap = abs(left["published"] - right["published"])
     if gap > _CLUSTER_WINDOW:
         return False
     if _same_subject_action(left, right):
+        return True
+    if _same_policy_subject(left, right):
         return True
     if (
         gap <= _SIMILAR_WINDOW
@@ -878,6 +928,36 @@ def _relevant_concepts(counts: Counter[str], titles: list[str], subjects: set[st
     return _specific_concepts(filtered)
 
 
+def _dictionary_concepts(blob: str) -> list[str]:
+    """主体在标题里、提及却是空的时候，补上对应的 A 股概念。"""
+    found: list[str] = []
+
+    def add(names: tuple[str, ...]) -> None:
+        for name in names:
+            if name not in found:
+                found.append(name)
+
+    for keys, concepts in _SUBJECT_CONCEPTS:
+        if all(key in blob for key in keys):
+            add(concepts)
+    fiscal = "财政部" in blob or (
+        "财政" in blob and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策"))
+    )
+    if fiscal and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策")):
+        add(("基建", "地方债"))
+    return found
+
+
+def _merge_mapped_concepts(concepts: list[str], blob: str) -> list[str]:
+    merged: list[str] = []
+    for name in [*_dictionary_concepts(blob), *concepts]:
+        if name and name not in merged:
+            merged.append(name)
+        if len(merged) >= _CONCEPT_LIMIT:
+            break
+    return merged
+
+
 def _stock_relevant(
     name: str,
     key: str,
@@ -907,9 +987,50 @@ def _stock_relevant(
     return not tied_to_rejected
 
 
+def _ends_split_verb(text: str) -> bool:
+    if not text or any(text.endswith(verb) for verb in _VERB_PAIRS):
+        return False
+    return any(text.endswith(verb[0]) for verb in _VERB_PAIRS)
+
+
+def _ends_mid_number(text: str) -> bool:
+    return bool(text) and text[-1].isdigit()
+
+
+def _display_clause_ok(text: str) -> bool:
+    """整句可以比 20 字长，但不能停在半个动词、半个数字或半个词上。"""
+    body = _compact(text)
+    if not body or body == "事件" or len(body) < 4 or len(body) > _TITLE_HARD:
+        return False
+    if any(char in body for char in "【】[]"):
+        return False
+    if _starts_fragment(body) or _ends_abruptly(body) or _ends_split_verb(body) or _ends_mid_number(body):
+        return False
+    lead, action, obj = _split_headline(body)
+    if not action or not _subject_ok(lead):
+        return False
+    consumed = len(lead) + len(action) + len(obj)
+    return not body[consumed:].strip("，。！？、；：")
+
+
+def _stitch_subject_verb(body: str) -> str:
+    """「IEA：下调原油供需预期」的冒号把主体和动词拆开了，先接回去。"""
+    parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()]
+    if len(parts) < 2:
+        return body
+    head, nxt = parts[0], parts[1]
+    if len(head) > 8 or _tuple_action(head)[0] >= 0 or _narrative_action(head)[0] >= 0:
+        return body
+    if _tuple_action(nxt)[0] != 0 and _narrative_action(nxt)[0] != 0:
+        return body
+    parts[0] = head + nxt
+    del parts[1]
+    return parts[0] if len(parts) == 1 else parts[0] + "，" + "，".join(parts[1:])
+
+
 def _cleaned_headline(text: str) -> str:
     """去掉来源前缀，取第一个有内容的分句，过长时停在分句内部的自然断点。"""
-    body = _strip_source_prefix(text)
+    body = _stitch_subject_verb(_strip_source_prefix(text))
     if not body or body == "事件":
         return ""
     parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()] or [body]
@@ -925,9 +1046,14 @@ def _cleaned_headline(text: str) -> str:
 def _clip_at_boundary(text: str) -> str:
     if not text or text == "事件":
         return ""
-    if len(text) <= _TITLE_LIMIT and not _ends_abruptly(text):
+    if _display_clause_ok(text):
         return text
-    window = text[:_TITLE_LIMIT]
+    window = text[:_TITLE_HARD]
+    if len(text) > _TITLE_HARD and _ends_mid_number(window):
+        while window and window[-1].isdigit():
+            window = window[:-1]
+    if len(text) > len(window) and _ends_split_verb(window):
+        window = window[:-1]
     cut = -1
     for sep in ("以及", "并且", "同时", "和", "与", "及"):
         index = window.rfind(sep)
@@ -935,12 +1061,23 @@ def _clip_at_boundary(text: str) -> str:
             cut = max(cut, index)
     if cut >= 4:
         window = window[:cut]
-    while window and (_ends_abruptly(window) or window[-1] in "的和与及"):
+    while window and (
+        _ends_abruptly(window) or _ends_split_verb(window) or _ends_mid_number(window) or window[-1] in "的和与及"
+    ):
         window = window[:-1]
-    if len(window) >= 4 and window != "事件" and not _ends_abruptly(window):
+    if _display_clause_ok(window):
         return window
-    if text != "事件" and not _ends_abruptly(text):
-        return text[:_TITLE_LIMIT] if len(text) > _TITLE_LIMIT else text
+    repaired = _repair_headline(text)
+    if repaired and (_display_clause_ok(repaired) or _title_ok(repaired)):
+        return repaired
+    if (
+        len(window) >= 4
+        and window != "事件"
+        and not _ends_abruptly(window)
+        and not _ends_split_verb(window)
+        and not _ends_mid_number(window)
+    ):
+        return window
     return ""
 
 
@@ -967,13 +1104,16 @@ def _attach_entity(title: str, entity: str) -> str:
     if entity in title and lead and not _subject_is_vague(lead):
         return title
     prefixed = title if entity in title else f"{entity}{title}"
-    if len(prefixed) <= _TITLE_LIMIT and _title_ok(prefixed):
-        prefixed_lead, _prefixed_action, _prefixed_obj = _split_headline(prefixed)
-        if prefixed_lead and not _subject_is_vague(prefixed_lead):
-            return prefixed
+    prefixed_lead, _prefixed_action, _prefixed_obj = _split_headline(prefixed)
+    if (
+        prefixed_lead
+        and not _subject_is_vague(prefixed_lead)
+        and (_display_clause_ok(prefixed) or (len(prefixed) <= _TITLE_LIMIT and _title_ok(prefixed)))
+    ):
+        return prefixed
     if action:
         fitted = _fit_object(f"{entity}{action}", obj)
-        if _title_ok(fitted):
+        if _display_clause_ok(fitted) or _title_ok(fitted):
             return fitted
     if len(prefixed) <= _TITLE_LIMIT and _title_ok(prefixed):
         return prefixed
@@ -1075,7 +1215,11 @@ def _strip_source_prefix(text: str) -> str:
             if updated != body:
                 body = updated.lstrip("，。！？、；：")
                 changed = True
-    return _REUTERS_TAIL.sub("", body).strip("，。！？、；：")
+    body = _REUTERS_TAIL.sub("", body)
+    body = _BROKEN_BRACKET.sub("", body)
+    body = _BRACKET_PAIR.sub("", body)
+    body = _STRAY_BRACKET.sub("", body)
+    return body.strip("，。！？、；：")
 
 
 def _starts_fragment(text: str) -> bool:
@@ -1202,10 +1346,26 @@ def _title_ok(title: str) -> bool:
 
 def _fit_object(base: str, obj: str) -> str:
     obj = obj.strip("，。！？、；：")
-    if obj and len(base) + len(obj) <= _TITLE_LIMIT and not _ends_abruptly(obj):
-        return base + obj
-    head = re.split(r"[和与及]", obj, maxsplit=1)[0] if obj else ""
-    if head and head != obj and len(base) + len(head) <= _TITLE_LIMIT and not _ends_abruptly(head):
+    if not obj:
+        return base
+    full = base + obj
+    if len(full) <= _TITLE_HARD and not _ends_abruptly(obj) and not _ends_mid_number(full):
+        return full
+    # 宾语本身是半个词（例如停在「政」）时整段丢掉，不要只削掉最后一个字。
+    if not _ends_abruptly(obj):
+        room = _TITLE_HARD - len(base)
+        chunk = obj[:room] if room > 0 else ""
+        while chunk and (
+            _ends_abruptly(base + chunk)
+            or _ends_split_verb(base + chunk)
+            or _ends_mid_number(base + chunk)
+            or chunk[-1] in "的和与及"
+        ):
+            chunk = chunk[:-1]
+        if len(chunk) >= 2:
+            return base + chunk
+    head = re.split(r"[和与及]", obj, maxsplit=1)[0]
+    if head and head != obj and len(base) + len(head) <= _TITLE_HARD and not _ends_abruptly(head):
         return base + head
     return base
 
@@ -1232,7 +1392,7 @@ def _repair_headline(text: str) -> str:
         if later > 0 and later_verb in _GLUE_FOLLOWUPS:
             obj = rest[:later]
     base = f"{subject}{verb}"
-    if len(base) > _TITLE_LIMIT or _ends_abruptly(base):
+    if len(base) > _TITLE_HARD or _ends_abruptly(base) or _ends_split_verb(base):
         return ""
     return _fit_object(base, obj)
 
@@ -1241,16 +1401,16 @@ def _fit_clause(clause: str) -> str:
     compact = _drop_leading_fragment(_strip_source_prefix(clause))
     if not compact:
         return ""
-    if _title_ok(compact):
+    if _display_clause_ok(compact) or _title_ok(compact):
         return compact
     repaired = _repair_headline(compact)
-    if repaired and _title_ok(repaired):
+    if repaired and (_display_clause_ok(repaired) or _title_ok(repaired)):
         return repaired
     return ""
 
 
 def _representative_clause(text: str) -> str:
-    body = _strip_source_prefix(text)
+    body = _stitch_subject_verb(_strip_source_prefix(text))
     if not body:
         return ""
     for part in _CLAUSE.split(body):
@@ -1422,10 +1582,13 @@ def _apply_llm(event: dict, parsed: dict) -> None:
             event["concepts"].append(name)
     texts = [str(event.get("name") or ""), str(event.get("headline") or "")]
     texts.extend(str(item) for item in (event.get("headlines") or []))
-    event["concepts"] = _relevant_concepts(
-        Counter({str(name): 1 for name in event.get("concepts") or []}),
-        texts,
-        _subject_set(str(event.get("name") or ""), []),
+    event["concepts"] = _merge_mapped_concepts(
+        _relevant_concepts(
+            Counter({str(name): 1 for name in event.get("concepts") or []}),
+            texts,
+            _subject_set(str(event.get("name") or ""), []),
+        ),
+        "\n".join(texts),
     )
     directions = parsed.get("concept_directions") or {}
     event["mapping"] = [

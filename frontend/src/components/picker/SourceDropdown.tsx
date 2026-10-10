@@ -109,7 +109,7 @@ export function SourceDropdown({
                 {on && <Check className="h-2.5 w-2.5" />}
               </span>
               <span className="min-w-0">
-                <span className="block truncate text-xs text-foreground">{item.name}</span>
+                <span className="block whitespace-normal break-words text-xs text-foreground">{item.name}</span>
                 {(item.importance || item.category || item.direction) && (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">
                     {[item.importance, item.confirmationLabel, item.category, item.direction, ...(item.mappedStocks ?? []).slice(0, 2)].filter(Boolean).join(' · ')}
