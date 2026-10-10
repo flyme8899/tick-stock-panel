@@ -51,7 +51,6 @@ import {
   IconStockFocus,
   IconLadder,
   IconConcept,
-  IconIndustry,
   IconFinancials,
   IconMonitor,
   IconRegime,
@@ -68,6 +67,7 @@ import {
 } from './BrandIcons'
 import { Logo } from './Logo'
 import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
+import { migrateNavHidden, migrateNavOrder } from '@/lib/navOrder'
 import { cn } from '@/lib/cn'
 import { useIsDesktop } from '@/lib/useMediaQuery'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
@@ -102,8 +102,7 @@ const nav = [
   { to: '/backtest',         label: '回测',     icon: IconBacktest },
   { to: '/stock-analysis',   label: '个股分析', icon: IconStockFocus },
   { to: '/limit-ladder',     label: '连板梯队', icon: IconLadder },
-  { to: '/concept-analysis', label: '概念分析', icon: IconConcept },
-  { to: '/industry-analysis', label: '行业分析', icon: IconIndustry },
+  { to: '/sector-analysis', label: '板块分析', icon: IconConcept },
   { to: '/financials',       label: '财务分析', icon: IconFinancials },
   { to: '/monitor',          label: '监控中心', icon: IconMonitor },
   { to: '/regime',           label: '市场环境', icon: IconRegime },
@@ -580,7 +579,7 @@ export function Layout() {
   }))
 
   const allNav: NavItem[] = [...nav, ...analysisNav, ...extensionNav]
-  const savedOrder = prefs?.nav_order ?? []
+  const savedOrder = migrateNavOrder(prefs?.nav_order ?? [])
 
   const navItems = savedOrder.length > 0
     ? (() => {
@@ -609,7 +608,7 @@ export function Layout() {
       })()
     : allNav
 
-  const hiddenIds = new Set(prefs?.nav_hidden ?? [])
+  const hiddenIds = new Set(migrateNavHidden(prefs?.nav_hidden ?? []))
   const visibleNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
 
   const doEnableRealtime = async () => {

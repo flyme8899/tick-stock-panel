@@ -1270,7 +1270,7 @@ def _local_tool_schemas() -> list[dict[str, Any]]:
         ),
         _schema(
             "get_sector_rotation",
-            "盘中板块轮动(概念/行业分析页口径): 活跃板块榜、板块切换事件与资金流向排名。",
+            "盘中板块轮动(板块分析页口径): 活跃板块榜、板块切换事件与资金流向排名。",
             {
                 "kind": {"type": "string", "enum": ["concept", "industry"], "description": "板块维度, 默认 concept"},
                 "top": {"type": "integer", "description": "榜单数量 (10-50, 默认 20)"},

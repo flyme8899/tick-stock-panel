@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
 import {
   Activity,
@@ -14,7 +15,7 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { AnalysisConfigDialog, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
+import { AnalysisConfigDialog, DimensionHeatmap, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toNavItems, type NavItem } from '@/lib/listNav'
 import { RpsRotationDialog } from '@/components/RpsRotationDialog'
@@ -23,16 +24,103 @@ import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtBigNum, fmtPct, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
-import { resolveDimension, type DimensionGroup, type StockRow } from '@/lib/analysis-adapter'
+import {
+  groupByIndustryLevel,
+  resolveDimension,
+  type DimensionGroup,
+  type StockRow,
+} from '@/lib/analysis-adapter'
 import { SectorRotationCard } from '@/components/SectorRotationCard'
+import { parseSectorTab, sectorAnalysisSearch, type SectorKind } from '@/lib/sectorTab'
 
-const KEYWORDS = ['concept', '概念', 'theme', '题材', '板块']
-const CANDIDATE_FIELDS = ['concept', '概念', 'theme', '题材', '板块', 'concept_name', '概念名称']
 const PAGE_LIMIT = 12000
-const MAX_RENDERED_CONCEPTS = 120
+const MAX_RENDERED_GROUPS = 120
 const MAX_RENDERED_STOCKS = 160
 
 type SortMode = 'heat' | 'avgPct' | 'leader' | 'amount' | 'down'
+
+interface KindSpec {
+  kind: SectorKind
+  dimLabel: string
+  keywords: string[]
+  candidateFields: string[]
+  presetId: string
+  emptyTitle: string
+  emptyHint: string
+  missingTitle: string
+  missingHint: string
+  loadingText: string
+  unmatchedTitle: string
+  unmatchedFallback: string
+  heroStrong: string
+  heroBreadth: string
+  railTitle: string
+  searchPlaceholder: string
+  leaderStageTitle: string
+  gradient: string
+  sortActiveClass: string
+  railActiveClass: string
+  heatBadgeClass: string
+  hierarchy: boolean
+  heatmap: boolean
+}
+
+const KIND_SPEC: Record<SectorKind, KindSpec> = {
+  concept: {
+    kind: 'concept',
+    dimLabel: '概念',
+    keywords: ['concept', '概念', 'theme', '题材', '板块'],
+    candidateFields: ['concept', '概念', 'theme', '题材', '板块', 'concept_name', '概念名称'],
+    presetId: 'ext_gn_ths',
+    emptyTitle: '暂无概念数据',
+    emptyHint: '从同花顺获取概念分类数据后即可使用概念分析',
+    missingTitle: '未获取概念数据',
+    missingHint: '内置概念数据源已就绪,点击下方按钮从同花顺获取概念分类数据',
+    loadingText: '正在计算概念强度...',
+    unmatchedTitle: '未匹配到概念数据',
+    unmatchedFallback: '请检查扩展数据是否包含概念/题材相关字段',
+    heroStrong: '最强主线',
+    heroBreadth: '涨跌板块',
+    railTitle: '概念矩阵',
+    searchPlaceholder: '搜索概念',
+    leaderStageTitle: '本概念三龙头',
+    gradient: 'bg-[radial-gradient(circle_at_12%_0%,rgba(59,130,246,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)]',
+    sortActiveClass: 'bg-accent/15 text-accent',
+    railActiveClass: 'bg-blue-400/[0.08]',
+    heatBadgeClass: 'bg-blue-400/10 text-blue-300',
+    hierarchy: false,
+    heatmap: false,
+  },
+  industry: {
+    kind: 'industry',
+    dimLabel: '行业',
+    keywords: ['industry', '行业', 'sector', '申万', '中信'],
+    candidateFields: ['industry', '行业', 'sector', '申万', '中信', '行业名称', 'industry_name', 'sector_name'],
+    presetId: 'ext_hy_ths',
+    emptyTitle: '暂无行业数据',
+    emptyHint: '从同花顺获取行业分类数据后即可使用行业分析',
+    missingTitle: '未获取行业数据',
+    missingHint: '内置行业数据源已就绪,点击下方按钮从同花顺获取行业分类数据',
+    loadingText: '正在计算行业强度...',
+    unmatchedTitle: '未匹配到行业数据',
+    unmatchedFallback: '请检查扩展数据是否包含行业/板块相关字段',
+    heroStrong: '最强行业',
+    heroBreadth: '涨跌行业',
+    railTitle: '行业矩阵',
+    searchPlaceholder: '搜索行业',
+    leaderStageTitle: '本行业三龙头',
+    gradient: 'bg-[radial-gradient(circle_at_12%_0%,rgba(245,158,11,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)]',
+    sortActiveClass: 'bg-amber-500/15 text-amber-400',
+    railActiveClass: 'bg-amber-500/[0.08]',
+    heatBadgeClass: 'bg-amber-500/10 text-amber-400',
+    hierarchy: true,
+    heatmap: true,
+  },
+}
+
+function configStore(kind: SectorKind) {
+  return kind === 'industry' ? storage.industryAnalysisConfig : storage.conceptAnalysisConfig
+}
 
 interface EnrichedStock extends MarketSnapshotRow {
   leaderScore: number
@@ -46,7 +134,7 @@ interface EnrichedStock extends MarketSnapshotRow {
   }
 }
 
-interface ConceptStat {
+interface SectorStat {
   key: string
   stocks: EnrichedStock[]
   count: number
@@ -66,22 +154,15 @@ interface ConceptStat {
   riskScore: number
 }
 
-function loadConfig(): AnalysisFieldConfig {
-  return storage.conceptAnalysisConfig.get({}) as AnalysisFieldConfig
-}
-
-function saveConfig(c: AnalysisFieldConfig) {
-  storage.conceptAnalysisConfig.set(c)
-}
-
 function pickBestConfig(
   configs: { id: string; label: string; description?: string; fields: { name: string; label: string }[] }[],
+  keywords: string[],
 ): string {
   let best = ''
   let bestScore = 0
   for (const c of configs) {
     const haystack = [c.id, c.label, c.description ?? '', ...c.fields.flatMap(f => [f.name, f.label])].join(' ').toLowerCase()
-    const score = KEYWORDS.reduce((n, k) => n + (haystack.includes(k) ? 1 : 0), 0)
+    const score = keywords.reduce((n, k) => n + (haystack.includes(k) ? 1 : 0), 0)
     if (score > bestScore) {
       bestScore = score
       best = c.id
@@ -167,7 +248,7 @@ function enrichStock(stock: StockRow, marketMap: Map<string, MarketSnapshotRow>)
   }
 }
 
-function calcConceptStat(group: DimensionGroup, marketMap: Map<string, MarketSnapshotRow>): ConceptStat {
+function calcSectorStat(group: DimensionGroup, marketMap: Map<string, MarketSnapshotRow>): SectorStat {
   const seen = new Set<string>()
   const stocks = group.stocks
     .map(s => enrichStock(s, marketMap))
@@ -223,7 +304,7 @@ function calcConceptStat(group: DimensionGroup, marketMap: Map<string, MarketSna
 }
 
 function statSort(mode: SortMode) {
-  return (a: ConceptStat, b: ConceptStat) => {
+  return (a: SectorStat, b: SectorStat) => {
     switch (mode) {
       case 'avgPct': return (b.avgPct ?? -Infinity) - (a.avgPct ?? -Infinity)
       case 'leader': return (b.leader?.leaderScore ?? -Infinity) - (a.leader?.leaderScore ?? -Infinity)
@@ -235,14 +316,52 @@ function statSort(mode: SortMode) {
   }
 }
 
-export function ConceptAnalysis() {
-  const [fieldConfig, setFieldConfig] = useState<AnalysisFieldConfig>(loadConfig)
+function SectorTabs({ kind, onChange }: { kind: SectorKind; onChange: (next: SectorKind) => void }) {
+  return (
+    <div className="flex gap-2" role="tablist" aria-label="板块维度">
+      {([
+        ['concept', '概念'],
+        ['industry', '行业'],
+      ] as const).map(([key, label]) => (
+        <button
+          key={key}
+          type="button"
+          role="tab"
+          aria-selected={kind === key}
+          className={cn(
+            'rounded-md border px-2.5 py-1 text-xs',
+            kind === key
+              ? 'border-accent bg-accent/10 text-foreground'
+              : 'border-border text-muted',
+          )}
+          onClick={() => onChange(key)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export function SectorAnalysis() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const kind = parseSectorTab(searchParams.get('tab'))
+  const setKind = (next: SectorKind) => {
+    if (next === kind) return
+    setSearchParams(sectorAnalysisSearch(next, searchParams), { replace: true })
+  }
+  return <SectorAnalysisBody key={kind} kind={kind} onKindChange={setKind} />
+}
+
+function SectorAnalysisBody({ kind, onKindChange }: { kind: SectorKind; onKindChange: (next: SectorKind) => void }) {
+  const spec = KIND_SPEC[kind]
+  const [fieldConfig, setFieldConfig] = useState<AnalysisFieldConfig>(() => configStore(kind).get({}) as AnalysisFieldConfig)
   const [showConfig, setShowConfig] = useState(false)
   const [search, setSearch] = useState('')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [sortMode, setSortMode] = useState<SortMode>('heat')
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
-  const [previewName, setPreviewName] = useState<string>('')
+  const [previewName, setPreviewName] = useState('')
   const [previewNavList, setPreviewNavList] = useState<NavItem[]>([])
   const handleStockClick = useCallback((symbol: string, name?: string, navList?: NavItem[]) => {
     setPreviewSymbol(symbol)
@@ -255,9 +374,9 @@ export function ConceptAnalysis() {
   const availableConfigs = configsQuery.data?.items ?? []
   // 用户配置的 configId 可能已失效 (扩展数据被删除), 此时回退到自动选择,
   // 避免用失效 ID 请求接口报错; 用户仍可点配置按钮重新选择。
-  const preferredConfigId = fieldConfig.configId || pickBestConfig(availableConfigs)
+  const preferredConfigId = fieldConfig.configId || pickBestConfig(availableConfigs, spec.keywords)
   const preferredConfig = availableConfigs.find(c => c.id === preferredConfigId)
-  const activeConfigId = preferredConfig ? preferredConfigId : pickBestConfig(availableConfigs)
+  const activeConfigId = preferredConfig ? preferredConfigId : pickBestConfig(availableConfigs, spec.keywords)
   const activeConfig = availableConfigs.find(c => c.id === activeConfigId)
 
   const rowsQuery = useQuery({
@@ -266,19 +385,16 @@ export function ConceptAnalysis() {
     enabled: !!activeConfigId,
   })
 
-  // 内置概念预设 (ext_gn_ths) 手动获取数据
-  const PRESET_CONCEPT_ID = 'ext_gn_ths'
   const queryClient = useQueryClient()
   const fetchMutation = useMutation({
-    mutationFn: () => api.extDataPresetFetch(PRESET_CONCEPT_ID),
+    mutationFn: () => api.extDataPresetFetch(spec.presetId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: QK.extData })
-      queryClient.invalidateQueries({ queryKey: QK.extDataRows(PRESET_CONCEPT_ID, undefined, PAGE_LIMIT) })
+      queryClient.invalidateQueries({ queryKey: QK.extDataRows(spec.presetId, undefined, PAGE_LIMIT) })
     },
   })
-  // 是否处于「内置概念预设存在但无数据」状态 → 显示获取按钮
-  const needsConceptFetch =
-    !!activeConfig && activeConfig.id === PRESET_CONCEPT_ID &&
+  const needsPresetFetch =
+    !!activeConfig && activeConfig.id === spec.presetId &&
     !rowsQuery.isLoading && (rowsQuery.data?.total ?? 0) === 0
 
   const marketQuery = useQuery({
@@ -289,15 +405,25 @@ export function ConceptAnalysis() {
 
   const marketMap = useMemo(() => buildMarketMap(marketQuery.data?.rows ?? []), [marketQuery.data?.rows])
   const resolved = useMemo(
-    () => resolveDimension(rowsQuery.data, activeConfig, fieldConfig.dimensionField ? [fieldConfig.dimensionField, ...CANDIDATE_FIELDS] : CANDIDATE_FIELDS),
-    [rowsQuery.data, activeConfig, fieldConfig.dimensionField],
+    () => resolveDimension(
+      rowsQuery.data,
+      activeConfig,
+      fieldConfig.dimensionField ? [fieldConfig.dimensionField, ...spec.candidateFields] : spec.candidateFields,
+    ),
+    [rowsQuery.data, activeConfig, fieldConfig.dimensionField, spec.candidateFields],
+  )
+
+  const industryLevel = fieldConfig.hierarchyLevel ?? 2
+  const groups = useMemo(
+    () => spec.hierarchy ? groupByIndustryLevel(resolved.groups, industryLevel) : resolved.groups,
+    [spec.hierarchy, resolved.groups, industryLevel],
   )
 
   const stats = useMemo(() => {
-    return resolved.groups
-      .map(g => calcConceptStat(g, marketMap))
+    return groups
+      .map(g => calcSectorStat(g, marketMap))
       .filter(s => s.count > 0)
-  }, [resolved.groups, marketMap])
+  }, [groups, marketMap])
 
   const filteredStats = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -308,8 +434,8 @@ export function ConceptAnalysis() {
   const selected = filteredStats.find(s => s.key === selectedKey) ?? filteredStats[0] ?? null
   const leading = useMemo(() => [...stats].sort(statSort('heat')).slice(0, 10), [stats])
   const falling = useMemo(() => [...stats].sort(statSort('down')).slice(0, 10), [stats])
-  const activeConcept = useMemo(() => [...stats].sort(statSort('amount'))[0] ?? null, [stats])
-  const conceptBreadth = useMemo(() => {
+  const activeSector = useMemo(() => [...stats].sort(statSort('amount'))[0] ?? null, [stats])
+  const breadth = useMemo(() => {
     const priced = stats.filter(s => s.avgPct != null)
     return {
       up: priced.filter(s => (s.avgPct ?? 0) > 0).length,
@@ -324,79 +450,138 @@ export function ConceptAnalysis() {
     return set.size
   }, [stats])
 
+  const heatmapQuoteMap = useMemo(() => {
+    if (!spec.heatmap) return null
+    const map = new Map<string, { symbol: string; pct?: number; change_pct?: number; name?: string; [k: string]: unknown }>()
+    for (const [k, v] of marketMap) {
+      map.set(k, {
+        ...v,
+        change_pct: v.change_pct ?? undefined,
+        name: v.name ?? undefined,
+      })
+    }
+    return map
+  }, [spec.heatmap, marketMap])
+
   const handleSaveConfig = (c: AnalysisFieldConfig) => {
     setFieldConfig(c)
-    saveConfig(c)
+    configStore(kind).set(c)
     setSelectedKey(null)
   }
 
+  const asOf = marketQuery.data?.as_of ?? rowsQuery.data?.date ?? '最新'
+  const subtitle = spec.hierarchy
+    ? `${industryLevel}级行业 · ${asOf} · ${stats.length} 个行业 · ${totalSymbols} 只标的`
+    : `${asOf} · ${stats.length} 个概念 · ${totalSymbols} 只标的`
+
+  const configButton = (
+    <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置数据源">
+      <Settings2 className="h-4 w-4" />
+    </button>
+  )
+
+  const header = (
+    <PageHeader
+      title="板块分析"
+      subtitle={activeConfig ? subtitle : undefined}
+      right={activeConfig ? (
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowRps(true)}
+            className="inline-flex items-center gap-1 rounded-btn border border-amber-400/40 bg-amber-400/15 px-2.5 py-1.5 text-[11px] text-amber-400 font-medium transition-colors hover:bg-amber-400/25 hover:border-amber-400/60"
+            title={`${spec.dimLabel}涨幅轮动矩阵`}
+          >
+            <Repeat className="h-3.5 w-3.5" />涨幅RPS轮动分析
+          </button>
+          <button
+            onClick={() => { rowsQuery.refetch(); marketQuery.refetch() }}
+            disabled={rowsQuery.isFetching || marketQuery.isFetching}
+            className="p-1.5 text-muted hover:bg-surface disabled:opacity-50"
+            title="刷新"
+          >
+            <RefreshCw className={cn('h-4 w-4', (rowsQuery.isFetching || marketQuery.isFetching) && 'animate-spin')} />
+          </button>
+          {configButton}
+        </div>
+      ) : configButton}
+    />
+  )
+
+  const dialogs = (
+    <>
+      <AnimatePresence>
+        {showConfig && (
+          <AnalysisConfigDialog
+            currentConfig={fieldConfig}
+            onSave={handleSaveConfig}
+            onClose={() => setShowConfig(false)}
+            showHierarchyLevel={spec.hierarchy}
+          />
+        )}
+      </AnimatePresence>
+      {previewSymbol && (
+        <StockPreviewDialog
+          symbol={previewSymbol}
+          name={previewName}
+          onClose={() => { setPreviewSymbol(null); setPreviewName(''); setPreviewNavList([]) }}
+          navList={previewNavList}
+          onNavigate={(sym, n) => { setPreviewSymbol(sym); setPreviewName(n ?? '') }}
+        />
+      )}
+      <AnimatePresence>
+        {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} kind={kind} />}
+      </AnimatePresence>
+    </>
+  )
+
   if (configsQuery.isLoading) {
-    return <div className="flex h-full items-center justify-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>
+    return (
+      <>
+        {header}
+        <div className="flex flex-1 items-center justify-center">
+          <RefreshCw className="h-5 w-5 animate-spin text-muted" />
+        </div>
+      </>
+    )
   }
 
   if (!activeConfig) {
-    // 极端情况: 无任何概念配置。仍提供一键获取内置概念数据入口
     return (
       <>
         <div className="flex h-full flex-col">
-          <PageHeader
-            title="概念分析"
-            right={
-              <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置数据源">
-                <Settings2 className="h-4 w-4" />
-              </button>
-            }
-          />
+          {header}
+          <div className="px-6 pt-5">
+            <SectorTabs kind={kind} onChange={onKindChange} />
+          </div>
           <PresetFetchState
-            title="暂无概念数据"
-            hint="从同花顺获取概念分类数据后即可使用概念分析"
+            title={spec.emptyTitle}
+            hint={spec.emptyHint}
             isLoading={fetchMutation.isPending}
             error={fetchMutation.error}
             onFetch={() => fetchMutation.mutate()}
           />
         </div>
-        <AnimatePresence>
-          {showConfig && <AnalysisConfigDialog currentConfig={fieldConfig} onSave={handleSaveConfig} onClose={() => setShowConfig(false)} />}
-        </AnimatePresence>
+        {dialogs}
       </>
     )
   }
 
   return (
     <>
-      <PageHeader
-        title="概念分析"
-        subtitle={`${marketQuery.data?.as_of ?? rowsQuery.data?.date ?? '最新'} · ${stats.length} 个概念 · ${totalSymbols} 只标的`}
-        right={
-          <div className="flex items-center gap-1">
-            {/* RPS 轮动: 打开涨幅轮动矩阵对话框 */}
-            <button
-              onClick={() => setShowRps(true)}
-              className="inline-flex items-center gap-1 rounded-btn border border-amber-400/40 bg-amber-400/15 px-2.5 py-1.5 text-[11px] text-amber-400 font-medium transition-colors hover:bg-amber-400/25 hover:border-amber-400/60"
-              title="概念涨幅轮动矩阵"
-            >
-              <Repeat className="h-3.5 w-3.5" />涨幅RPS轮动分析
-            </button>
-            <button
-              onClick={() => { rowsQuery.refetch(); marketQuery.refetch() }}
-              disabled={rowsQuery.isFetching || marketQuery.isFetching}
-              className="p-1.5 text-muted hover:bg-surface disabled:opacity-50"
-              title="刷新"
-            >
-              <RefreshCw className={cn('h-4 w-4', (rowsQuery.isFetching || marketQuery.isFetching) && 'animate-spin')} />
-            </button>
-            <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置数据源">
-              <Settings2 className="h-4 w-4" />
-            </button>
-          </div>
-        }
-      />
-
-      <div className="min-h-full bg-[radial-gradient(circle_at_12%_0%,rgba(59,130,246,0.12),transparent_28%),radial-gradient(circle_at_85%_8%,rgba(244,63,94,0.08),transparent_28%)] px-6 py-5">
+      {header}
+      <div className={cn('min-h-full px-6 py-5', spec.gradient)}>
         <div className="mx-auto max-w-[1440px] space-y-5">
-          <SectorRotationCard kind="concept" />
+          <SectorTabs kind={kind} onChange={onKindChange} />
 
-          <HeroPanel leading={leading[0]} falling={falling[0]} activeConcept={activeConcept} conceptBreadth={conceptBreadth} />
+          <SectorRotationCard kind={kind} />
+
+          <HeroPanel
+            spec={spec}
+            leading={leading[0]}
+            falling={falling[0]}
+            activeSector={activeSector}
+            breadth={breadth}
+          />
 
           <MarketPulse
             leading={leading}
@@ -407,10 +592,21 @@ export function ConceptAnalysis() {
             onStockClick={handleStockClick}
           />
 
+          {spec.heatmap && heatmapQuoteMap && groups.length > 0 && (
+            <DimensionHeatmap
+              groups={groups}
+              quoteMap={heatmapQuoteMap}
+              selectedKey={selectedKey}
+              onSelect={k => setSelectedKey(k)}
+              colorScheme="amber"
+            />
+          )}
+
           {stats.length > 0 ? (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-[18rem_1fr]">
-              <ConceptRail
-                stats={filteredStats.slice(0, MAX_RENDERED_CONCEPTS)}
+              <SectorRail
+                spec={spec}
+                stats={filteredStats.slice(0, MAX_RENDERED_GROUPS)}
                 selectedKey={selected?.key ?? null}
                 search={search}
                 sortMode={sortMode}
@@ -418,68 +614,58 @@ export function ConceptAnalysis() {
                 onSort={setSortMode}
                 onSelect={setSelectedKey}
               />
-              <ConceptFocus stat={selected} activeSymbol={previewSymbol} onStockClick={handleStockClick} />
+              <SectorFocus
+                spec={spec}
+                stat={selected}
+                activeSymbol={previewSymbol}
+                onStockClick={handleStockClick}
+              />
             </div>
           ) : rowsQuery.isLoading ? (
-            <div className="rounded-2xl border border-border bg-surface px-6 py-16 text-center text-sm text-muted">正在计算概念强度...</div>
-          ) : needsConceptFetch ? (
+            <div className="rounded-2xl border border-border bg-surface px-6 py-16 text-center text-sm text-muted">{spec.loadingText}</div>
+          ) : needsPresetFetch ? (
             <PresetFetchState
-              title="未获取概念数据"
-              hint="内置概念数据源已就绪,点击下方按钮从同花顺获取概念分类数据"
+              title={spec.missingTitle}
+              hint={spec.missingHint}
               isLoading={fetchMutation.isPending}
               error={fetchMutation.error}
               onFetch={() => fetchMutation.mutate()}
             />
           ) : (
-            <EmptyState icon={Layers3} title="未匹配到概念数据" hint={resolved.hint || '请检查扩展数据是否包含概念/题材相关字段'} />
+            <EmptyState icon={Layers3} title={spec.unmatchedTitle} hint={resolved.hint || spec.unmatchedFallback} />
           )}
         </div>
       </div>
-
-      <AnimatePresence>
-        {showConfig && <AnalysisConfigDialog currentConfig={fieldConfig} onSave={handleSaveConfig} onClose={() => setShowConfig(false)} />}
-      </AnimatePresence>
-
-      {previewSymbol && (
-        <StockPreviewDialog
-          symbol={previewSymbol}
-          name={previewName}
-          onClose={() => { setPreviewSymbol(null); setPreviewName(''); setPreviewNavList([]) }}
-          navList={previewNavList}
-          onNavigate={(sym, n) => { setPreviewSymbol(sym); setPreviewName(n ?? '') }}
-        />
-      )}
-
-      <AnimatePresence>
-        {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} />}
-      </AnimatePresence>
+      {dialogs}
     </>
   )
 }
 
 function HeroPanel({
+  spec,
   leading,
   falling,
-  activeConcept,
-  conceptBreadth,
+  activeSector,
+  breadth,
 }: {
-  leading?: ConceptStat
-  falling?: ConceptStat
-  activeConcept?: ConceptStat | null
-  conceptBreadth: { up: number; down: number; flat: number }
+  spec: KindSpec
+  leading?: SectorStat
+  falling?: SectorStat
+  activeSector?: SectorStat | null
+  breadth: { up: number; down: number; flat: number }
 }) {
   return (
     <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
-      <HeroMetric icon={TrendingUp} label="最强主线" value={leading?.key ?? '—'} hint={leading?.avgPct != null ? <span className={priceColorClass(leading.avgPct)}>{fmtPct(leading.avgPct)}</span> : '等待行情'} tone="up" />
+      <HeroMetric icon={TrendingUp} label={spec.heroStrong} value={leading?.key ?? '—'} hint={leading?.avgPct != null ? <span className={priceColorClass(leading.avgPct)}>{fmtPct(leading.avgPct)}</span> : '等待行情'} tone="up" />
       <HeroMetric icon={TrendingDown} label="最大风险" value={falling?.key ?? '—'} hint={falling?.avgPct != null ? <span className={priceColorClass(falling.avgPct)}>{fmtPct(falling.avgPct)}</span> : '等待行情'} tone="down" />
       <HeroMetric
         icon={Activity}
-        label="涨跌板块"
-        value={<><span className="text-bull">{conceptBreadth.up}</span><span className="mx-1 text-muted">/</span><span className="text-bear">{conceptBreadth.down}</span></>}
-        hint={<><span className="text-bull">上涨</span><span className="mx-1 text-muted">/</span><span className="text-bear">下跌</span>{conceptBreadth.flat ? <span className="text-muted"> · 平 {conceptBreadth.flat}</span> : null}</>}
+        label={spec.heroBreadth}
+        value={<><span className="text-bull">{breadth.up}</span><span className="mx-1 text-muted">/</span><span className="text-bear">{breadth.down}</span></>}
+        hint={<><span className="text-bull">上涨</span><span className="mx-1 text-muted">/</span><span className="text-bear">下跌</span>{breadth.flat ? <span className="text-muted"> · 平 {breadth.flat}</span> : null}</>}
         tone="blue"
       />
-      <HeroMetric icon={Activity} label="资金活跃" value={activeConcept?.key ?? '—'} hint={activeConcept ? fmtBigNum(activeConcept.totalAmount) : '等待行情'} tone="blue" />
+      <HeroMetric icon={Activity} label="资金活跃" value={activeSector?.key ?? '—'} hint={activeSector ? fmtBigNum(activeSector.totalAmount) : '等待行情'} tone="blue" />
       <HeroMetric icon={Crown} label="龙头算法" value="6 因子" hint="强势 + 承接 + 容量" tone="gold" />
     </div>
   )
@@ -524,8 +710,8 @@ function MarketPulse({
   onStockClick,
   activeSymbol,
 }: {
-  leading: ConceptStat[]
-  falling: ConceptStat[]
+  leading: SectorStat[]
+  falling: SectorStat[]
   selectedKey: string | null
   onSelect: (key: string) => void
   onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void
@@ -549,7 +735,7 @@ function PulseList({
   activeSymbol,
 }: {
   title: string
-  items: ConceptStat[]
+  items: SectorStat[]
   mode: 'up' | 'down'
   selectedKey: string | null
   onSelect: (key: string) => void
@@ -633,7 +819,8 @@ function PulseList({
   )
 }
 
-function ConceptRail({
+function SectorRail({
+  spec,
   stats,
   selectedKey,
   search,
@@ -642,7 +829,8 @@ function ConceptRail({
   onSort,
   onSelect,
 }: {
-  stats: ConceptStat[]
+  spec: KindSpec
+  stats: SectorStat[]
   selectedKey: string | null
   search: string
   sortMode: SortMode
@@ -654,18 +842,18 @@ function ConceptRail({
     <section className="rounded-2xl border border-border bg-surface p-2.5">
       <div className="px-1 pb-2.5">
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-foreground">概念矩阵</h3>
+          <h3 className="text-sm font-semibold text-foreground">{spec.railTitle}</h3>
           <span className="text-[10px] text-muted">Top {stats.length}</span>
         </div>
         <div className="mt-2 relative">
           <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
-          <input value={search} onChange={e => onSearch(e.target.value)} placeholder="搜索概念" className="h-8 w-full rounded-lg border border-border bg-base pl-8 pr-3 text-xs text-foreground outline-none focus:border-accent/50" />
+          <input value={search} onChange={e => onSearch(e.target.value)} placeholder={spec.searchPlaceholder} className="h-8 w-full rounded-lg border border-border bg-base pl-8 pr-3 text-xs text-foreground outline-none focus:border-accent/50" />
         </div>
         <div className="mt-2 grid grid-cols-5 overflow-hidden rounded-lg border border-border text-[10px]">
           {([
             ['heat', '强度'], ['avgPct', '涨幅'], ['leader', '龙头'], ['amount', '成交'], ['down', '跌幅'],
           ] as [SortMode, string][]).map(([key, label]) => (
-            <button key={key} onClick={() => onSort(key)} className={cn('py-1.5 transition-colors', sortMode === key ? 'bg-accent/15 text-accent' : 'bg-base text-muted hover:text-foreground')}>{label}</button>
+            <button key={key} onClick={() => onSort(key)} className={cn('py-1.5 transition-colors', sortMode === key ? spec.sortActiveClass : 'bg-base text-muted hover:text-foreground')}>{label}</button>
           ))}
         </div>
       </div>
@@ -673,7 +861,7 @@ function ConceptRail({
         {stats.map(item => {
           const active = selectedKey === item.key
           return (
-            <button key={item.key} onClick={() => onSelect(item.key)} className={cn('w-full border-b border-border/50 px-2.5 py-2 text-left transition-colors last:border-b-0', active ? 'bg-blue-400/[0.08]' : 'hover:bg-elevated/40')}>
+            <button key={item.key} onClick={() => onSelect(item.key)} className={cn('w-full border-b border-border/50 px-2.5 py-2 text-left transition-colors last:border-b-0', active ? spec.railActiveClass : 'hover:bg-elevated/40')}>
               <div className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">{item.key}</span>
                 <span className={cn('font-mono text-xs', priceColorClass(item.avgPct))}>{item.avgPct != null ? fmtPct(item.avgPct) : '—'}</span>
@@ -692,7 +880,7 @@ function ConceptRail({
   )
 }
 
-function ConceptFocus({ stat, onStockClick, activeSymbol }: { stat: ConceptStat | null; onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void; activeSymbol: string | null }) {
+function SectorFocus({ spec, stat, onStockClick, activeSymbol }: { spec: KindSpec; stat: SectorStat | null; onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void; activeSymbol: string | null }) {
   if (!stat) return null
   const stocks = [...stat.stocks].sort((a, b) => b.leaderScore - a.leaderScore).slice(0, MAX_RENDERED_STOCKS)
   const topLeaders = stocks.slice(0, 3)
@@ -704,7 +892,7 @@ function ConceptFocus({ stat, onStockClick, activeSymbol }: { stat: ConceptStat 
           <div className="min-w-0">
             <div className="flex items-center gap-3">
               <h3 className="truncate text-xl font-semibold text-foreground">{stat.key}</h3>
-              <span className="rounded-full bg-blue-400/10 px-2 py-0.5 text-[10px] text-blue-300">强度 {stat.heatScore.toFixed(0)}</span>
+              <span className={cn('rounded-full px-2 py-0.5 text-[10px]', spec.heatBadgeClass)}>强度 {stat.heatScore.toFixed(0)}</span>
             </div>
             <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
               <span>{stat.count} 只成分</span>
@@ -725,7 +913,7 @@ function ConceptFocus({ stat, onStockClick, activeSymbol }: { stat: ConceptStat 
       </div>
 
       <div className="grid shrink-0 gap-3 border-b border-border bg-base/25 p-4 lg:grid-cols-[1fr_1.15fr]">
-        <LeaderStage stocks={topLeaders} activeSymbol={activeSymbol} onStockClick={(sym, name) => onStockClick(sym, name, focusNav)} />
+        <LeaderStage title={spec.leaderStageTitle} stocks={topLeaders} activeSymbol={activeSymbol} onStockClick={(sym, name) => onStockClick(sym, name, focusNav)} />
         <ScoreExplain stock={topLeaders[0]} />
       </div>
 
@@ -776,13 +964,13 @@ function MiniStat({ label, value, cls }: { label: string; value: string; cls: st
   return <div className="rounded-lg border border-border/60 bg-base/35 px-2 py-1.5"><div className="text-[10px] text-muted">{label}</div><div className={cn('mt-0.5 truncate text-sm font-semibold', cls)}>{value}</div></div>
 }
 
-function LeaderStage({ stocks, onStockClick, activeSymbol }: { stocks: EnrichedStock[]; onStockClick: (symbol: string, name?: string) => void; activeSymbol: string | null }) {
+function LeaderStage({ title, stocks, onStockClick, activeSymbol }: { title: string; stocks: EnrichedStock[]; onStockClick: (symbol: string, name?: string) => void; activeSymbol: string | null }) {
   if (!stocks.length) return <div className="rounded-xl border border-border/60 bg-surface p-4 text-sm text-muted">暂无龙头候选</div>
   return (
     <div className="rounded-xl border border-border/60 bg-surface p-3">
       <div className="mb-2 flex items-center gap-2 text-xs font-medium text-amber-300">
         <Crown className="h-3.5 w-3.5" />
-        本概念三龙头
+        {title}
       </div>
       <div className="grid gap-2 md:grid-cols-3">
         {stocks.map((stock, idx) => (
