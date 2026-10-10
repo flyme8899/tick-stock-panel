@@ -13,6 +13,11 @@ def health() -> dict:
     return query.health()
 
 
+@router.get("/board")
+def board() -> dict:
+    return query.board()
+
+
 @router.get("/stock/{symbol}")
 def stock(symbol: str, limit: int = Query(120, ge=1, le=500)) -> dict:
     return query.stock_series(symbol, limit=limit)

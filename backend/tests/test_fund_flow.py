@@ -372,6 +372,67 @@ def test_read_api_and_etf_link(tmp_path, monkeypatch) -> None:
     assert sectors.json()["items"] == []
 
 
+def test_board_shows_existing_rows_and_skips_short_history(tmp_path) -> None:
+    store.write_rows(tmp_path, "industry", "2026-10-09", normalize.normalize_sectors([{
+        "行业": "半导体", "净额": 1.2,
+    }], trade_date="2026-10-09", snapshot="close", captured_at="2026-10-09T15:00:00"))
+    for offset in range(1, 5):
+        day = date(2026, 10, offset).isoformat()
+        store.write_rows(tmp_path, "stock", day, [{
+            "symbol": "600519.SH", "code": "600519", "trade_date": day,
+            "main_net": 1e8, "large_net": None, "super_net": None, "source": "efinance",
+        }])
+    store.write_rows(tmp_path, "stock", "2026-10-09", [{
+        "symbol": "600519.SH", "code": "600519", "trade_date": "2026-10-09",
+        "main_net": 2e8, "large_net": None, "super_net": None, "source": "efinance",
+    }, {
+        "symbol": "000001.SZ", "code": "000001", "trade_date": "2026-10-09",
+        "main_net": -1e8, "large_net": None, "super_net": None, "source": "efinance",
+    }])
+    store.write_rows(tmp_path, "margin", "2026-10-08", [{
+        "market": "sse", "symbol": "600519", "name": "贵州茅台", "trade_date": "2026-10-08",
+        "row_kind": "detail", "margin_balance": 9.0, "short_balance": 1.0,
+        "margin_buy": None, "source": "akshare",
+    }, {
+        "market": "sse", "symbol": "", "name": "", "trade_date": "2026-10-08",
+        "row_kind": "summary", "margin_balance": 30e8, "short_balance": 1e8,
+        "margin_buy": None, "source": "akshare",
+    }])
+    store.write_rows(tmp_path, "southbound", "2026-10-09", [{
+        "trade_date": "2026-10-09", "net_flow": 4e8, "source": "akshare",
+    }])
+    store.write_rows(tmp_path, "etf_shares", "2026-10-08", [{
+        "symbol": "510300", "code": "510300", "name": "沪深300ETF",
+        "trade_date": "2026-10-08", "shares": 1000.0, "source": "akshare",
+    }])
+    store.write_rows(tmp_path, "etf_shares", "2026-10-09", [{
+        "symbol": "510300", "code": "510300", "name": "沪深300ETF",
+        "trade_date": "2026-10-09", "shares": 1100.0, "source": "akshare",
+    }, {
+        "symbol": "588000", "code": "588000", "name": "科创50ETF",
+        "trade_date": "2026-10-09", "shares": 500.0, "source": "akshare",
+    }])
+    payload = query.board(tmp_path)
+    assert payload["industry"]["items"][0]["name"] == "半导体"
+    assert payload["concept"]["items"] == []
+    assert payload["stocks_today"]["items"][0]["code"] == "600519"
+    assert payload["stocks_5d"]["items"][0]["ff_main_net_5d"] == 6e8
+    assert all(item["code"] != "000001" for item in payload["stocks_5d"]["items"])
+    assert payload["margin"]["items"] == [{
+        "trade_date": "2026-10-08", "market": "sse",
+        "margin_balance": 30e8, "short_balance": 1e8,
+    }]
+    assert payload["southbound"]["items"][0]["net_flow"] == 4e8
+    broad = {item["code"]: item for item in payload["etf_shares"]["items"]}
+    assert broad["510300"]["broad"] == "沪深300"
+    assert broad["510300"]["share_change"] == 100.0
+    assert broad["588000"]["broad"] == "科创50"
+    assert broad["588000"]["share_change"] is None
+    empty = query.board(tmp_path / "missing")
+    assert empty["stocks_today"]["items"] == []
+    assert empty["etf_shares"]["items"] == []
+
+
 def test_lhb_backup_is_used_only_when_fuyao_missing(tmp_path, monkeypatch) -> None:
     (tmp_path / "kline_daily" / "date=2026-08-28").mkdir(parents=True)
     store.write_rows(tmp_path, "lhb", "2026-08-28", normalize.normalize_lhb([{

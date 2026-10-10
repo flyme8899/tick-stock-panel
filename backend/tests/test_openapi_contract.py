@@ -34,6 +34,7 @@ EXPECTED_OPEN_ENDPOINTS: set[str] = {
     "GET /api/ext-data/schema/{config_id}",
     "GET /api/ext-data/{config_id}/dimension-intraday",
     "GET /api/ext-data/{config_id}/dimension-members",
+    "GET /api/fund-flow/board",
     "GET /api/fund-flow/etf-shares",
     "GET /api/fund-flow/health",
     "GET /api/fund-flow/margin",

@@ -239,6 +239,145 @@ def dsa_context(data_dir: Path | None = None) -> dict:
     }
 
 
+_BROAD_HS300 = frozenset({"510300", "510310", "510330", "159919"})
+_BROAD_KC50 = frozenset({"588000", "588080", "588050"})
+_BOARD_SECTOR_LIMIT = 12
+_BOARD_STOCK_LIMIT = 15
+_BOARD_HISTORY = 40
+_BOARD_ETF_OTHERS = 12
+
+
+def _broad_label(code: str | None, name: str | None) -> str | None:
+    """沪深300 / 科创50 宽基，页面上当作国家队代理。对不上就不是宽基。"""
+    text = name or ""
+    code6 = normalize.code6(code or "") or ""
+    if "科创50" in text or code6 in _BROAD_KC50:
+        return "科创50"
+    if "沪深300" in text or code6 in _BROAD_HS300:
+        return "沪深300"
+    return None
+
+
+def board(data_dir: Path | None = None) -> dict:
+    """资金页一次读完。只读已落盘分区，没有的块留空，不把缺失写成 0。"""
+    root = _dir(data_dir)
+    return {
+        "industry": _sector_board(root, "industry"),
+        "concept": _sector_board(root, "concept"),
+        "stocks_today": _stocks_today(root),
+        "stocks_5d": _stocks_5d(root),
+        "margin": _margin_trend(root),
+        "southbound": _southbound_trend(root),
+        "etf_shares": _etf_changes(root),
+    }
+
+
+def _sector_board(root: Path, kind: str) -> dict:
+    payload = sectors(kind, data_dir=root)
+    payload["items"] = payload["items"][:_BOARD_SECTOR_LIMIT]
+    return payload
+
+
+def _stocks_today(root: Path) -> dict:
+    day = store.latest_date(root, "stock")
+    if day is None:
+        return {"trade_date": None, "items": []}
+    frame = store.read_partition(root, "stock", day)
+    if frame.is_empty():
+        return {"trade_date": day, "items": []}
+    ranked = (
+        frame.filter(pl.col("main_net").is_not_null())
+        .sort("main_net", descending=True)
+        .head(_BOARD_STOCK_LIMIT)
+    )
+    return {
+        "trade_date": day,
+        "items": ranked.select("symbol", "code", "main_net", "large_net", "super_net").to_dicts(),
+    }
+
+
+def _stocks_5d(root: Path) -> dict:
+    """最新交易日上、已经凑满 5 个交易日的主力净流入。不足 5 日不出现，也不记成 0。"""
+    main = factors.main_net_frame(root)
+    if main.is_empty():
+        return {"trade_date": None, "items": []}
+    trade_date = main.select(pl.col("trade_date").max()).item()
+    ranked = (
+        main.filter((pl.col("trade_date") == trade_date) & pl.col("ff_main_net_5d").is_not_null())
+        .sort("ff_main_net_5d", descending=True)
+        .head(_BOARD_STOCK_LIMIT)
+    )
+    symbols = store.read_partition(root, "stock", str(trade_date))
+    if not symbols.is_empty():
+        ranked = ranked.join(symbols.select("code", "symbol"), on="code", how="left")
+    else:
+        ranked = ranked.with_columns(pl.lit(None).cast(pl.Utf8).alias("symbol"))
+    return {"trade_date": trade_date, "items": ranked.select("symbol", "code", "ff_main_net_5d").to_dicts()}
+
+
+def _margin_trend(root: Path) -> dict:
+    dates = store.list_dates(root, "margin")[-_BOARD_HISTORY:]
+    items = []
+    for day in dates:
+        frame = store.read_partition(root, "margin", day)
+        if frame.is_empty():
+            continue
+        summary = frame.filter(pl.col("row_kind") == "summary")
+        items.extend(summary.select("trade_date", "market", "margin_balance", "short_balance").to_dicts())
+    return {"items": items}
+
+
+def _southbound_trend(root: Path) -> dict:
+    frame = store.read_range(root, "southbound")
+    if frame.is_empty():
+        return {"items": []}
+    ranked = frame.sort("trade_date").tail(_BOARD_HISTORY)
+    return {"items": ranked.select("trade_date", "net_flow").to_dicts()}
+
+
+def _etf_changes(root: Path) -> dict:
+    dates = store.list_dates(root, "etf_shares")
+    if not dates:
+        return {"trade_date": None, "prev_trade_date": None, "items": []}
+    day = dates[-1]
+    prev_day = dates[-2] if len(dates) > 1 else None
+    current = store.read_partition(root, "etf_shares", day)
+    previous: dict[str, float] = {}
+    if prev_day is not None:
+        prev = store.read_partition(root, "etf_shares", prev_day)
+        for row in prev.to_dicts():
+            if row.get("shares") is not None:
+                previous[row["code"]] = row["shares"]
+    linked = _etf_flow_map(root, day)
+    broad = []
+    others = []
+    for row in current.to_dicts():
+        label = _broad_label(row.get("code"), row.get("name"))
+        prev_shares = previous.get(row["code"])
+        shares = row.get("shares")
+        change = None if prev_shares is None or shares is None else shares - prev_shares
+        item = {
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "shares": shares,
+            "prev_shares": prev_shares,
+            "share_change": change,
+            "broad": label,
+            "flow_net": linked.get(row["code"]),
+        }
+        if label:
+            broad.append(item)
+        elif change is not None:
+            others.append(item)
+    broad.sort(key=lambda item: (item["broad"] or "", item["name"] or ""))
+    others.sort(key=lambda item: abs(item["share_change"] or 0), reverse=True)
+    return {
+        "trade_date": day,
+        "prev_trade_date": prev_day,
+        "items": broad + others[:_BOARD_ETF_OTHERS],
+    }
+
+
 def _yi(value: float | None) -> str:
     if value is None:
         return "无"

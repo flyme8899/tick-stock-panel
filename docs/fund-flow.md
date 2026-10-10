@@ -52,6 +52,7 @@ data/fund_flow/<kind>/date=YYYY-MM-DD/part.parquet
 | 方法 | 路径 | 内容 |
 | --- | --- | --- |
 | GET | `/api/fund-flow/health` | 开关、各分区最新日期、最近错误、熔断状态 |
+| GET | `/api/fund-flow/board` | 资金页用的排行和短趋势。没有的块是空列表 |
 | GET | `/api/fund-flow/stock/{symbol}` | 该股账单，以及主力净流入 5 日 |
 | GET | `/api/fund-flow/sectors?kind=industry\|concept` | 行业或概念排名。有收盘快照用收盘，否则用当天最后一次盘中 |
 | GET | `/api/fund-flow/margin` | 两融汇总，明细默认最多 100 行 |
