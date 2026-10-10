@@ -336,3 +336,34 @@ export function computeQuoteMetrics(
     totalVolume: totalVol,
   }
 }
+
+// ===== 行业层级 =====
+
+export type IndustryLevel = 1 | 2 | 3
+
+/** 同花顺行业路径按 “-” 拆级；缺级时回退到已有的最后一段。 */
+export function industryLevelName(key: string, level: IndustryLevel): string {
+  const parts = key.split('-').map(s => s.trim()).filter(Boolean)
+  return parts[level - 1] || parts[parts.length - 1] || key
+}
+
+/** 把个股所属的完整行业路径归并到指定层级，成分股合并到同一级名称下。 */
+export function groupByIndustryLevel(groups: DimensionGroup[], level: IndustryLevel): DimensionGroup[] {
+  const map = new Map<string, DimensionGroup>()
+  for (const group of groups) {
+    const key = industryLevelName(group.key, level)
+    const existing = map.get(key)
+    if (existing) {
+      existing.stocks.push(...group.stocks)
+      existing.count = existing.stocks.length
+    } else {
+      map.set(key, {
+        key,
+        count: group.stocks.length,
+        stocks: [...group.stocks],
+        metrics: { ...group.metrics },
+      })
+    }
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count)
+}

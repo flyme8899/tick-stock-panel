@@ -21,6 +21,7 @@ import { Eye, EyeOff, ExternalLink, GripVertical, Settings, Bell } from 'lucide-
 import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { migrateNavHidden, migrateNavOrder } from '@/lib/navOrder'
 import { usePreferences } from '@/lib/useSharedQueries'
 
 interface NavEntry {
@@ -39,8 +40,7 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/backtest', label: '回测', type: 'builtin', visible: true },
   { id: '/stock-analysis', label: '个股分析', type: 'builtin', visible: true },
   { id: '/limit-ladder', label: '连板梯队', type: 'builtin', visible: true },
-  { id: '/concept-analysis', label: '概念分析', type: 'builtin', visible: true },
-  { id: '/industry-analysis', label: '行业分析', type: 'builtin', visible: true },
+  { id: '/sector-analysis', label: '板块分析', type: 'builtin', visible: true },
   { id: '/financials', label: '财务分析', type: 'builtin', visible: true },
   { id: '/monitor', label: '监控中心', type: 'builtin', visible: true },
   { id: '/regime', label: '市场环境', type: 'builtin', visible: true },
@@ -71,8 +71,7 @@ const ARCH_CLASS: Record<string, { kind: ArchKind; reason: string }> = {
   '/data':           { kind: 'core', reason: '数据底座 — 同步管道与数据源路由' },
   '/stock-analysis': { kind: 'ext', reason: '个股分析视图 — 消费核心数据, 可由扩展页面替换' },
   '/limit-ladder':   { kind: 'ext', reason: '连板梯队视图 — 消费核心数据, 可由扩展页面替换' },
-  '/concept-analysis': { kind: 'ext', reason: '概念分析视图 — 消费核心数据, 可由扩展页面替换' },
-  '/industry-analysis': { kind: 'ext', reason: '行业分析视图 — 消费核心数据, 可由扩展页面替换' },
+  '/sector-analysis': { kind: 'ext', reason: '板块分析视图 — 概念/行业消费核心数据, 可由扩展页面替换' },
   '/financials':     { kind: 'ext', reason: '财务分析视图 — 消费核心数据, 可由扩展页面替换' },
   '/monitor':        { kind: 'ext', reason: '监控消费页 (规则引擎与推送管道属核心), 页面可替换' },
   '/abnormal':       { kind: 'ext', reason: '异动监控视图 — 消费核心数据, 可由扩展页面替换' },
@@ -223,7 +222,7 @@ export function SettingsMenuSettingsPanel() {
   }))
 
   const allEntries = useMemo(() => {
-    const saved = prefs?.nav_order ?? []
+    const saved = migrateNavOrder(prefs?.nav_order ?? [])
     const entryMap = new Map<string, NavEntry>()
     for (const e of BUILTIN_PAGES) entryMap.set(e.id, e)
     for (const e of analysisEntries) entryMap.set(e.id, e)
@@ -256,12 +255,12 @@ export function SettingsMenuSettingsPanel() {
     return ordered
   }, [prefs?.nav_order, analysisEntries])
 
-  const hiddenSet = useMemo(() => new Set(prefs?.nav_hidden ?? []), [prefs?.nav_hidden])
+  const hiddenSet = useMemo(() => new Set(migrateNavHidden(prefs?.nav_hidden ?? [])), [prefs?.nav_hidden])
 
   // Local order state for optimistic drag updates
   const [localOrder, setLocalOrder] = useState<string[] | null>(null)
   const orderedEntries = useMemo(() => {
-    const order = localOrder ?? prefs?.nav_order ?? []
+    const order = migrateNavOrder(localOrder ?? prefs?.nav_order ?? [])
     if (!order.length) return allEntries
     const byId = new Map(allEntries.map(e => [e.id, e]))
     const result: NavEntry[] = []

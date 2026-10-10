@@ -333,7 +333,7 @@ async def analyze_rotation_stream(
     from app.services.market_overview_builder import build_market_overview
 
     dim = _dim_label(kind)
-    page = "行业分析" if kind == "industry" else "概念分析"
+    page = "板块分析"
 
     # 1. 取轮动矩阵
     rotation = build_rps_rotation(repo, days, kind, level)

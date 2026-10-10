@@ -6,6 +6,8 @@
  * 另负责全局快捷键 ⌘K/Ctrl+K 与 Esc、按当前路由上报页面上下文。
  */
 import { useEffect } from 'react'
+import { useLocation } from 'react-router-dom'
+import { sectorPageLabel } from '@/lib/sectorTab'
 import type { FrontendSlotContextMap } from '@/extensions/types'
 import { closeAssistant, setPageContext, toggleAssistant, useAssistantStore } from './store'
 import { AssistantFloatingButton } from './ui/AssistantFloatingButton'
@@ -26,8 +28,7 @@ const PAGE_LABELS: Record<string, string> = {
   '/backtest': '回测',
   '/stock-analysis': '个股分析',
   '/limit-ladder': '连板梯队',
-  '/concept-analysis': '概念分析',
-  '/industry-analysis': '行业分析',
+  '/sector-analysis': '板块分析',
   '/financials': '财务分析',
   '/monitor': '监控中心',
   '/regime': '市场环境',
@@ -43,11 +44,13 @@ const PAGE_LABELS: Record<string, string> = {
 
 export function AssistantLauncher(props: AnySlotContext) {
   const { pathname } = props as NavigationContext
+  const location = useLocation()
   const { open } = useAssistantStore()
 
   useEffect(() => {
-    setPageContext({ page: PAGE_LABELS[pathname] ?? '' })
-  }, [pathname])
+    const path = location.pathname || pathname
+    setPageContext({ page: sectorPageLabel(path, location.search) ?? PAGE_LABELS[path] ?? '' })
+  }, [pathname, location.pathname, location.search])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

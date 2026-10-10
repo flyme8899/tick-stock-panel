@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate, useSearchParams } from 'react-router-dom'
+import { sectorFocusSearch, type SectorKind } from './lib/sectorTab'
 import { Layout } from './components/Layout'
 import { useSettings } from './lib/useSharedQueries'
 import { Logo } from './components/Logo'
@@ -25,8 +26,7 @@ const Lots = lazy(() => import('./pages/Lots').then(m => ({ default: m.Lots })))
 const Paper = lazy(() => import('./pages/Paper').then(m => ({ default: m.Paper })))
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const AnalysisDetail = lazy(() => import('./pages/AnalysisDetail').then(m => ({ default: m.AnalysisDetail })))
-const ConceptAnalysis = lazy(() => import('./pages/ConceptAnalysis').then(m => ({ default: m.ConceptAnalysis })))
-const IndustryAnalysis = lazy(() => import('./pages/IndustryAnalysis').then(m => ({ default: m.IndustryAnalysis })))
+const SectorAnalysis = lazy(() => import('./pages/SectorAnalysis').then(m => ({ default: m.SectorAnalysis })))
 const StockAnalysis = lazy(() => import('./pages/StockAnalysis').then(m => ({ default: m.StockAnalysis })))
 const Signals = lazy(() => import('./pages/Signals').then(m => ({ default: m.Signals })))
 const Review = lazy(() => import('./pages/Review').then(m => ({ default: m.Review })))
@@ -50,6 +50,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/overview',
   '/analysis',
   '/analysis/:menuId',
+  '/sector-analysis',
   '/concept-analysis',
   '/industry-analysis',
   '/stock-analysis',
@@ -89,6 +90,11 @@ function MiningRedirect() {
   const [searchParams] = useSearchParams()
   const search = searchParams.toString()
   return <Navigate to={`/factors?tab=mining${search ? `&${search}` : ''}`} replace />
+}
+
+function LegacySectorRedirect({ tab }: { tab: SectorKind }) {
+  const [searchParams] = useSearchParams()
+  return <Navigate to={`/sector-analysis?${sectorFocusSearch(tab, searchParams)}`} replace />
 }
 
 // 首次使用守卫 —— 未完成向导则重定向到 /onboarding
@@ -157,8 +163,9 @@ export const router = createBrowserRouter([
       { path: 'overview', element: <Navigate to="/" replace /> },
       { path: 'analysis', element: <Navigate to="/settings?tab=ext-pages" replace /> },
       { path: 'analysis/:menuId', element: <AnalysisDetail /> },
-      { path: 'concept-analysis', element: <ConceptAnalysis /> },
-      { path: 'industry-analysis', element: <IndustryAnalysis /> },
+      { path: 'sector-analysis', element: <SectorAnalysis /> },
+      { path: 'concept-analysis', element: <LegacySectorRedirect tab="concept" /> },
+      { path: 'industry-analysis', element: <LegacySectorRedirect tab="industry" /> },
       { path: 'stock-analysis', element: <StockAnalysis /> },
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
