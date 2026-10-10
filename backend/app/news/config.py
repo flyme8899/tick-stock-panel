@@ -6,7 +6,7 @@ import os
 
 from app.config import settings
 
-SOURCE_ORDER = ("dws", "zsxq", "ima", "cls", "wscn")
+SOURCE_ORDER = ("dws", "zsxq", "ima", "cls", "wscn", "etf_flow")
 
 SOURCE_LABELS = {
     "dws": "钉钉作文实时",
@@ -14,8 +14,12 @@ SOURCE_LABELS = {
     "ima": "ima爱分享",
     "cls": "财联社",
     "wscn": "华尔街见闻",
+    "etf_flow": "ETF领航者",
     "hot": "TSP热门候选",
 }
+
+_DEFAULT_VISION_BASE = "https://tokenhub.tencentmaas.com/v1"
+_DEFAULT_VISION_MODEL = "glm-5.3-flash"
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -53,7 +57,29 @@ def group_id(source: str) -> str:
     return str(getattr(settings, attr, "") or "").strip()
 
 
+def _text_setting(env_name: str, attr: str) -> str:
+    raw = os.environ.get(env_name)
+    if raw is not None and raw.strip():
+        return raw.strip()
+    return str(getattr(settings, attr, "") or "").strip()
+
+
+def vision_api_key() -> str:
+    """视觉模型密钥。不回落到文本模型的 AI_API_KEY。"""
+    return _text_setting("VISION_AI_API_KEY", "vision_ai_api_key")
+
+
+def vision_base_url() -> str:
+    return (_text_setting("VISION_AI_BASE_URL", "vision_ai_base_url") or _DEFAULT_VISION_BASE).rstrip("/")
+
+
+def vision_model() -> str:
+    return _text_setting("VISION_AI_MODEL", "vision_ai_model") or _DEFAULT_VISION_MODEL
+
+
 def source_configured(source: str) -> bool:
+    if source == "etf_flow":
+        return bool(vision_api_key())
     if source == "ima":
         return ima_configured()
     if source in {"dws", "zsxq"}:

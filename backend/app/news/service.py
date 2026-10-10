@@ -42,6 +42,7 @@ from app.news.config import (
     source_enabled,
     source_locked,
 )
+from app.news.etf_flow import collect_etf_flow
 from app.news.extract import Lexicon, Mention, StructuredStock, parse_llm_payload
 from app.news.scoring import MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
@@ -441,6 +442,8 @@ def run_due(source: str) -> dict:
         return collect_ima()
     if source in {"dws", "zsxq"}:
         return collect_inbox()
+    if source == "etf_flow":
+        return collect_etf_flow()
     return {}
 
 

@@ -98,7 +98,7 @@ def update_sources(body: SourceUpdate):
 
 @router.get("/dsa-feed")
 def dsa_feed(
-    source: str = Query(..., pattern="dws|zsxq|ima|cls|wscn|hot"),
+    source: str = Query(..., pattern="dws|zsxq|ima|cls|wscn|etf_flow|hot"),
     limit: int = Query(50, ge=1, le=50),
     header_token: str = Header("", alias="X-News-Feed-Token"),
 ):
