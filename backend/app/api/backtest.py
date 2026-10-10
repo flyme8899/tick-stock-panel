@@ -350,6 +350,9 @@ class StrategyBacktestRequest(BaseModel):
     asset_type: str = "stock"
     minute_fill: bool = False
     regime_filter: dict | None = None
+    # 0 或省略 = 关闭。开启后单笔成交不超过当根成交量的该比例。
+    volume_limit: float | None = None
+    benchmark_symbol: str = "000001.SH"
 
 
 def _guard_minute_strategy_backtest(
@@ -413,6 +416,8 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         asset_type=req.asset_type,
         minute_fill=req.minute_fill,
         regime_filter=req.regime_filter,
+        volume_limit=_checked_volume_limit(req.volume_limit),
+        benchmark_symbol=_checked_benchmark(req.benchmark_symbol),
     )
     task = make_worker_task("backtest", settings.data_dir, cfg)
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
@@ -487,9 +492,35 @@ def _make_job_key(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    volume_limit: float | None = None,
+    benchmark_symbol: str = "000001.SH",
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}"
+    raw = (
+        f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}"
+        f"|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}"
+        f"|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}"
+        f"|{volume_limit}|{benchmark_symbol}"
+    )
     return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def _checked_volume_limit(value: float | None) -> float | None:
+    from app.backtest.liquidity import normalize_volume_limit
+
+    try:
+        return normalize_volume_limit(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _checked_benchmark(symbol: str | None) -> str:
+    from app.backtest.strategy import BENCHMARK_NAMES, BENCHMARK_SYMBOL
+
+    text = (symbol or BENCHMARK_SYMBOL).strip().upper()
+    if text not in BENCHMARK_NAMES:
+        allowed = "、".join(BENCHMARK_NAMES)
+        raise HTTPException(status_code=400, detail=f"基准指数仅支持 {allowed}")
+    return text
 
 
 @router.get("/strategy/stream")
@@ -517,6 +548,8 @@ async def strategy_stream(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    volume_limit: float | None = None,
+    benchmark_symbol: str = "000001.SH",
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -541,6 +574,8 @@ async def strategy_stream(
         # 空 start = 全部历史: 用本地最早日K日期, 查不到再回退到默认窗口
         earliest = request.app.state.repo.earliest_daily_date()
         start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
+    volume_limit = _checked_volume_limit(volume_limit)
+    benchmark_symbol = _checked_benchmark(benchmark_symbol)
     _guard_minute_strategy_backtest(request, strategy_id, start_date, asset_type)
 
     # 服务端范围保护
@@ -560,6 +595,8 @@ async def strategy_stream(
         asset_type=asset_type,
         minute_fill=minute_fill,
         regime_filter=regime_filter,
+        volume_limit=volume_limit,
+        benchmark_symbol=benchmark_symbol,
     )
 
     _cleanup_stale_jobs()
@@ -621,6 +658,8 @@ async def strategy_stream(
                 asset_type=asset_type,
                 minute_fill=minute_fill,
                 regime_filter=json.loads(regime_filter) if regime_filter else None,
+                volume_limit=volume_limit,
+                benchmark_symbol=benchmark_symbol,
             )
 
             def _run_backtest():
@@ -726,6 +765,10 @@ async def strategy_cancel(request: Request):
         commission_pct=_get_opt_float("commission_pct"),
         stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
         asset_type=_get("asset_type", "stock"),
+        minute_fill=_get("minute_fill").lower() in {"1", "true", "yes", "on"},
+        regime_filter=_get("regime_filter") or None,
+        volume_limit=_checked_volume_limit(_get_opt_float("volume_limit")),
+        benchmark_symbol=_checked_benchmark(_get("benchmark_symbol") or None),
     )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:

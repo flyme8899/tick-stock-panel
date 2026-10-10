@@ -12,12 +12,18 @@ import pytest
 
 from app.backtest.stats_v2 import (
     _normal_ppf,
+    align_benchmark_returns,
+    benchmark_relative_metrics,
     bh_fdr_qvalues,
+    cvar_95,
     deflated_sharpe_psr,
     expected_max_sharpe,
+    kelly_fraction,
     naive_t,
     newey_west_t,
     normal_two_sided_p,
+    sqn,
+    ulcer_index,
 )
 
 
@@ -108,3 +114,59 @@ def test_deflated_sharpe_psr() -> None:
     deflated = deflated_sharpe_psr(0.1, 2500, 0.0, 3.0, expected_max_sharpe=0.08)
     assert deflated < probability
     assert deflated_sharpe_psr(0.1, 3) is None  # 样本不足
+
+
+def test_ulcer_sqn_kelly_cvar_golden() -> None:
+    equity = np.array([100.0, 80.0, 90.0])
+    # 回撤 0, -0.2, -0.1; RMS = sqrt((0 + 0.04 + 0.01) / 3)
+    assert ulcer_index(equity) == pytest.approx(math.sqrt(0.05 / 3))
+    assert ulcer_index(np.array([100.0])) is None
+
+    returns = np.array([0.02, 0.04])
+    assert sqn(returns) == pytest.approx(3.0)
+    assert sqn(np.array([0.01])) is None
+    assert sqn(np.array([0.01, 0.01])) is None
+
+    assert kelly_fraction(np.array([0.10, 0.10, -0.05])) == pytest.approx(0.5)
+    assert kelly_fraction(np.array([0.10, 0.0, -0.05])) == pytest.approx(0.25)
+    assert kelly_fraction(np.array([0.10, 0.20])) is None
+    assert kelly_fraction(np.array([-0.10, -0.20])) is None
+    assert kelly_fraction(np.array([0.0, 0.0])) is None
+
+    short = np.array([-0.10, -0.04, -0.02, 0.0, 0.01, 0.03, 0.05, 0.08, 0.10, 0.20])
+    assert cvar_95(short) is None
+    assert cvar_95(np.resize(short, 19)) is None
+    long = np.concatenate([np.array([-0.20]), np.full(19, -0.01)])
+    assert cvar_95(long) == pytest.approx(-0.20)
+
+
+def test_benchmark_relative_aligns_without_forward_fill() -> None:
+    strategy = np.array([0.02, 0.01, -0.01])
+    benchmark = np.array([0.01, 0.005, -0.005])
+    metrics = benchmark_relative_metrics(strategy, benchmark)
+    assert metrics["beta"] == pytest.approx(2.0)
+    excess = strategy - benchmark
+    assert metrics["tracking_error"] == pytest.approx(float(excess.std(ddof=1) * math.sqrt(252)))
+    assert metrics["information_ratio"] == pytest.approx(
+        float(excess.mean() * math.sqrt(252) / excess.std(ddof=1))
+    )
+    assert benchmark_relative_metrics(strategy[:2], benchmark[:2]) == {
+        "tracking_error": None,
+        "information_ratio": None,
+        "beta": None,
+    }
+
+    equity = [
+        {"date": "2024-01-02", "value": 100.0},
+        {"date": "2024-01-03", "value": 110.0},
+        {"date": "2024-01-04", "value": 99.0},
+        {"date": "2024-01-05", "value": 100.0},
+    ]
+    bench = [
+        {"date": "2024-01-02", "close": 100.0},
+        {"date": "2024-01-03", "close": 100.0},
+        {"date": "2024-01-05", "close": 101.0},
+    ]
+    aligned_strategy, aligned_bench = align_benchmark_returns(equity, bench)
+    assert aligned_strategy.tolist() == pytest.approx([0.10])
+    assert aligned_bench.tolist() == pytest.approx([0.0])

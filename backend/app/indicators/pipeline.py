@@ -106,6 +106,36 @@ ENRICHED_STORAGE_COLS = [
     "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
 ]
 
+# 涨跌停参考价公式版本。signal_limit_up/down 不在 ENRICHED_STORAGE_COLS 里,
+# 读取时由 compute_limit_signals 重算; 落盘且依赖该公式的是
+# consecutive_limit_ups / consecutive_limit_downs。
+# 1 = 旧口径, 把前复权昨收直接当作原始参考价。
+# 2 = 除权日用前复权昨收 / 当日复权因子, 回到交易所原始价尺度。
+LIMIT_FORMULA_VERSION = 2
+_LIMIT_FORMULA_STAMP = ".limit_formula_version"
+
+
+def limit_formula_stamp_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "kline_daily_enriched" / _LIMIT_FORMULA_STAMP
+
+
+def read_limit_formula_version(data_dir: Path) -> int:
+    try:
+        text = limit_formula_stamp_path(data_dir).read_text(encoding="utf-8").strip()
+        return int(text)
+    except (OSError, ValueError):
+        return 0
+
+
+def limit_formula_needs_rebuild(data_dir: Path) -> bool:
+    return read_limit_formula_version(data_dir) < LIMIT_FORMULA_VERSION
+
+
+def write_limit_formula_version(data_dir: Path) -> None:
+    path = limit_formula_stamp_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{LIMIT_FORMULA_VERSION}\n", encoding="utf-8")
+
 
 # ================================================================
 # enriched 完整列清单 (存储 + 运行时计算)
@@ -809,9 +839,11 @@ def compute_limit_signals(
     elif "turnover_rate" in want and "turnover_rate" not in df.columns:
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("turnover_rate"))
 
-    # 前一日参考收盘价（交易所涨跌停基准价）
-    # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
-    # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
+    # 前一日参考收盘价（交易所涨跌停基准价, 原始价尺度）
+    # 复权因子不变时用原始昨收, 避免浮点误差。
+    # 除权除息日因子跳变: 前复权昨收仍在复权尺度, 必须再除以当日因子
+    # (close/raw_close) 才回到交易所用于涨跌停的原始参考价。
+    # 最新日因子为 1 时, 该式等于前复权昨收, 与旧口径一致。
     if not need_price_limits:
         cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down", "listing_date") if c in df.columns]
         return df.drop(cleanup)
@@ -820,9 +852,9 @@ def compute_limit_signals(
     _adj_yesterday = pl.col("close").shift(1).over("symbol") / pl.col("raw_close").shift(1).over("symbol")
     _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
     df = df.with_columns(
-        pl.when(_adj_changed)
-        .then(pl.col("close").shift(1).over("symbol"))   # 除权: 使用前复权昨收
-        .otherwise(pl.col("raw_close").shift(1).over("symbol"))  # 正常: 使用原始昨收
+        pl.when(_adj_changed & _adj_today.is_not_null() & (_adj_today != 0))
+        .then(pl.col("close").shift(1).over("symbol") / _adj_today)
+        .otherwise(pl.col("raw_close").shift(1).over("symbol"))
         .alias("_prev_raw_close")
     )
 
@@ -1573,6 +1605,9 @@ def run_pipeline(data_dir: Path | None = None,
       - 除权因子增量 (symbols 指定, new_dates_only=False):
           只对指定 symbol 做局部重算并合并回已有 enriched。
           用于无新日K数据、仅除权因子变更的场景。
+      - 涨跌停公式迁移: 已有 enriched 分区且 `.limit_formula_version`
+          缺失或落后于 LIMIT_FORMULA_VERSION 时, 忽略 new_dates_only / symbols,
+          改为全量重建, 成功后写回版本戳。日常增量本身不会重写旧日期。
     返回写入的行数。
     """
     import time as _t
@@ -1586,6 +1621,18 @@ def run_pipeline(data_dir: Path | None = None,
     publication = EnrichedPublication(d, "stock", recover=True)
     daily_dir = d / "kline_daily"
     enriched_base = d / "kline_daily_enriched"
+    enriched_existed = enriched_base.exists() and any(enriched_base.glob("date=*"))
+    # 日常增量只补 enriched 里还没有的日期分区 (以及调用方点名的除权个股)。
+    # 已有分区不会因为涨跌停公式变化而重写, 所以版本戳落后时这次调用改走全量。
+    formula_upgrade = enriched_existed and limit_formula_needs_rebuild(d)
+    if formula_upgrade:
+        logger.warning(
+            "涨跌停公式版本 %s < %s, 已有 enriched 分区改为全量重建",
+            read_limit_formula_version(d),
+            LIMIT_FORMULA_VERSION,
+        )
+        symbols = None
+        new_dates_only = False
     factor_path = d / "adj_factor" / "all.parquet"
     inst_glob = str(d / "instruments" / "**" / "*.parquet")
 
@@ -1711,6 +1758,8 @@ def run_pipeline(data_dir: Path | None = None,
                 logger.info("除权重算: %d 只, 共写入 %d 行", len(sym_set), written)
 
         publication.commit()
+        if not enriched_existed:
+            write_limit_formula_version(d)
         t_done = _t.perf_counter()
         logger.info("增量管道完成: %.2fs, %d 行", t_done - t0, written)
         return written
@@ -1888,6 +1937,8 @@ def run_pipeline(data_dir: Path | None = None,
             shutil.rmtree(staging_dir, ignore_errors=True)
 
     publication.commit()
+    if symbols is None:
+        write_limit_formula_version(d)
     t_done = _t.perf_counter()
     adj_label = "含复权" if not factors.is_empty() else "无复权"
     logger.info("enriched 完成 [%s]: %.2fs, 共 %d 行, %s",

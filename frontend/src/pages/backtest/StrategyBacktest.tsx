@@ -588,14 +588,49 @@ const METRIC_HELP = {
     note: '短周期回测的年化结果可能被明显放大。',
   },
   benchmarkReturn: {
-    title: '同期上证',
-    description: '同一回测区间内上证指数的累计收益率。',
-    note: '用于判断策略表现是否主要来自市场整体涨跌。',
+    title: '同期基准',
+    description: '同一回测区间内所选基准指数的累计收益率。',
+    note: '默认上证指数，也可改为沪深300、中证500或中证1000。',
   },
   excessReturn: {
     title: '超额收益',
-    description: '策略总收益率减去同期上证指数收益率。',
+    description: '策略总收益率减去同期基准指数收益率。',
     note: '正值表示跑赢基准，负值表示跑输基准。',
+  },
+  ulcerIndex: {
+    title: '溃疡指数',
+    description: '回撤幅度的均方根，和最大回撤同一比例口径。',
+    note: '比单点最大回撤更反映回撤持续的深度。样本不足时显示为 —。',
+  },
+  sqn: {
+    title: 'SQN',
+    description: '系统质量数：sqrt(交易数) × 平均每笔收益率 ÷ 收益标准差。用的是收益率，不是 R 倍数。',
+    note: '交易少于 2 笔或收益完全相同则无定义。没有把样本截断到 100，交易数差很多时不要横向比较。部分成交合并成一笔逻辑交易。',
+  },
+  kelly: {
+    title: '凯利比例',
+    description: '按胜率和盈亏比估计的理论下注比例 f* = 胜率 − (1−胜率) / 赔率。',
+    note: '收益恰好为 0 的交易不计入。没有盈利或没有亏损样本时无定义，不显示成 0 或 100%。',
+  },
+  cvar95: {
+    title: 'CVaR 95%',
+    description: '日收益里最差 5% 的平均值，亏损为负。',
+    note: '只使用日收益。样本少于 20 个交易日时无定义。逐笔口径在 cvar_95_trade，不和这张卡片混用。',
+  },
+  trackingError: {
+    title: '跟踪误差',
+    description: '策略日收益与基准日收益之差的年化标准差。',
+    note: '只使用两边都有收盘的交易日，缺数据不前值填充。指数未同步时显示为 —。',
+  },
+  informationRatio: {
+    title: '信息比率',
+    description: '年化超额收益均值 ÷ 跟踪误差。',
+    note: '衡量相对基准的稳定性，不是夏普比率。',
+  },
+  beta: {
+    title: 'Beta',
+    description: '策略日收益相对基准日收益的回归系数。',
+    note: '基准几乎不动时无定义。',
   },
   sharpe: {
     title: '夏普比率 (Sharpe Ratio)',
@@ -970,6 +1005,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [fees, setFees] = useState(saved?.fees ?? '2')
   const [stampTax, setStampTax] = useState(saved?.stampTax ?? '1')
   const [slippage, setSlippage] = useState(saved?.slippage ?? '5')
+  const [volumeLimitPct, setVolumeLimitPct] = useState(saved?.volumeLimitPct ?? '')
+  const [benchmarkSymbol, setBenchmarkSymbol] = useState(saved?.benchmarkSymbol ?? '000001.SH')
   const [maxPositions, setMaxPositions] = useState(saved?.maxPositions ?? '10')
   const [maxExposure, setMaxExposure] = useState(saved?.maxExposure ?? '100')
   const [initialCapital, setInitialCapital] = useState(saved?.initialCapital ?? '1000000')
@@ -1027,6 +1064,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     if (cfg.commission_pct != null) setFees(String(Math.round(Number(cfg.commission_pct) * 10000)))
     if (cfg.stamp_tax_pct != null) setStampTax(String(Number(cfg.stamp_tax_pct) * 1000))
     if (cfg.slippage_bps != null) setSlippage(String(cfg.slippage_bps))
+    if (cfg.volume_limit != null && Number(cfg.volume_limit) > 0) {
+      setVolumeLimitPct(String(Math.round(Number(cfg.volume_limit) * 1000) / 10))
+    } else if ('volume_limit' in cfg) {
+      setVolumeLimitPct('')
+    }
+    if (typeof cfg.benchmark_symbol === 'string' && cfg.benchmark_symbol) {
+      setBenchmarkSymbol(cfg.benchmark_symbol)
+    }
     if (cfg.max_positions != null) setMaxPositions(String(cfg.max_positions))
     if (cfg.max_exposure_pct != null) setMaxExposure(String(Math.round(Number(cfg.max_exposure_pct) * 100)))
     if (cfg.initial_capital != null) setInitialCapital(String(cfg.initial_capital))
@@ -1195,6 +1240,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         fees,
         stampTax,
         slippage,
+        volumeLimitPct,
+        benchmarkSymbol,
         maxPositions,
         maxExposure,
         initialCapital,
@@ -1231,6 +1278,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
       commission_pct: Number(fees) / 10000,
       stamp_tax_pct: Number(stampTax) / 1000,
       slippage_bps: Number(slippage),
+      volume_limit: volumeLimitPct.trim() === '' ? null : Number(volumeLimitPct) / 100,
+      benchmark_symbol: benchmarkSymbol,
       max_positions: Number(maxPositions),
       max_exposure_pct: Number(maxExposure) / 100,
       initial_capital: Number(initialCapital),
@@ -1291,6 +1340,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const excessReturn = strategyReturn != null && benchmarkReturn != null
     ? strategyReturn - benchmarkReturn
     : null
+  const benchmarkName = String(pick('benchmark_name') ?? result?.benchmark_curve?.[0]?.name ?? '上证指数')
+  const benchmarkShort = benchmarkName.replace(/指数$/, '')
 
   /** 导出回测结果 CSV (带 BOM, Excel 可直接打开): 概要 + 净值曲线 + 交易明细 + 分标的统计 */
   const exportResultCsv = () => {
@@ -1311,15 +1362,21 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     lines.push(`完成交易数,${result.trades?.length ?? 0}`)
     lines.push(`总收益,${pct(strategyReturn)}`)
     lines.push(`年化收益,${pct(s.annual_return)}`)
-    lines.push(`同期基准,${pct(benchmarkReturn)}`)
+    lines.push(`同期基准(${benchmarkName}),${pct(benchmarkReturn)}`)
     lines.push(`超额收益,${pct(excessReturn)}`)
     for (const [label, key] of [
       ['夏普比率', 'sharpe'], ['索提诺', 'sortino'], ['最大回撤', 'max_drawdown'],
+      ['溃疡指数', 'ulcer_index'], ['SQN', 'sqn'], ['凯利比例', 'kelly_fraction'],
+      ['CVaR 95%（日收益）', 'cvar_95'], ['CVaR 95%（逐笔）', 'cvar_95_trade'],
+      ['跟踪误差', 'tracking_error'], ['信息比率', 'information_ratio'],
+      ['Beta', 'beta'],
       ['胜率', 'win_rate'], ['平均收益', 'avg_return'], ['中位数收益', 'median_return'],
       ['盈亏比', 'profit_factor'], ['最终权益', 'final_equity'], ['平均持仓天数', 'avg_duration'],
     ] as const) {
       const v = s[key as keyof typeof s]
-      if (v != null) lines.push(`${label},${key.includes('return') || key === 'win_rate' || key === 'max_drawdown' ? pct(v) : num(v)}`)
+      const asPct = key.includes('return') || key === 'win_rate' || key === 'max_drawdown'
+        || key === 'ulcer_index' || key === 'kelly_fraction' || key === 'cvar_95' || key === 'cvar_95_trade' || key === 'tracking_error'
+      if (v != null) lines.push(`${label},${asPct ? pct(v) : num(v)}`)
     }
 
     const ddMap = new Map((result.drawdown_curve ?? []).map(r => [r.date, r.value]))
@@ -1627,6 +1684,10 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     ['sell_suspended', '停牌阻塞'],
     ['pending_exit', '待卖阻塞'],
     ['sell_minute_trigger_fallback', '分钟信号顺延'],
+    ['buy_volume_limit', '量能不足'],
+    ['buy_volume_capped', '买入缩量'],
+    ['sell_volume_limit', '量能卖不出'],
+    ['sell_volume_capped', '卖出缩量'],
   ]
     .map(([key, label]) => ({ key, label, value: Number(executionStats[key] ?? 0) }))
     .filter(item => item.value > 0)
@@ -1973,6 +2034,31 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           </div>
         </div>
         )}
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="text-[10px] font-medium text-secondary block mb-1">成交量参与率(%)</label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={volumeLimitPct}
+              placeholder="关闭"
+              onChange={e => setVolumeLimitPct(e.target.value)}
+              className={INPUT_CLS}
+              title="收盘成交不超过当日成交量的该比例；开盘和盘中成交用上一交易日成交量，建议从 5%–10% 起。留空或 0 关闭。买入余量丢弃且当天不改派，卖出余量顺延，卖光后合并成一笔。"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] font-medium text-secondary block mb-1">基准指数</label>
+            <select value={benchmarkSymbol} onChange={e => setBenchmarkSymbol(e.target.value)} className={INPUT_CLS}>
+              <option value="000001.SH">上证指数</option>
+              <option value="000300.SH">沪深300</option>
+              <option value="000905.SH">中证500</option>
+              <option value="000852.SH">中证1000</option>
+            </select>
+          </div>
+        </div>
         {simMode === 'position' && (
         <div className="text-[10px] leading-4 text-muted">
           单票目标约 {Number.isFinite(targetPositionPct) ? targetPositionPct.toFixed(1) : '—'}%。最大总仓位控制资金投入；剩余现金不是新增持仓名额，只有实际卖出成功才释放持仓数。
@@ -2365,14 +2451,22 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                   color={statValueColor(strategyReturn)} />
                 <Stat label={<MetricLabel label="年化" metric="annualReturn" />} value={pick('annual_return') != null ? fmtPct(pick('annual_return') as number) : '—'}
                   color={statValueColor(pick('annual_return') as number)} />
-                <Stat label={<MetricLabel label="同期上证" metric="benchmarkReturn" />} value={benchmarkReturn != null ? fmtPct(benchmarkReturn) : '—'}
-                  color={statValueColor(benchmarkReturn)} />
+                <Stat label={<MetricLabel label={`同期${benchmarkShort}`} metric="benchmarkReturn" />} value={pick('benchmark_missing') ? '未同步' : (benchmarkReturn != null ? fmtPct(benchmarkReturn) : '—')}
+                  color={pick('benchmark_missing') ? undefined : statValueColor(benchmarkReturn)} />
                 <Stat label={<MetricLabel label="超额收益" metric="excessReturn" />} value={excessReturn != null ? fmtPct(excessReturn) : '—'}
                   color={statValueColor(excessReturn)} />
                 <Stat label={<MetricLabel label="夏普" metric="sharpe" />} value={pick('sharpe') != null ? Number(pick('sharpe')).toFixed(2) : '—'} />
                 <Stat label={<MetricLabel label="索提诺" metric="sortino" />} value={pick('sortino') != null ? Number(pick('sortino')).toFixed(2) : '—'} />
                 <Stat label={<MetricLabel label="最大回撤" metric="maxDrawdown" />} value={pick('max_drawdown') != null ? fmtPct(pick('max_drawdown') as number) : '—'}
                   color="#34d399" />
+                <Stat label={<MetricLabel label="溃疡指数" metric="ulcerIndex" />} value={pick('ulcer_index') != null ? fmtPct(pick('ulcer_index') as number) : '—'} />
+                <Stat label={<MetricLabel label="SQN" metric="sqn" />} value={pick('sqn') != null ? Number(pick('sqn')).toFixed(2) : '—'} />
+                <Stat label={<MetricLabel label="凯利比例" metric="kelly" />} value={pick('kelly_fraction') != null ? fmtPct(pick('kelly_fraction') as number) : '—'} />
+                <Stat label={<MetricLabel label="CVaR 95%" metric="cvar95" />} value={pick('cvar_95') != null ? fmtPct(pick('cvar_95') as number) : '—'}
+                  color="#34d399" />
+                <Stat label={<MetricLabel label="跟踪误差" metric="trackingError" />} value={pick('tracking_error') != null ? fmtPct(pick('tracking_error') as number) : '—'} />
+                <Stat label={<MetricLabel label="信息比率" metric="informationRatio" />} value={pick('information_ratio') != null ? Number(pick('information_ratio')).toFixed(2) : '—'} />
+                <Stat label={<MetricLabel label="Beta" metric="beta" />} value={pick('beta') != null ? Number(pick('beta')).toFixed(2) : '—'} />
                 <Stat
                   label={<MetricLabel label="蒙卡回撤 中位/95%" metric="mcDrawdown" />}
                   value={`${pick('mc_maxdd_p50') != null ? fmtPct(pick('mc_maxdd_p50') as number) : '—'}/${pick('mc_maxdd_p95') != null ? fmtPct(pick('mc_maxdd_p95') as number) : '—'}`}

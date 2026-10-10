@@ -21,6 +21,8 @@ import polars as pl
 
 from app.backtest.engine import BacktestEngine, MatcherConfig, SimResult, SimulationOptions
 from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES
+from app.backtest.liquidity import normalize_volume_limit
+from app.backtest.stats_v2 import align_benchmark_returns, benchmark_relative_metrics
 from app.backtest.matrix import (
     MarketDataMatrix,
     MatrixCacheProfile,
@@ -66,6 +68,12 @@ from app.strategy.scoring import (
 logger = logging.getLogger(__name__)
 
 BENCHMARK_SYMBOL = "000001.SH"
+BENCHMARK_NAMES = {
+    "000001.SH": "上证指数",
+    "000300.SH": "沪深300",
+    "000905.SH": "中证500",
+    "000852.SH": "中证1000",
+}
 _EXECUTION_COLUMNS = frozenset({
     "symbol", "date", "open", "high", "low", "close", "volume",
     "name", "score", "signal_limit_up", "signal_limit_down",
@@ -583,12 +591,22 @@ class StrategyBacktestConfig:
     # 市场环境过滤: {"states": ["strong",...], "min_score": 60}。
     # 强制 T-1: regime[T-1] 决定 entry[T](防未来函数)。None=不过滤。
     regime_filter: dict | None = None
+    # 单笔成交不超过当根成交量的该比例。None/0 关闭, 历史结果不变。
+    volume_limit: float | None = None
+    # 超额与相对指标使用的指数。默认上证, 避免静默改掉既有超额口径。
+    benchmark_symbol: str = BENCHMARK_SYMBOL
 
     def __post_init__(self) -> None:
         if self.entry_fill is None:
             self.entry_fill = self.matching
         if self.exit_fill is None:
             self.exit_fill = self.matching
+        self.volume_limit = normalize_volume_limit(self.volume_limit)
+        symbol = (self.benchmark_symbol or BENCHMARK_SYMBOL).strip().upper()
+        if symbol not in BENCHMARK_NAMES:
+            allowed = "、".join(BENCHMARK_NAMES)
+            raise ValueError(f"基准指数仅支持 {allowed}")
+        self.benchmark_symbol = symbol
 
 
 @dataclass
@@ -1347,6 +1365,7 @@ class StrategyBacktestService:
             position_sizing=config.position_sizing,
             minute_fill=config.minute_fill,
             asset_type=config.asset_type,
+            volume_limit=config.volume_limit,
         )
         t_signal = time.perf_counter()
         selection_stats: dict[str, int | bool]
@@ -1699,10 +1718,14 @@ class StrategyBacktestService:
             result.stats["matrix_compute_cache"] = prepared.compute_cache.snapshot()
 
         benchmark_curve = (
-            self._build_benchmark_curve(config.start, config.end)
+            self._build_benchmark_curve(config.start, config.end, config.benchmark_symbol)
             if result_policy.include_benchmark
             else []
         )
+        if result_policy.include_benchmark:
+            result.stats.update(self._benchmark_metric_fields(
+                result.equity_curve, benchmark_curve, config.benchmark_symbol,
+            ))
 
         # 构建策略信息
         strategy_info = {
@@ -1940,6 +1963,7 @@ class StrategyBacktestService:
             # 分钟策略的成交价由 entry_price_override 提供 (触发分钟收盘),
             # 不再叠加日线口径的分钟成交细化。
             minute_fill=False,
+            volume_limit=config.volume_limit,
         )
 
         t_matrix = time.perf_counter()
@@ -2009,10 +2033,14 @@ class StrategyBacktestService:
         }
 
         benchmark_curve = (
-            self._build_benchmark_curve(config.start, config.end)
+            self._build_benchmark_curve(config.start, config.end, config.benchmark_symbol)
             if result_policy.include_benchmark
             else []
         )
+        if result_policy.include_benchmark:
+            result.stats.update(self._benchmark_metric_fields(
+                result.equity_curve, benchmark_curve, config.benchmark_symbol,
+            ))
         strategy_info = {
             "id": s.meta.get("id", config.strategy_id),
             "name": s.meta.get("name", config.strategy_id),
@@ -2360,11 +2388,17 @@ class StrategyBacktestService:
             combined = combined | m
         return combined
 
-    def _build_benchmark_curve(self, start: date, end: date) -> list[dict]:
+    def _build_benchmark_curve(
+        self,
+        start: date,
+        end: date,
+        symbol: str = BENCHMARK_SYMBOL,
+    ) -> list[dict]:
+        symbol = symbol if symbol in BENCHMARK_NAMES else BENCHMARK_SYMBOL
         try:
-            df = self.engine.repo.get_index_daily(BENCHMARK_SYMBOL, start, end, columns=["date", "close"])
+            df = self.engine.repo.get_index_daily(symbol, start, end, columns=["date", "close"])
         except Exception as e:
-            logger.warning("load benchmark %s failed: %s", BENCHMARK_SYMBOL, e)
+            logger.warning("load benchmark %s failed: %s", symbol, e)
             return []
 
         if df.is_empty() or "close" not in df.columns:
@@ -2374,17 +2408,45 @@ class StrategyBacktestService:
         if df.is_empty():
             return []
 
+        name = BENCHMARK_NAMES[symbol]
         return [
             {
                 "date": str(row["date"])[:10],
                 "value": round(float(row["close"]), 4),
                 "close": round(float(row["close"]), 4),
-                "name": "上证指数",
-                "symbol": BENCHMARK_SYMBOL,
+                "name": name,
+                "symbol": symbol,
             }
             for row in df.iter_rows(named=True)
             if row["close"] is not None
         ]
+
+    @staticmethod
+    def _benchmark_metric_fields(
+        equity_curve: list[dict],
+        benchmark_curve: list[dict],
+        symbol: str,
+    ) -> dict:
+        """跟踪误差、信息比率、beta。基准缺数据时三项为 None, 不改绝对收益。
+
+        需要对齐的日权益曲线。``include_curves=False`` 时曲线为空, 相对指标为 None。
+        同一天多点或非相邻交易日会让 date 去重和 sqrt(252) 年化失真; 全量独立样本的
+        权益是由成交合成的, 相对指标只在组合日权益上有意义。
+        """
+        strategy_returns, benchmark_returns = align_benchmark_returns(
+            equity_curve, benchmark_curve,
+        )
+        relative = benchmark_relative_metrics(strategy_returns, benchmark_returns)
+        digits = {"tracking_error": 4, "information_ratio": 2, "beta": 4}
+        fields: dict = {
+            "benchmark_symbol": symbol,
+            "benchmark_name": BENCHMARK_NAMES.get(symbol, symbol),
+            "benchmark_missing": not benchmark_curve,
+        }
+        for key, places in digits.items():
+            value = relative[key]
+            fields[key] = None if value is None else round(float(value), places)
+        return fields
 
     # ── 工具 ──
 
@@ -2547,6 +2609,8 @@ class StrategyBacktestService:
             "holding_days": c.holding_days,
             "minute_fill": c.minute_fill,
             "regime_filter": c.regime_filter,
+            "volume_limit": c.volume_limit,
+            "benchmark_symbol": c.benchmark_symbol,
         }
 
     @staticmethod

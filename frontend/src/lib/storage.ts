@@ -156,6 +156,8 @@ export const storage = {
     mode: 'position' | 'full'
     holdingDays: string
     minuteFill?: boolean
+    volumeLimitPct?: string
+    benchmarkSymbol?: string
     regimeStates?: string[]
     regimeMinScore?: number | ''
     params?: Record<string, any>
