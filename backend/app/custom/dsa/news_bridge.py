@@ -28,6 +28,7 @@ _SOURCES = (
     ("ima", "ima爱分享", "ima 知识库「【爱分享】的财经资讯」，只同步标题。"),
     ("cls", "财联社", "财联社电报，保留级别、个股和板块标签。"),
     ("wscn", "华尔街见闻", "华尔街见闻快讯，保留标的、主题和热度。"),
+    ("etf_flow", "ETF领航者", "公众号 ETF领航者的每日 ETF 申购赎回。优先读网易号，表格图片由视觉模型抽取。"),
     ("hot", "TSP热门候选", "TSP 按多源提及算出的热门板块和个股，供大盘复盘引用。"),
 )
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "app", "tsp"}
@@ -157,7 +158,7 @@ def _fetch_json(source_key: str) -> dict:
 
 
 def sync_tsp_sources(service, *, fetch: bool = True) -> dict:
-    """建好五个资讯源和热门候选源，并按冷却时间拉取。DSA 不可用时由调用方吞掉异常。"""
+    """建好各资讯源和热门候选源，并按冷却时间拉取。DSA 不可用时由调用方吞掉异常。"""
     global _last_sync
     if not feed_token():
         return {"skipped": True, "reason": "token"}

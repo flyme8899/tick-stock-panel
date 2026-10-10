@@ -1,4 +1,5 @@
 """每个来源独立开关。未配置凭据或群号时强制关闭，环境变量优先于页面偏好。"""
+
 from __future__ import annotations
 
 import hmac
@@ -6,7 +7,7 @@ import os
 
 from app.config import settings
 
-SOURCE_ORDER = ("dws", "zsxq", "ima", "cls", "wscn")
+SOURCE_ORDER = ("dws", "zsxq", "ima", "cls", "wscn", "etf_flow")
 
 SOURCE_LABELS = {
     "dws": "钉钉作文实时",
@@ -14,8 +15,16 @@ SOURCE_LABELS = {
     "ima": "ima爱分享",
     "cls": "财联社",
     "wscn": "华尔街见闻",
+    "etf_flow": "ETF领航者",
     "hot": "TSP热门候选",
 }
+
+_DEFAULT_VISION_BASE = "https://tokenhub.tencentmaas.com/v1"
+_DEFAULT_VISION_MODEL = "deepseek/deepseek-v4-flash-vision-exp"
+# 表格 OCR 不能关思考，预算要留给 reasoning 之后的 JSON。
+VISION_OCR_MAX_TOKENS = 8192
+# 短任务关掉思考后，正文不跟 reasoning 抢同一段预算。
+VISION_SHORT_MAX_TOKENS = 1024
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -53,7 +62,49 @@ def group_id(source: str) -> str:
     return str(getattr(settings, attr, "") or "").strip()
 
 
+def _text_setting(env_name: str, attr: str) -> str:
+    raw = os.environ.get(env_name)
+    if raw is not None and raw.strip():
+        return raw.strip()
+    return str(getattr(settings, attr, "") or "").strip()
+
+
+def vision_api_key() -> str:
+    """视觉模型密钥。不回落到文本模型的 AI_API_KEY。"""
+    return _text_setting("VISION_AI_API_KEY", "vision_ai_api_key")
+
+
+def vision_base_url() -> str:
+    return (
+        _text_setting("VISION_AI_BASE_URL", "vision_ai_base_url") or _DEFAULT_VISION_BASE
+    ).rstrip("/")
+
+
+def vision_model() -> str:
+    """空白时用 deepseek 视觉模型。glm-5.3-flash 和 mimo-v2.6-flash 只是备选。"""
+    return _text_setting("VISION_AI_MODEL", "vision_ai_model") or _DEFAULT_VISION_MODEL
+
+
+def vision_generation(model: str, *, ocr: bool) -> dict:
+    """表格 OCR 保持思考。只有非表格的短任务才按模型尝试关掉思考。
+
+    deepseek 视觉模型可以传 thinking.type=disabled，但关掉后表格识别变差。
+    glm-5.3-flash 传这个字段会 400，短任务只用 reasoning_effort=low。
+    mimo-v2.6-flash 可以干净关掉思考，识别并不更好，所以不改默认模型。
+    """
+    if ocr:
+        return {"max_tokens": VISION_OCR_MAX_TOKENS}
+    name = (model or "").lower()
+    if "glm-5.3-flash" in name:
+        return {"max_tokens": VISION_SHORT_MAX_TOKENS, "reasoning_effort": "low"}
+    if "deepseek-v4-flash-vision" in name or "mimo-v2.6-flash" in name:
+        return {"max_tokens": VISION_SHORT_MAX_TOKENS, "thinking": {"type": "disabled"}}
+    return {"max_tokens": VISION_OCR_MAX_TOKENS}
+
+
 def source_configured(source: str) -> bool:
+    if source == "etf_flow":
+        return bool(vision_api_key())
     if source == "ima":
         return ima_configured()
     if source in {"dws", "zsxq"}:
@@ -69,6 +120,7 @@ def source_enabled(source: str) -> bool:
     if flag is not None:
         return flag
     from app.services import preferences
+
     saved = preferences.load().get("news_sources") or {}
     row = saved.get(source) if isinstance(saved, dict) else None
     if isinstance(row, dict):
@@ -106,6 +158,7 @@ def set_source_enabled(source: str, enabled: bool) -> bool:
     if source_locked(source) or not source_configured(source):
         return source_enabled(source)
     from app.services import preferences
+
     current = preferences.load()
     saved = dict(current.get("news_sources") or {})
     row = dict(saved.get(source) or {})

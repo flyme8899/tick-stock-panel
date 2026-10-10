@@ -260,7 +260,7 @@ class NewsStore:
             ids = [row["id"] for row in rows]
             marks = ",".join("?" for _ in ids)
             mentions = list(self._conn.execute(
-                f"SELECT item_id, kind, key FROM news_mentions WHERE item_id IN ({marks})",
+                f"SELECT item_id, kind, key FROM news_mentions WHERE item_id IN ({marks}) ORDER BY id",
                 ids,
             ))
         grouped: dict[int, list[sqlite3.Row]] = {}

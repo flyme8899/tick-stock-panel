@@ -8,6 +8,7 @@ from datetime import time as dt_time
 
 from app.market_time import cn_now
 from app.news.config import source_enabled
+from app.news.etf_flow import etf_wait_seconds
 from app.news.service import backfill_mentions, collect_inbox, get_lexicon, run_due
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ class NewsScheduler:
         while not self._stop.is_set():
             now = cn_now()
             stamp = now.timestamp()
-            for source in ("cls", "wscn", "ima", "dws", "zsxq"):
+            for source in ("cls", "wscn", "ima", "dws", "zsxq", "etf_flow"):
                 if not source_enabled(source):
                     continue
                 due = self._next.get(source, 0)
@@ -65,6 +66,12 @@ class NewsScheduler:
                         collect_inbox()
                         self._next["dws"] = stamp + interval_seconds("dws", now)
                         self._next["zsxq"] = stamp + interval_seconds("zsxq", now)
+                    elif source == "etf_flow":
+                        # 申赎稿在交易日次日早晨发布，周五的在周六。pending 才在窗口里继续等。
+                        result = run_due(source) or {}
+                        self._next[source] = stamp + etf_wait_seconds(
+                            now, pending=bool(result.get("pending")),
+                        )
                     else:
                         run_due(source)
                         self._next[source] = stamp + interval_seconds(source, now)

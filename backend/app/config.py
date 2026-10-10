@@ -155,6 +155,11 @@ class Settings(BaseSettings):
     news_llm_extract: str = ""
     news_dws_group_id: str = ""
     news_zsxq_group_id: str = ""
+    news_etf_flow_enabled: str = ""
+    # ETF 申赎表格的视觉模型。和上面的 ai_api_key / ai_model 分开，避免把文本模型当成视觉模型。
+    vision_ai_api_key: str = ""
+    vision_ai_base_url: str = "https://tokenhub.tencentmaas.com/v1"
+    vision_ai_model: str = "deepseek/deepseek-v4-flash-vision-exp"
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
