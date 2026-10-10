@@ -9,7 +9,7 @@ import html
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
@@ -477,7 +477,8 @@ def parse_feed_time(value: str) -> datetime | None:
     if parsed_rfc is None:
         return None
     if parsed_rfc.tzinfo is None:
-        parsed_rfc = parsed_rfc.replace(tzinfo=UTC)
+        # datetime.UTC 是 3.11 才有的别名。宿主机采集 venv 可能仍是 3.10。
+        parsed_rfc = parsed_rfc.replace(tzinfo=timezone.utc)  # noqa: UP017
     return parsed_rfc.astimezone(CN_TZ)
 
 

@@ -107,9 +107,41 @@ python scripts/news_host_collector.py --data-dir ./data
 python scripts/news_host_collector.py --data-dir ./data --backfill-since 2025-08-23
 ```
 
-示例 systemd 单元在 `deploy/tsp-news-collector.service` 和 `.timer`，默认每 5 分钟跑一次。单元以用户 `ubuntu` 运行，`HOME=/home/ubuntu`，工作目录是 `/home/ubuntu/tick-stock-panel`。`TimeoutStartSec=3600` 留给知识星球长回补。`ExecStart` 用 `~/.venvs/tsp-collector` 里的 Python，这个环境要装上 pydantic。`PATH` 带上 `~/.local/bin`，才能找到 `dws` 和 `zsxq-cli`。
+示例 systemd 单元在 `deploy/tsp-news-collector.service` 和 `.timer`，默认每 5 分钟跑一次。单元以用户 `ubuntu` 运行，`HOME=/home/ubuntu`，工作目录是 `/home/ubuntu/tick-stock-panel`。`TimeoutStartSec=3600` 留给知识星球长回补。`ExecStart` 用 `~/.venvs/tsp-collector` 里的 Python。`PATH` 带上 `~/.local/bin`，才能找到 `dws` 和 `zsxq-cli`。
+
+这条定时器不是容器调度的重复。容器里的轮询对钉钉和知识星球只调用 `collect_inbox()`，读取 `data/news/inbox`。容器内没有 `dws` / `zsxq-cli`，登录态在宿主机的 `~/.dws` 等目录。停掉 `tsp-news-collector.timer` 之后，这两路资讯不再入库。
+
+采集脚本启动时检查 Python 版本，低于 3.10 会直接退出。面板和容器仍用 Python 3.11。推荐把 `~/.venvs/tsp-collector` 建在 3.11 上，不要长期留在系统自带的 3.10。虚拟环境里至少要有 `pydantic` 和 `pydantic-settings`，因为脚本会导入 `app.config`。
+
+Ubuntu 可以用 deadsnakes：
+
+```bash
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt-get update
+sudo apt-get install -y python3.11 python3.11-venv
+rm -rf ~/.venvs/tsp-collector
+python3.11 -m venv ~/.venvs/tsp-collector
+~/.venvs/tsp-collector/bin/pip install pydantic pydantic-settings
+```
+
+或者用 uv：
+
+```bash
+uv python install 3.11
+rm -rf ~/.venvs/tsp-collector
+uv venv --python 3.11 ~/.venvs/tsp-collector
+uv pip install --python ~/.venvs/tsp-collector/bin/python pydantic pydantic-settings
+```
 
 `ProtectSystem=strict` 下，`data/news` 必须属于该服务用户，否则收件箱写不进去。dws 大约每 2 小时刷新一次令牌；`ProtectHome` 只读时还要放开 `~/.dws`、`~/.local/share/dws-cli`、`~/.config/zsxq-cli`、`~/.local/share/zsxq-cli`。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。
+
+容器默认不再以 root 运行。已经用 root 写过数据目录的机器，切换前执行一次 `sudo chown -R 1000:1000 data`，让容器用户和上面的 `ubuntu` 用户是同一个 uid。步骤和回滚见 [deployment.md](./deployment.md)。
+
+改完属主或重建虚拟环境后跑一次预检。`data/news` 不可写、采集器 Python 低于 3.10，或 `data/` 里有不属于 `APP_UID`/`APP_GID` 的文件时，退出码不是 0：
+
+```bash
+python3 scripts/deploy_preflight.py --data-dir ./data
+```
 
 钉钉游标比本次完成时间早 2 分钟，避免拉取过程中新到的消息被跳过。同一条 `messageId` 不会重复入库。
 

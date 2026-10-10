@@ -61,6 +61,37 @@ git pull
 docker compose up --build -d
 ```
 
+### 容器不以 root 运行
+
+`docker-compose.yml` 里的 app 使用 `user: ${APP_UID:-1000}:${APP_GID:-1000}`。`.env` 里的 `APP_UID` / `APP_GID` 默认是 `1000`，和 Ubuntu 上的 `ubuntu` 用户一致。镜像把家目录放在 `/home/app`，uv 缓存放在 `/home/app/.cache/uv`，Codex 登录态挂到 `/codex-home`（`CODEX_HOME`）。这些路径不在 `/root` 下面，因为基础镜像里 `/root` 只有 root 能进入。
+
+已经用 root 跑过的机器，`data/` 里会有 root 拥有的文件。切换前先停容器，执行一次：
+
+```bash
+sudo chown -R 1000:1000 data
+```
+
+`1000:1000` 要和 `.env` 里的 `APP_UID` / `APP_GID` 相同，并且等于宿主机采集器用户的 uid/gid。用 `id -u ubuntu` 和 `id -g ubuntu` 确认；不是 1000 就把 `.env` 和这条 chown 改成那一对数字。`.env` 通常是 `600`，Codex 目录通常是 `700`，容器用户必须是它们的属主，否则读不到。
+
+然后：
+
+```bash
+python3 scripts/deploy_preflight.py --data-dir ./data
+docker compose up -d
+```
+
+预检要求 `data/` 和 `data/news` 对这对 uid/gid 可写，采集器虚拟环境的 Python 不低于 3.10，并且 `data/` 下面没有别人拥有的文件。失败时退出码不是 0。采集器虚拟环境的重建步骤在 [news-sources.md](./news-sources.md)。
+
+回滚：把 `.env` 里的 `APP_UID` 和 `APP_GID` 改成下面这样，再重建容器。容器重新以 root 运行。root 可以写已经属于 1000 的文件，所以不一定要把属主改回去。
+
+```bash
+APP_UID=0
+APP_GID=0
+docker compose up -d --force-recreate
+```
+
+如果确实要恢复成 root 拥有整个 `data/`，执行 `sudo chown -R root:root data` 之后，还要把收件箱交回采集器用户，例如 `sudo chown -R ubuntu:ubuntu data/news`。否则宿主机定时器写不进 `data/news/inbox`。
+
 ---
 
 ## 方式 C:本机 AI 代部署(小白推荐)
