@@ -1485,6 +1485,11 @@ export interface MiningAvailability {
   effective_start: string | null
   effective_end: string | null
   suggested_start: string | null
+  /** 本地历史不足时还差多少交易日; 足够时为 0。 */
+  deficit_bars: number
+  /** 建议补的跨度 (配合数据页「向前扩展历史」), 不足时为 null。 */
+  suggested_backfill_value: number | null
+  suggested_backfill_unit: 'month' | 'year' | null
 }
 
 export interface MiningRequestV1 {
