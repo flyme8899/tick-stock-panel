@@ -310,6 +310,7 @@ def test_compose_runs_as_configurable_user_outside_root():
     assert "CODEX_HOME=/codex-home" in dockerfile
     assert "UV_NO_SYNC=1" in dockerfile
     assert "chmod 1777" in dockerfile
+    assert "efinance.config import DATA_DIR" in dockerfile
     assert 'CMD ["uv", "run", "--no-sync"' in dockerfile
     assert "APP_UID=1000" in example
     assert "APP_GID=1000" in example

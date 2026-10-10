@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type FundFlowAmountRow, type FundFlowBoard } from '@/lib/api'
+import { api, type FundFlowAmountRow, type FundFlowBoard, type FundFlowMarginDay, type FundFlowStockBlock } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
@@ -76,11 +76,13 @@ function AmountList({
   label,
   amount,
   emptyText = '还没有这一块的落盘。',
+  renderLabel,
 }: {
   rows: FundFlowAmountRow[]
   label: (row: FundFlowAmountRow) => string
   amount: (row: FundFlowAmountRow) => number | null | undefined
   emptyText?: string
+  renderLabel?: (row: FundFlowAmountRow) => ReactNode
 }) {
   if (rows.length === 0) return <Empty text={emptyText} />
   return (
@@ -89,9 +91,9 @@ function AmountList({
         const value = amount(row)
         return (
           <li key={`${label(row)}-${index}`} className="flex items-baseline justify-between gap-3 text-sm">
-            <span className="min-w-0 truncate">
+            <span className="flex min-w-0 items-baseline">
               {row.rank != null ? <span className="mr-2 text-xs text-muted">{row.rank}</span> : null}
-              {label(row)}
+              {renderLabel ? renderLabel(row) : <span className="min-w-0 truncate">{label(row)}</span>}
             </span>
             <span className={cn('shrink-0 font-mono text-xs', signedClass(value))}>{yi(value)}</span>
           </li>
@@ -101,17 +103,90 @@ function AmountList({
   )
 }
 
-function marginDays(items: FundFlowAmountRow[]) {
-  const byDate = new Map<string, { total: number; markets: string[] }>()
+function stockName(row: FundFlowAmountRow): string {
+  const name = row.name?.trim()
+  if (name) return name
+  return row.code || '—'
+}
+
+function StockLabel({ row }: { row: FundFlowAmountRow }) {
+  const name = row.name?.trim()
+  const code = row.code || ''
+  return (
+    <span className="min-w-0 truncate">
+      {stockName(row)}
+      {name && code ? <span className="ml-2 text-[11px] text-muted">{code}</span> : null}
+    </span>
+  )
+}
+
+function StockSides({
+  block,
+  amount,
+  emptyInflow,
+}: {
+  block: FundFlowStockBlock | undefined
+  amount: (row: FundFlowAmountRow) => number | null | undefined
+  emptyInflow: string
+}) {
+  if (block?.partial) {
+    return <Empty text={block.note || '个股样本不完整，不作为全市场排名。'} />
+  }
+  const inflow = block?.inflow ?? block?.items ?? []
+  const outflow = block?.outflow ?? []
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="mb-1 text-[11px] text-muted">净流入</p>
+        <AmountList rows={inflow} label={stockName} amount={amount} emptyText={emptyInflow} renderLabel={row => <StockLabel row={row} />} />
+      </div>
+      <div>
+        <p className="mb-1 text-[11px] text-muted">净流出</p>
+        <AmountList rows={outflow} label={stockName} amount={amount} emptyText="没有净流出。" renderLabel={row => <StockLabel row={row} />} />
+      </div>
+    </div>
+  )
+}
+
+function fallbackMarginDays(items: FundFlowAmountRow[]): FundFlowMarginDay[] {
+  const byDate = new Map<string, FundFlowMarginDay>()
   for (const row of items) {
     const day = row.trade_date || ''
     if (!day || row.margin_balance == null) continue
-    const slot = byDate.get(day) ?? { total: 0, markets: [] }
-    slot.total += row.margin_balance
-    if (row.market) slot.markets.push(row.market)
+    const slot = byDate.get(day) ?? {
+      trade_date: day,
+      margin_balance: 0,
+      coverage: 'none',
+      label: '',
+    }
+    slot.margin_balance = (slot.margin_balance ?? 0) + row.margin_balance
+    if (row.market === 'sse') slot.sse_margin_balance = row.margin_balance
+    if (row.market === 'szse') slot.szse_margin_balance = row.margin_balance
     byDate.set(day, slot)
   }
-  return [...byDate.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)
+  return [...byDate.values()].sort((a, b) => a.trade_date < b.trade_date ? -1 : 1).map(day => {
+    const markets = [
+      day.sse_margin_balance != null ? 'sse' : '',
+      day.szse_margin_balance != null ? 'szse' : '',
+    ].filter(Boolean)
+    if (markets.length === 2) return { ...day, coverage: 'both', label: '沪深合计' }
+    if (markets.length === 1) {
+      const only = markets[0]
+      return { ...day, coverage: only, label: only === 'sse' ? '仅沪市' : '仅深市' }
+    }
+    return { ...day, label: '汇总' }
+  })
+}
+
+function MarginSplit({ day }: { day: FundFlowMarginDay }) {
+  if (day.coverage !== 'both' || day.sse_margin_balance == null || day.szse_margin_balance == null) {
+    return null
+  }
+  return (
+    <span className="mt-0.5 block text-[11px] text-muted">
+      沪 {yi(day.sse_margin_balance).replace('+', '')} · 深 {yi(day.szse_margin_balance).replace('+', '')}
+    </span>
+  )
 }
 
 export function FundFlow() {
@@ -125,7 +200,9 @@ export function FundFlow() {
   const data: FundFlowBoard | undefined = board.data
   const sectorBlock = sector === 'industry' ? data?.industry : data?.concept
   const stockBlock = stockWindow === 'today' ? data?.stocks_today : data?.stocks_5d
-  const margin = marginDays(data?.margin.items ?? [])
+  const margin = (data?.margin.days && data.margin.days.length > 0)
+    ? [...data.margin.days].sort((a, b) => a.trade_date < b.trade_date ? -1 : 1)
+    : fallbackMarginDays(data?.margin.items ?? [])
   const south = [...(data?.southbound.items ?? [])].reverse()
   const etf = data?.etf_shares
 
@@ -162,11 +239,10 @@ export function FundFlow() {
                 options={[{ key: 'today', label: '今日' }, { key: '5d', label: '5日' }]}
                 onChange={setStockWindow}
               />
-              <AmountList
-                rows={stockBlock?.items ?? []}
-                label={row => row.symbol || row.code || '—'}
+              <StockSides
+                block={stockBlock}
                 amount={row => stockWindow === 'today' ? row.main_net : row.ff_main_net_5d}
-                emptyText={stockWindow === '5d'
+                emptyInflow={stockWindow === '5d'
                   ? '凑满 5 个交易日才列出。缺的日子不按 0 计入。'
                   : '还没有这一块的落盘。'}
               />
@@ -175,12 +251,13 @@ export function FundFlow() {
             <Card title="两融余额趋势">
               {margin.length === 0 ? <Empty text="还没有融资融券汇总。" /> : (
                 <ul className="space-y-1.5">
-                  {[...margin].reverse().slice(0, 12).map(([day, slot]) => (
-                    <li key={day} className="flex items-baseline justify-between gap-3 text-sm">
-                      <span className="text-xs text-muted">{day}</span>
+                  {[...margin].reverse().slice(0, 12).map(day => (
+                    <li key={day.trade_date} className="flex items-baseline justify-between gap-3 text-sm">
+                      <span className="text-xs text-muted">{day.trade_date}</span>
                       <span className="text-right">
-                        <span className="font-mono text-xs">{yi(slot.total).replace('+', '')}</span>
-                        <span className="ml-2 text-[11px] text-muted">{slot.markets.join(' / ') || '汇总'}</span>
+                        <span className="font-mono text-xs">{yi(day.margin_balance).replace('+', '')}</span>
+                        <span className="ml-2 text-[11px] text-muted">{day.label || '汇总'}</span>
+                        <MarginSplit day={day} />
                       </span>
                     </li>
                   ))}

@@ -1,11 +1,14 @@
 """各数据集的一次同步。网络调用都经过注入的 ``SourceClients``。"""
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
+
+import polars as pl
 
 from app.fund_flow import config, normalize, store
 from app.fund_flow.circuit import CircuitBreaker, CircuitOpenError, call_with_retry
@@ -20,6 +23,9 @@ SECTOR_CACHE_S = 60.0
 
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
+HISTORY_SOURCES = frozenset({"efinance", "mx"})
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -73,6 +79,93 @@ def _group_dates(rows: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def _empty_frame_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "length mismatch" in text and "0 elements" in text
+
+
+def _select_bill_dates(
+    rows: list[dict],
+    *,
+    backfill: bool,
+    target: str | None,
+    trade_date: str | None,
+) -> list[dict]:
+    if backfill or not trade_date:
+        return _keep_dates(rows, backfill=backfill, since=target)
+    # 指定交易日还不完整时，要能写回这一天，不能只留更晚的日期。
+    return [row for row in rows if row["trade_date"] >= trade_date]
+
+
+def _present_sources(frame) -> dict[str, str]:
+    found: dict[str, str] = {}
+    if frame.is_empty() or "code" not in frame.columns:
+        return found
+    sources = frame["source"].to_list() if "source" in frame.columns else [""] * frame.height
+    for code, source in zip(frame["code"].to_list(), sources, strict=False):
+        if code:
+            found[str(code)] = str(source or "")
+    return found
+
+
+def _rank_attempts(window: str) -> tuple[tuple[str, dict, str], ...]:
+    if window == "5d":
+        return (
+            ("stock_fund_flow_individual", {"symbol": "5日排行"}, "akshare_ths"),
+            ("stock_individual_fund_flow_rank", {"indicator": "5日"}, "akshare_em_rank"),
+        )
+    return (
+        ("stock_fund_flow_individual", {"symbol": "即时"}, "akshare_ths"),
+        ("stock_individual_fund_flow_rank", {"indicator": "今日"}, "akshare_em_rank"),
+    )
+
+
+def _load_rank(clients: SourceClients, window: str) -> tuple[list[dict], str]:
+    """同花顺全市场排名优先。东财排名是备选，失败不计入 akshare 熔断。"""
+    last = ""
+    for name, kwargs, source in _rank_attempts(window):
+        for _attempt in range(2):
+            try:
+                rows = clients.ak(name, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                last = str(exc)
+                logger.warning("全市场资金排名 %s 失败: %s", name, exc)
+                continue
+            if rows:
+                return rows, source
+            break
+    if last:
+        logger.warning("全市场资金排名 %s 没有可用结果: %s", window, last)
+    return [], ""
+
+
+def _rank_fallback(clients: SourceClients, symbols: list[str], trade_date: str) -> list[dict]:
+    wanted = {code for symbol in symbols if (code := normalize.code6(symbol))}
+    if not wanted:
+        return []
+    today_raw, today_source = _load_rank(clients, "today")
+    five_raw, five_source = _load_rank(clients, "5d")
+    today_rows = normalize.normalize_rank_rows(
+        today_raw, trade_date=trade_date, source=today_source or "akshare_ths", window="today",
+    ) if today_raw else []
+    five_rows = normalize.normalize_rank_rows(
+        five_raw, trade_date=trade_date, source=five_source or "akshare_ths", window="5d",
+    ) if five_raw else []
+    merged: dict[str, dict] = {}
+    for row in today_rows:
+        if row["code"] in wanted:
+            merged[row["code"]] = row
+    for row in five_rows:
+        if row["code"] not in wanted:
+            continue
+        current = merged.get(row["code"])
+        if current is None:
+            merged[row["code"]] = row
+        else:
+            current["main_net_5d"] = row.get("main_net_5d")
+    return list(merged.values())
+
+
 def sync_stock(
     data_dir: Path,
     symbols: list[str],
@@ -84,8 +177,13 @@ def sync_stock(
     sleeper: Sleeper | None = None,
     mx_key: str | None = None,
     mx_max_calls: int | None = None,
+    trade_date: str | None = None,
 ) -> RunResult:
-    """全市场个股账单。首跑每个代码留最近 120 个日期，之后只补缺。"""
+    """全市场个股账单。首跑每个代码留最近 120 个日期，之后只补缺。
+
+    ``trade_date`` 对应的分区不足全市场时，已有代码也会重拉。熔断只停下东财
+    逐只请求，已经拿到的行照常落盘；还没请求的代码改走全市场排名，不整批交给妙想。
+    """
     result = RunResult(kind="stock")
     pace = pace or Pace()
     sleep = sleeper or time.sleep
@@ -95,11 +193,23 @@ def sync_stock(
     latest = store.latest_date(data_dir, "stock")
     backfill = latest is None
     target = None if backfill else latest
-    present: set[str] = set()
-    if target is not None:
-        frame = store.read_partition(data_dir, "stock", target)
-        if "code" in frame.columns:
-            present = set(frame["code"].to_list())
+    refresh_day = False
+    universe = len({code for symbol in symbols if (code := normalize.code6(symbol))})
+    if trade_date:
+        current = store.read_partition(data_dir, "stock", trade_date)
+        refresh_day = store.is_partial_ranking(store.code_count(current), universe)
+        present_sources = _present_sources(current)
+    elif target is not None:
+        present_sources = _present_sources(store.read_partition(data_dir, "stock", target))
+    else:
+        present_sources = {}
+
+    def _skip(code: str) -> bool:
+        if code not in present_sources:
+            return False
+        if trade_date is None:
+            return not backfill
+        return not refresh_day
 
     def _paced(source: str, breaker: CircuitBreaker, fn):
         sleep(pace.delay_s)
@@ -113,35 +223,38 @@ def sync_stock(
 
     missing: list[str] = []
     collected: list[dict] = []
-    for index, symbol in enumerate(symbols):
+
+    def _dated(raw: list[dict], symbol: str, source: str) -> list[dict]:
+        return _select_bill_dates(
+            normalize.normalize_bills(raw, symbol=symbol, source=source),
+            backfill=backfill,
+            target=target,
+            trade_date=trade_date,
+        )
+
+    for symbol in symbols:
         code = normalize.code6(symbol)
-        if not code:
-            continue
-        if code in present and not backfill:
+        if not code or _skip(code):
             continue
         try:
             raw = _paced("efinance", efinance, lambda symbol=symbol: clients.history_bill(symbol))
-            rows = _keep_dates(
-                normalize.normalize_bills(raw, symbol=symbol, source="efinance"),
-                backfill=backfill,
-                since=target,
-            )
+            rows = _dated(raw, symbol, "efinance")
             if rows:
                 collected.extend(rows)
             else:
                 missing.append(symbol)
         except CircuitOpenError as exc:
+            # 熔断只停掉后续逐只请求。已拿到的行在函数末尾落盘，剩下的改走排名。
+            logger.warning("个股资金流熔断，本轮不再逐只请求: %s", exc)
             result.errors.append(str(exc))
-            pending = [symbol]
-            for rest in symbols[index + 1:]:
-                rest_code = normalize.code6(rest)
-                if rest_code and (backfill or rest_code not in present):
-                    pending.append(rest)
-            missing.extend(pending)
+            missing.append(symbol)
             break
         except Exception as exc:  # noqa: BLE001
             missing.append(symbol)
             result.errors.append(f"{code} efinance: {exc}")
+
+    if missing and not key:
+        logger.info("未配置 MX_APIKEY，跳过妙想补齐（%s 只）", len(missing))
 
     for symbol in missing:
         if not key or quota_left <= 0 or mx_calls >= (mx_max_calls or quota_left):
@@ -161,17 +274,29 @@ def sync_stock(
             quota_left = reported
         else:
             quota_left -= 1
-        rows = _keep_dates(
-            normalize.normalize_bills(raw, symbol=symbol, source="mx"),
-            backfill=backfill,
-            since=target,
-        )
-        collected.extend(rows)
+        collected.extend(_dated(raw, symbol, "mx"))
         if quota_left <= 0:
             break
 
-    for trade_date, rows in _group_dates(collected).items():
-        result.wrote += store.write_rows(data_dir, "stock", trade_date, rows)
+    if trade_date:
+        got = {
+            row["code"]
+            for row in collected
+            if row.get("trade_date") == trade_date and row.get("main_net") is not None and row.get("code")
+        }
+        needed = [
+            symbol for symbol in symbols
+            if (code := normalize.code6(symbol)) and code not in got and not _skip(code)
+        ]
+        if needed:
+            ranked = _rank_fallback(clients, needed, trade_date)
+            if ranked:
+                collected.extend(ranked)
+            else:
+                logger.warning("全市场排名没有补上 %s 只股票", len(needed))
+
+    for day, rows in _group_dates(collected).items():
+        result.wrote += store.write_rows(data_dir, "stock", day, rows)
     store.update_kind_state(
         data_dir,
         "stock",
@@ -243,6 +368,49 @@ def sync_sectors(
     return result
 
 
+def _pull_ak(clients: SourceClients, name: str, kwargs: dict, breaker: CircuitBreaker, sleeper):
+    """空表不当成源故障，避免深交所没公布时把 akshare 熔断掉。"""
+
+    def _call():
+        try:
+            return clients.ak(name, **kwargs)
+        except Exception as exc:
+            if _empty_frame_error(exc):
+                logger.warning("两融 %s 空表，跳过: %s", name, exc)
+                return []
+            raise
+
+    return call_with_retry("akshare", _call, breaker, sleeper=sleeper)
+
+
+def _szse_summary_exists(data_dir: Path, trade_date: str) -> bool:
+    frame = store.read_partition(data_dir, "margin", trade_date)
+    if frame.is_empty() or "market" not in frame.columns or "row_kind" not in frame.columns:
+        return False
+    matched = frame.filter((pl.col("market") == "szse") & (pl.col("row_kind") == "summary"))
+    return not matched.is_empty()
+
+
+def _load_szse_day(
+    clients: SourceClients,
+    trade_date: str,
+    breaker: CircuitBreaker,
+    sleeper,
+) -> list[dict]:
+    compact = trade_date.replace("-", "")
+    rows: list[dict] = []
+    summary = _pull_ak(clients, "stock_margin_szse", {"date": compact}, breaker, sleeper)
+    rows.extend(
+        row for row in normalize.normalize_margin_summary(
+            summary, market="szse", trade_date=trade_date,
+        )
+        if row["trade_date"] == trade_date
+    )
+    detail = _pull_ak(clients, "stock_margin_detail_szse", {"date": compact}, breaker, sleeper)
+    rows.extend(normalize.normalize_margin_detail(detail, market="szse", trade_date=trade_date))
+    return rows
+
+
 def sync_margin(
     data_dir: Path,
     clients: SourceClients,
@@ -250,8 +418,12 @@ def sync_margin(
     trade_date: str,
     breaker: CircuitBreaker,
     sleeper: Sleeper | None = None,
+    known_days: list[date] | None = None,
 ) -> RunResult:
-    """两融 T+1。``trade_date`` 是要补的交易日，不是运行当天。"""
+    """两融 T+1。``trade_date`` 是要补的交易日，不是运行当天。
+
+    深交所汇总空表时跳过并记日志，上交所已经拿到的行仍写入。再试上一交易日的深市。
+    """
     result = RunResult(kind="margin")
     compact = trade_date.replace("-", "")
     calls = [
@@ -261,12 +433,10 @@ def sync_margin(
         ("szse", "detail", "stock_margin_detail_szse", {"date": compact}),
     ]
     rows: list[dict] = []
+    szse_summary_empty = False
     for market, row_kind, name, kwargs in calls:
         try:
-            raw = call_with_retry(
-                "akshare", lambda name=name, kwargs=kwargs: clients.ak(name, **kwargs),
-                breaker, sleeper=sleeper,
-            )
+            raw = _pull_ak(clients, name, kwargs, breaker, sleeper)
         except CircuitOpenError as exc:
             result.errors.append(str(exc))
             break
@@ -274,13 +444,30 @@ def sync_margin(
             result.errors.append(f"{name}: {exc}")
             continue
         if row_kind == "summary":
-            parsed = normalize.normalize_margin_summary(raw, market=market)
+            parsed = normalize.normalize_margin_summary(raw, market=market, trade_date=trade_date)
             parsed = [row for row in parsed if row["trade_date"] == trade_date]
+            if market == "szse" and not parsed:
+                szse_summary_empty = True
+                logger.warning("深交所两融 %s 无汇总，保留上交所", trade_date)
+                continue
         else:
             parsed = normalize.normalize_margin_detail(raw, market=market, trade_date=trade_date)
         rows.extend(parsed)
+    if szse_summary_empty:
+        prev = previous_session(date.fromisoformat(trade_date), known_days).isoformat()
+        if prev != trade_date and not _szse_summary_exists(data_dir, prev):
+            try:
+                prev_rows = _load_szse_day(clients, prev, breaker, sleeper)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("深交所两融改试 %s 失败: %s", prev, exc)
+                prev_rows = []
+            if prev_rows:
+                result.wrote += store.write_rows(data_dir, "margin", prev, prev_rows)
+            else:
+                logger.warning("深交所两融上一交易日 %s 仍无汇总", prev)
+        result.errors.append(f"stock_margin_szse: {trade_date} 无数据，已跳过")
     if rows:
-        result.wrote = store.write_rows(data_dir, "margin", trade_date, rows)
+        result.wrote += store.write_rows(data_dir, "margin", trade_date, rows)
     store.update_kind_state(
         data_dir, "margin",
         last_error=result.errors[-1] if result.errors else None,

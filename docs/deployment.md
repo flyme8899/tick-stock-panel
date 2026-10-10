@@ -63,7 +63,7 @@ docker compose up --build -d
 
 ### 容器不以 root 运行
 
-`docker-compose.yml` 里的 app 和 dsa 都使用 `user: ${APP_UID:-1000}:${APP_GID:-1000}`。`.env` 里的 `APP_UID` / `APP_GID` 默认是 `1000`，和 Ubuntu 上的 `ubuntu` 用户一致。生产机上 `id -g ubuntu` 经常是 `1001`，`.env` 里就写成 `APP_GID=1001`。app 镜像把家目录放在 `/home/app`，uv 缓存放在 `/home/app/.cache/uv`，Codex 登录态挂到 `/codex-home`（`CODEX_HOME`）。dsa 镜像把家目录放在 `/home/dsa`。这些路径不在 `/root` 下面，因为基础镜像里 `/root` 只有 root 能进入。
+`docker-compose.yml` 里的 app 和 dsa 都使用 `user: ${APP_UID:-1000}:${APP_GID:-1000}`。`.env` 里的 `APP_UID` / `APP_GID` 默认是 `1000`，和 Ubuntu 上的 `ubuntu` 用户一致。生产机上 `id -g ubuntu` 经常是 `1001`，`.env` 里就写成 `APP_GID=1001`。app 镜像把家目录放在 `/home/app`，uv 缓存放在 `/home/app/.cache/uv`，Codex 登录态挂到 `/codex-home`（`CODEX_HOME`）。dsa 镜像把家目录放在 `/home/dsa`。这些路径不在 `/root` 下面，因为基础镜像里 `/root` 只有 root 能进入。app 镜像在构建时把 efinance 包内 `data/` 设成 `1777`：这个库一导入就会在包目录里建搜索缓存。运行时资金采集再把缓存改写到数据卷的 `data/efinance`。
 
 已经用 root 跑过的机器，`data/` 里会有 root 拥有的文件。切换前先停容器，执行一次：
 

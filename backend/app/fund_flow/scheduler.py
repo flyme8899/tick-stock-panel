@@ -170,6 +170,123 @@ def _margin_target(now: datetime, known_days: list[date] | None = None) -> str:
     return jobs.previous_session(now.date(), known_days).isoformat()
 
 
+def session_day(
+    now: datetime,
+    *,
+    trading: bool,
+    known_days: list[date] | None,
+    ready: dt_time,
+) -> str:
+    """最近一个应该已经落盘的交易日。收盘前用上一交易日，周末同样回退。"""
+    clock = now.timetz().replace(tzinfo=None)
+    if trading and clock >= ready:
+        return now.date().isoformat()
+    return jobs.previous_session(now.date(), known_days).isoformat()
+
+
+def task_day(
+    name: str,
+    now: datetime,
+    *,
+    trading: bool,
+    known_days: list[date] | None,
+) -> str:
+    if name in {"margin", "margin_evening"}:
+        return _margin_target(now, known_days)
+    if name == "sector_intraday":
+        return now.date().isoformat()
+    ready = {
+        "stock": dt_time(16, 30),
+        "sector_close": dt_time(15, 5),
+        "etf_shares": dt_time(16, 40),
+        "southbound": dt_time(16, 40),
+        "northbound_turnover": dt_time(16, 40),
+        "lhb": dt_time(17, 30),
+    }.get(name, dt_time(16, 30))
+    return session_day(now, trading=trading, known_days=known_days, ready=ready)
+
+
+def _partition_missing(data_dir: Path, kind: str, day: str) -> bool:
+    return not store.partition_file(data_dir, kind, day).exists()
+
+
+def _stock_incomplete(data_dir: Path, day: str, universe: int) -> bool:
+    count = 0 if _partition_missing(data_dir, "stock", day) else store.code_count(
+        store.read_partition(data_dir, "stock", day),
+    )
+    return store.is_partial_ranking(count, universe)
+
+
+def _sector_close_missing(data_dir: Path, day: str) -> bool:
+    for kind in ("industry", "concept"):
+        frame = store.read_partition(data_dir, kind, day)
+        if frame.is_empty() or "snapshot" not in frame.columns:
+            return True
+        if "close" not in frame.get_column("snapshot").to_list():
+            return True
+    return False
+
+
+def catchup_tasks(
+    now: datetime,
+    *,
+    trading: bool,
+    state: dict,
+    flags: dict[str, bool],
+    breakers_open: set[str],
+    data_dir: Path,
+    known_days: list[date] | None,
+    universe: int,
+) -> list[str]:
+    """开关在收盘后或非交易日打开时，补最近一个交易日还缺的分区。"""
+    if not flags.get("enabled"):
+        return []
+    kinds = state.get("kinds") or {}
+    today = now.date().isoformat()
+
+    def kind_state(name: str) -> dict:
+        raw = kinds.get(name) or {}
+        return raw if isinstance(raw, dict) else {}
+
+    def cooled(name: str) -> bool:
+        return _done_today(kind_state(name), today) or _recent(kind_state(name), now, RETRY_GAP_S)
+
+    due: list[str] = []
+    stock_day = task_day("stock", now, trading=trading, known_days=known_days)
+    if (
+        flags.get("stock")
+        and "efinance" not in breakers_open
+        and not cooled("stock")
+        and _stock_incomplete(data_dir, stock_day, universe)
+    ):
+        due.append("stock")
+    margin_day = task_day("margin", now, trading=trading, known_days=known_days)
+    if flags.get("margin") and "akshare" not in breakers_open and not cooled("margin"):
+        covered = str(kind_state("margin").get("target_covered") or "")
+        if covered != margin_day or _partition_missing(data_dir, "margin", margin_day):
+            due.append("margin")
+    close_day = task_day("sector_close", now, trading=trading, known_days=known_days)
+    if (
+        flags.get("sector")
+        and "akshare" not in breakers_open
+        and not cooled("sector_close")
+        and _sector_close_missing(data_dir, close_day)
+    ):
+        due.append("sector_close")
+    for task, flag, kind, ready_name in (
+        ("etf_shares", "etf_shares", "etf_shares", "etf_shares"),
+        ("southbound", "southbound", "southbound", "southbound"),
+        ("northbound_turnover", "northbound_turnover", "northbound_turnover", "northbound_turnover"),
+        ("lhb", "lhb_backup", "lhb", "lhb"),
+    ):
+        if not flags.get(flag) or "akshare" in breakers_open or cooled(task):
+            continue
+        day = task_day(ready_name, now, trading=trading, known_days=known_days)
+        if _partition_missing(data_dir, kind, day):
+            due.append(task)
+    return due
+
+
 def current_flags() -> dict[str, bool]:
     return {
         "enabled": config.enabled(),
@@ -295,24 +412,40 @@ class FundFlowWorker:
         self.deferred_reason = None
         state = store.load_state(data_dir)
         open_sources = {name for name, breaker in self.breakers.items() if not breaker.allow()}
+        known = known_trading_days(data_dir)
+        if symbols is None:
+            symbols = load_symbols(data_dir)
         planned = due_tasks(
             now, trading=trading, state=state, flags=flags, breakers_open=open_sources,
         )
+        for name in catchup_tasks(
+            now,
+            trading=trading,
+            state=state,
+            flags=flags,
+            breakers_open=open_sources,
+            data_dir=data_dir,
+            known_days=known,
+            universe=len(symbols),
+        ):
+            if name not in planned:
+                planned.append(name)
         if not planned:
             self._persist_breakers(data_dir)
             return []
         if clients is None:
             from app.fund_flow.sources import live_clients
 
-            clients = live_clients()
-        if symbols is None:
-            symbols = load_symbols(data_dir)
+            clients = live_clients(data_dir)
         ran: list[str] = []
         for name in planned:
             if self._stop.is_set():
                 break
             self._mark_attempt(data_dir, name, now)
-            self._execute(data_dir, name, now, clients, symbols)
+            self._execute(
+                data_dir, name, now, clients, symbols,
+                trading=trading, known_days=known,
+            )
             ran.append(name)
             if tickflow_sync_busy():
                 self.deferred_reason = "tickflow_sync"
@@ -320,14 +453,26 @@ class FundFlowWorker:
         self._persist_breakers(data_dir)
         return ran
 
-    def _execute(self, data_dir: Path, name: str, now: datetime, clients, symbols: list[str]) -> RunResult:
+    def _execute(
+        self,
+        data_dir: Path,
+        name: str,
+        now: datetime,
+        clients,
+        symbols: list[str],
+        *,
+        trading: bool,
+        known_days: list[date],
+    ) -> RunResult:
         day = now.date().isoformat()
-        captured = now.strftime("%Y-%m-%dT%H:%M:%S")
+        trade_day = task_day(name, now, trading=trading, known_days=known_days)
+        captured = f"{trade_day}T{now.strftime('%H:%M:%S')}"
         ak = self.breakers["akshare"]
         if name == "stock":
             result = jobs.sync_stock(
                 data_dir, symbols, clients,
                 efinance=self.breakers["efinance"], mx=self.breakers["mx"],
+                trade_date=trade_day,
             )
             if not result.errors:
                 _mark_success(data_dir, "stock", day)
@@ -335,7 +480,7 @@ class FundFlowWorker:
         if name == "sector_intraday":
             for kind in ("industry", "concept"):
                 result = jobs.sync_sectors(
-                    data_dir, clients, kind=kind, trade_date=day,
+                    data_dir, clients, kind=kind, trade_date=trade_day,
                     captured_at=captured, snapshot="intraday", breaker=ak,
                 )
                 if result.errors:
@@ -345,7 +490,7 @@ class FundFlowWorker:
         if name == "sector_close":
             for kind in ("industry", "concept"):
                 result = jobs.sync_sectors(
-                    data_dir, clients, kind=kind, trade_date=day,
+                    data_dir, clients, kind=kind, trade_date=trade_day,
                     captured_at=captured, snapshot="close", breaker=ak,
                 )
                 if result.errors:
@@ -353,16 +498,17 @@ class FundFlowWorker:
             _mark_success(data_dir, "sector_close", day)
             return result
         if name in {"margin", "margin_evening"}:
-            target = _margin_target(now, known_trading_days(data_dir))
-            result = jobs.sync_margin(data_dir, clients, trade_date=target, breaker=ak)
+            result = jobs.sync_margin(
+                data_dir, clients, trade_date=trade_day, breaker=ak, known_days=known_days,
+            )
             if not result.errors and result.wrote:
-                store.update_kind_state(data_dir, "margin", target_covered=target)
+                store.update_kind_state(data_dir, "margin", target_covered=trade_day)
                 _mark_success(data_dir, name, day)
             elif name == "margin_evening":
                 store.update_kind_state(data_dir, "margin_evening", last_error=result.errors[-1] if result.errors else None)
             return result
         if name == "etf_shares":
-            result = jobs.sync_etf_shares(data_dir, clients, trade_date=day, breaker=ak)
+            result = jobs.sync_etf_shares(data_dir, clients, trade_date=trade_day, breaker=ak)
             if not result.errors:
                 _mark_success(data_dir, "etf_shares", day)
             return result
@@ -377,7 +523,7 @@ class FundFlowWorker:
                 _mark_success(data_dir, "northbound_turnover", day)
             return result
         if name == "lhb":
-            result = jobs.sync_lhb_backup(data_dir, clients, trade_date=day, breaker=ak)
+            result = jobs.sync_lhb_backup(data_dir, clients, trade_date=trade_day, breaker=ak)
             if not result.errors:
                 _mark_success(data_dir, "lhb", day)
             return result
