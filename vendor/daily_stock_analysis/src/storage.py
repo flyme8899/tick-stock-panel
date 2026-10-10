@@ -41,6 +41,7 @@ from sqlalchemy import (
     and_,
     or_,
     delete,
+    update,
     desc,
     event,
     func,
@@ -371,6 +372,9 @@ class AnalysisHistory(Base):
     take_profit = Column(Float)
 
     created_at = Column(DateTime, default=datetime.now, index=True)
+    # 仪表盘「已读」和移出。空表示仍显示。移出是软删除，行和回测关联都留着。
+    read_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index('ix_analysis_code_time', 'code', 'created_at'),
@@ -396,6 +400,8 @@ class AnalysisHistory(Base):
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
             'created_at': self.created_at.isoformat() if self.created_at else None,
+            'read_at': self.read_at.isoformat() if self.read_at else None,
+            'dismissed_at': self.dismissed_at.isoformat() if self.dismissed_at else None,
         }
 
 
@@ -1379,6 +1385,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
 
             # 创建所有表
             Base.metadata.create_all(self._engine)
+            self._ensure_analysis_history_dashboard_columns()
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
             self._ensure_stock_daily_canonical_id()
@@ -2142,6 +2149,34 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 )
         except Exception as exc:
             logger.warning("资讯池 scope_value 回填失败，已跳过: %s", exc)
+
+    def _ensure_analysis_history_dashboard_columns(self) -> None:
+        """给已有 SQLite 补上仪表盘已读/移出列。新库由 create_all 建出。"""
+        if not self._is_sqlite_engine:
+            return
+        inspector = inspect(self._engine)
+        if not inspector.has_table(AnalysisHistory.__tablename__):
+            return
+        try:
+            existing = {
+                column["name"]
+                for column in inspector.get_columns(AnalysisHistory.__tablename__)
+            }
+        except Exception as exc:
+            logger.error("检查分析历史仪表盘列失败: %s", exc)
+            raise
+        for column in ("read_at", "dismissed_at"):
+            if column in existing:
+                continue
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {AnalysisHistory.__tablename__} "
+                        f"ADD COLUMN {column} DATETIME"
+                    )
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, column):
+                    raise
 
     @classmethod
     def get_instance(cls) -> 'DatabaseManager':
@@ -3002,7 +3037,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         offset: int = 0,
-        limit: int = 20
+        limit: int = 20,
+        exclude_dismissed: bool = False,
     ) -> Tuple[List[AnalysisHistory], int]:
         """
         分页查询分析历史记录（带总数）
@@ -3038,6 +3074,8 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             if end_date:
                 # created_at < end_date+1 00:00:00 (即 <= end_date 23:59:59)
                 conditions.append(AnalysisHistory.created_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time()))
+            if exclude_dismissed:
+                conditions.append(AnalysisHistory.dismissed_at.is_(None))
             
             # 构建 where 子句
             where_clause = and_(*conditions) if conditions else True
@@ -3161,6 +3199,59 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             _write,
         )
 
+    def mark_analysis_history_read(self, record_ids: List[int]) -> int:
+        """把仍在仪表盘上的记录标为已读。已移出的不改。"""
+        ids = sorted({int(record_id) for record_id in record_ids if record_id is not None and int(record_id) > 0})
+        if not ids:
+            return 0
+        now = datetime.now()
+
+        def _write(session: Session) -> int:
+            result = session.execute(
+                update(AnalysisHistory)
+                .where(
+                    AnalysisHistory.id.in_(ids),
+                    AnalysisHistory.dismissed_at.is_(None),
+                )
+                .values(read_at=now)
+            )
+            return result.rowcount or 0
+
+        return self._run_write_transaction("mark analysis history read", _write)
+
+    def dismiss_analysis_history(
+        self,
+        *,
+        record_ids: Optional[List[int]] = None,
+        older_than: Optional[datetime] = None,
+        only_read: bool = False,
+    ) -> int:
+        """软删除仪表盘记录。三种条件互斥，都不传时不改任何行。"""
+        ids = sorted({
+            int(record_id)
+            for record_id in (record_ids or [])
+            if record_id is not None and int(record_id) > 0
+        })
+        if ids:
+            selector = AnalysisHistory.id.in_(ids)
+        elif only_read:
+            selector = AnalysisHistory.read_at.is_not(None)
+        elif older_than is not None:
+            selector = AnalysisHistory.created_at < older_than
+        else:
+            return 0
+        now = datetime.now()
+
+        def _write(session: Session) -> int:
+            result = session.execute(
+                update(AnalysisHistory)
+                .where(AnalysisHistory.dismissed_at.is_(None), selector)
+                .values(dismissed_at=now)
+            )
+            return result.rowcount or 0
+
+        return self._run_write_transaction("dismiss analysis history", _write)
+
     def get_distinct_stocks_from_history(
         self,
         start_date: Optional[date] = None,
@@ -3198,6 +3289,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
                 subq = subq.where(
                     AnalysisHistory.created_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time())
                 )
+            subq = subq.where(AnalysisHistory.dismissed_at.is_(None))
             if not include_market_review:
                 subq = subq.where(
                     and_(

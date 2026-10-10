@@ -1,5 +1,8 @@
 /** 界面样例。服务未连接时用于展示版式，不代表真实行情或建议。 */
 
+/** 样例观察池，对应定时任务要跟踪的代码。 */
+export const SAMPLE_WATCH_POOL = ['603626', '300750', '600519']
+
 export const SAMPLE_HISTORY = [
   {
     id: 1,
@@ -44,6 +47,54 @@ export const SAMPLE_HISTORY = [
     analysis_summary: '先进制程订单能见度高，但股价已反映大部分扩产预期。',
     region: 'tw',
     created_at: '2026-10-08 18:08',
+  },
+  {
+    id: 5,
+    stock_code: '603626.SH',
+    stock_name: '科森科技',
+    report_type: 'detailed',
+    operation_advice: '观望',
+    sentiment_score: 58,
+    trend_prediction: '看多',
+    analysis_summary: '均线呈标准多头排列，趋势仍在，短线不追高。',
+    region: 'cn',
+    created_at: '2026-10-10 18:12',
+  },
+  {
+    id: 6,
+    stock_code: '300750',
+    stock_name: '宁德时代',
+    report_type: 'detailed',
+    operation_advice: '观望',
+    sentiment_score: 45,
+    trend_prediction: '震荡',
+    analysis_summary: '收涨后放量反弹，但均线仍未走平。',
+    region: 'cn',
+    created_at: '2026-10-10 18:16',
+  },
+  {
+    id: 7,
+    stock_code: 'MARKET',
+    stock_name: '大盘复盘',
+    report_type: 'market_review',
+    operation_advice: '查看复盘',
+    sentiment_score: 50,
+    trend_prediction: '大盘复盘',
+    analysis_summary: '2026-10-10 大盘复盘 早盘',
+    region: 'cn',
+    created_at: '2026-10-10 15:10',
+  },
+  {
+    id: 8,
+    stock_code: 'MARKET',
+    stock_name: '大盘复盘',
+    report_type: 'market_review',
+    operation_advice: '查看复盘',
+    sentiment_score: 50,
+    trend_prediction: '大盘复盘',
+    analysis_summary: '2026-10-10 大盘复盘 收盘',
+    region: 'cn',
+    created_at: '2026-10-10 18:40',
   },
 ]
 

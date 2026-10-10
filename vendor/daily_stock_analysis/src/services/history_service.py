@@ -19,6 +19,7 @@ from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 from src.config import get_config, resolve_news_window_days
 from src.formatters import markdown_to_plain_text
 from src.data.stock_index_loader import resolve_index_stock_code
+from src.services.dashboard_history import collapse_market_reviews
 from src.services.stock_code_utils import resolve_daily_stock_identity
 from src.report_language import (
     get_bias_status_emoji,
@@ -70,6 +71,8 @@ if TYPE_CHECKING:
     from src.analyzer import AnalysisResult
 
 logger = logging.getLogger(__name__)
+# 去重时先取最近这么多条再折叠，避免同一天的复盘占满仪表盘页。
+_MARKET_REVIEW_DEDUPE_SCAN = 500
 
 
 class MarkdownReportGenerationError(Exception):
@@ -255,6 +258,9 @@ class HistoryService:
         limit: int = 20,
         include_ambiguous_numeric_aliases: bool = True,
         market_hint: Optional[str] = None,
+        *,
+        dedupe_market_review: bool = False,
+        exclude_dismissed: bool = True,
     ) -> Dict[str, Any]:
         """
         Get history analysis list.
@@ -303,6 +309,8 @@ class HistoryService:
             
             # Calculate offset
             offset = (page - 1) * limit
+            fetch_offset = 0 if dedupe_market_review else offset
+            fetch_limit = _MARKET_REVIEW_DEDUPE_SCAN if dedupe_market_review else limit
             
             # Use new paginated query method
             records, total = self.db.get_analysis_history_paginated(
@@ -310,9 +318,14 @@ class HistoryService:
                 report_type=report_type,
                 start_date=start_dt,
                 end_date=end_dt,
-                offset=offset,
-                limit=limit
+                offset=fetch_offset,
+                limit=fetch_limit,
+                exclude_dismissed=exclude_dismissed,
             )
+            if dedupe_market_review:
+                records = collapse_market_reviews(records)
+                total = len(records)
+                records = records[offset:offset + limit]
             
             # Convert to response format
             items = []
@@ -461,6 +474,7 @@ class HistoryService:
             "action_label": action_fields["action_label"],
             "model_used": normalize_model_used(model_used),
             "created_at": self._serialize_created_at(record.created_at),
+            "read_at": self._serialize_created_at(getattr(record, "read_at", None)),
             "market_phase_summary": market_phase_summary,
             "asset_type": self._asset_type_for_record(record),
             **market_fields,
@@ -501,19 +515,29 @@ class HistoryService:
         try:
             int_id = int(record_id)
             record = self.db.get_analysis_history_by_id(int_id)
-            if record:
+            if record and not self._is_dismissed(record):
                 return record
+            if record and self._is_dismissed(record):
+                return None
         except (ValueError, TypeError):
             pass
         # Fall back to query_id lookup. Keep the old no-kwargs call for
         # unfiltered paths so existing test doubles and integrations remain compatible.
         if code is None and report_type is None:
-            return self.db.get_latest_analysis_by_query_id(record_id)
-        return self.db.get_latest_analysis_by_query_id(
-            record_id,
-            code=code,
-            report_type=report_type,
-        )
+            found = self.db.get_latest_analysis_by_query_id(record_id)
+        else:
+            found = self.db.get_latest_analysis_by_query_id(
+                record_id,
+                code=code,
+                report_type=report_type,
+            )
+        if found is not None and self._is_dismissed(found):
+            return None
+        return found
+
+    @staticmethod
+    def _is_dismissed(record: Any) -> bool:
+        return getattr(record, "dismissed_at", None) is not None
 
     def resolve_and_get_detail(self, record_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -830,6 +854,24 @@ class HistoryService:
                        receives a proper 500 error instead of a silent success.
         """
         return self.db.delete_analysis_history_records(record_ids)
+
+    def mark_history_read(self, record_ids: List[int]) -> int:
+        """Mark dashboard cards as read. Dismissed rows are left unchanged."""
+        return self.db.mark_analysis_history_read(record_ids)
+
+    def dismiss_history_records(
+        self,
+        *,
+        record_ids: Optional[List[int]] = None,
+        older_than: Optional[datetime] = None,
+        only_read: bool = False,
+    ) -> int:
+        """Hide dashboard cards without deleting the underlying history row."""
+        return self.db.dismiss_analysis_history(
+            record_ids=record_ids,
+            older_than=older_than,
+            only_read=only_read,
+        )
 
     def get_news_intel(self, query_id: str, limit: int = 20) -> List[Dict[str, str]]:
         """

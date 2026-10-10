@@ -58,6 +58,9 @@ def test_catalog_lists_user_facing_features(client: TestClient) -> None:
 
 def test_upstream_path_rejects_escape_and_unknown_prefixes() -> None:
     assert normalize_upstream_path("history/12/markdown") == "history/12/markdown"
+    assert normalize_upstream_path("history/dismiss") == "history/dismiss"
+    assert normalize_upstream_path("history/read") == "history/read"
+    assert normalize_upstream_path("stocks/watchlist/remove-batch") == "stocks/watchlist/remove-batch"
     with pytest.raises(InvalidUpstreamPathError):
         normalize_upstream_path("../secrets")
     with pytest.raises(InvalidUpstreamPathError):
@@ -508,6 +511,40 @@ def test_compose_mounts_etf_job_next_to_bootstrap() -> None:
     text = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(encoding="utf-8")
     assert "./backend/app/custom/dsa/etf_job.py:/opt/tsp/etf_job.py:ro" in text
     assert 'profiles: ["dsa"]' in text
+
+
+def test_dashboard_delete_requires_tsp_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """浏览器打到 TSP 的删除请求走面板登录，不匿名转发到 DSA。"""
+    import asyncio
+
+    from fastapi import Request
+    from fastapi.responses import JSONResponse
+
+    monkeypatch.setattr("app.services.auth.is_configured", lambda: True)
+    monkeypatch.setattr("app.services.auth.is_valid_session", lambda _token: False)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/dsa/upstream/history/dismiss",
+        "raw_path": b"/api/dsa/upstream/history/dismiss",
+        "query_string": b"",
+        "headers": [],
+        "client": ("10.1.1.8", 1234),
+        "server": ("test", 80),
+    }
+
+    async def _ok(_request):
+        return JSONResponse({"ok": True})
+
+    from app.main import auth_middleware
+
+    response = asyncio.run(auth_middleware(Request(scope), _ok))
+
+    assert response.status_code == 401
 
 
 def test_env_example_and_guide_document_screening_and_priority() -> None:

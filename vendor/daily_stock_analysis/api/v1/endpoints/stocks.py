@@ -27,7 +27,7 @@ from api.v1.schemas.stocks import (
     StockProfileResponse,
     StockQuote,
 )
-from api.v1.schemas.history import WatchlistRequest, WatchlistResponse
+from api.v1.schemas.history import WatchlistRemoveBatchRequest, WatchlistRequest, WatchlistResponse
 from api.v1.schemas.common import ErrorResponse
 from src.services.image_stock_extractor import (
     ALLOWED_MIME,
@@ -387,6 +387,18 @@ def add_to_watchlist(
     summary="从自选队列删除",
     description="从 STOCK_LIST 中移除指定股票代码。",
 )
+def _drop_watchlist_codes(codes: list, remove_keys: set[str]) -> tuple[list, int]:
+    """按等价键移出观察池，保留其余代码的原始写法。"""
+    kept = []
+    removed = 0
+    for code in codes:
+        if _watchlist_match_key(code) in remove_keys:
+            removed += 1
+            continue
+        kept.append(code)
+    return kept, removed
+
+
 def remove_from_watchlist(
     request: WatchlistRequest,
     service: SystemConfigService = Depends(get_system_config_service),
@@ -394,11 +406,8 @@ def remove_from_watchlist(
     try:
         validated = _validate_and_normalize_stock_code(request.stock_code)
         codes = _read_watchlist_codes(service)
-        existing_keys = [_watchlist_match_key(c) for c in codes]
-        requested_key = _watchlist_match_key(validated)
-        if requested_key in existing_keys:
-            idx = existing_keys.index(requested_key)
-            codes.pop(idx)
+        codes, removed = _drop_watchlist_codes(codes, {_watchlist_match_key(validated)})
+        if removed:
             _write_watchlist_codes(service, codes)
         return WatchlistResponse(stock_codes=codes, message=f"已移除 {request.stock_code.strip()}")
     except HTTPException:
@@ -408,6 +417,44 @@ def remove_from_watchlist(
         raise HTTPException(
             status_code=500,
             detail={"error": "internal_error", "message": f"从自选删除失败: {str(e)}"},
+        )
+
+
+@router.post(
+    "/watchlist/remove-batch",
+    response_model=WatchlistResponse,
+    responses={
+        200: {"description": "已从观察池删除"},
+        400: {"description": "参数错误", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="批量移出观察池",
+    description="从 STOCK_LIST 中一次移除多只股票。任一代码不合法时整批不写。定时任务之后不再分析这些代码。",
+)
+def remove_from_watchlist_batch(
+    request: WatchlistRemoveBatchRequest,
+    service: SystemConfigService = Depends(get_system_config_service),
+) -> WatchlistResponse:
+    try:
+        remove_keys = set()
+        for code in request.stock_codes:
+            validated = _validate_and_normalize_stock_code(code)
+            remove_keys.add(_watchlist_match_key(validated))
+        codes = _read_watchlist_codes(service)
+        codes, removed = _drop_watchlist_codes(codes, remove_keys)
+        if removed:
+            _write_watchlist_codes(service, codes)
+        return WatchlistResponse(
+            stock_codes=codes,
+            message=f"已移出 {removed} 只",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"批量移出观察池失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"移出观察池失败: {str(e)}"},
         )
 
 

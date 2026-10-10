@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
@@ -42,9 +42,9 @@ import {
   textOf,
   type DsaError,
 } from './client'
+import { DashboardPanel } from './DashboardPanel'
 import {
   SAMPLE_ALERTS,
-  SAMPLE_HISTORY,
   SAMPLE_NEWS,
   SAMPLE_REPORT,
   SAMPLE_RISK,
@@ -74,13 +74,6 @@ type SectionId = (typeof SECTIONS)[number]['id']
 const primaryBtn = 'inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs text-white shadow-sm shadow-accent/25 hover:bg-accent/90 disabled:opacity-50'
 const ghostBtn = 'inline-flex h-8 items-center gap-1.5 rounded-btn bg-elevated px-3 text-xs text-secondary hover:text-foreground disabled:opacity-50'
 const fieldCls = 'h-8 rounded-btn border border-border bg-base px-2.5 text-xs text-foreground outline-none focus:border-accent'
-
-function adviceClass(advice: string) {
-  if (/买/.test(advice)) return 'text-bull'
-  if (/卖/.test(advice)) return 'text-bear'
-  if (/观望|持有/.test(advice)) return 'text-warning'
-  return 'text-secondary'
-}
 
 function Panel({ title, hint, children, extra }: { title: string; hint?: string; children: ReactNode; extra?: ReactNode }) {
   return (
@@ -192,7 +185,14 @@ export function DecisionWorkspace() {
               <Notice>下面带「样例」标记的内容只用于查看版式，不是行情，也不能当作交易依据。连接决策服务并配置模型密钥后会换成真实结果。</Notice>
             </div>
           )}
-          {section === 'dashboard' && <Dashboard sample={sample} reachable={reachable} />}
+          {section === 'dashboard' && (
+            <DashboardPanel
+              sample={sample}
+              reachable={reachable}
+              middle={<QuantEvidence />}
+              review={<MarketReview reachable={reachable} />}
+            />
+          )}
           {section === 'reports' && <Reports sample={sample} reachable={reachable} initialCode={code} />}
           {section === 'intelligence' && <Intelligence sample={sample} reachable={reachable} />}
           {section === 'markets' && <Markets reachable={reachable} markets={catalog.data?.markets ?? []} />}
@@ -218,68 +218,6 @@ export function DecisionWorkspace() {
           <p className="mt-4 text-[10px] text-muted">研究结果仅供学习，不构成投资建议。</p>
         </div>
       </div>
-    </div>
-  )
-}
-
-function Dashboard({ sample, reachable }: { sample: boolean; reachable: boolean }) {
-  const query = useQuery({
-    queryKey: QK.dsaUpstream('history'),
-    queryFn: () => dsaUpstream<unknown>('history?limit=12'),
-    enabled: reachable,
-    retry: false,
-  })
-  const rows = reachable ? asRecords(query.data) : sample ? SAMPLE_HISTORY : []
-  const counts = useMemo(() => {
-    const bucket = { buy: 0, hold: 0, sell: 0 }
-    for (const row of rows) {
-      const advice = textOf(row.operation_advice, '')
-      if (/买/.test(advice)) bucket.buy += 1
-      else if (/卖/.test(advice)) bucket.sell += 1
-      else bucket.hold += 1
-    }
-    return bucket
-  }, [rows])
-
-  return (
-    <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-3">
-        <Stat label="买入" value={counts.buy} tone="text-bull" />
-        <Stat label="观望" value={counts.hold} tone="text-warning" />
-        <Stat label="卖出" value={counts.sell} tone="text-bear" />
-      </div>
-      <QuantEvidence />
-      <Panel
-        title={sample ? '今日决策 · 样例' : '今日决策'}
-        hint="手动分析和定时任务的结论都在这里。定时结果同时按 .env 里的通知渠道推送。"
-        extra={<MarketReview reachable={reachable} />}
-      >
-        {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
-        {!query.isError && rows.length === 0 && (
-          <Notice>{reachable ? '还没有分析记录。到「个股研报」提交一只股票，或等定时任务跑完。' : '决策服务未连接。'}</Notice>
-        )}
-        <div className="mt-3 grid gap-2 lg:grid-cols-2">
-          {rows.map(row => (
-            <article key={textOf(row.id, textOf(row.stock_code))} className="rounded-lg border border-border bg-base px-3 py-2.5">
-              <div className="flex items-baseline justify-between gap-2">
-                <div className="min-w-0">
-                  <span className="text-sm text-foreground">{textOf(row.stock_name, textOf(row.stock_code))}</span>
-                  <span className="ml-2 font-mono text-[11px] text-muted">{textOf(row.stock_code)}</span>
-                </div>
-                <span className={cn('text-xs font-medium', adviceClass(textOf(row.operation_advice, '')))}>
-                  {textOf(row.operation_advice)}
-                </span>
-              </div>
-              <div className="mt-1 flex gap-3 text-[11px] text-muted">
-                <span>评分 <b className="num text-foreground">{textOf(row.sentiment_score)}</b></span>
-                <span>{textOf(row.trend_prediction)}</span>
-                <span className="uppercase">{textOf(row.region, '')}</span>
-              </div>
-              <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-secondary">{textOf(row.analysis_summary, '')}</p>
-            </article>
-          ))}
-        </div>
-      </Panel>
     </div>
   )
 }
@@ -320,15 +258,6 @@ function QuantEvidence() {
         ))}
       </ul>
     </Panel>
-  )
-}
-
-function Stat({ label, value, tone }: { label: string; value: number; tone: string }) {
-  return (
-    <div className="rounded-lg border border-border bg-surface px-4 py-3">
-      <div className="text-[11px] text-muted">{label}</div>
-      <div className={cn('num mt-1 text-2xl', tone)}>{value}</div>
-    </div>
   )
 }
 

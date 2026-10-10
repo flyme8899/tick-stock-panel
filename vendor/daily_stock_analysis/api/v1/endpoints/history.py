@@ -10,6 +10,7 @@
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Mapping, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Depends, Body
@@ -21,6 +22,10 @@ from api.v1.schemas.history import (
     HistoryItem,
     DeleteHistoryRequest,
     DeleteHistoryResponse,
+    DismissHistoryRequest,
+    DismissHistoryResponse,
+    MarkHistoryReadRequest,
+    MarkHistoryReadResponse,
     NewsIntelItem,
     NewsIntelResponse,
     AnalysisReport,
@@ -237,6 +242,10 @@ def get_history_list(
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     limit: int = Query(20, ge=1, le=100, description="每页数量"),
+    dedupe_market_review: bool = Query(
+        False,
+        description="同一天的大盘复盘只返回最新一条",
+    ),
     db_manager: DatabaseManager = Depends(get_database_manager)
 ) -> HistoryListResponse:
     """
@@ -266,7 +275,8 @@ def get_history_list(
             start_date=start_date,
             end_date=end_date,
             page=page,
-            limit=limit
+            limit=limit,
+            dedupe_market_review=dedupe_market_review,
         )
         
         # 转换为响应模型
@@ -290,6 +300,7 @@ def get_history_list(
                 turnover_rate=item.get("turnover_rate"),
                 model_used=item.get("model_used"),
                 created_at=item.get("created_at"),
+                read_at=item.get("read_at"),
                 market_phase_summary=item.get("market_phase_summary"),
                 asset_type=item.get("asset_type"),
             )
@@ -515,6 +526,70 @@ def get_stock_bar(
                 "error": "internal_error",
                 "message": f"查询个股栏失败: {str(e)}",
             },
+        )
+
+
+@router.post(
+    "/read",
+    response_model=MarkHistoryReadResponse,
+    responses={
+        200: {"description": "已标为已读"},
+        400: {"description": "请求参数错误", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="把历史记录标为已读",
+    description="供决策仪表盘「清空已读」使用。已移出仪表盘的记录不会被改写。",
+)
+def mark_history_read(
+    request: MarkHistoryReadRequest = Body(...),
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> MarkHistoryReadResponse:
+    try:
+        updated = HistoryService(db_manager).mark_history_read(request.record_ids)
+        return MarkHistoryReadResponse(updated=updated)
+    except Exception as e:
+        logger.error(f"标记历史已读失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"标记已读失败: {str(e)}"},
+        )
+
+
+@router.post(
+    "/dismiss",
+    response_model=DismissHistoryResponse,
+    responses={
+        200: {"description": "已移出仪表盘"},
+        400: {"description": "请求参数错误", "model": ErrorResponse},
+        422: {"description": "条件不合法", "model": ErrorResponse},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="移出决策仪表盘",
+    description=(
+        "软删除：写入 dismissed_at，列表和详情不再返回这些记录。"
+        "record_ids、older_than_days、only_read 三者只能指定一种。"
+        "天数按决策服务进程的本地时钟计算，部署约定为 Asia/Shanghai。"
+    ),
+)
+def dismiss_history(
+    request: DismissHistoryRequest = Body(...),
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> DismissHistoryResponse:
+    try:
+        older_than = None
+        if request.older_than_days is not None:
+            older_than = datetime.now() - timedelta(days=request.older_than_days)
+        dismissed = HistoryService(db_manager).dismiss_history_records(
+            record_ids=request.record_ids or None,
+            older_than=older_than,
+            only_read=request.only_read,
+        )
+        return DismissHistoryResponse(dismissed=dismissed)
+    except Exception as e:
+        logger.error(f"移出仪表盘失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"移出仪表盘失败: {str(e)}"},
         )
 
 
