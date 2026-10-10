@@ -12,6 +12,7 @@ import pytest
 from app.config import settings
 from app.market_time import CN_TZ
 from app.news.config import (
+    VISION_OCR_MAX_TOKENS,
     source_configured,
     source_enabled,
     vision_base_url,
@@ -19,6 +20,7 @@ from app.news.config import (
     vision_model,
 )
 from app.news.etf_flow import (
+    VISION_LENGTH_MAX_TOKENS,
     ArticleRef,
     ExtractFailedError,
     _call_vision,
@@ -461,6 +463,61 @@ def test_empty_content_on_the_only_image_fails_after_one_retry(news_db):
     with pytest.raises(ExtractFailedError, match="没有返回内容"):
         _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
     assert len(client.posts) == 2
+    assert [body["max_tokens"] for body in client.posts] == [
+        VISION_OCR_MAX_TOKENS,
+        VISION_OCR_MAX_TOKENS,
+    ]
+
+
+def _length_cutoff() -> dict:
+    return {
+        "choices": [
+            {
+                "finish_reason": "length",
+                "message": {"content": "", "reasoning_content": "思考占满了预算"},
+            }
+        ]
+    }
+
+
+def test_length_cutoff_retries_once_at_higher_max_tokens(news_db):
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None):
+            self.posts.append(json)
+            if len(self.posts) == 1:
+                return Resp("", url, payload=_length_cutoff())
+            return Resp("", url, payload=_vision())
+
+    client = Seq()
+    extracted = _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
+    assert extracted["overview"]["net_1d"] == 12.5
+    assert [body["max_tokens"] for body in client.posts] == [
+        VISION_OCR_MAX_TOKENS,
+        VISION_LENGTH_MAX_TOKENS,
+    ]
+    assert all("thinking" not in body and "reasoning_effort" not in body for body in client.posts)
+    assert client.posts[1]["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/")
+
+
+def test_length_cutoff_does_not_retry_past_the_higher_budget(news_db):
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None):
+            self.posts.append(json)
+            return Resp("", url, payload=_length_cutoff())
+
+    client = Seq()
+    with pytest.raises(ExtractFailedError, match="没有返回内容"):
+        _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
+    assert [body["max_tokens"] for body in client.posts] == [
+        VISION_OCR_MAX_TOKENS,
+        VISION_LENGTH_MAX_TOKENS,
+    ]
 
 
 def test_non_empty_garbage_is_not_retried(news_db):

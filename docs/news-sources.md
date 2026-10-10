@@ -32,7 +32,7 @@
 
 表格交给视觉模型，走 OpenAI 兼容的 `chat/completions`，图片放在 `image_url`。tokenhub 拉不到网易图片代理 `nimg.ws.126.net`（没有扩展名，直接给远程地址会 400），所以先在允许的图片域名里把图下载下来，核对 Content-Type 是 jpeg、png、webp、gif 或 bmp，并且不超过约 5MB，再写成 `data:image/...;base64,...`。网易图的 Referer 是 `https://www.163.com/`，微信图是 `https://mp.weixin.qq.com/`。下载失败则这篇表格抽取失败。入库的 `media_ids` 仍是原来的图片地址。只用下面三个变量，不读取文本模型的 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`，也不走 `NEWS_LLM_EXTRACT`。默认模型 `deepseek/deepseek-v4-flash-vision-exp` 会读图片，单张表大约 16 秒。`glm-5.3-flash` 大约 23 秒，`mimo-v2.6-flash` 也能读图，但表格识别并不更好，所以这两个只作备选，不改默认。
 
-申赎表格保持思考，`max_tokens` 为 8192。低于这个值时预算被思考用完，`content` 为空。deepseek 视觉模型可以用 `thinking.type=disabled` 或 `reasoning_effort=none` 关掉思考，但表格识别会变差，所以这条链路不关。非表格的短视觉请求才关：deepseek 和 mimo 传 `thinking.type=disabled`；glm 传这个字段会 400，只传 `reasoning_effort=low`。每张图单独请求。空内容时同一张图再试一次；第一次已经抽出数字时，再请求一次核对正负号。同一格两次正负号相反就留空，不猜哪一次对。代码只保留恰好 6 位的数字。
+申赎表格保持思考，`max_tokens` 为 8192。低于这个值时预算被思考用完，`content` 为空。deepseek 视觉模型可以用 `thinking.type=disabled` 或 `reasoning_effort=none` 关掉思考，但表格识别会变差，所以这条链路不关。非表格的短视觉请求才关：deepseek 和 mimo 传 `thinking.type=disabled`；glm 传这个字段会 400，只传 `reasoning_effort=low`。每张图单独请求。空内容时同一张图再试一次；若 `finish_reason` 是 `length` 且正文仍为空，这一次把 `max_tokens` 提高到 16384，思考仍然打开。第一次已经抽出数字时，再请求一次核对正负号。同一格两次正负号相反就留空，不猜哪一次对。代码只保留恰好 6 位的数字。
 
 ```ini
 VISION_AI_API_KEY=
