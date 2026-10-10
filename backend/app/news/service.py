@@ -6,7 +6,7 @@ import logging
 import math
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -103,7 +103,10 @@ def reset_store_for_tests(path: Path | None = None) -> NewsStore:
             _STORE.close()
         _STORE = NewsStore(path or (settings.data_dir / "news" / "news.sqlite"))
         _LEXICON = None
-        return _STORE
+    from app.news.hot_events import clear_hot_event_cache
+
+    clear_hot_event_cache()
+    return _STORE
 
 
 def lexicon_from_repo(repo) -> Lexicon:
@@ -271,6 +274,18 @@ def hot_candidates(*, kind: str = "all", window_hours: int = 24, baseline_days: 
     if kind in {"stock", "sector"}:
         ranked = [item for item in ranked if item.kind == kind]
     return ranked[: max(1, min(limit, 50))]
+
+
+def top_hot_events(now: datetime | None = None) -> dict:
+    """当前交易日热度最高的具体事件。
+
+    同一交易日的标题按主体、动作和细概念聚类，热度是资讯条数乘来源数，再按更新时间衰减。
+    当天没有资讯时，改用不晚于今天、且落在回看窗口里的最近一天，并在 hint 里标明。
+    结果缓存约 10 分钟。模型不可用时保留关键词标题。
+    """
+    from app.news.hot_events import build_top_hot_events
+
+    return build_top_hot_events(now, get_store())
 
 
 def message_view(row, *, limit: int = 240) -> dict:

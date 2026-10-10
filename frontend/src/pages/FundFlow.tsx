@@ -132,12 +132,12 @@ export function FundFlow() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
-        title="资金"
+        title="资金流向"
         subtitle="只读本地落盘。没有数据的块留空，不把缺失写成 0。"
       />
       <div className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
         {board.isLoading && <p className="text-sm text-muted">加载中…</p>}
-        {board.isError && <p className="text-sm text-danger">资金页加载失败</p>}
+        {board.isError && <p className="text-sm text-danger">资金流向加载失败</p>}
         {board.isSuccess && (
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             <Card

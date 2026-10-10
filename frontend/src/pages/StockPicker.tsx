@@ -75,8 +75,6 @@ export function StockPicker() {
   })
   const [picks, setPicks] = useState<Pick[]>([])
   const [combine, setCombine] = useState<'and' | 'or'>('or')
-  const [hotWindow, setHotWindow] = useState<'24h' | '3d'>('24h')
-  const [minSources, setMinSources] = useState('2')
   const [industries, setIndustries] = useState<string[]>([])
   const [capMin, setCapMin] = useState('')
   const [capMax, setCapMax] = useState('')
@@ -102,14 +100,10 @@ export function StockPicker() {
 
   const run = useMutation({
     mutationFn: () => {
-      const floor = optionalNumber(minSources)
       return api.pickerRun({
         sources: picks.map(item => ({
           type: item.type,
           id: item.id,
-          params: item.type === 'hot_events'
-            ? { window: hotWindow, min_sources: floor ?? 2 }
-            : undefined,
         })),
         combine,
         filters: {
@@ -200,38 +194,29 @@ export function StockPicker() {
             onToggle={id => setPicks(current => togglePick(current, 'fundamental', id))}
           />
           <SourceDropdown
-            label="热门事件（实时）"
-            options={hot?.items ?? []}
+            label="热门事件"
+            searchable={false}
+            options={(hot?.items ?? []).map(item => ({
+              id: item.id,
+              name: item.name,
+              mentions: item.mentions,
+              sourceCount: item.source_count,
+              updatedAt: item.first_seen ?? item.updated_at ?? undefined,
+              concepts: item.concepts,
+              headline: item.headline ?? undefined,
+            }))}
             selectedIds={idsOf(picks, 'hot_events')}
             onToggle={id => setPicks(current => togglePick(current, 'hot_events', id))}
-            hint={hot?.updated_at ? `实时 · 更新于 ${hot.updated_at}` : '实时'}
-            footer={(
-              <div className="space-y-2">
-                <div className="flex gap-1">
-                  {(['24h', '3d'] as const).map(window => (
-                    <button
-                      key={window}
-                      type="button"
-                      onClick={() => setHotWindow(window)}
-                      className={cn(
-                        'rounded-btn border px-2 py-1 text-[11px]',
-                        hotWindow === window ? 'border-accent bg-accent/10 text-accent' : 'border-border text-muted',
-                      )}
-                    >
-                      {window}
-                    </button>
-                  ))}
-                </div>
-                <label className="flex items-center justify-between gap-2 text-[11px] text-muted">
-                  最少来源数
-                  <input
-                    value={minSources}
-                    onChange={event => setMinSources(event.target.value)}
-                    inputMode="numeric"
-                    className="h-7 w-16 rounded-input border border-border bg-base px-2 text-xs text-foreground"
-                  />
-                </label>
-              </div>
+            hint={hot?.hint || undefined}
+            hintClassName={hot?.fallback ? 'text-amber-600 dark:text-amber-400' : undefined}
+            empty={sources.isError ? (
+              <p className="px-2 py-3 text-xs text-danger">来源列表加载失败</p>
+            ) : hot?.error ? (
+              <p className="px-2 py-3 text-xs text-danger">{hot.error}</p>
+            ) : sources.isPending ? (
+              <p className="px-2 py-3 text-xs text-muted">加载中…</p>
+            ) : (
+              <p className="px-2 py-3 text-xs text-muted">今日暂无热门事件</p>
             )}
           />
           <SourceDropdown
@@ -381,7 +366,7 @@ export function StockPicker() {
                 : ` vs 上期 ${summary.previous_as_of ?? '—'} +${summary.added}/-${summary.removed}`}
             </>
           ) : '还没有运行结果'}
-          {summary?.hot_updated_at ? ` · 实时 · 更新于 ${summary.hot_updated_at}` : ''}
+          {summary?.hot_hint ? ` · ${summary.hot_hint}` : summary?.hot_updated_at ? ` · 更新于 ${summary.hot_updated_at}` : ''}
         </p>
         {summary?.warnings.map(warning => (
           <p key={warning} className="text-[11px] text-amber-500">{warning}</p>

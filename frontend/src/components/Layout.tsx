@@ -108,7 +108,7 @@ const nav = [
   { to: '/monitor',          label: '监控中心', icon: IconMonitor },
   { to: '/regime',           label: '市场环境', icon: IconRegime },
   { to: '/hot-events',       label: '热门事件', icon: IconHot },
-  { to: '/fund-flow',        label: '资金',     icon: IconFund },
+  { to: '/fund-flow',        label: '资金流向', icon: IconFund },
   { to: '/abnormal',         label: '异动监控', icon: IconAlert },
   { to: '/lots',             label: '持仓提醒', icon: IconLots },
   { to: '/paper',            label: '模拟盘',   icon: IconPaper },
@@ -386,6 +386,12 @@ export function Layout() {
   // 自选分组 — 仅当用户开启「显示在侧边栏」时拉取
   const groupsInNav = prefs?.watchlist_groups_in_nav ?? false
   const location = useLocation()
+  useEffect(() => {
+    const baseTitle = 'Tick Stock Panel · Quant Terminal'
+    document.title = location.pathname === '/fund-flow'
+      ? '资金流向 · Tick Stock Panel'
+      : baseTitle
+  }, [location.pathname])
   const { data: watchlistGroupsData } = useQuery({
     queryKey: QK.watchlistGroups,
     queryFn: api.watchlistGroups,
