@@ -11,7 +11,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.custom.dsa.dsa_bootstrap import _install_etf_job
-from app.custom.dsa.etf_job import COMMAND, dsa_root, install, install_import_hook, run_job
+from app.custom.dsa.etf_job import (
+    COMMAND,
+    INTERNAL_TOKEN_HEADER,
+    dsa_root,
+    execute_job,
+    install,
+    install_import_hook,
+    presented_token_ok,
+    token_usable,
+)
 
 
 def _source_tree(path: Path) -> None:
@@ -34,7 +43,7 @@ def test_run_job_uses_fixed_argv_and_ignores_nothing_from_the_caller(
 
     monkeypatch.setattr("app.custom.dsa.etf_job.subprocess.run", fake_run)
 
-    result = run_job()
+    result = execute_job()
 
     assert result["ok"] is True
     assert result["code"] == 0
@@ -59,7 +68,7 @@ def test_run_job_keeps_stderr_when_the_command_fails(
 
     monkeypatch.setattr("app.custom.dsa.etf_job.subprocess.run", fake_run)
 
-    result = run_job()
+    result = execute_job()
 
     assert result["ok"] is False
     assert result["code"] == 2
@@ -78,7 +87,7 @@ def test_run_job_timeout_does_not_look_successful(
 
     monkeypatch.setattr("app.custom.dsa.etf_job.subprocess.run", fake_run)
 
-    result = run_job()
+    result = execute_job()
 
     assert result == {"ok": False, "detail": "ETF 轮动超时", "command": COMMAND}
 
@@ -91,7 +100,7 @@ def test_run_job_refuses_to_start_without_source(monkeypatch: pytest.MonkeyPatch
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("没有源码不应启动")),
     )
 
-    result = run_job()
+    result = execute_job()
 
     assert result["ok"] is False
     assert "main.py" in result["detail"]
@@ -128,10 +137,10 @@ def test_overlapping_run_does_not_start_a_second_process(
         return subprocess.CompletedProcess(argv, 0, stdout="done", stderr="")
 
     monkeypatch.setattr("app.custom.dsa.etf_job.subprocess.run", fake_run)
-    first = threading.Thread(target=run_job)
+    first = threading.Thread(target=execute_job)
     first.start()
     assert entered.wait(2)
-    second = run_job()
+    second = execute_job()
     release.set()
     first.join(2)
 
@@ -140,30 +149,80 @@ def test_overlapping_run_does_not_start_a_second_process(
     assert not first.is_alive()
 
 
-def test_route_ignores_request_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+_TOKEN = "tsp-etf-shared-secret"
+
+
+def _route_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, seen: dict) -> TestClient:
     _source_tree(tmp_path)
     monkeypatch.chdir(tmp_path)
-    seen: dict = {}
+    monkeypatch.setenv("DSA_INTERNAL_TOKEN", _TOKEN)
 
     def fake_run(argv, **kwargs):
         seen["argv"] = list(argv)
         seen["cwd"] = kwargs["cwd"]
+        seen["calls"] = seen.get("calls", 0) + 1
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr("app.custom.dsa.etf_job.subprocess.run", fake_run)
     app = FastAPI()
     install(app)
     install(app)
+    return TestClient(app)
 
-    response = TestClient(app).post("/api/v1/tsp/etf-rotation", json={"cmd": "echo pwned"})
+
+def test_route_requires_internal_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+    client = _route_app(monkeypatch, tmp_path, seen)
+
+    missing = client.post("/api/v1/tsp/etf-rotation", json={"cmd": "echo pwned"})
+    wrong = client.post(
+        "/api/v1/tsp/etf-rotation",
+        headers={INTERNAL_TOKEN_HEADER: "not-the-shared-secret"},
+    )
+    monkeypatch.setenv("DSA_INTERNAL_TOKEN", "short")
+    short = client.post(
+        "/api/v1/tsp/etf-rotation",
+        headers={INTERNAL_TOKEN_HEADER: "short"},
+    )
+
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+    assert short.status_code == 401
+    assert missing.json()["detail"] == "未授权"
+    assert "calls" not in seen
+    assert client.get("/api/v1/tsp/etf-rotation").status_code == 405
+
+
+def test_route_ignores_request_body(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict = {}
+    client = _route_app(monkeypatch, tmp_path, seen)
+
+    response = client.post(
+        "/api/v1/tsp/etf-rotation",
+        json={"cmd": "echo pwned"},
+        headers={INTERNAL_TOKEN_HEADER: _TOKEN},
+    )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert seen["argv"] == [sys.executable, "main.py", "--etf-rotation", "--no-notify"]
     assert seen["cwd"] == tmp_path.resolve()
-    paths = [getattr(route, "path", "") for route in app.routes]
-    assert paths.count("/api/v1/tsp/etf-rotation") == 1
-    assert TestClient(app).get("/api/v1/tsp/etf-rotation").status_code == 405
+    assert seen["calls"] == 1
+
+
+def test_token_check_rejects_missing_short_and_mismatched(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DSA_INTERNAL_TOKEN", raising=False)
+    assert token_usable("") is False
+    assert presented_token_ok(_TOKEN) is False
+
+    monkeypatch.setenv("DSA_INTERNAL_TOKEN", "short")
+    assert token_usable("short") is False
+    assert presented_token_ok("short") is False
+
+    monkeypatch.setenv("DSA_INTERNAL_TOKEN", _TOKEN)
+    assert presented_token_ok(" " + _TOKEN + " ") is True
+    assert presented_token_ok(_TOKEN + "-x") is False
+    assert presented_token_ok("tsp-etf-shared-secreT") is False
 
 
 def test_import_hook_mounts_route_after_the_app_module_loads(tmp_path: Path) -> None:

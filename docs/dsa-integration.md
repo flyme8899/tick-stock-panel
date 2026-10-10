@@ -45,6 +45,8 @@ Docker 服务带健康检查：容器内 `curl -fsS http://127.0.0.1:8000/api/v1
 
 TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里，接口不会在 app 容器中找解释器，而是请求 sidecar 的 `POST /api/v1/tsp/etf-rotation`。该入口由 `dsa_bootstrap.py` 在 DSA 导入自己的 API 时挂上，并在 sidecar 的工作目录里执行上面的命令。因此需要 `docker compose --profile dsa`，且 `DSA_BASE_URL=http://dsa:8000`。app 服务不挂载 Docker 套接字。
 
+这个入口即使在 `ADMIN_AUTH_ENABLED` 关闭时也不匿名开放。请求必须带 `X-TSP-Internal-Token`，值与 `.env` 里的 `DSA_INTERNAL_TOKEN` 相同（至少 16 位可见 ASCII）。TSP 转发时自己加上这个头，浏览器拿不到密钥。没配、太短或不相等都返回 401，不执行命令。`DSA_HOST` 改成对外地址时也一样。
+
 本机仓库里已经有 `vendor/daily_stock_analysis/main.py` 和解释器时，仍由 TSP 进程直接执行。没有这份源码、sidecar 也没连上时，接口返回 `ok: false` 和原因，不会改用系统里的其他 Python。单次运行超过 180 秒会按超时失败。
 
 上游没有单独的 ETF 轮动 HTTP 接口，所以没有改 `vendor/daily_stock_analysis`。
@@ -96,6 +98,7 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 | `DSA_AUTOSTART` | `1` 时 `dev.sh` / `dev.ps1` 拉起 sidecar |
 | `DSA_PORT` | sidecar 端口，默认 8000 |
 | `DSA_PYTHON` | 本机跑 ETF 轮动所用的解释器。未设置时用 `vendor/daily_stock_analysis/.venv`。Docker 下由 dsa 服务执行，不读这一项 |
+| `DSA_INTERNAL_TOKEN` | ETF 轮动入口的共享密钥，请求头 `X-TSP-Internal-Token`。至少 16 位可见 ASCII。TSP 与 DSA 用同一份 `.env`。留空则该入口拒绝执行 |
 | `SCREENING_ENABLED` | 默认 `false`。设为 `true` 后决策页「多市场选股」可用。关闭时上游返回 `screening_disabled` |
 | `EFINANCE_PRIORITY` | efinance 在日 K 路由中的优先级，数字越小越优先。建议 `EFINANCE_PRIORITY=3`：TickFlow 默认优先级是 2，efinance 默认 0 会排在它前面；设为 3 后 TickFlow 先于 efinance。AkShare 默认仍是 1。已登记指数的日 K，以及实时行情，不使用这个值。改完后重启 sidecar |
 | `DSA_UPSTREAM_COOKIE` | DSA 打开 `ADMIN_AUTH_ENABLED` 后转发给上游的 Cookie。未配置 `DSA_PASSWORD` 时只使用这一项 |
@@ -107,7 +110,7 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 
 DSA 读取的密钥和数据源（写在同一个 `.env`，留空则对应能力失败并给出原因）：
 
-`SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`SCHEDULE_RUN_IMMEDIATELY`、`TRADING_DAY_CHECK_ENABLED`、`MARKET_REVIEW_REGION`、`STOCK_LIST`、`SCREENING_ENABLED`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`AIHUBMIX_KEY`、`ANSPIRE_API_KEYS`、`TUSHARE_TOKEN`、`TICKFLOW_API_KEY`、`EFINANCE_PRIORITY`、`SERPAPI_API_KEYS`、`TAVILY_API_KEYS`、`BOCHA_API_KEYS`、`BRAVE_API_KEYS`、`MINIMAX_API_KEYS`、`SEARXNG_BASE_URLS`、`WECHAT_WEBHOOK_URL`、`FEISHU_WEBHOOK_URL`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`DISCORD_WEBHOOK_URL`、`SLACK_BOT_TOKEN`、`SLACK_CHANNEL_ID`、`EMAIL_SENDER`、`EMAIL_PASSWORD`、`ETF_ROTATION_POOL`、`ETF_ROTATION_SAFE_ASSET`。
+`DSA_INTERNAL_TOKEN`、`SCHEDULE_ENABLED`、`SCHEDULE_TIME`、`SCHEDULE_RUN_IMMEDIATELY`、`TRADING_DAY_CHECK_ENABLED`、`MARKET_REVIEW_REGION`、`STOCK_LIST`、`SCREENING_ENABLED`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`AIHUBMIX_KEY`、`ANSPIRE_API_KEYS`、`TUSHARE_TOKEN`、`TICKFLOW_API_KEY`、`EFINANCE_PRIORITY`、`SERPAPI_API_KEYS`、`TAVILY_API_KEYS`、`BOCHA_API_KEYS`、`BRAVE_API_KEYS`、`MINIMAX_API_KEYS`、`SEARXNG_BASE_URLS`、`WECHAT_WEBHOOK_URL`、`FEISHU_WEBHOOK_URL`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`DISCORD_WEBHOOK_URL`、`SLACK_BOT_TOKEN`、`SLACK_CHANNEL_ID`、`EMAIL_SENDER`、`EMAIL_PASSWORD`、`ETF_ROTATION_POOL`、`ETF_ROTATION_SAFE_ASSET`。
 
 sidecar 启动时，如果 `OPENAI_API_KEY` 为空且 TSP 已配置 `AI_API_KEY`，会借用 `AI_API_KEY` / `AI_BASE_URL` / `AI_MODEL`。`TICKFLOW_API_KEY` 两边同名，直接共用。
 

@@ -167,6 +167,7 @@ ENV_VARS = (
     {"name": "DSA_AUTOSTART", "required": False, "purpose": "设为 1 时，./dev.sh 会一并拉起 sidecar"},
     {"name": "DSA_PORT", "required": False, "purpose": "sidecar 监听端口，默认 8000"},
     {"name": "DSA_PYTHON", "required": False, "purpose": "本机直接跑 ETF 轮动时用的解释器。未设置时使用 vendor 目录里的 .venv。Docker 下改由 dsa 服务执行，不读这一项"},
+    {"name": "DSA_INTERNAL_TOKEN", "required": False, "purpose": "ETF 轮动入口的共享密钥，请求头 X-TSP-Internal-Token。至少 16 位可见 ASCII。留空则该入口拒绝执行。不要写入仓库"},
     {"name": "SCREENING_ENABLED", "required": False, "purpose": "true 后才启用 DSA 规则选股。默认 false，关闭时选股接口返回 screening_disabled"},
     {"name": "EFINANCE_PRIORITY", "required": False, "purpose": "efinance 在日 K 路由中的优先级，数字越小越优先。建议 3，这样默认优先级为 2 的 TickFlow 排在 efinance 前面"},
     {"name": "DSA_UPSTREAM_COOKIE", "required": False, "purpose": "DSA 打开管理登录后，转发给上游的 Cookie。未配置 DSA_PASSWORD 时只使用这一项"},

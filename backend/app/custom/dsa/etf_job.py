@@ -3,23 +3,62 @@
 TSP 的 app 镜像不含 ``vendor/daily_stock_analysis``。``dsa_bootstrap`` 在
 sidecar 导入 FastAPI 应用时挂上 ``POST /api/v1/tsp/etf-rotation``，由该进程
 在自己的工作目录里执行固定命令。请求体不能改变参数；股票池和成本只读环境变量。
+
+管理登录关闭时，这个入口如果跟着 DSA 端口一起暴露就会变成匿名触发。
+因此每次都要带 ``X-TSP-Internal-Token``，并且和 ``DSA_INTERNAL_TOKEN`` 一致。
+没配、太短或不相等时直接拒绝，不执行命令。
 """
 from __future__ import annotations
 
 import importlib.machinery
 import logging
+import os
+import secrets
 import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 logger = logging.getLogger("tsp.dsa.etf_job")
 
 COMMAND = "python main.py --etf-rotation --no-notify"
+ETF_UPSTREAM_PATH = "tsp/etf-rotation"
+INTERNAL_TOKEN_HEADER = "X-TSP-Internal-Token"
+TOKEN_ENV = "DSA_INTERNAL_TOKEN"
+TOKEN_MISSING_DETAIL = (
+    "未配置 DSA_INTERNAL_TOKEN。请在共享的 .env 里写成至少 16 位随机 ASCII，TSP 与 DSA 使用同一值。"
+)
+_UNAUTHORIZED = {"ok": False, "detail": "未授权", "command": COMMAND}
 _ARGV = ("main.py", "--etf-rotation", "--no-notify")
 _TIMEOUT_SECONDS = 180
+_TOKEN_MIN = 16
+_TOKEN_MAX = 256
 _LOCK = threading.Lock()
+
+
+def configured_token() -> str:
+    return os.getenv(TOKEN_ENV, "").strip()
+
+
+def token_usable(token: str) -> bool:
+    """共享密钥只接受可见 ASCII，避免换行把请求头拆开，也避免过短的占位值。"""
+    if not isinstance(token, str) or not _TOKEN_MIN <= len(token) <= _TOKEN_MAX:
+        return False
+    return all(33 <= ord(char) <= 126 for char in token)
+
+
+def presented_token_ok(presented: str) -> bool:
+    expected = configured_token()
+    if not token_usable(expected) or not isinstance(presented, str):
+        return False
+    candidate = presented.strip()
+    if not token_usable(candidate):
+        return False
+    return secrets.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
 
 
 def _root_candidates() -> tuple[Path, ...]:
@@ -42,7 +81,7 @@ def dsa_root() -> Path | None:
     return None
 
 
-def run_job() -> dict:
+def execute_job() -> dict:
     """执行固定的 ETF 轮动命令。重叠调用直接失败，不另起一套进程。"""
     if not _LOCK.acquire(blocking=False):
         return {"ok": False, "detail": "ETF 轮动正在运行", "command": COMMAND}
@@ -79,6 +118,15 @@ def _run_locked() -> dict:
         "detail": output[-8000:],
         "command": COMMAND,
     }
+
+
+def run_job(request: Request) -> Any:
+    """授权通过后才执行。未授权不占用正在运行的那把锁。"""
+    presented = request.headers.get(INTERNAL_TOKEN_HEADER, "")
+    if not presented_token_ok(presented):
+        logger.info("ETF 轮动入口拒绝了未授权请求")
+        return JSONResponse(status_code=401, content=dict(_UNAUTHORIZED))
+    return execute_job()
 
 
 def install(app: Any) -> None:

@@ -1,6 +1,7 @@
 """DSA 上游会话：静态 cookie、缓存、401 单次重登、登录失败退避。"""
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -27,6 +28,9 @@ class _Response:
         if name.lower() == "set-cookie":
             return list(self._set_cookie)
         return []
+
+    def json(self) -> object:
+        return json.loads(self.content)
 
 
 class _Headers(dict):

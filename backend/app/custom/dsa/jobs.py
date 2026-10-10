@@ -12,6 +12,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from app.custom.dsa.etf_job import TOKEN_MISSING_DETAIL, configured_token, token_usable
 from app.custom.dsa.proxy import UpstreamError, enabled, forward
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -88,6 +89,8 @@ def _run_in_sidecar() -> dict:
             "detail": "未配置 DSA_BASE_URL。Docker 请设置为 http://dsa:8000，并用 docker compose --profile dsa 启动。",
             "command": command,
         }
+    if not token_usable(configured_token()):
+        return {"ok": False, "detail": TOKEN_MISSING_DETAIL, "command": command}
     try:
         status, payload, _media, _extra = forward(
             "POST",
@@ -95,11 +98,10 @@ def _run_in_sidecar() -> dict:
             timeout=_SIDECAR_TIMEOUT,
         )
     except UpstreamError as exc:
-        return {
-            "ok": False,
-            "detail": f"{exc}。请用 docker compose --profile dsa 启动，并把 DSA_BASE_URL 设为 http://dsa:8000。",
-            "command": command,
-        }
+        detail = str(exc)
+        if "DSA_INTERNAL_TOKEN" not in detail:
+            detail = f"{detail}。请用 docker compose --profile dsa 启动，并把 DSA_BASE_URL 设为 http://dsa:8000。"
+        return {"ok": False, "detail": detail, "command": command}
     return _parse_sidecar_payload(status, payload, command)
 
 
