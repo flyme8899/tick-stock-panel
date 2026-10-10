@@ -84,9 +84,13 @@ def test_keyword_title_uses_clause_instead_of_gluing_snippets():
     assert _keyword_title([
         {"title": "美联储降息25基点，和之前结构性降息不同"},
     ]) == "美联储降息25基点"
-    assert _keyword_title([
+    bare = _keyword_title([
         {"title": "和之前结构性降息"},
-    ]) == "事件"
+    ])
+    assert bare == "结构性降息"
+    assert bare != "事件"
+    assert _keyword_title([{"title": "【财联社】事件"}]) == ""
+    assert _keyword_title([{"title": "事件"}]) == ""
     policy = _keyword_title([
         {"title": "财联社：根据宏观经济运行情况出台务实管用的增量政策"},
     ])
@@ -216,3 +220,182 @@ def test_old_title_cache_is_regenerated(tmp_path, monkeypatch):
     assert named["events"][0]["name"] == "美联储降息25基点"
     assert len(prompts) == 1
     assert fingerprint not in hot_mod._LLM_CACHE
+
+
+def _insert_rich(
+    source_id: str,
+    title: str,
+    hour: int,
+    minute: int,
+    *,
+    source: str = "cls",
+    sectors: list[str] | None = None,
+    stocks: list[tuple[str, str]] | None = None,
+    summary: str = "",
+) -> None:
+    mentions = [("sector", name, name, "", "structured") for name in (sectors or [])]
+    mentions += [
+        ("stock", symbol, name, symbol[:6], "structured")
+        for symbol, name in (stocks or [])
+    ]
+    status = get_store().insert_item(
+        source=source,
+        source_id=source_id,
+        published_at=_publish(date(2026, 10, 9), hour, minute),
+        author="",
+        title=title,
+        clean_text=summary or title,
+        raw=None,
+        content_hash=source_id,
+        url="",
+        level="",
+        media_ids=[],
+        extra=None,
+        mentions=mentions,
+    )
+    assert status == "inserted"
+
+
+def test_keyword_title_fills_missing_subject_from_the_headline():
+    rate = _keyword_title([{
+        "title": "美联储主席表示，可能还会有几次加息",
+    }])
+    assert "美联储" in rate
+    assert "加息" in rate
+    assert rate != "可能还会有几次加息"
+    policy = _keyword_title([{
+        "title": "中共中央政治局会议：根据宏观经济运行情况及时谋划出台增量政策",
+    }])
+    assert "政治局" in policy
+    assert "出台" in policy
+    assert policy != "宏观经济运行情况及时谋划出台"
+    # 标题里没有可补的机构时，保持原来的完整分句。
+    assert _keyword_title([{
+        "title": "财联社：根据宏观经济运行情况出台务实管用的增量政策",
+    }]) == "宏观经济运行情况出台务实管用的增量政策"
+
+
+def test_dropdown_examples_keep_subject_drop_bare_event_and_unrelated_maps(tmp_path):
+    """生产下拉里的四类问题：裸「事件」、概念串味、同主体加息重复、缺主体标题。"""
+    reset_store_for_tests(tmp_path / "dropdown.sqlite")
+    _insert_rich(
+        "rubber",
+        "橡胶价格大涨",
+        7,
+        25,
+        sectors=["橡胶", "苹果", "黄金", "固态电池", "智能家居"],
+        stocks=[("601118.SH", "海南橡胶")],
+    )
+    _insert_rich(
+        "rubber-2",
+        "橡胶价格大涨超预期",
+        7,
+        40,
+        source="wscn",
+        sectors=["橡胶", "黄金"],
+        stocks=[("601118.SH", "海南橡胶")],
+    )
+    _insert_rich(
+        "battery",
+        "宁德时代发布固态电池",
+        7,
+        28,
+        sectors=["固态电池"],
+        stocks=[("300750.SZ", "宁德时代")],
+    )
+    _insert_rich(
+        "apple",
+        "苹果发布智能家居新品",
+        8,
+        5,
+        sectors=["苹果", "智能家居"],
+        stocks=[("AAPL", "苹果")],
+    )
+    _insert_rich(
+        "gold",
+        "黄金价格上涨",
+        8,
+        12,
+        sectors=["黄金"],
+    )
+    _insert_rich(
+        "hike-vague",
+        "美联储主席表示，可能还会有几次加息",
+        7,
+        56,
+        summary="美联储主席表示，可能还会有几次加息",
+    )
+    _insert_rich(
+        "hike-clear",
+        "美联储将从容推进加息",
+        7,
+        56,
+        source="wscn",
+    )
+    _insert_rich(
+        "policy",
+        "中共中央政治局会议：根据宏观经济运行情况及时谋划出台增量政策",
+        16,
+        27,
+    )
+    _insert_rich(
+        "fragment",
+        "和之前结构性降息",
+        9,
+        0,
+    )
+    _insert_rich(
+        "empty-event",
+        "【财联社】事件",
+        9,
+        5,
+    )
+
+    events = top_hot_events(NOW)["events"]
+    names = [event["name"] for event in events]
+    assert "事件" not in names
+    assert all(name != "事件" for name in names)
+    assert "可能还会有几次加息" not in names
+    assert "宏观经济运行情况及时谋划出台" not in names
+
+    rubber = next(event for event in events if "橡胶" in event["name"])
+    assert rubber["name"] in {"橡胶价格大涨", "橡胶价格大涨超预期"}
+    assert rubber["concepts"] == ["橡胶"]
+    assert "苹果" not in rubber["concepts"]
+    assert "黄金" not in rubber["concepts"]
+    assert "固态电池" not in rubber["concepts"]
+    assert "智能家居" not in rubber["concepts"]
+    rubber_stocks = [stock["name"] for stock in rubber["mentioned_stocks"]]
+    assert rubber_stocks == ["海南橡胶"]
+    assert "宁德时代" not in rubber_stocks
+    assert rubber["category"] == "大宗商品/期货价格异动"
+    assert rubber["mentions"] == 2
+    assert rubber["first_seen"] == "10-09 07:25"
+
+    battery = next(event for event in events if event["name"] == "宁德时代发布固态电池")
+    assert battery["concepts"] == ["固态电池"]
+    assert [stock["name"] for stock in battery["mentioned_stocks"]] == ["宁德时代"]
+    apple = next(event for event in events if "智能家居" in event["name"])
+    assert "橡胶" not in apple["concepts"]
+    assert apple["key"] != rubber["key"]
+
+    hikes = [event for event in events if "加息" in event["name"] and "美联储" in event["name"]]
+    assert len(hikes) == 1
+    hike = hikes[0]
+    assert hike["mentions"] == 2
+    assert hike["first_seen"] == "10-09 07:56"
+    assert hike["category"] == "海外市场/央行"
+    assert hike["name"] != "可能还会有几次加息"
+
+    policy = next(event for event in events if "出台" in event["name"] and "政治局" in event["name"])
+    assert policy["name"] != "宏观经济运行情况及时谋划出台"
+    assert "政治局" in policy["name"]
+    assert policy["first_seen"] == "10-09 16:27"
+
+    assert "结构性降息" in names
+    assert rubber["key"].startswith("ev_")
+    assert len(rubber["key"]) == 15
+
+    again = top_hot_events(NOW + timedelta(minutes=11))
+    again_rubber = next(event for event in again["events"] if "橡胶" in event["name"])
+    assert again_rubber["key"] == rubber["key"]

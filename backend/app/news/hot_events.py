@@ -1,7 +1,12 @@
 """把一个交易日的资讯收成具体事件，而不是宽行业榜。
 
-聚类看标题里的主体、动作和细概念，再加同一时间窗。摘要只在标题没有主体时参与，
-避免各条资讯共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
+聚类看标题里的主体、动作，以及标题里出现的细概念，再加同一时间窗。正文里抽到、
+但标题没写的概念不参与聚类，避免旁支概念把无关消息粘成一件事。同一主体和动作，
+或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
+共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
+
+标题优先用合格的关键词或模型说法。两者都没有时，用去掉来源前缀、按分句截断的
+代表标题。没有可读标题，或标题只剩「事件」，这条就不进列表。
 """
 from __future__ import annotations
 
@@ -27,8 +32,8 @@ _CLUSTER_WINDOW = timedelta(hours=6)
 _HEAT_HALF_LIFE_HOURS = 12
 _LLM_PER_PASS = 8
 _TITLE_LIMIT = 20
-# 标题缓存按这个版本取。旧键里的半句话不再套用，下一轮重新生成。
-_TITLE_CACHE_VERSION = 2
+# 标题缓存按这个版本取。旧键里的「事件」和缺主体标题不再套用，下一轮重新生成。
+_TITLE_CACHE_VERSION = 3
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -60,7 +65,7 @@ _CATEGORY_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("地缘政治", ("制裁", "关税", "冲突", "战争", "停火", "出口管制", "配额", "地缘")),
     ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "加息", "降息", "美股", "纳指", "标普", "欧股", "日经")),
     ("国内政策/宏观", ("出台", "补贴", "降准", "国务院", "发改委", "工信部", "证监会", "财政部", "央行", "宏观", "政策")),
-    ("大宗商品/期货价格异动", ("碳酸锂", "原油", "期货", "黄金", "铜价", "铁矿", "煤炭", "稀土", "豆粕", "螺纹", "报价")),
+    ("大宗商品/期货价格异动", ("碳酸锂", "原油", "期货", "黄金", "铜价", "铁矿", "煤炭", "稀土", "豆粕", "螺纹", "报价", "橡胶")),
     ("公司重大事项", ("收购", "回购", "上市", "立案", "停产", "召回", "签约", "中标", "停牌", "退市")),
     ("科技与产业", ("发布", "订单", "追加", "获批", "涨价", "降价", "提价", "上调", "下调", "量产", "芯片", "模型")),
 )
@@ -106,6 +111,34 @@ _LEADERS = (
     "华为", "宁德时代", "贵州茅台", "英伟达", "苹果", "特斯拉", "比亚迪",
     "平安银行", "腾讯", "阿里巴巴", "茅台",
 )
+# 标题里点名的机构。缺主体时从代表标题里补这些，而不是留下「可能还会」「运行情况」。
+_ORG_SUBJECTS = (
+    "美联储", "欧洲央行", "欧央行", "日本央行", "英格兰银行", "英央行",
+    "国务院", "政治局", "发改委", "工信部", "证监会", "财政部",
+    "商务部", "外交部", "住建部", "国家能源局", "能源局", "国常会",
+    "央行",
+)
+_EXPLICIT_SUBJECTS = tuple(sorted(set(_ORG_SUBJECTS) | set(_LEADERS), key=len, reverse=True))
+# 没有具体对象的词。不能单靠它们把两条资讯收成一件事。
+_GENERIC_TOKENS = frozenset({
+    "超预期", "不及预期", "预期", "公告", "消息", "行情", "价格", "股价",
+    "政策", "市场", "公司", "股份", "板块", "概念", "产业链", "产业",
+    "上涨", "下跌", "大涨", "大跌",
+})
+_SUBJECT_TRAIL = (
+    "价格", "股价", "期货", "行情", "板块", "概念", "产业链", "产业",
+    "公司", "集团", "股份", "厂商", "企业",
+)
+# 这些词当主语时，标题还缺一个能指认的主体。
+_VAGUE_CUES = (
+    "可能", "或许", "预计", "有望", "或将", "料将",
+    "还会", "还将", "几次", "多次",
+    "情况", "谋划", "宏观",
+    "进一步", "消息称", "据悉", "传闻称",
+)
+_SIMILAR_WINDOW = timedelta(hours=3)
+_SIMILARITY_MIN = 0.72
+_REPRESENTATIVE_SIMILARITY = 0.45
 _LEADER_ACTS = ("发布", "收购", "回购", "停产", "制裁", "订单", "上市", "立案")
 _IMPORTANT_ACTS = ("涨价", "获批", "回购", "订单", "收购", "中标")
 _IMPORTANT_CATEGORIES = frozenset({
@@ -224,6 +257,16 @@ def _compute(now: datetime, store: NewsStore) -> dict:
     attach_confirmations(events, now)
     events = _rank_events(events, now, grade=False)
     _label_with_llm(events)
+    events = [event for event in events if _display_name_ok(event.get("name"))]
+    if not events:
+        return {
+            "as_of": None,
+            "trading_day": trading.isoformat(),
+            "fallback": False,
+            "hint": None,
+            "updated_at": None,
+            "events": [],
+        }
     events = _rank_events(events, now, grade=False)
     latest = max(event.pop("_latest") for event in events)
     for event in events:
@@ -255,15 +298,15 @@ def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
 
     for left in range(len(docs)):
         for right in range(left + 1, len(docs)):
-            gap = abs(docs[left]["published"] - docs[right]["published"])
-            if gap > _CLUSTER_WINDOW:
-                continue
-            if docs[left]["tokens"] & docs[right]["tokens"]:
+            if _can_merge(docs[left], docs[right]):
                 parent[find(right)] = find(left)
     groups: dict[int, list[dict]] = defaultdict(list)
     for index, doc in enumerate(docs):
         groups[find(index)].append(doc)
-    events = [_event_from(members, now) for members in groups.values()]
+    events = [
+        event for event in (_event_from(members, now) for members in groups.values())
+        if _display_name_ok(event.get("name"))
+    ]
     return _rank_events(events, now, grade=True)
 
 
@@ -291,16 +334,24 @@ def _doc(row: dict) -> dict | None:
     shown = title or summary[:80]
     if _relevance(shown, lead, action, concepts, stocks) < _RELEVANCE_MIN:
         return None
-    tokens = _tokens(lead, obj, concepts)
+    entity_text = title
+    if summary and not _explicit_entities(title):
+        entity_text = f"{title}\n{summary[:160]}"
+    entities = _explicit_entities(title)
+    if not entities and _subject_is_vague(lead):
+        entities = _explicit_entities(summary[:200])
+    tokens = _title_tokens(lead, obj, concepts, title or summary[:80], entities)
     return {
         "item_id": row.get("id"),
         "source": str(row.get("source") or ""),
         "published": published,
         "title": title or summary[:80],
+        "entity_text": entity_text,
         "text": f"{title}\n{summary}",
         "lead": lead,
         "action": action,
         "object": obj,
+        "entities": entities,
         "relevance": _relevance(shown, lead, action, concepts, stocks),
         "concepts": concepts,
         "stocks": stocks,
@@ -346,11 +397,18 @@ def _parse_phrase(text: str) -> tuple[str, str, str]:
         if action:
             break
     if not action:
+        for clause in clauses or [body]:
+            index, verb = _narrative_action(clause)
+            if verb and _subject_ok(clause[:index]):
+                chosen = clause
+                action = verb
+                break
+    if not action:
         return _clean_lead(chosen[:8]), "", ""
     index = chosen.find(action)
     lead = _clean_lead(chosen[:index])
     obj = _CLAUSE.split(chosen[index + len(action):])[0].strip()[:8]
-    if len(obj) < 2 or obj in _STOP or obj in BROAD_SECTORS:
+    if len(obj) < 2 or obj in _STOP or obj in BROAD_SECTORS or obj in _GENERIC_TOKENS:
         obj = ""
     return lead, action, obj
 
@@ -365,15 +423,34 @@ def _clean_lead(text: str) -> str:
     return lead[:8]
 
 
-def _tokens(lead: str, obj: str, concepts: list[str]) -> set[str]:
-    """聚类词来自标题主体和细概念。个股名单独出现不够把两件事粘在一起。"""
+def _title_tokens(
+    lead: str,
+    obj: str,
+    concepts: list[str],
+    title: str,
+    entities: list[str] | None = None,
+) -> set[str]:
+    """聚类词只来自标题里的主体、宾语和标题中出现的细概念。
+
+    正文提及的概念不进聚类词，否则一条快讯带上的苹果、黄金会把橡胶新闻粘进去。
+    """
     tokens = set()
-    if lead:
-        tokens.add(lead)
-    if obj:
-        tokens.add(obj)
-    tokens.update(concepts)
-    return {token for token in tokens if token}
+    for value in (lead, obj, _subject_core(lead)):
+        if (
+            value
+            and len(value) >= 2
+            and value not in _STOP
+            and value not in BROAD_SECTORS
+            and value not in _GENERIC_TOKENS
+        ):
+            tokens.add(value)
+    for entity in entities or []:
+        if entity:
+            tokens.add(entity)
+    for concept in concepts:
+        if concept and concept in (title or "") and concept not in BROAD_SECTORS:
+            tokens.add(concept)
+    return tokens
 
 
 def _event_from(members: list[dict], now: datetime) -> dict:
@@ -385,20 +462,27 @@ def _event_from(members: list[dict], now: datetime) -> dict:
     decay = math.exp(-math.log(2) * age_hours / _HEAT_HALF_LIFE_HOURS)
     mentions = len(members)
     source_count = len(sources) or 1
+    name = _keyword_title(members)
+    focused = _representative_members(members, name)
     concept_counts: Counter[str] = Counter()
-    for item in members:
+    for item in focused:
         concept_counts.update(dict.fromkeys(item["concepts"], 1))
-    concepts = _specific_concepts(concept_counts)
+    focus_titles = [str(item.get("title") or "") for item in focused]
+    subjects = _subject_set(name, focused)
+    concepts = _relevant_concepts(concept_counts, focus_titles, subjects)
+    rejected = [label for label in concept_counts if label not in concepts and label not in BROAD_SECTORS]
     stocks: dict[str, dict] = {}
-    for item in members:
-        for key, name in item["stocks"].items():
+    for item in focused:
+        for key, stock_name in item["stocks"].items():
+            if not _stock_relevant(stock_name, key, focus_titles, subjects, concepts, rejected):
+                continue
             hit = stocks.get(key)
             if hit is None:
-                hit = {"key": key, "name": name, "mentions": 0, "sources": set()}
+                hit = {"key": key, "name": stock_name, "mentions": 0, "sources": set()}
                 stocks[key] = hit
             hit["mentions"] += 1
             hit["sources"].add(item["source"])
-            hit["name"] = name
+            hit["name"] = stock_name
     mentioned = [
         {
             "key": hit["key"],
@@ -409,13 +493,12 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         for hit in stocks.values()
     ]
     mentioned.sort(key=lambda item: (-item["mentions"], -item["source_count"], item["name"]))
-    blob = "\n".join(item["title"] for item in members)
-    action = _mode([item["action"] for item in members if item["action"]])
+    blob = "\n".join(focus_titles)
+    action = _mode([item["action"] for item in focused if item["action"]])
     category = _category_for(blob, action)
     direction = _direction_for(blob, action)
     for hit in mentioned:
         hit["direction"] = direction
-    name = _keyword_title(members)
     item_ids = [str(item["item_id"]) for item in members]
     digest = hashlib.sha1(",".join(sorted(item_ids)).encode("utf-8")).hexdigest()[:12]
     seen = first.astimezone(CN_TZ)
@@ -585,21 +668,350 @@ def _specific_concepts(counts: Counter[str]) -> list[str]:
     return kept[:_CONCEPT_LIMIT]
 
 
+def _display_name_ok(name: object) -> bool:
+    text = _compact(str(name or ""))
+    return bool(text) and text != "事件"
+
+
+def _subject_core(lead: str) -> str:
+    core = _compact(lead)
+    original = core
+    changed = True
+    while changed and len(core) > 2:
+        changed = False
+        for suffix in _SUBJECT_TRAIL:
+            if core.endswith(suffix) and len(core) - len(suffix) >= 2:
+                core = core[:-len(suffix)]
+                changed = True
+                break
+    if not core or core == original or len(core) < 2:
+        return ""
+    if core in _STOP or core in _GENERIC_TOKENS or core in BROAD_SECTORS:
+        return ""
+    return core
+
+
+def _explicit_entities(text: str) -> list[str]:
+    if not text:
+        return []
+    occupied = [False] * len(text)
+    spans: list[tuple[int, str]] = []
+    for name in _EXPLICIT_SUBJECTS:
+        start = 0
+        while True:
+            index = text.find(name, start)
+            if index < 0:
+                break
+            end = index + len(name)
+            if not any(occupied[index:end]):
+                spans.append((index, name))
+                for pos in range(index, end):
+                    occupied[pos] = True
+            start = end
+    spans.sort()
+    seen: list[str] = []
+    for _index, name in spans:
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _subject_is_vague(lead: str) -> bool:
+    text = _normalize_subject(lead) or _subject_text(lead)
+    if len(text) < 2:
+        return True
+    if _explicit_entities(text):
+        return False
+    if text in _NOT_SUBJECT or text in BROAD_SECTORS or text in _STOP:
+        return True
+    if text.endswith(("性", "的", "地")):
+        return True
+    return any(cue in text for cue in _VAGUE_CUES)
+
+
+def _norm_title(text: str) -> str:
+    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", _strip_source_prefix(text))
+
+
+def _headline_similarity(left: str, right: str) -> float:
+    aa = _norm_title(left)
+    bb = _norm_title(right)
+    if not aa or not bb:
+        return 0.0
+    if aa == bb:
+        return 1.0
+
+    def grams(text: str) -> set[str]:
+        if len(text) < 2:
+            return {text}
+        return {text[i:i + 2] for i in range(len(text) - 1)}
+
+    ga, gb = grams(aa), grams(bb)
+    union = len(ga | gb)
+    if not union:
+        return 0.0
+    return len(ga & gb) / union
+
+
+def _subject_keys(doc: dict) -> set[str]:
+    keys = {entity for entity in (doc.get("entities") or []) if entity}
+    lead = str(doc.get("lead") or "")
+    if lead and not _subject_is_vague(lead):
+        if len(lead) <= 8:
+            keys.add(lead)
+        core = _subject_core(lead)
+        if core:
+            keys.add(core)
+    return keys
+
+
+def _same_subject_action(left: dict, right: dict) -> bool:
+    if not left.get("action") or left.get("action") != right.get("action"):
+        return False
+    return bool(_subject_keys(left) & _subject_keys(right))
+
+
+def _can_merge(left: dict, right: dict) -> bool:
+    gap = abs(left["published"] - right["published"])
+    if gap > _CLUSTER_WINDOW:
+        return False
+    if _same_subject_action(left, right):
+        return True
+    if (
+        gap <= _SIMILAR_WINDOW
+        and _headline_similarity(str(left.get("title") or ""), str(right.get("title") or "")) >= _SIMILARITY_MIN
+    ):
+        return True
+    shared = set(left.get("tokens") or ()) & set(right.get("tokens") or ())
+    shared = {token for token in shared if len(token) >= 3 and token not in _GENERIC_TOKENS}
+    if not shared:
+        return False
+    return not (left.get("action") and right.get("action") and left.get("action") != right.get("action"))
+
+
+def _subject_set(name: str, members: list[dict]) -> set[str]:
+    subjects = set(_explicit_entities(name))
+    lead, _action, _obj = _split_headline(name)
+    if lead and not _subject_is_vague(lead):
+        if len(lead) <= 8:
+            subjects.add(lead)
+        core = _subject_core(lead)
+        if core:
+            subjects.add(core)
+    for item in members:
+        for entity in item.get("entities") or []:
+            if entity:
+                subjects.add(entity)
+        item_lead = str(item.get("lead") or "")
+        if item_lead and not _subject_is_vague(item_lead):
+            if len(item_lead) <= 8:
+                subjects.add(item_lead)
+            core = _subject_core(item_lead)
+            if core:
+                subjects.add(core)
+    return {subject for subject in subjects if subject and len(subject) >= 2}
+
+
+def _matches_event(item: dict, name: str, subjects: set[str]) -> bool:
+    title = str(item.get("title") or "")
+    if not title:
+        return False
+    if any(len(subject) >= 2 and subject in title for subject in subjects):
+        return True
+    if name and _headline_similarity(title, name) >= _REPRESENTATIVE_SIMILARITY:
+        return True
+    norm_name = _norm_title(name)
+    for token in item.get("tokens") or ():
+        if len(str(token)) >= 3 and str(token) in norm_name:
+            return True
+    return False
+
+
+def _representative_members(members: list[dict], name: str) -> list[dict]:
+    subjects = _subject_set(name, [])
+    chosen = [item for item in members if _matches_event(item, name, subjects)]
+    return chosen or list(members)
+
+
+def _concept_relevant(name: str, blob: str, subjects: set[str]) -> bool:
+    if name and name in blob:
+        return True
+    # 细概念延伸标题里已经出现的词，例如标题写「机器人」、提及是「工业机器人」。
+    if _headline_maps_concept(name, blob):
+        return True
+    checked: list[str] = []
+    for subject in subjects:
+        checked.append(subject)
+        core = _subject_core(subject)
+        if core:
+            checked.append(core)
+    for token in checked:
+        if len(token) < 2 or token in _GENERIC_TOKENS or token in _STOP:
+            continue
+        if token in name:
+            return True
+        if len(token) <= 8 and name in token:
+            return True
+    return False
+
+
+def _headline_maps_concept(name: str, blob: str) -> bool:
+    if len(name) < 3 or not blob or name in blob:
+        return False
+    for size in range(min(len(name) - 1, 6), 1, -1):
+        for start in range(0, len(name) - size + 1):
+            token = name[start:start + size]
+            if token in _GENERIC_TOKENS or token in _STOP:
+                continue
+            if token in blob:
+                return True
+    return False
+
+
+def _relevant_concepts(counts: Counter[str], titles: list[str], subjects: set[str]) -> list[str]:
+    blob = "\n".join(titles)
+    filtered: Counter[str] = Counter({
+        name: count
+        for name, count in counts.items()
+        if _concept_relevant(str(name), blob, subjects)
+    })
+    return _specific_concepts(filtered)
+
+
+def _stock_relevant(
+    name: str,
+    key: str,
+    titles: list[str],
+    subjects: set[str],
+    kept_concepts: list[str],
+    rejected: list[str],
+) -> bool:
+    """代表成员上的个股默认留下。名字只贴着被丢掉的概念时才剔除。"""
+    label = str(name or "").strip()
+    blob = "\n".join(titles)
+    if label and label in blob:
+        return True
+    if key and str(key) in blob:
+        return True
+    tokens: list[str] = list(kept_concepts)
+    for subject in subjects:
+        tokens.append(subject)
+        core = _subject_core(subject)
+        if core:
+            tokens.append(core)
+    if label and any(len(token) >= 2 and token not in _GENERIC_TOKENS and token in label for token in tokens):
+        return True
+    tied_to_rejected = bool(label) and any(
+        len(concept) >= 2 and (concept in label or label in concept) for concept in rejected
+    )
+    return not tied_to_rejected
+
+
+def _cleaned_headline(text: str) -> str:
+    """去掉来源前缀，取第一个有内容的分句，过长时停在分句内部的自然断点。"""
+    body = _strip_source_prefix(text)
+    if not body or body == "事件":
+        return ""
+    parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()] or [body]
+    for part in parts:
+        cleaned = _TIME_PREFIX.sub("", _drop_leading_fragment(part)).strip("，。！？、；：\"'“”")
+        if cleaned and cleaned != "事件":
+            clipped = _clip_at_boundary(cleaned)
+            if clipped and clipped != "事件":
+                return clipped
+    return ""
+
+
+def _clip_at_boundary(text: str) -> str:
+    if not text or text == "事件":
+        return ""
+    if len(text) <= _TITLE_LIMIT and not _ends_abruptly(text):
+        return text
+    window = text[:_TITLE_LIMIT]
+    cut = -1
+    for sep in ("以及", "并且", "同时", "和", "与", "及"):
+        index = window.rfind(sep)
+        if index >= 4:
+            cut = max(cut, index)
+    if cut >= 4:
+        window = window[:cut]
+    while window and (_ends_abruptly(window) or window[-1] in "的和与及"):
+        window = window[:-1]
+    if len(window) >= 4 and window != "事件" and not _ends_abruptly(window):
+        return window
+    if text != "事件" and not _ends_abruptly(text):
+        return text[:_TITLE_LIMIT] if len(text) > _TITLE_LIMIT else text
+    return ""
+
+
+def _ensure_subject(title: str, source: str) -> str:
+    text = _compact(title)
+    if not _display_name_ok(text):
+        return ""
+    lead, action, _obj = _split_headline(text)
+    if action and lead and not _subject_is_vague(lead):
+        return text
+    entities = _explicit_entities(source)
+    if not entities:
+        return text
+    if lead and any(entity in lead for entity in entities) and not _subject_is_vague(lead):
+        return text
+    attached = _attach_entity(text, entities[0])
+    return attached if _display_name_ok(attached) else text
+
+
+def _attach_entity(title: str, entity: str) -> str:
+    if not entity:
+        return title
+    lead, action, obj = _split_headline(title)
+    if entity in title and lead and not _subject_is_vague(lead):
+        return title
+    prefixed = title if entity in title else f"{entity}{title}"
+    if len(prefixed) <= _TITLE_LIMIT and _title_ok(prefixed):
+        prefixed_lead, _prefixed_action, _prefixed_obj = _split_headline(prefixed)
+        if prefixed_lead and not _subject_is_vague(prefixed_lead):
+            return prefixed
+    if action:
+        fitted = _fit_object(f"{entity}{action}", obj)
+        if _title_ok(fitted):
+            return fitted
+    if len(prefixed) <= _TITLE_LIMIT and _title_ok(prefixed):
+        return prefixed
+    return title
+
+
 def _keyword_title(members: list[dict]) -> str:
-    """用代表标题的第一分句，不再把各条的主体、动作、宾语拼在一起。"""
+    """用代表标题的第一分句，不再把各条的主体、动作、宾语拼在一起。
+
+    合格分句优先。没有合格分句时，退回去掉来源前缀、按分句截断的原标题。
+    仍然没有可读文本时返回空字符串，调用方把这条事件丢掉，不再显示「事件」。
+    """
     clauses: list[str] = []
     for item in members:
         clause = _representative_clause(str(item.get("title") or ""))
-        if clause:
+        if clause and clause != "事件":
             clauses.append(clause)
-    if not clauses:
-        return "事件"
-    counts = Counter(clauses)
-    best = max(counts.values())
-    for clause in clauses:
-        if counts[clause] == best:
-            return clause
-    return clauses[0]
+    blob = "\n".join(
+        str(item.get("entity_text") or item.get("title") or "")
+        for item in members
+    )
+    if clauses:
+        counts = Counter(clauses)
+        best = max(counts.values())
+        for clause in clauses:
+            if counts[clause] != best:
+                continue
+            ensured = _ensure_subject(clause, blob)
+            if _display_name_ok(ensured):
+                return ensured
+    for item in members:
+        cleaned = _cleaned_headline(str(item.get("title") or ""))
+        if not cleaned:
+            continue
+        ensured = _ensure_subject(cleaned, blob)
+        if _display_name_ok(ensured):
+            return ensured
+    return ""
 
 
 def _is_noise(title: str) -> bool:
@@ -905,6 +1317,8 @@ def _label_with_llm(events: list[dict]) -> None:
             '"stocks":[{"name":"","code":"","direction":"利好或利空"}]}。'
             "title 必须是完整具体的事件标题，不超过20个字，包含主体和动作，"
             "例如美联储降息25基点。不要半句话，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
+            "不要用「事件」当标题。主体必须写明，例如美联储、国务院、政治局，"
+            "不要只写可能还会、宏观经济运行情况这种没有主体的说法。"
             f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
             "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
             "寻常涨价、获批、订单是重要。"
@@ -985,7 +1399,13 @@ def _parse_llm_event(raw: str, text: str) -> dict | None:
 def _apply_llm(event: dict, parsed: dict) -> None:
     title = str(parsed.get("title") or "")
     if _title_ok(title):
-        event["name"] = title
+        blob = "\n".join(
+            [str(event.get("headline") or "")]
+            + [str(item) for item in (event.get("headlines") or [])]
+        )
+        ensured = _ensure_subject(title, blob)
+        if _title_ok(ensured) and _display_name_ok(ensured):
+            event["name"] = ensured
     category = str(parsed.get("category") or "")
     if category in CATEGORY_NAMES:
         event["category"] = category
@@ -1000,6 +1420,13 @@ def _apply_llm(event: dict, parsed: dict) -> None:
     for name in parsed.get("concepts") or []:
         if name not in event["concepts"] and len(event["concepts"]) < _CONCEPT_LIMIT:
             event["concepts"].append(name)
+    texts = [str(event.get("name") or ""), str(event.get("headline") or "")]
+    texts.extend(str(item) for item in (event.get("headlines") or []))
+    event["concepts"] = _relevant_concepts(
+        Counter({str(name): 1 for name in event.get("concepts") or []}),
+        texts,
+        _subject_set(str(event.get("name") or ""), []),
+    )
     directions = parsed.get("concept_directions") or {}
     event["mapping"] = [
         {
