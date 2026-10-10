@@ -29,6 +29,11 @@ _SOURCES = (
     ("cls", "财联社", "财联社电报，保留级别、个股和板块标签。"),
     ("wscn", "华尔街见闻", "华尔街见闻快讯，保留标的、主题和热度。"),
     ("etf_flow", "ETF领航者", "公众号 ETF领航者的每日 ETF 申购赎回。优先读网易号，表格图片由视觉模型抽取。"),
+    ("cnbc", "CNBC", "CNBC 头条与市场 RSS，只存标题和摘要。"),
+    ("marketwatch", "MarketWatch", "MarketWatch 头条 RSS，只存标题和摘要。"),
+    ("wsj", "华尔街日报市场", "华尔街日报市场 RSS，只存标题和摘要，不抓付费正文。"),
+    ("bloomberg", "彭博", "彭博市场与科技 RSS，只存标题和摘要，不抓付费正文。"),
+    ("sec", "SEC 8-K", "SEC 最新 8-K Atom，只存标题、摘要和申报链接。"),
     ("hot", "TSP热门候选", "TSP 按多源提及算出的热门板块和个股，供大盘复盘引用。"),
 )
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "app", "tsp"}

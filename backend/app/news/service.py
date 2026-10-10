@@ -15,8 +15,11 @@ from app.market_time import cn_now
 from app.news.cleaning import clean_text, content_hash, excerpt
 from app.news.collectors import (
     CLS_URL,
+    FOREIGN_FEEDS,
+    FOREIGN_SOURCES,
     IMA_BASE,
     WSCN_URL,
+    Feed,
     Item,
     cls_params,
     ima_headers,
@@ -26,6 +29,7 @@ from app.news.collectors import (
     load_inbox_payload,
     parse_cls,
     parse_dws_payload,
+    parse_feed_xml,
     parse_ima_titles,
     parse_time,
     parse_wscn,
@@ -38,12 +42,20 @@ from app.news.config import (
     SOURCE_LABELS,
     SOURCE_ORDER,
     llm_extract_enabled,
+    sec_configured,
+    sec_user_agent,
     source_configured,
     source_enabled,
     source_locked,
 )
 from app.news.etf_flow import collect_etf_flow
-from app.news.extract import Lexicon, Mention, StructuredStock, parse_llm_payload
+from app.news.extract import (
+    Lexicon,
+    Mention,
+    StructuredStock,
+    parse_llm_payload,
+    parse_llm_summary,
+)
 from app.news.scoring import MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
 
@@ -55,6 +67,8 @@ _LEXICON: tuple[float, Lexicon] | None = None
 _LLM_TIMES: list[float] = []
 _LLM_LOCK = threading.Lock()
 _LLM_PER_HOUR = 10
+# 一次外文轮询可能带上几十条新稿。模型只处理前几条，避免单轮把额度打光。
+_FOREIGN_LLM_PER_POLL = 10
 
 
 def get_store() -> NewsStore:
@@ -115,14 +129,27 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
         grouped.setdefault(item.source, []).append(item.source_id)
     for source, ids in grouped.items():
         known.update((source, sid) for sid in store.existing_ids(source, ids))
+    known_urls: set[tuple[str, str]] = set()
+    urls_by_source: dict[str, list[str]] = {}
+    for item in pending:
+        if item.source in FOREIGN_SOURCES and item.url:
+            urls_by_source.setdefault(item.source, []).append(item.url[:500])
+    for source, urls in urls_by_source.items():
+        known_urls.update((source, url) for url in store.existing_urls(source, urls))
     inserted = 0
     duplicate = 0
+    foreign_llm_used = 0
     for item in pending:
         ident = (item.source, item.source_id)
-        if ident in known:
+        url_key = None
+        if item.source in FOREIGN_SOURCES and item.url:
+            url_key = (item.source, item.url[:500])
+        if ident in known or (url_key and url_key in known_urls):
             duplicate += 1
             continue
         known.add(ident)
+        if url_key:
+            known_urls.add(url_key)
         if lexicon is None:
             lexicon = get_lexicon()
         clean = clean_text(item.text)
@@ -133,7 +160,20 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
             item.stocks,
             item.sectors,
         )
-        if not mentions and llm_extract_enabled() and len(clean) >= 40:
+        extra = {"stocks": [stock.__dict__ for stock in item.stocks], "sectors": item.sectors}
+        if item.source in FOREIGN_SOURCES:
+            # 超过本轮上限后不再落到通用抽取，否则限额形同虚设。
+            if (
+                llm_extract_enabled()
+                and foreign_llm_used < _FOREIGN_LLM_PER_POLL
+                and len(f"{title}\n{clean}".strip()) >= 8
+            ):
+                foreign_llm_used += 1
+                summary_zh, llm_found = _llm_foreign_enrich(title, clean, lexicon)
+                if summary_zh:
+                    extra["summary_zh"] = summary_zh
+                mentions = _merge_mentions(mentions, llm_found)
+        elif not mentions and llm_extract_enabled() and len(clean) >= 40:
             mentions = _llm_mentions(title, clean, lexicon)
         status = store.insert_item(
             source=item.source,
@@ -147,7 +187,7 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
             url=item.url,
             level=item.level,
             media_ids=item.media_ids,
-            extra={"stocks": [s.__dict__ for s in item.stocks], "sectors": item.sectors},
+            extra=extra,
             mentions=[(m.kind, m.key, m.name, m.code, m.origin) for m in mentions],
         )
         if status == "inserted":
@@ -220,7 +260,7 @@ def message_view(row, *, limit: int = 240) -> dict:
         "published_at": row["published_at"],
         "author": row["author"] or "",
         "title": row["title"] or "",
-        "excerpt": excerpt(row["clean_text"] or "", limit),
+        "excerpt": _row_summary(row, limit),
         "url": row["url"] or "",
         "level": row["level"] or "",
     }
@@ -270,7 +310,7 @@ def feed_for_source(source: str, *, limit: int = 50) -> dict:
         items.append({
             "source_id": row["source_id"],
             "title": row["title"] or excerpt(row["clean_text"], 40),
-            "summary": excerpt(row["clean_text"], 400),
+            "summary": _row_summary(row, 400),
             "url": row["url"] or "",
             "published_at": row["published_at"],
             "symbols": symbols[:8],
@@ -433,6 +473,49 @@ def collect_inbox(directory: Path | None = None) -> dict:
     return {"inserted": inserted, "duplicate": duplicate, "errors": errors}
 
 
+def collect_foreign(source: str, client: httpx.Client | None = None) -> dict:
+    """只拉 feed。304 沿用缓存的 ETag，不解析正文，也不打开条目链接。"""
+    feeds = FOREIGN_FEEDS.get(source)
+    if not feeds:
+        return {"inserted": 0, "duplicate": 0, "skipped": True}
+    if source == "sec" and not sec_configured():
+        return {"inserted": 0, "duplicate": 0, "skipped": True}
+    own = client is None
+    client = client or httpx.Client(timeout=15.0, follow_redirects=True)
+    headers = _foreign_headers(source)
+    items: list[Item] = []
+    errors: list[str] = []
+    ok_feeds = 0
+    try:
+        for feed in feeds:
+            try:
+                pulled, status = _pull_feed(client, feed, headers)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{feed.url}: {exc}"[:180])
+                logger.warning("%s feed 失败: %s", source, exc)
+                continue
+            if status in {200, 304}:
+                ok_feeds += 1
+            items.extend(pulled)
+        result = ingest_items(items) if items else {"inserted": 0, "duplicate": 0}
+        label = SOURCE_LABELS.get(source, source)
+        if ok_feeds == 0:
+            message = "; ".join(errors) or "feed 请求失败"
+            get_store().mark_health(source, ok=False, error=message, auth_state="n/a")
+            return {**result, "error": message[:200]}
+        get_store().mark_health(source, ok=True, auth_state="n/a")
+        if errors:
+            logger.warning("%s 部分 feed 失败: %s", label, errors[0])
+        return result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("%s 采集失败: %s", SOURCE_LABELS.get(source, source), exc)
+        get_store().mark_health(source, ok=False, error=str(exc), auth_state="n/a")
+        return {"inserted": 0, "duplicate": 0, "error": str(exc)[:200]}
+    finally:
+        if own:
+            client.close()
+
+
 def run_due(source: str) -> dict:
     if source == "cls":
         return collect_cls()
@@ -444,7 +527,54 @@ def run_due(source: str) -> dict:
         return collect_inbox()
     if source == "etf_flow":
         return collect_etf_flow()
+    if source in FOREIGN_FEEDS:
+        return collect_foreign(source)
     return {}
+
+
+def _foreign_headers(source: str) -> dict[str, str]:
+    if source == "sec":
+        return {
+            "User-Agent": sec_user_agent(),
+            "Accept": "application/atom+xml, application/xml, text/xml",
+        }
+    return {
+        "User-Agent": "tsp-news/1.0",
+        "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
+    }
+
+
+def _pull_feed(client: httpx.Client, feed: Feed, headers: dict[str, str]) -> tuple[list[Item], int]:
+    store = get_store()
+    etag, modified = store.get_feed_cache(feed.url)
+    request_headers = dict(headers)
+    if etag:
+        request_headers["If-None-Match"] = etag
+    if modified:
+        request_headers["If-Modified-Since"] = modified
+    response = client.get(feed.url, headers=request_headers)
+    status = int(getattr(response, "status_code", 200))
+    if status == 304:
+        return [], 304
+    response.raise_for_status()
+    items = parse_feed_xml(response.text, feed.source, feed_url=feed.url)
+    # 解析失败时保留上一份校验值，下一轮仍拉完整响应，而不是把坏正文记成已同步。
+    store.save_feed_cache(
+        feed.url,
+        _header(getattr(response, "headers", None), "etag"),
+        _header(getattr(response, "headers", None), "last-modified"),
+    )
+    return items, status
+
+
+def _header(headers, name: str) -> str:
+    if not headers:
+        return ""
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return str(value or "").strip()
+    return ""
 
 
 _IMA_MAX_PAGES = 8
@@ -574,20 +704,18 @@ def _title_from(clean: str) -> str:
     return line[:40]
 
 
-def _llm_mentions(title: str, clean: str, lexicon: Lexicon) -> list[Mention]:
+def _reserve_llm_call() -> bool:
     now = time.monotonic()
     with _LLM_LOCK:
         while _LLM_TIMES and now - _LLM_TIMES[0] > 3600:
             _LLM_TIMES.pop(0)
         if len(_LLM_TIMES) >= _LLM_PER_HOUR:
-            return []
+            return False
         _LLM_TIMES.append(now)
-    prompt = (
-        "从下面的财经消息里抽出 A 股股票和板块。"
-        "只输出 JSON：{\"stocks\":[{\"name\":\"\",\"code\":\"\"}],\"sectors\":[]}。"
-        "没有把握就留空，不要编造代码。\n\n"
-        f"标题：{title}\n正文：{excerpt(clean, 500)}"
-    )
+        return True
+
+
+def _llm_text(prompt: str) -> str:
     try:
         import asyncio
 
@@ -601,12 +729,80 @@ def _llm_mentions(title: str, clean: str, lexicon: Lexicon) -> list[Mention]:
         ))
     except Exception as exc:  # noqa: BLE001
         logger.info("资讯 LLM 抽取失败: %s", exc)
+        return ""
+    return str(raw or "")
+
+
+def _llm_mentions(title: str, clean: str, lexicon: Lexicon) -> list[Mention]:
+    if not _reserve_llm_call():
         return []
-    mentions = parse_llm_payload(raw, lexicon)
+    prompt = (
+        "从下面的财经消息里抽出 A 股股票和板块。"
+        "只输出 JSON：{\"stocks\":[{\"name\":\"\",\"code\":\"\"}],\"sectors\":[]}。"
+        "没有把握就留空，不要编造代码。\n\n"
+        f"标题：{title}\n正文：{excerpt(clean, 500)}"
+    )
+    raw = _llm_text(prompt)
+    if not raw:
+        return []
     return [
         Mention(item.kind, item.key, item.name, item.code, "llm")
-        for item in mentions
+        for item in parse_llm_payload(raw, lexicon)
     ]
+
+
+def _llm_foreign_enrich(title: str, clean: str, lexicon: Lexicon) -> tuple[str, list[Mention]]:
+    """只把标题和 feed 摘要交给模型，换一句中文摘要和词典内的股票、板块。"""
+    if not _reserve_llm_call():
+        return "", []
+    prompt = (
+        "下面是一条外文财经资讯的标题和来源给出的摘要，不是全文。"
+        "只根据这些文字输出 JSON："
+        "{\"summary_zh\":\"一句中文摘要\",\"stocks\":[{\"name\":\"\",\"code\":\"\"}],\"sectors\":[]}。"
+        "不要编造未出现的事实，不要补写付费正文。没有把握的股票或板块留空。\n\n"
+        f"标题：{title}\n摘要：{excerpt(clean, 500)}"
+    )
+    raw = _llm_text(prompt)
+    if not raw:
+        return "", []
+    mentions = [
+        Mention(item.kind, item.key, item.name, item.code, "llm")
+        for item in parse_llm_payload(raw, lexicon)
+    ]
+    return parse_llm_summary(raw), mentions
+
+
+def _merge_mentions(primary: list[Mention], extra: list[Mention]) -> list[Mention]:
+    seen = {(item.kind, item.key) for item in primary}
+    merged = list(primary)
+    for item in extra:
+        ident = (item.kind, item.key)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        merged.append(item)
+    return merged
+
+
+def _row_summary(row, limit: int) -> str:
+    zh = ""
+    raw = ""
+    if isinstance(row, dict):
+        raw = row.get("extra_json") or ""
+    else:
+        keys = row.keys()
+        if "extra_json" in keys:
+            raw = row["extra_json"] or ""
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            zh = str(payload.get("summary_zh") or "").strip()
+    if zh:
+        return excerpt(zh, limit)
+    return excerpt(row["clean_text"] or "", limit)
 
 
 def _sector_names(repo) -> list[str]:

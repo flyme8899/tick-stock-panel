@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 
 from app.config import settings
 
-SOURCE_ORDER = ("dws", "zsxq", "ima", "cls", "wscn", "etf_flow")
+SOURCE_ORDER = (
+    "dws", "zsxq", "ima", "cls", "wscn", "etf_flow",
+    "cnbc", "marketwatch", "wsj", "bloomberg", "sec",
+)
 
 SOURCE_LABELS = {
     "dws": "钉钉作文实时",
@@ -16,6 +20,11 @@ SOURCE_LABELS = {
     "cls": "财联社",
     "wscn": "华尔街见闻",
     "etf_flow": "ETF领航者",
+    "cnbc": "CNBC",
+    "marketwatch": "MarketWatch",
+    "wsj": "华尔街日报市场",
+    "bloomberg": "彭博",
+    "sec": "SEC 8-K",
     "hot": "TSP热门候选",
 }
 
@@ -25,6 +34,7 @@ _DEFAULT_VISION_MODEL = "deepseek/deepseek-v4-flash-vision-exp"
 VISION_OCR_MAX_TOKENS = 8192
 # 短任务关掉思考后，正文不跟 reasoning 抢同一段预算。
 VISION_SHORT_MAX_TOKENS = 1024
+_EMAIL_IN_UA = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -102,6 +112,18 @@ def vision_generation(model: str, *, ocr: bool) -> dict:
     return {"max_tokens": VISION_OCR_MAX_TOKENS}
 
 
+def sec_user_agent() -> str:
+    """SEC 要求 User-Agent 里带联系邮箱。空字符串表示未配置。"""
+    raw = os.environ.get("SEC_USER_AGENT")
+    if raw is not None and raw.strip():
+        return raw.strip()
+    return str(getattr(settings, "sec_user_agent", "") or "").strip()
+
+
+def sec_configured() -> bool:
+    return _EMAIL_IN_UA.search(sec_user_agent()) is not None
+
+
 def source_configured(source: str) -> bool:
     if source == "etf_flow":
         return bool(vision_api_key())
@@ -109,6 +131,8 @@ def source_configured(source: str) -> bool:
         return ima_configured()
     if source in {"dws", "zsxq"}:
         return bool(group_id(source))
+    if source == "sec":
+        return sec_configured()
     return source in SOURCE_LABELS
 
 

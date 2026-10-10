@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS collector_state (
     auth_state TEXT,
     items_ingested INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS feed_http_cache (
+    feed_url TEXT PRIMARY KEY,
+    etag TEXT,
+    last_modified TEXT,
+    updated_at TEXT
+);
 """
 
 _RAW_LIMIT = 24_000
@@ -139,6 +145,49 @@ class NewsStore:
             self._conn.commit()
             return "inserted"
 
+    def existing_urls(self, source: str, urls: list[str]) -> set[str]:
+        """同一来源已经入库的链接。外文 feed 用它按链接去重。"""
+        wanted = [item[:500] for item in urls if item]
+        found: set[str] = set()
+        if not wanted:
+            return found
+        with self._lock:
+            for offset in range(0, len(wanted), 400):
+                chunk = wanted[offset:offset + 400]
+                marks = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT url FROM news_items WHERE source = ? AND url IN ({marks})",
+                    (source, *chunk),
+                )
+                found.update(str(row["url"]) for row in rows if row["url"])
+        return found
+
+    def get_feed_cache(self, feed_url: str) -> tuple[str, str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT etag, last_modified FROM feed_http_cache WHERE feed_url = ?",
+                (feed_url,),
+            ).fetchone()
+        if row is None:
+            return "", ""
+        return str(row["etag"] or ""), str(row["last_modified"] or "")
+
+    def save_feed_cache(self, feed_url: str, etag: str, last_modified: str) -> None:
+        now = datetime.now(CN_TZ).isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO feed_http_cache (feed_url, etag, last_modified, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(feed_url) DO UPDATE SET
+                    etag = excluded.etag,
+                    last_modified = excluded.last_modified,
+                    updated_at = excluded.updated_at
+                """,
+                (feed_url, (etag or "")[:400], (last_modified or "")[:200], now),
+            )
+            self._conn.commit()
+
     def existing_ids(self, source: str, source_ids: list[str]) -> set[str]:
         """已经入库的 source_id。调用方据此跳过抽取，避免重复消耗额度。"""
         wanted = [item for item in source_ids if item]
@@ -215,7 +264,7 @@ class NewsStore:
             return list(self._conn.execute(
                 """
                 SELECT i.source, i.source_id, i.published_at, i.author, i.title,
-                       i.clean_text, i.url, i.level, i.content_hash
+                       i.clean_text, i.url, i.level, i.content_hash, i.extra_json
                 FROM news_mentions m
                 JOIN news_items i ON i.id = m.item_id
                 WHERE m.kind = ? AND m.key = ? AND i.published_at >= ?
@@ -233,7 +282,7 @@ class NewsStore:
             return list(self._conn.execute(
                 f"""
                 SELECT DISTINCT i.source, i.published_at, i.author, i.title,
-                       i.clean_text, i.url, i.level
+                       i.clean_text, i.url, i.level, i.extra_json
                 FROM news_mentions m
                 JOIN news_items i ON i.id = m.item_id
                 WHERE m.kind = 'stock' AND m.key IN ({marks}) AND i.published_at >= ?
@@ -247,7 +296,7 @@ class NewsStore:
         with self._lock:
             rows = list(self._conn.execute(
                 """
-                SELECT id, source_id, published_at, title, clean_text, url
+                SELECT id, source_id, published_at, title, clean_text, url, extra_json
                 FROM news_items
                 WHERE source = ?
                 ORDER BY published_at DESC

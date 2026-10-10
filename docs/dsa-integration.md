@@ -63,7 +63,7 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 
 热门事件采集的资讯可以进入 DSA 情报库，供个股分析、情报页、大盘复盘和定时推送使用。不改 `vendor/daily_stock_analysis`。`dsa_bootstrap.py` 启动时加载同目录的 `news_bridge.py`，运行时放行情报源类型 `tsp`，并只允许访问配置好的 TSP feed 地址。
 
-各来源各建一个情报源：钉钉作文实时、知识星球纳指星球调研、ima爱分享、财联社、华尔街见闻、ETF领航者。每条资讯除市场范围外，按股票和板块再写一行，标签因此能被个股分析命中。另有「TSP热门候选」，大盘复盘合并新闻时插到前面。
+每个采集源各建一个情报源：钉钉作文实时、知识星球纳指星球调研、ima爱分享、财联社、华尔街见闻、ETF领航者、CNBC、MarketWatch、华尔街日报市场、彭博、SEC 8-K。每条资讯除市场范围外，按股票和板块再写一行，标签因此能被个股分析命中。另有「TSP热门候选」，大盘复盘合并新闻时插到前面。外文源只传标题和摘要。
 
 `NEWS_DSA_FEED_TOKEN` 留空、TSP 没开或网络失败时只记日志，DSA 照常启动。不打开 `NEWS_INTEL_AUTO_FETCH_ENABLED`。Docker 设置 `TSP_NEWS_BASE_URL=http://app:3018` 并只读挂载桥文件；本地脚本默认 `http://127.0.0.1:3018`。采集开关和宿主机步骤见 [news-sources.md](./news-sources.md)。
 

@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     strategy_run_all_first_return_s: float = 15.0
 
     # 资讯采集。来源默认关闭；页面偏好或 NEWS_<来源>_ENABLED 打开。
-    # ima 缺凭据、钉钉或知识星球缺群号时，即使打开也保持关闭。
+    # ima 缺凭据、钉钉或知识星球缺群号、SEC 缺带邮箱的 User-Agent 时，即使打开也保持关闭。
     ima_client_id: str = ""
     ima_api_key: str = ""
     ima_kb_id: str = ""
@@ -152,6 +152,13 @@ class Settings(BaseSettings):
     news_ima_enabled: str = ""
     news_dws_enabled: str = ""
     news_zsxq_enabled: str = ""
+    news_cnbc_enabled: str = ""
+    news_marketwatch_enabled: str = ""
+    news_wsj_enabled: str = ""
+    news_bloomberg_enabled: str = ""
+    news_sec_enabled: str = ""
+    # 例：TSP-News ops@example.com。不含邮箱时 SEC 来源保持未配置。
+    sec_user_agent: str = ""
     news_llm_extract: str = ""
     news_dws_group_id: str = ""
     news_zsxq_group_id: str = ""

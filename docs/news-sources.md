@@ -14,6 +14,11 @@
 | 财联社 | TSP 进程 | 电报。保留级别、个股和板块 |
 | 华尔街见闻 | TSP 进程 | 全球和 A 股快讯。保留标的、主题和热度 |
 | ETF领航者 | TSP 进程 | 每日 ETF 申购赎回。来源键 `etf_flow`。优先网易号，搜狗微信作备份 |
+| CNBC | TSP 进程 | 头条、市场 RSS。只存标题、摘要、链接和时间 |
+| MarketWatch | TSP 进程 | 头条 RSS。只存标题、摘要、链接和时间 |
+| 华尔街日报市场 | TSP 进程 | 市场 RSS。只存标题和摘要，不抓付费正文 |
+| 彭博 | TSP 进程 | 市场、科技 RSS。只存标题和摘要，不抓付费正文 |
+| SEC 8-K | TSP 进程 | 最新 8-K Atom。只存标题、摘要和申报链接 |
 
 钉钉和知识星球的登录态在宿主机，不在容器里。宿主机脚本把 JSON 写到 `data/news/inbox/`，TSP 再入库。不开放无鉴权的 HTTP 写入接口。
 
@@ -49,6 +54,8 @@ VISION_AI_MODEL=deepseek/deepseek-v4-flash-vision-exp
 
 进程如果在 09:00 之后才起来，当天补看一次，然后等到下一个 07:35。
 
+CNBC、MarketWatch、华尔街日报市场、彭博约 5 分钟一次，SEC 8-K 约 3 分钟一次。这两档固定间隔，不按 A 股交易时段加快或放慢。请求带上次响应的 `ETag` / `Last-Modified`，返回 304 时不再解析。采集只请求 feed 地址，不打开条目链接，也不保存 `content:encoded` 或 Atom `content`。
+
 ## 开关
 
 每个来源独立。页面上的开关写到 `data/user_data/preferences.json` 的 `news_sources`。环境变量优先，设了之后页面不能改：
@@ -60,9 +67,16 @@ NEWS_IMA_ENABLED=false
 NEWS_CLS_ENABLED=false
 NEWS_WSCN_ENABLED=false
 NEWS_ETF_FLOW_ENABLED=false
+NEWS_CNBC_ENABLED=false
+NEWS_MARKETWATCH_ENABLED=false
+NEWS_WSJ_ENABLED=false
+NEWS_BLOOMBERG_ENABLED=false
+NEWS_SEC_ENABLED=false
 ```
 
 ima 还要 `IMA_CLIENT_ID` 和 `IMA_API_KEY`，缺一则保持关闭。可选 `IMA_KB_ID`；留空时按知识库名称查找。
+
+SEC 8-K 还要 `SEC_USER_AGENT`，字符串里必须有联系邮箱，例如 `TSP-News ops@example.com`。没有邮箱时来源保持未配置，不会请求 sec.gov。这一批外文源没有 API key。
 
 钉钉群号和知识星球号留空表示未配置，对应来源无法开启：
 
@@ -73,7 +87,7 @@ NEWS_ZSXQ_GROUP_ID=
 
 登录失效时，若配置了 `DINGTALK_WEBHOOK_URL`（可选 `DINGTALK_SECRET`），6 小时内对同一来源只发一条提醒，正文不含资讯内容。
 
-可选 `NEWS_LLM_EXTRACT=true` 时，词典抽不到股票或板块才会调用现有 AI 客户端，每小时最多 10 次，并且只接受词典里已有的名称或代码。默认关闭。这是文本模型，和 ETF 申赎的 `VISION_AI_*` 不是同一套。
+可选 `NEWS_LLM_EXTRACT=true` 时，词典抽不到股票或板块才会调用现有 AI 客户端，每小时最多 10 次，并且只接受词典里已有的名称或代码。外文来源用同一次调用补一句中文摘要，模型只看到标题和 feed 摘要；同一次轮询最多处理 10 条新资讯，其余只存标题和摘要。默认关闭。这是文本模型，和 ETF 申赎的 `VISION_AI_*` 不是同一套。
 
 ## 宿主机采集
 
@@ -118,7 +132,7 @@ SQLite 在 `data/news/news.sqlite`，保留约 45 天。同一来源的 `source_
 
 - 增加情报源类型 `tsp`。
 - 只放行指向 `/api/news/dsa-feed`、且主机在允许名单里的地址（`localhost`、`127.0.0.1`、`::1`、`host.docker.internal`、`app`、`tsp`，以及 `TSP_NEWS_BASE_URL` 的主机）。
-- 为各采集源（含 ETF领航者）和「TSP热门候选」各建一个情报源。
+- 为每个采集源（含 ETF领航者和外文 RSS）和「TSP热门候选」各建一个情报源。外文源同样只传标题和摘要。
 - 每条资讯写成市场范围一行，再按股票（最多 8 个，规范代码如 `600519.SH`）和板块（最多 6 个）各写一行，个股分析才能按标签命中。
 - 情报源关闭时拒绝拉取，不把状态记成失败。写入后按 DSA 的 `news_intel_retention_days` 删过期行，返回值带最多 5 条 `sample_items`。
 - 大盘复盘合并本地情报时，把最多 4 条热门候选插到前面，避免电报占满 6 条窗口。

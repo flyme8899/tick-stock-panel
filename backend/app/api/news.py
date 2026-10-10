@@ -15,6 +15,8 @@ from app.news.service import (
 
 router = APIRouter(prefix="/api/news", tags=["news"])
 
+_FEED_SOURCE_PATTERN = "^(?:" + "|".join((*SOURCE_ORDER, "hot")) + ")$"
+
 
 class SourceToggle(BaseModel):
     enabled: bool
@@ -98,7 +100,7 @@ def update_sources(body: SourceUpdate):
 
 @router.get("/dsa-feed")
 def dsa_feed(
-    source: str = Query(..., pattern="dws|zsxq|ima|cls|wscn|etf_flow|hot"),
+    source: str = Query(..., pattern=_FEED_SOURCE_PATTERN),
     limit: int = Query(50, ge=1, le=50),
     header_token: str = Header("", alias="X-News-Feed-Token"),
 ):

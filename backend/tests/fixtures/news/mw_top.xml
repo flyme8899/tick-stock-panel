@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>MarketWatch Top Stories</title>
+    <item>
+      <title>Retail sales cool</title>
+      <link>https://www.marketwatch.com/story/retail-sales-cool</link>
+      <description>Spending slowed in September.</description>
+      <pubDate>Fri, 09 Oct 2026 13:00:00 GMT</pubDate>
+      <guid>mw-7</guid>
+    </item>
+  </channel>
+</rss>
