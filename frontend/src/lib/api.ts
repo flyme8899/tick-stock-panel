@@ -3393,20 +3393,27 @@ export const api = {
   miningRun: (runId: string) =>
     request<MiningRun>(`/api/backtest/mining/runs/${encodeURIComponent(runId)}`),
 
+  // 挖掘是同步计算型接口: /auto 要先跑完 L1 因子筛选 (实测约 158s) 才返回,
+  // 默认 30s 会先 abort, 用户看到「请求超时」而任务其实已在后台启动。
   miningAutoStart: (payload: MiningAutoStartPayload) =>
     request<MiningAutoStartResponse>('/api/backtest/mining/auto', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
     }),
 
   miningStart: (payload: MiningRequestV1) =>
     request<MiningRun>('/api/backtest/mining/runs', {
       method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
     }),
 
+  // 结果包含 factors/candidates/folds 等多份 parquet 的解析, 同样按计算型放宽。
   miningResult: (runId: string) =>
-    request<MiningResult>(`/api/backtest/mining/runs/${encodeURIComponent(runId)}/result`),
+    request<MiningResult>(`/api/backtest/mining/runs/${encodeURIComponent(runId)}/result`, {
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+    }),
 
   miningCancel: (runId: string) =>
     request<MiningRun>(`/api/backtest/mining/runs/${encodeURIComponent(runId)}/cancel`, {
