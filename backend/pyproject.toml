@@ -26,6 +26,10 @@ dependencies = [
     "pypinyin>=0.50",             # 股票名拼音首字母搜索 (同花顺式 payh → 平安银行)
     # TickFlow 官方 SDK
     "tickflow[all]>=0.1.23",
+    # A 股资金进出。版本钉死：efinance 个股账单、akshare 同花顺板块/两融/ETF/南向。
+    # 不随浮动版本改字段。测试不导入这两个包。
+    "efinance==0.5.9",
+    "akshare==1.19.1",
     # Scheduling
     "apscheduler>=3.10",
     # Config

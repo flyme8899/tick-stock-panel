@@ -604,6 +604,12 @@ def release_run_slot(owner: str | None = None) -> None:
         _run_slot_owner = None
 
 
+def run_slot_busy() -> bool:
+    """重任务槽是否被占用。资金进出用它让路，自己不抢这个槽。"""
+    with _run_slot_lock:
+        return _run_slot_owner is not None
+
+
 def _parse_utc(ts: str) -> datetime:
     """解析 start()/progress() 存的 "2026-07-04T12:00:00Z" 形式时间戳。"""
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))

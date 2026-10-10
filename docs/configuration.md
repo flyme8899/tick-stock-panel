@@ -187,6 +187,10 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 热门事件和 DSA 情报桥的变量、宿主机采集见 [news-sources.md](./news-sources.md)。`NEWS_DWS_ENABLED`、`NEWS_ZSXQ_ENABLED`、`NEWS_IMA_ENABLED`、`NEWS_CLS_ENABLED`、`NEWS_WSCN_ENABLED`、`NEWS_ETF_FLOW_ENABLED`、`NEWS_CNBC_ENABLED`、`NEWS_MARKETWATCH_ENABLED`、`NEWS_WSJ_ENABLED`、`NEWS_BLOOMBERG_ENABLED`、`NEWS_SEC_ENABLED` 默认留空，来源关闭。`NEWS_DSA_FEED_TOKEN` 留空时 DSA 不拉取。ima 需要 `IMA_CLIENT_ID` 与 `IMA_API_KEY`。ETF 申赎表格用 `VISION_AI_API_KEY`（可选 `VISION_AI_BASE_URL`、`VISION_AI_MODEL`，默认 `deepseek/deepseek-v4-flash-vision-exp`，备选 `glm-5.3-flash` 与 `mimo-v2.6-flash`），不复用 `AI_API_KEY`。表格 OCR 保持思考，`max_tokens` 至少 8192。只有非表格的短视觉请求才按模型关掉思考。SEC 8-K 需要带联系邮箱的 `SEC_USER_AGENT`，否则不会请求 sec.gov。CNBC、MarketWatch、华尔街日报和彭博不需要 API key，只存标题和摘要。
 
+## A 股资金进出（可选）
+
+个股账单、板块资金、两融、ETF 份额、南向和龙虎榜备份。代码默认关闭。本仓库 `.env.example` 里为本 HK 部署写了打开值，复制到 `.env` 后才会拉数。字段、时刻和禁止使用的接口见 [fund-flow.md](./fund-flow.md)。妙想密钥是 `MX_APIKEY`，留空则不补个股。
+
 ## 配置优先级
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`

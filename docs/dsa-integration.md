@@ -83,6 +83,8 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 
 `NEWS_DSA_FEED_TOKEN` 留空、TSP 没开或网络失败时只记日志，DSA 照常启动。不打开 `NEWS_INTEL_AUTO_FETCH_ENABLED`。Docker 设置 `TSP_NEWS_BASE_URL=http://app:3018` 并只读挂载桥文件；本地脚本默认 `http://127.0.0.1:3018`。采集开关和宿主机步骤见 [news-sources.md](./news-sources.md)。
 
+同一启动钩子还会加载 `fund_flow_bridge.py`。令牌和主机与资讯桥相同，读取 `GET /api/fund-flow/dsa-context`，把已落盘的主力净流入、板块排名和南向净流入插到大盘复盘新闻前面。没有数据或请求失败时不插入。资金进出本身的开关见 [fund-flow.md](./fund-flow.md)。
+
 ## 定时分析
 
 不使用 GitHub Actions。每日任务由 sidecar 进程内的调度器执行：`python main.py --serve-only` 在 `SCHEDULE_ENABLED=true` 时会恢复任务，但不会在启动时立刻分析。

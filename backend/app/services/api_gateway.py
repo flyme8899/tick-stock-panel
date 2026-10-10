@@ -48,6 +48,12 @@ _RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/news/hot", "read:analysis"),
     ("GET", "/api/news/messages", "read:analysis"),
     ("GET", "/api/news/stocks", "read:analysis"),
+    ("GET", "/api/fund-flow/health", "read:analysis"),
+    ("GET", "/api/fund-flow/board", "read:analysis"),
+    ("GET", "/api/fund-flow/stock/", "read:analysis"),
+    ("GET", "/api/fund-flow/sectors", "read:analysis"),
+    ("GET", "/api/fund-flow/margin", "read:analysis"),
+    ("GET", "/api/fund-flow/etf-shares", "read:analysis"),
     # run:backtest — 触发计算任务
     ("POST", "/api/screener/run", "run:backtest"),
     ("POST", "/api/screener/run_preset", "run:backtest"),

@@ -55,25 +55,37 @@ def hot(
         baseline_days=baseline_days,
         limit=limit,
     )
+    candidates = [
+        {
+            "kind": item.kind,
+            "key": item.key,
+            "name": item.name,
+            "score": item.score,
+            "story_count": item.story_count,
+            "effective_mentions": item.effective_mentions,
+            "sources": list(item.sources),
+            "growth": item.growth,
+            "baseline_effective": item.baseline_effective,
+        }
+        for item in rows
+    ]
     return {
         "kind": kind,
         "window_hours": window_hours,
         "baseline_days": baseline_days,
-        "candidates": [
-            {
-                "kind": item.kind,
-                "key": item.key,
-                "name": item.name,
-                "score": item.score,
-                "story_count": item.story_count,
-                "effective_mentions": item.effective_mentions,
-                "sources": list(item.sources),
-                "growth": item.growth,
-                "baseline_effective": item.baseline_effective,
-            }
-            for item in rows
-        ],
+        "candidates": _attach_fund_flow(candidates),
     }
+
+
+def _attach_fund_flow(candidates: list[dict]) -> list[dict]:
+    """热门候选带上资金字段。读失败时保持原列表，页面仍能打开。"""
+    try:
+        from app.config import settings
+        from app.fund_flow.factors import annotate_hot
+
+        return annotate_hot(candidates, settings.data_dir)
+    except Exception:  # noqa: BLE001
+        return candidates
 
 
 @router.get("/messages")

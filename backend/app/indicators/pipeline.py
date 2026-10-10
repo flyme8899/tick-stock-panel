@@ -681,6 +681,7 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
     # 历史回看注入会引入未来数据 (CONTRIBUTING §5.3)。
     from app.factors import ext_factors
     df = ext_factors.attach_ext_columns(df, include_snapshot=False)
+    df = _attach_fund_flow(df, include_rank=False)
     # 条件引用的注册表因子列先复用评分物化管线补算 (虚拟/自定义/复合均可)。
     from app.strategy import custom_signals
     exprs = _get_custom_signal_exprs()
@@ -2282,6 +2283,7 @@ def compute_enriched_today(
     # 帧缓存由 ext_factors 按分区/文件签名管理, 写入端变更自动失效。
     from app.factors import ext_factors
     df = ext_factors.attach_ext_columns(df, include_snapshot=True)
+    df = _attach_fund_flow(df, include_rank=True)
 
     # 自定义信号（日级实时路径同样注入, 但不支持日期偏移条件 → allow_shift=False）
     # 复用模块级缓存 _custom_signal_exprs_today: 增量热路径每秒级执行,
@@ -2485,3 +2487,19 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     df = df.drop([c for c in cleanup if c in df.columns])
 
     return df
+
+
+def _attach_fund_flow(df, *, include_rank: bool):
+    """资金因子列。没有落盘或读取失败时原样返回，不把缺失写成 0。
+
+    目录不存在时不导入资金模块。行情热路径在没启用这套数据时只做一次存在性检查。
+    """
+    try:
+        if not (Path(settings.data_dir) / "fund_flow").is_dir():
+            return df
+        from app.fund_flow.factors import attach_columns
+
+        return attach_columns(df, include_rank=include_rank)
+    except Exception:  # noqa: BLE001
+        logger.debug("资金因子未并入行情帧", exc_info=True)
+        return df

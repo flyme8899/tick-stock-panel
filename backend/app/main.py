@@ -22,6 +22,7 @@ from app.api import (
     events,
     factors,
     financials,
+    fund_flow,
     indices,
     intraday,
     kline,
@@ -251,6 +252,16 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("news scheduler init failed: %s", e)
 
+    # 资金进出。开关默认关，线程起来也不出网。不占界面上的数据任务槽。
+    try:
+        from app.fund_flow.scheduler import get_worker
+
+        fund_flow_worker = get_worker()
+        fund_flow_worker.start()
+        app.state.fund_flow_worker = fund_flow_worker
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fund-flow worker init failed: %s", e)
+
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
     app.state.watchdog = start_watchdog(app.state, repo)
@@ -391,6 +402,9 @@ async def _application_lifespan(app: FastAPI):
         news_sched = getattr(app.state, "news_scheduler", None)
         if news_sched:
             news_sched.stop()
+        fund_flow_worker = getattr(app.state, "fund_flow_worker", None)
+        if fund_flow_worker:
+            fund_flow_worker.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()
@@ -484,6 +498,14 @@ async def auth_middleware(request: Request, call_next):
             return await call_next(request)
         return JSONResponse(status_code=404, content={"detail": "未启用"})
 
+    # DSA 读取本地资金进出摘要。令牌与资讯 feed 相同，不对就 404。
+    if path == "/api/fund-flow/dsa-context":
+        from app.news.config import feed_matches
+
+        if feed_matches(request.headers.get("x-news-feed-token", "")):
+            return await call_next(request)
+        return JSONResponse(status_code=404, content={"detail": "未启用"})
+
     # ── API Token 通道 (外部调用方; 与密码会话并行, 见 open-platform-plan §4) ──
     authz = request.headers.get("authorization", "")
     if authz.startswith("Bearer "):
@@ -549,6 +571,7 @@ app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(news.router)
+app.include_router(fund_flow.router)
 app.include_router(settings_api.router)
 app.include_router(strategy.router)
 app.include_router(signals.router)

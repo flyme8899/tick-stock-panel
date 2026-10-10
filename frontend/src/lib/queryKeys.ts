@@ -148,6 +148,7 @@ export const QK = {
   dsaQuantEvidence:     ['dsa-quant-evidence'] as const,
   dsaUpstream:          (key: string) => ['dsa-upstream', key] as const,
   newsHot:              (kind: string) => ['news-hot', kind] as const,
+  fundFlowBoard:        ['fund-flow-board'] as const,
   newsMessages:         (kind: string, key: string) => ['news-messages', kind, key] as const,
   newsHealth:           ['news-health'] as const,
   newsPush:             ['news-push'] as const,

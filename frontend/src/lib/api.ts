@@ -2181,6 +2181,38 @@ export interface SectorRotationUniverseItem {
   excluded?: boolean
 }
 
+export interface FundFlowAmountRow {
+  trade_date?: string | null
+  name?: string | null
+  symbol?: string | null
+  code?: string | null
+  net_inflow?: number | null
+  rank?: number | null
+  main_net?: number | null
+  large_net?: number | null
+  super_net?: number | null
+  ff_main_net_5d?: number | null
+  market?: string | null
+  margin_balance?: number | null
+  short_balance?: number | null
+  net_flow?: number | null
+  shares?: number | null
+  prev_shares?: number | null
+  share_change?: number | null
+  broad?: string | null
+  flow_net?: number | null
+}
+
+export interface FundFlowBoard {
+  industry: { trade_date: string | null; snapshot: string | null; items: FundFlowAmountRow[] }
+  concept: { trade_date: string | null; snapshot: string | null; items: FundFlowAmountRow[] }
+  stocks_today: { trade_date: string | null; items: FundFlowAmountRow[] }
+  stocks_5d: { trade_date: string | null; items: FundFlowAmountRow[] }
+  margin: { items: FundFlowAmountRow[] }
+  southbound: { items: FundFlowAmountRow[] }
+  etf_shares: { trade_date: string | null; prev_trade_date: string | null; items: FundFlowAmountRow[] }
+}
+
 export interface NewsCandidate {
   kind: 'stock' | 'sector'
   key: string
@@ -2191,6 +2223,12 @@ export interface NewsCandidate {
   sources: string[]
   growth: number
   baseline_effective: number
+  fund_flow?: {
+    main_net_5d?: number | null
+    sector_net_inflow_rank?: number | null
+    sector_net_inflow?: number | null
+    sector_name?: string | null
+  } | null
 }
 
 export interface NewsMessage {
@@ -4130,6 +4168,8 @@ export const api = {
       timeoutMs: null,
       body: JSON.stringify(payload),
     }),
+
+  fundFlowBoard: () => request<FundFlowBoard>('/api/fund-flow/board'),
 
   newsHot: (kind: 'all' | 'stock' | 'sector' = 'all') =>
     request<{ kind: string; window_hours: number; baseline_days: number; candidates: NewsCandidate[] }>(

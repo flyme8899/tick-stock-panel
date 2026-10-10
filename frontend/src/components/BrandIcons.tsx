@@ -195,6 +195,16 @@ export const IconIndices = make(
   </>,
 )
 
+/** 资金 — 基线上的净流入柱 */
+export const IconFund = make(
+  <>
+    <path d="M3 19.5h18" />
+    <rect x="5" y="12" width="3.5" height="7.5" fill="currentColor" stroke="none" />
+    <rect x="10.25" y="7" width="3.5" height="12.5" fill="currentColor" stroke="none" />
+    <rect x="15.5" y="3.5" width="3.5" height="16" />
+  </>,
+)
+
 /** 热门事件 — 三档升温柱 */
 export const IconHot = make(
   <>
