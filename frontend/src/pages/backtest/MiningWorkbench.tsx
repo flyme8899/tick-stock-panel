@@ -556,8 +556,12 @@ export function MiningWorkbench() {
       return
     }
     if (!availabilityQuery.data.eligible) {
+      const a = availabilityQuery.data
+      const backfill = a.suggested_backfill_value && a.suggested_backfill_unit
+        ? `；可在数据页「向前扩展历史」补约 ${a.suggested_backfill_value}${a.suggested_backfill_unit === 'month' ? ' 个月' : ' 年'}`
+        : ''
       toast(
-        `${PROFILE_LABELS[draft.profile]}至少需要 ${availabilityQuery.data.required_bars} 个交易日，当前范围仅 ${availabilityQuery.data.trading_bars} 个`,
+        `${PROFILE_LABELS[draft.profile]}至少需要 ${a.required_bars} 个交易日，当前范围仅 ${a.trading_bars} 个（缺 ${a.deficit_bars} 个）${backfill}`,
         'error',
       )
       return
@@ -718,7 +722,24 @@ export function MiningWorkbench() {
                   </button>
                 )}
                 {!availabilityQuery.data.eligible && !availabilityQuery.data.suggested_start && draft.profile !== 'exploratory' && (
-                  <div>本地历史数据不足；可改用探索档，系统不会自动降档。</div>
+                  <div>
+                    本地历史数据不足，缺少 {availabilityQuery.data.deficit_bars} 个交易日。
+                    {availabilityQuery.data.suggested_backfill_value && availabilityQuery.data.suggested_backfill_unit ? (
+                      <>
+                        {' '}
+                        <Link
+                          to="/data"
+                          className="text-accent hover:underline"
+                        >
+                          去数据页「向前扩展历史」补约 {availabilityQuery.data.suggested_backfill_value}
+                          {availabilityQuery.data.suggested_backfill_unit === 'month' ? ' 个月' : ' 年'}
+                        </Link>
+                        ，补完后重新核验即可启用{PROFILE_LABELS[draft.profile]}档。
+                      </>
+                    ) : (
+                      ' 也可改用探索档（系统不会自动降档）。'
+                    )}
+                  </div>
                 )}
               </div>
             )}

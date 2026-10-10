@@ -305,6 +305,9 @@ def test_availability_enforces_exact_profile_boundaries(
         "effective_start": dates[0].isoformat(),
         "effective_end": dates[-1].isoformat(),
         "suggested_start": dates[0].isoformat(),
+        "deficit_bars": 0,
+        "suggested_backfill_value": None,
+        "suggested_backfill_unit": None,
     }
     assert insufficient.status_code == 200
     assert insufficient.json()["trading_bars"] == required_bars - 1
@@ -330,7 +333,8 @@ def test_start_rejects_balanced_625_bar_range_before_creating_run(tmp_path):
     assert response.status_code == 400
     assert response.json()["detail"] == (
         "balanced mining requires at least 786 enriched trading bars for 3 outer "
-        "folds; effective range 2024-01-15 to 2025-09-30 has 625"
+        "folds; effective range 2024-01-15 to 2025-09-30 has 625 "
+        "(缺 161 个交易日)"
     )
     assert store.list_runs() == []
 
@@ -635,3 +639,66 @@ def test_start_returns_400_with_guidance_while_enriched_publication_active(
 
     assert response.status_code == 400
     assert "数据更新" in response.json()["detail"]
+
+
+def test_availability_reports_deficit_and_backfill_hint_when_history_short(
+    tmp_path,
+):
+    """本地历史物理不足 (非区间选窄) 时, 应报出缺口并给出补历史建议。
+
+    回归场景: 生产环境仅 243 天日 K 时, balanced 档提示「改用探索档」却
+    不提数据页已有的「向前扩展历史」功能, 用户被留在死胡同。
+    """
+    # 用干净的 app (不经 _client, 避免预置的 219 天污染日期范围)。
+    _write_enriched_dates(tmp_path, 243, first=date(2025, 10, 9))
+    app = FastAPI()
+    app.include_router(router)
+    app.state.repo = _Repo(tmp_path)
+    app.state.mining_manager = _Manager(tmp_path)
+    app.state.strategy_engine = SimpleNamespace()
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/backtest/mining/availability",
+        params={"asset_type": "stock", "budget_profile": "balanced"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["eligible"] is False
+    assert body["trading_bars"] == 243
+    assert body["required_bars"] == 786
+    assert body["deficit_bars"] == 786 - 243
+    # 543 个交易日缺口 → 按 21 交易日/月向上取整 ≈ 26 个月
+    assert body["suggested_backfill_value"] == 26
+    assert body["suggested_backfill_unit"] == "month"
+    # 区间未选窄 (全范围查询), 但仍缺历史 → 不应给区间建议
+    assert body["suggested_start"] is None
+
+
+def test_availability_no_backfill_hint_when_range_narrowed(tmp_path):
+    """区间人为选窄导致不足时, 不该建议补历史 (数据其实够), 只给区间建议。"""
+    dates = _write_enriched_dates(tmp_path, 900, first=date(2023, 1, 2))
+    app = FastAPI()
+    app.include_router(router)
+    app.state.repo = _Repo(tmp_path)
+    app.state.mining_manager = _Manager(tmp_path)
+    app.state.strategy_engine = SimpleNamespace()
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/backtest/mining/availability",
+        params={
+            "asset_type": "stock",
+            "budget_profile": "balanced",
+            "start": dates[-100].isoformat(),
+            "end": dates[-1].isoformat(),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["eligible"] is False
+    assert body["deficit_bars"] > 0
+    assert body["suggested_backfill_value"] is None
+    assert body["suggested_backfill_unit"] is None
