@@ -149,7 +149,7 @@ uv pip install --python ~/.venvs/tsp-collector/bin/python pydantic pydantic-sett
 
 容器默认不再以 root 运行。已经用 root 写过数据目录的机器，切换前执行一次 `sudo chown -R 1000:1000 data`，让容器用户和上面的 `ubuntu` 用户是同一个 uid。步骤和回滚见 [deployment.md](./deployment.md)。
 
-改完属主或重建虚拟环境后跑一次预检。`data/news` 不可写、采集器 Python 低于 3.10，或 `data/` 里有不属于 `APP_UID`/`APP_GID` 的文件时，退出码不是 0：
+改完属主或重建虚拟环境后跑一次预检。`data/news` 不可写、已经存在的 `data/dsa` 不可写、`.env` 属主不是 `APP_UID`/`APP_GID`、采集器 Python 低于 3.10，或 `data/` 里有不属于这对 uid/gid 的文件时，退出码不是 0：
 
 ```bash
 python3 scripts/deploy_preflight.py --data-dir ./data

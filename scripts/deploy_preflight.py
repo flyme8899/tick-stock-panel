@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """部署前检查 data/ 能否被容器用户和宿主机采集器写。
 
-检查三件事，任一失败就以退出码 1 结束：
+检查这些事，任一失败就以退出码 1 结束：
 
 1. data/ 和 data/news 对 APP_UID/APP_GID 可写。采集器要写收件箱，容器要写库。
-2. ~/.venvs/tsp-collector 的 Python 不低于 3.10。
-3. data/ 下面没有不属于这对 uid/gid 的文件或目录（属主漂移）。
+2. data/dsa 存在时同样可写。不存在只提示，不拦住还没启用 dsa 的部署。
+3. 仓库根目录的 .env 属主是这对 uid/gid，并且可写。dsa 会把定时设置写回去。
+4. ~/.venvs/tsp-collector 的 Python 不低于 3.10。
+5. data/ 下面没有不属于这对 uid/gid 的文件或目录（属主漂移）。data/dsa 在这棵树里。
 
 权限按属主、主组、other 三位判断，不看附加组，也不看 ACL。
-当前进程的 uid 正好是目标用户时，会再实际写一个临时文件。
+当前进程的 uid 正好是目标用户时，会再实际写一个临时文件。不改 .env。
 3.10 可以运行，但会提示推荐按 docs/news-sources.md 重建为 3.11。
 """
 from __future__ import annotations
@@ -140,6 +142,54 @@ def _mode_allows(path: Path, uid: int, gid: int, *, write: bool) -> bool:
     return (mode & mask) == mask
 
 
+def file_writable(path: Path, uid: int, gid: int) -> bool:
+    """文件是否允许 uid/gid 写入。不要求执行位。"""
+    st = path.stat()
+    mode = stat.S_IMODE(st.st_mode)
+    if st.st_uid == uid:
+        mask = stat.S_IWUSR
+    elif st.st_gid == gid:
+        mask = stat.S_IWGRP
+    else:
+        mask = stat.S_IWOTH
+    return bool(mode & mask)
+
+
+def env_file_problem(path: Path, uid: int, gid: int) -> str | None:
+    """`.env` 必须属于容器用户，dsa 才能写回定时设置。"""
+    if not path.is_file():
+        return (
+            f"{path} 不存在或不是文件。"
+            f"dsa 会把定时设置写回这份文件，属主需要是 {uid}:{gid}。"
+        )
+    st = path.stat()
+    if st.st_uid != uid or st.st_gid != gid:
+        return (
+            f"{path} 属主是 {st.st_uid}:{st.st_gid}，期望 {uid}:{gid}。"
+            f"可执行 sudo chown {uid}:{gid} {path}"
+        )
+    if not file_writable(path, uid, gid):
+        return f"{path} 对 uid {uid}（gid {gid}）不可写。决策页保存定时设置会写回该文件。"
+    return None
+
+
+def dsa_data_problems(data_dir: Path, uid: int, gid: int) -> tuple[list[str], list[str]]:
+    """data/dsa 存在时必须可写。属主漂移由整棵 data/ 的扫描负责。"""
+    dsa = data_dir / "dsa"
+    if not dsa.exists():
+        return [], [
+            f"{dsa} 不存在。启用 dsa 前先创建该目录，并执行 "
+            f"sudo chown -R {uid}:{gid} {data_dir}。"
+            f".env 的属主也要是 {uid}:{gid}。"
+        ]
+    if not dsa.is_dir():
+        return [f"{dsa} 不是目录"], []
+    ok, detail = directory_writable(dsa, uid, gid)
+    if not ok:
+        return [detail], []
+    return [], []
+
+
 def directory_writable(path: Path, uid: int, gid: int) -> tuple[bool, str]:
     """目录是否允许 uid/gid 创建文件。当前进程就是该 uid 时，实际写一次。"""
     if not path.is_dir():
@@ -192,6 +242,7 @@ def collect_problems(
     gid: int,
     python: Path,
     version: tuple[int, int, int] | None = None,
+    env_file: Path | None = None,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -214,6 +265,11 @@ def collect_problems(
             if note:
                 warnings.append(note)
 
+    if env_file is not None:
+        problem = env_file_problem(env_file, uid, gid)
+        if problem:
+            errors.append(problem)
+
     if not data_dir.is_dir():
         errors.append(f"{data_dir} 不存在。创建后执行 sudo chown -R {uid}:{gid} {data_dir}")
         return errors, warnings
@@ -231,6 +287,9 @@ def collect_problems(
         ok, detail = directory_writable(news, uid, gid)
         if not ok:
             errors.append(detail)
+    dsa_errors, dsa_warnings = dsa_data_problems(data_dir, uid, gid)
+    errors.extend(dsa_errors)
+    warnings.extend(dsa_warnings)
     errors.extend(ownership_errors(data_dir, uid, gid))
     return errors, warnings
 
@@ -245,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--uid", type=int, default=None, help="容器和采集器的 uid，默认 APP_UID 或 1000")
     parser.add_argument("--gid", type=int, default=None, help="容器和采集器的 gid，默认 APP_GID 或 1000")
+    parser.add_argument("--env-file", default="", help="要检查属主的 .env，默认 <仓库>/.env")
     args = parser.parse_args(argv)
 
     repo = repo_root()
@@ -271,7 +331,16 @@ def main(argv: list[str] | None = None) -> int:
             dotenv.get("TSP_COLLECTOR_PYTHON"),
         )
 
-    errors, warnings = collect_problems(data_dir, uid=uid, gid=gid, python=python)
+    if args.env_file:
+        env_file = Path(args.env_file)
+        if not env_file.is_absolute():
+            env_file = repo / env_file
+    else:
+        env_file = repo / ".env"
+
+    errors, warnings = collect_problems(
+        data_dir, uid=uid, gid=gid, python=python, env_file=env_file,
+    )
     for note in warnings:
         print(f"注意: {note}")
     if errors:

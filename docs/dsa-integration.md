@@ -39,6 +39,38 @@ sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis
 
 Docker 服务带健康检查：容器内 `curl -fsS http://127.0.0.1:8000/api/v1/health`。这个接口免登录，HTTP 失败或连不上都会让容器变为 unhealthy。决策页徽标每 30 秒请求 TSP 的 `/api/dsa/status`，悬停可看到同样的探测结果。
 
+## 运行用户
+
+dsa 和 app 使用同一对 `user: ${APP_UID:-1000}:${APP_GID:-1000}`。以前只有 app 降权，sidecar 仍是 root，每次写 `data/dsa/cache/akshare_name_map.json` 都会把宿主机文件重新变成 root。`chown` 清不掉。
+
+已经跑过 root 版 sidecar 的机器，先停容器。生产环境 `APP_UID=1000`、`APP_GID=1001`（`id -g ubuntu`），执行：
+
+```bash
+sudo chown -R 1000:1001 data
+sudo chown 1000:1001 .env
+chmod 600 .env
+python3 scripts/deploy_preflight.py --data-dir ./data
+docker compose --profile dsa up -d --build --force-recreate
+```
+
+数字要和 `.env` 里的 `APP_UID` / `APP_GID` 一致。默认示例仍是 `1000:1000`。预检会检查 `data/dsa` 可写，以及 `.env` 的属主。`data/dsa` 还不存在时只提示，不因此失败。
+
+容器里实际会写的位置：
+
+| 路径 | 宿主机 | 说明 |
+| --- | --- | --- |
+| `/app/data` | `./data/dsa` | SQLite（`stock_analysis.db` 及 `-wal`/`-shm`）、`cache/akshare_name_map.json`、`cache/stocks.index.json`、选股缓存、`.admin_password_hash`、`.session_secret` |
+| `/app/logs` | 不挂载 | `LOG_DIR`。目录在镜像里是 `1777`，日志留在容器层，不再落到宿主机变成 root 文件 |
+| `/app/reports` | 不挂载 | 研报回退文件。同样只在容器层 |
+| `/app/config/.env` | `./.env` | 可写单文件挂载。保存定时设置时先写同目录的 `.env.tmp`，挂载点不能原子替换时再原地改写。`/app/config` 是 `1777` |
+| `/opt/tsp/*.py` | 仓库里的桥接文件 | 只读。`PYTHONDONTWRITEBYTECODE=1`，不会在旁边写 `__pycache__` |
+| `/home/dsa` | 不挂载 | `HOME`。AkShare 的 `~/tk.csv`、Longbridge 的 `~/.longbridge`、fontconfig 用户缓存都在这里 |
+| `MPLCONFIGDIR=/home/dsa/.config/matplotlib` | 不挂载 | matplotlib 配置和字体缓存。`XDG_CACHE_HOME`、`XDG_CONFIG_HOME` 也指向 `/home/dsa` |
+| `/tmp` | 不挂载 | `TMPDIR`。分享图、临时目录走这里 |
+| efinance 包内 `data/` | 不挂载 | `import efinance` 会创建该目录并写 `search-cache-v2.json`。镜像构建时把这个目录设成 `1777` |
+
+`/root` 保持基础镜像的 `0700`，非 root 进不去，所以上面这些缓存不放在那里。回滚方式和 app 相同：把 `APP_UID` / `APP_GID` 改成 `0`，再 `docker compose --profile dsa up -d --force-recreate`。见 [deployment.md](./deployment.md)。
+
 ## ETF 轮动
 
 决策页「ETF 轮动」里的「运行轮动」调用 `POST /api/dsa/jobs/etf-rotation`。命令固定为 `python main.py --etf-rotation --no-notify`，模式、分桶和成本只读 `ETF_ROTATION_*`，请求不能改参数。

@@ -531,7 +531,7 @@ docker compose up --build
 <details>
 <summary><b>🐳 Codex CLI 挂载、版本覆盖与插件开关(点开查看)</b></summary>
 
-Compose 以 `APP_UID` / `APP_GID`（默认 `1000:1000`）运行容器，不再使用 root。已经用 root 写过 `data/` 的机器，先执行一次 `sudo chown -R 1000:1000 data`。说明和回滚见 [docs/deployment.md](./docs/deployment.md)。
+Compose 以 `APP_UID` / `APP_GID`（默认 `1000:1000`）运行 app 和 dsa，不再使用 root。已经用 root 写过 `data/` 的机器，先执行一次 `sudo chown -R 1000:1000 data`，并把 `.env` 交给同一对 uid/gid。生产机 gid 是 1001 时用 `sudo chown -R 1000:1001 data`。说明和回滚见 [docs/deployment.md](./docs/deployment.md)。
 
 镜像内置固定版本的 **Codex CLI**，Compose 会将主机 `${HOME}/.codex` 只读挂载到容器内的 `/codex-home`，因此主机需先完成 Codex 登录。若主机 Codex 使用 loopback local-access provider，容器会保留实际端口并自动将主机名映射为 `host.docker.internal`。需要覆盖镜像内版本时可设置构建参数：
 

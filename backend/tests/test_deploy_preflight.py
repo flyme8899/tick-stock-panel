@@ -21,10 +21,20 @@ _SPEC.loader.exec_module(deploy_preflight)
 def _layout(tmp_path: Path, mode: int = 0o755) -> Path:
     data = tmp_path / "data"
     news = data / "news"
+    dsa = data / "dsa"
     news.mkdir(parents=True)
+    dsa.mkdir()
     data.chmod(mode)
     news.chmod(mode)
+    dsa.chmod(mode)
     return data
+
+
+def _env_file(tmp_path: Path, mode: int = 0o600) -> Path:
+    path = tmp_path / ".env"
+    path.write_text("APP_UID=1000\n", encoding="utf-8")
+    path.chmod(mode)
+    return path
 
 
 def test_version_error_bounds():
@@ -148,6 +158,8 @@ def test_cli_exits_nonzero_on_drift(tmp_path: Path):
             "4242",
             "--python",
             sys.executable,
+            "--env-file",
+            str(_env_file(tmp_path)),
         ],
         capture_output=True,
         text=True,
@@ -172,6 +184,8 @@ def test_cli_exits_zero_when_layout_matches(tmp_path: Path):
             str(os.getgid()),
             "--python",
             sys.executable,
+            "--env-file",
+            str(_env_file(tmp_path)),
         ],
         capture_output=True,
         text=True,
@@ -181,11 +195,111 @@ def test_cli_exits_zero_when_layout_matches(tmp_path: Path):
     assert "部署预检通过" in proc.stdout
 
 
+def test_preflight_warns_when_dsa_dir_missing(tmp_path: Path):
+    data = _layout(tmp_path)
+    (data / "dsa").rmdir()
+    errors, warnings = deploy_preflight.collect_problems(
+        data,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        python=Path(sys.executable),
+        version=(3, 11, 0),
+        env_file=_env_file(tmp_path),
+    )
+    assert errors == []
+    assert any(str(data / "dsa") in item and "不存在" in item for item in warnings)
+
+
+def test_preflight_rejects_unwritable_dsa(tmp_path: Path):
+    data = _layout(tmp_path)
+    dsa = data / "dsa"
+    dsa.chmod(0o555)
+    errors, _warnings = deploy_preflight.collect_problems(
+        data,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        python=Path(sys.executable),
+        version=(3, 11, 0),
+    )
+    assert any("不可写" in item and str(dsa) in item for item in errors)
+
+
+def test_preflight_flags_dsa_cache_owner(tmp_path: Path):
+    data = _layout(tmp_path, mode=0o777)
+    cache = data / "dsa" / "cache"
+    cache.mkdir()
+    cache.chmod(0o777)
+    name_map = cache / "akshare_name_map.json"
+    name_map.write_text("{}", encoding="utf-8")
+    errors, _warnings = deploy_preflight.collect_problems(
+        data,
+        uid=4242,
+        gid=1001,
+        python=Path(sys.executable),
+        version=(3, 11, 0),
+    )
+    text = "\n".join(errors)
+    assert "akshare_name_map.json" in text
+    assert "期望 4242:1001" in text
+
+
+def test_preflight_rejects_env_owner_and_mode(tmp_path: Path):
+    data = _layout(tmp_path)
+    env = _env_file(tmp_path)
+    mismatch, _warnings = deploy_preflight.collect_problems(
+        data,
+        uid=4242,
+        gid=1001,
+        python=Path(sys.executable),
+        version=(3, 11, 0),
+        env_file=env,
+    )
+    assert any("期望 4242:1001" in item and str(env) in item for item in mismatch)
+
+    readonly = _env_file(tmp_path, mode=0o400)
+    errors, _warnings = deploy_preflight.collect_problems(
+        data,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        python=Path(sys.executable),
+        version=(3, 11, 0),
+        env_file=readonly,
+    )
+    assert any("不可写" in item and str(readonly) in item for item in errors)
+
+    missing, _warnings = deploy_preflight.collect_problems(
+        data,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        python=Path(sys.executable),
+        version=(3, 11, 0),
+        env_file=tmp_path / "missing.env",
+    )
+    assert any("不存在" in item and "missing.env" in item for item in missing)
+
+
+def test_preflight_accepts_matching_env_owner(tmp_path: Path):
+    data = _layout(tmp_path)
+    errors, warnings = deploy_preflight.collect_problems(
+        data,
+        uid=os.getuid(),
+        gid=os.getgid(),
+        python=Path(sys.executable),
+        version=(3, 11, 0),
+        env_file=_env_file(tmp_path),
+    )
+    assert errors == []
+    assert warnings == []
+
+
 def test_compose_runs_as_configurable_user_outside_root():
     compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dsa_dockerfile = (_ROOT / "vendor" / "daily_stock_analysis" / "Dockerfile.tsp").read_text(
+        encoding="utf-8",
+    )
     example = (_ROOT / ".env.example").read_text(encoding="utf-8")
-    assert 'user: "${APP_UID:-1000}:${APP_GID:-1000}"' in compose
+    assert compose.count('user: "${APP_UID:-1000}:${APP_GID:-1000}"') == 2
     assert "/codex-home:ro" in compose
     assert ":/root/.codex" not in compose
     assert "HOME=/home/app" in compose
@@ -199,11 +313,25 @@ def test_compose_runs_as_configurable_user_outside_root():
     assert 'CMD ["uv", "run", "--no-sync"' in dockerfile
     assert "APP_UID=1000" in example
     assert "APP_GID=1000" in example
+    assert "HOME=/home/dsa" in compose
+    assert "MPLCONFIGDIR=/home/dsa/.config/matplotlib" in compose
+    assert "XDG_CACHE_HOME=/home/dsa/.cache" in compose
+    assert "PYTHONDONTWRITEBYTECODE=1" in compose
+    assert "ENV_FILE=/app/config/.env" in compose
+    assert "./.env:/app/config/.env" in compose
+    assert "LOG_DIR=/app/logs" in compose
+    assert "/opt/tsp/dsa_bootstrap.py:ro" in compose
+    assert "HOME=/home/dsa" in dsa_dockerfile
+    assert "MPLCONFIGDIR=/home/dsa/.config/matplotlib" in dsa_dockerfile
+    assert "efinance.config import DATA_DIR" in dsa_dockerfile
+    assert "chmod 1777" in dsa_dockerfile
+    assert "sudo chown -R 1000:1001 data" in example
 
 
 def test_docs_cover_venv_rebuild_chown_and_preflight():
     news = (_ROOT / "docs" / "news-sources.md").read_text(encoding="utf-8")
     deploy = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    dsa = (_ROOT / "docs" / "dsa-integration.md").read_text(encoding="utf-8")
     for text in (news, deploy):
         assert "scripts/deploy_preflight.py" in text
         assert "sudo chown -R 1000:1000 data" in text
@@ -211,3 +339,7 @@ def test_docs_cover_venv_rebuild_chown_and_preflight():
     assert "uv python install 3.11" in news
     assert "APP_UID=0" in deploy
     assert "data/news" in deploy
+    for text in (deploy, dsa):
+        assert "sudo chown -R 1000:1001 data" in text
+        assert "sudo chown 1000:1001 .env" in text
+        assert "data/dsa" in text
