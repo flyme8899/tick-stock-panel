@@ -360,7 +360,7 @@ def test_dropdown_examples_keep_subject_drop_bare_event_and_unrelated_maps(tmp_p
 
     rubber = next(event for event in events if "橡胶" in event["name"])
     assert rubber["name"] in {"橡胶价格大涨", "橡胶价格大涨超预期"}
-    assert rubber["concepts"] == ["橡胶"]
+    assert rubber["concepts"] == ["橡胶", "天然橡胶"]
     assert "苹果" not in rubber["concepts"]
     assert "黄金" not in rubber["concepts"]
     assert "固态电池" not in rubber["concepts"]
@@ -399,3 +399,138 @@ def test_dropdown_examples_keep_subject_drop_bare_event_and_unrelated_maps(tmp_p
     again = top_hot_events(NOW + timedelta(minutes=11))
     again_rubber = next(event for event in again["events"] if "橡胶" in event["name"])
     assert again_rubber["key"] == rubber["key"]
+
+
+_TRUNCATED_TITLES = (
+    "财政的小增量政策也出",
+    "新增隐债】财政部发布20",
+    "苹果公司宣布将于10月13日在纽约发布",
+    "IEA下调原油供需预期...",
+)
+
+
+def test_keyword_titles_keep_whole_clauses_objects_and_numbers():
+    """生产标题被切在半句、半个动词、数字和宾语前面。"""
+    fiscal = _keyword_title([{
+        "title": "财政部有关负责人表示财政的小增量政策也出台了一批配套措施",
+    }])
+    assert fiscal == "财政部有关负责人表示财政的小增量政策也出台了一批配套措施"
+    assert fiscal != "财政的小增量政策也出"
+    assert "出台" in fiscal
+
+    debt = _keyword_title([{
+        "title": "新增隐债】财政部发布2025年一揽子化债方案",
+    }])
+    assert debt == "财政部发布2025年一揽子化债方案"
+    assert "】" not in debt
+    assert "【" not in debt
+    assert debt != "新增隐债】财政部发布20"
+    assert "2025" in debt
+
+    apple = _keyword_title([{
+        "title": "苹果公司宣布将于10月13日在纽约发布全新iPhone",
+    }])
+    assert apple == "苹果公司宣布将于10月13日在纽约发布全新iPhone"
+    assert apple != "苹果公司宣布将于10月13日在纽约发布"
+
+    oil = _keyword_title([{
+        "title": "IEA下调原油供需预期，预计明年全球石油供应过剩",
+    }])
+    assert oil == "IEA下调原油供需预期"
+    assert oil != "IEA下调原油供需预期..."
+    labeled = _keyword_title([{
+        "title": "IEA：下调原油供需预期，预计明年全球石油供应过剩",
+    }])
+    assert labeled == "IEA下调原油供需预期"
+
+    kept = _keyword_title([{
+        "title": "财政部宏观经济运行情况及时谋划出台增量政策",
+    }])
+    assert kept == "财政部宏观经济运行情况及时谋划出台增量政策"
+    assert kept != "财政部宏观经济运行情况及时谋划出台"
+
+
+def test_finance_ministry_items_merge_and_subjects_map_to_concepts(tmp_path):
+    """三条财政部政策是一件事；橡胶、原油、加息要有概念，无关概念仍排除。"""
+    reset_store_for_tests(tmp_path / "prod-1009.sqlite")
+    _insert_rich(
+        "fiscal-cut",
+        "财政部有关负责人表示财政的小增量政策也出台了一批配套措施",
+        9,
+        10,
+    )
+    _insert_rich(
+        "fiscal-debt",
+        "新增隐债】财政部发布2025年一揽子化债方案",
+        9,
+        30,
+    )
+    _insert_rich(
+        "fiscal-macro",
+        "财政部宏观经济运行情况及时谋划出台增量政策",
+        9,
+        50,
+    )
+    _insert_rich(
+        "apple",
+        "苹果公司宣布将于10月13日在纽约发布全新iPhone",
+        10,
+        0,
+        sectors=["苹果", "固态电池"],
+    )
+    _insert_rich(
+        "iea",
+        "IEA下调原油供需预期，预计明年全球石油供应过剩",
+        8,
+        40,
+    )
+    _insert_rich(
+        "rubber",
+        "橡胶价格大涨",
+        7,
+        25,
+        sectors=["苹果", "黄金", "固态电池", "智能家居"],
+        stocks=[("601118.SH", "海南橡胶")],
+    )
+    _insert_rich("hike", "美联储将从容推进加息", 7, 56)
+    _insert_rich("cut", "美联储宣布降息25基点", 8, 5)
+
+    events = top_hot_events(NOW)["events"]
+    names = [event["name"] for event in events]
+    for bad in _TRUNCATED_TITLES:
+        assert bad not in names
+    assert all("】" not in name and "【" not in name for name in names)
+
+    fiscal_rows = [event for event in events if "财政" in event["name"]]
+    assert len(fiscal_rows) == 1
+    fiscal = fiscal_rows[0]
+    assert fiscal["mentions"] == 3
+    assert "财政部" in fiscal["name"]
+    assert fiscal["name"] != "财政的小增量政策也出"
+    assert fiscal["name"] != "新增隐债】财政部发布20"
+    assert fiscal["concepts"] == ["基建", "地方债"]
+    assert "苹果" not in fiscal["concepts"]
+
+    apple = next(event for event in events if "iPhone" in event["name"])
+    assert apple["name"] == "苹果公司宣布将于10月13日在纽约发布全新iPhone"
+    assert "固态电池" not in apple["concepts"]
+
+    oil = next(event for event in events if "原油" in event["name"] or event["name"].startswith("IEA"))
+    assert oil["name"] == "IEA下调原油供需预期"
+    assert oil["concepts"] == ["石油", "油服"]
+
+    rubber = next(event for event in events if "橡胶" in event["name"])
+    assert rubber["concepts"] == ["橡胶", "天然橡胶"]
+    assert [stock["name"] for stock in rubber["mentioned_stocks"]] == ["海南橡胶"]
+    for banned in ("苹果", "黄金", "固态电池", "智能家居"):
+        assert banned not in rubber["concepts"]
+
+    hike = next(event for event in events if "加息" in event["name"])
+    assert hike["concepts"] == ["黄金", "银行"]
+    cut = next(event for event in events if "降息" in event["name"] and "结构性" not in event["name"])
+    assert cut["key"] != hike["key"]
+    assert cut["concepts"] == []
+
+    again = top_hot_events(NOW + timedelta(minutes=11))
+    again_fiscal = next(event for event in again["events"] if "财政" in event["name"])
+    assert again_fiscal["key"] == fiscal["key"]
