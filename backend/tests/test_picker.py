@@ -545,11 +545,13 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     names = [event["name"] for event in snapshot["events"]]
     assert names[:5] == [
         "华为发布盘古新模型",
-        "存储芯片厂涨价",
         "工信部出台机器人补贴政策",
         "碳酸锂报价继续上涨",
-        "创新药临床获批",
+        "平安银行回购",
+        "稀土出口配额收紧",
     ]
+    assert "光伏组件厂下调报价" not in names
+    assert names.index("稀土出口配额收紧") < names.index("存储芯片厂涨价")
     assert "人工智能" not in names
     assert "半导体" not in names
     assert "周六闲聊不影响交易日" not in names
@@ -566,6 +568,10 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert head["relevance"] >= 3
     assert head["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利好"}]
     assert head["first_seen"] == "10-09 14:52"
+    assert head["importance"] == "重大"
+    assert head["breakdown"]["importance"] == 130
+    assert head["breakdown"]["mapping"] == 35
+    assert abs(head["score"] - sum(head["breakdown"].values())) < 0.02
     assert [stock["key"] for stock in head["mentioned_stocks"]] == ["600519.SH", "000001.SZ"]
     assert head["mentioned_stocks"][0]["mentions"] == 2
 
@@ -605,7 +611,9 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert {row["symbol"] for row in overlapped["rows"]} == {"600519.SH"}
 
     bank = next(event for event in snapshot["events"] if event["name"] == "平安银行回购")
-    assert names.index(bank["name"]) >= 5
+    assert names.index(bank["name"]) == 3
+    assert bank["mentions"] == 1
+    assert bank["importance"] == "重大"
     bought = run_picker([SourceSpec("hot_events", bank["key"])], "or", FilterSpec(), deps)
     assert [row["symbol"] for row in bought["rows"]] == ["601318.SH"]
 
@@ -620,6 +628,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert "光伏组件厂下调报价" not in {item["name"] for item in group["items"]}
     assert all("mentioned_stocks" not in item for item in group["items"])
     assert group["items"][0]["description"] == "提及 3 · 来源 3"
+    assert group["items"][0]["importance"] == "重大"
     assert group["items"][0]["concepts"] == ["昇腾"]
     assert group["items"][0]["headline"] == "华为发布盘古新模型，昇腾链走强"
     assert group["hint"] == "交易日 10月9日 · 更新于 15:04"
@@ -637,6 +646,48 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
         "combine": "or",
     })
     assert rejected.status_code == 422
+
+
+def test_major_event_with_few_mentions_outranks_routine_heat(tmp_path):
+    """一条降息仍高于多来源的寻常涨价；没有映射的单条报价不进榜。"""
+    from app.news.service import hot_event_listing
+
+    reset_store_for_tests(tmp_path / "rank.sqlite")
+    friday = date(2026, 10, 9)
+    _insert_news("cls", "fed", _publish(friday, 15, 0), [], [], title="美联储宣布降息")
+    for index, source in enumerate(("cls", "wscn", "dws", "reddit", "cls")):
+        _insert_news(
+            source, f"chip-{index}", _publish(friday, 15, index),
+            ["存储芯片"], [],
+            title="存储芯片厂宣布涨价",
+        )
+    _insert_news("cls", "pv", _publish(friday, 15, 20), [], [], title="光伏组件厂下调报价")
+    events = top_hot_events(NOW)["events"]
+    names = [event["name"] for event in events]
+    assert names[0] == "美联储降息"
+    assert "存储芯片厂涨价" in names
+    assert names.index("美联储降息") < names.index("存储芯片厂涨价")
+    assert "光伏组件厂下调报价" not in names
+    head = events[0]
+    assert head["importance"] == "重大"
+    assert head["mentions"] == 1
+    assert head["source_count"] == 1
+    parts = head["breakdown"]
+    assert set(parts) == {"importance", "mapping", "freshness", "heat"}
+    assert parts["importance"] > parts["mapping"] + parts["freshness"] + parts["heat"]
+    routine = next(event for event in events if event["name"] == "存储芯片厂涨价")
+    assert routine["importance"] == "重要"
+    assert routine["mentions"] > head["mentions"]
+    assert routine["heat"] > head["heat"]
+    assert head["score"] > routine["score"]
+
+    listed = hot_event_listing(NOW, limit=20)
+    public = listed["events"][0]
+    assert public["name"] == "美联储降息"
+    assert public["importance"] == "重大"
+    assert public["score"] == head["score"]
+    assert public["breakdown"] == head["breakdown"]
+    assert "item_ids" not in public
 
 
 def test_hot_events_classify_market_news_and_drop_noise(tmp_path):
@@ -868,19 +919,22 @@ def test_hot_event_recency_breaks_equal_item_source_products(tmp_path):
     for index in range(4):
         _insert_news(
             "cls", f"old-{index}", _publish(friday, 8, index), ["创新药"], [],
-            title="药监局出台创新药细则",
+            title="创新药临床获批",
         )
     _insert_news(
-        "cls", "new-1", _publish(friday, 15, 30), ["昇腾"], [],
-        title="华为发布盘古新模型",
+        "cls", "new-1", _publish(friday, 15, 30), ["存储芯片"], [],
+        title="存储芯片厂宣布涨价",
     )
     _insert_news(
-        "wscn", "new-2", _publish(friday, 15, 40), ["昇腾"], [],
-        title="华为发布盘古新模型",
+        "wscn", "new-2", _publish(friday, 15, 40), ["存储芯片"], [],
+        title="存储芯片厂宣布涨价",
     )
     noon = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
-    names = [event["name"] for event in top_hot_events(noon)["events"]]
-    assert names[0] == "华为发布盘古新模型"
+    events = top_hot_events(noon)["events"]
+    names = [event["name"] for event in events]
+    assert names[0] == "存储芯片厂涨价"
+    assert events[0]["importance"] == events[1]["importance"] == "重要"
+    assert events[0]["mentions"] * events[0]["source_count"] == events[1]["mentions"] * events[1]["source_count"]
 
 
 def test_hot_event_snapshot_is_cached_for_ten_minutes(tmp_path):
@@ -934,6 +988,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert named["events"][0]["concepts"] == ["昇腾"]
     assert named["events"][0]["category"] == "地缘政治"
     assert named["events"][0]["direction"] == "利空"
+    assert named["events"][0]["importance"] == "重大"
     assert named["events"][0]["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利空"}]
     assert named["events"][0]["mentioned_stocks"] == []
     assert len(prompts) == 1
@@ -951,7 +1006,19 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert fallback["events"][0]["name"] == "华为发布盘古新模型"
     assert fallback["events"][0]["category"] == "科技与产业"
     assert fallback["events"][0]["direction"] == "利好"
+    assert fallback["events"][0]["importance"] == "重大"
     assert len(prompts) == 1
+
+    def trivial(prompt: str) -> str:
+        prompts.append(prompt)
+        return '{"title":"华为发布新模型","importance":"琐碎"}'
+
+    monkeypatch.setattr(news_service, "_llm_text", trivial)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    kept = top_hot_events(NOW + timedelta(minutes=33))
+    assert kept["events"][0]["name"] == "华为发布新模型"
+    assert kept["events"][0]["importance"] == "一般"
 
 
 def test_hot_event_llm_labels_at_most_eight(tmp_path, monkeypatch):
@@ -965,7 +1032,7 @@ def test_hot_event_llm_labels_at_most_eight(tmp_path, monkeypatch):
     for index in range(9):
         _insert_news(
             "cls", f"cap-{index}", _publish(friday, 15, index), [], [],
-            title=f"{subjects[index]}厂发布{objects[index]}材",
+            title=f"{subjects[index]}厂涨价{objects[index]}材",
         )
     prompts: list[str] = []
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)

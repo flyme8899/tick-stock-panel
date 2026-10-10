@@ -85,6 +85,29 @@ _BULL_CUES = ("补贴", "获批", "订单", "涨价", "回购", "发布", "出�
 _NOISE_EXACT = frozenset({"图片", "广告", "视频", "转发", "分享", "推广", "赞助"})
 _NOISE_HINTS = ("闲聊", "广告", "推广", "赞助", "加微信", "点击领取", "转发微博")
 _RELEVANCE_MIN = 3
+# 重要性的档距大于映射、新鲜度和热度封顶之和，避免条数把寻常涨价顶过降息、政策或制裁。
+_IMPORTANCE_POINTS = {"琐碎": 0, "一般": 20, "重要": 55, "重大": 130}
+_IMPORTANCE_ORDER = ("琐碎", "一般", "重要", "重大")
+_MAPPING_CONCEPT = 15
+_MAPPING_ASSET = 15
+_MAPPING_DIRECTION = 5
+_FRESH_MAX = 20
+_HEAT_BONUS_CAP = 15
+_MAJOR_RATE = ("降息", "加息", "降准", "美联储", "欧央行", "日本央行", "英央行")
+_MAJOR_ORGS = ("国务院", "发改委", "工信部", "证监会", "财政部", "央行")
+_MAJOR_POLICY_ACTS = ("出台", "补贴", "政策", "降准")
+_MAJOR_GEO = ("制裁", "战争", "关税", "出口管制", "配额")
+_MAJOR_COMMODITIES = ("碳酸锂", "原油", "黄金", "铜价", "铁矿")
+_PRICE_VERBS = ("报价", "涨价", "降价", "提价", "上调", "下调", "上涨", "下跌", "暴涨", "暴跌")
+_LEADERS = (
+    "华为", "宁德时代", "贵州茅台", "英伟达", "苹果", "特斯拉", "比亚迪",
+    "平安银行", "腾讯", "阿里巴巴", "茅台",
+)
+_LEADER_ACTS = ("发布", "收购", "回购", "停产", "制裁", "订单", "上市", "立案")
+_IMPORTANT_ACTS = ("涨价", "获批", "回购", "订单", "收购", "中标")
+_IMPORTANT_CATEGORIES = frozenset({
+    "国内政策/宏观", "海外市场/央行", "地缘政治", "公司重大事项",
+})
 _LEAD_SUFFIXES = ("宣布", "称", "表示", "指出", "消息", "传闻", "公司", "披露")
 _STOP = frozenset({
     "公司", "市场", "今日", "表示", "消息", "记者", "财经", "股份", "有限",
@@ -148,9 +171,11 @@ def _compute(now: datetime, store: NewsStore) -> dict:
         }
     events = ranked[chosen]
     _label_with_llm(events)
+    events = _rank_events(events, now, grade=False)
     latest = max(event.pop("_latest") for event in events)
     for event in events:
         event.pop("_fp", None)
+        event.pop("_first", None)
     updated_hm = latest.astimezone(CN_TZ).strftime("%H:%M")
     return {
         "as_of": chosen.isoformat(),
@@ -186,8 +211,7 @@ def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
     for index, doc in enumerate(docs):
         groups[find(index)].append(doc)
     events = [_event_from(members, now) for members in groups.values()]
-    events.sort(key=lambda item: (-item["heat"], -item["mentions"], -item["source_count"], item["name"]))
-    return events
+    return _rank_events(events, now, grade=True)
 
 
 def _doc(row: dict) -> dict | None:
@@ -369,8 +393,117 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         "mentioned_stocks": mentioned,
         "item_ids": item_ids,
         "_latest": latest,
+        "_first": first,
         "_fp": hashlib.sha1("\n".join(item["title"] for item in members).encode("utf-8")).hexdigest(),
     }
+
+
+def _rank_events(events: list[dict], now: datetime, *, grade: bool) -> list[dict]:
+    """按重要性、映射、新鲜度、热度排序。只有第一次按规则分级时丢掉琐碎小事。"""
+    kept = []
+    for event in events:
+        if grade:
+            event["importance"] = _rule_importance(event)
+        _score_event(event, now)
+        if grade and _drop_minor(event):
+            continue
+        kept.append(event)
+    kept.sort(key=lambda item: (
+        -float(item["score"]),
+        -_IMPORTANCE_POINTS.get(str(item.get("importance")), 0),
+        -float(item["breakdown"]["mapping"]),
+        -float(item["breakdown"]["freshness"]),
+        -float(item["heat"]),
+        str(item["name"]),
+    ))
+    return kept
+
+
+def _score_event(event: dict, now: datetime) -> None:
+    label = str(event.get("importance") or "一般")
+    if label not in _IMPORTANCE_POINTS:
+        label = "一般"
+        event["importance"] = label
+    importance = _IMPORTANCE_POINTS[label]
+    concepts = [str(name).strip() for name in (event.get("concepts") or []) if str(name).strip()]
+    stocks = [item for item in (event.get("mentioned_stocks") or []) if isinstance(item, dict)]
+    mapping = 0
+    if concepts:
+        mapping += _MAPPING_CONCEPT
+    if stocks:
+        mapping += _MAPPING_ASSET
+    direction = str(event.get("direction") or "")
+    if direction in {"利好", "利空"} and (concepts or stocks):
+        mapping += _MAPPING_DIRECTION
+    first = event.get("_first")
+    if isinstance(first, datetime):
+        age_hours = max(0.0, (now - first).total_seconds() / 3600)
+    else:
+        age_hours = _HEAT_HALF_LIFE_HOURS
+    freshness = _FRESH_MAX * math.exp(-math.log(2) * age_hours / _HEAT_HALF_LIFE_HOURS)
+    try:
+        heat = float(event.get("heat") or 0)
+    except (TypeError, ValueError):
+        heat = 0.0
+    heat_bonus = min(_HEAT_BONUS_CAP, max(0.0, heat))
+    event["breakdown"] = {
+        "importance": importance,
+        "mapping": mapping,
+        "freshness": round(freshness, 4),
+        "heat": round(heat_bonus, 4),
+    }
+    event["score"] = round(importance + mapping + freshness + heat_bonus, 4)
+
+
+def _event_text(event: dict) -> str:
+    parts = [str(event.get("name") or ""), str(event.get("headline") or "")]
+    parts.extend(str(item) for item in (event.get("headlines") or []))
+    return "\n".join(part for part in parts if part)
+
+
+def _rule_importance(event: dict) -> str:
+    text = _event_text(event)
+    if _is_major(text):
+        label = "重大"
+    elif _is_important(text, str(event.get("category") or "")):
+        label = "重要"
+    else:
+        label = "一般"
+    if "传闻" in text:
+        label = _IMPORTANCE_ORDER[max(0, _IMPORTANCE_ORDER.index(label) - 1)]
+    return label
+
+
+def _is_major(text: str) -> bool:
+    if any(cue in text for cue in _MAJOR_RATE):
+        return True
+    if any(org in text for org in _MAJOR_ORGS) and any(act in text for act in _MAJOR_POLICY_ACTS):
+        return True
+    if any(cue in text for cue in _MAJOR_GEO):
+        return True
+    if any(name in text for name in _MAJOR_COMMODITIES) and any(verb in text for verb in _PRICE_VERBS):
+        return True
+    return any(name in text for name in _LEADERS) and any(act in text for act in _LEADER_ACTS)
+
+
+def _is_important(text: str, category: str) -> bool:
+    if any(act in text for act in _IMPORTANT_ACTS):
+        return True
+    if category in _IMPORTANT_CATEGORIES:
+        return True
+    return any(name in text for name in _LEADERS) and any(verb in text for verb in _PRICE_VERBS)
+
+
+def _drop_minor(event: dict) -> bool:
+    """没有映射、只有一条来源的寻常小事不进榜。重大和重要事件留下。"""
+    label = str(event.get("importance") or "")
+    if label == "琐碎":
+        return True
+    if label != "一般":
+        return False
+    if float(event["breakdown"]["mapping"]) > 0:
+        return False
+    return int(event.get("mentions") or 0) <= 1 and int(event.get("source_count") or 0) <= 1
 
 
 def _specific_concepts(counts: Counter[str]) -> list[str]:
@@ -492,9 +625,12 @@ def _label_with_llm(events: list[dict]) -> None:
             "下面几条标题是同一件与资本市场有关的资讯。收成一个具体事件，不要用宽泛行业名当标题。"
             "只输出 JSON："
             '{"title":"不超过20个字","category":"","direction":"利好或利空",'
+            '"importance":"重大或重要或一般或琐碎",'
             '"concepts":[{"name":"细分概念","direction":"利好或利空"}],'
             '"stocks":[{"name":"","code":"","direction":"利好或利空"}]}。'
             f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
+            "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
+            "寻常涨价、获批、订单是重要。"
             "concepts 写受影响的细概念，不要写人工智能、半导体、医药这种大行业。"
             "direction 表示对 A 股相关方向是利好还是利空。"
             "没有把握就留空，不要编造标题里没出现的事实。\n\n"
@@ -553,12 +689,16 @@ def _parse_llm_event(raw: str, text: str) -> dict | None:
     direction = str(payload.get("direction") or "").strip()
     if direction not in {"利好", "利空"}:
         direction = ""
-    if not title and not concepts and not stocks and not category:
+    importance = str(payload.get("importance") or "").strip()
+    if importance not in _IMPORTANCE_POINTS:
+        importance = ""
+    if not title and not concepts and not stocks and not category and not importance:
         return None
     return {
         "title": title,
         "category": category,
         "direction": direction,
+        "importance": importance,
         "concepts": concepts[:_CONCEPT_LIMIT],
         "concept_directions": concept_directions,
         "stocks": stocks,
@@ -575,6 +715,11 @@ def _apply_llm(event: dict, parsed: dict) -> None:
     direction = str(parsed.get("direction") or "")
     if direction in {"利好", "利空"}:
         event["direction"] = direction
+    importance = str(parsed.get("importance") or "")
+    if importance == "琐碎":
+        importance = "一般"
+    if importance in _IMPORTANCE_POINTS:
+        event["importance"] = importance
     for name in parsed.get("concepts") or []:
         if name not in event["concepts"] and len(event["concepts"]) < _CONCEPT_LIMIT:
             event["concepts"].append(name)

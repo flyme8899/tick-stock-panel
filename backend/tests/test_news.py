@@ -954,6 +954,9 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     assert head["mentions"] == 2
     assert head["source_count"] == 2
     assert head["headline"] == "华为发布盘古新模型，昇腾链走强"
+    assert head["importance"] == "重大"
+    assert set(head["breakdown"]) == {"importance", "mapping", "freshness", "heat"}
+    assert head["score"] > head["heat"]
     assert head["stocks"][0]["key"] == "600519.SH"
     assert "item_ids" not in head
 
@@ -988,12 +991,16 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
             "concepts": head["concepts"],
             "first_seen": head["first_seen"],
             "headline": head["headline"],
+            "category": head["category"],
+            "direction": head["direction"],
+            "importance": head["importance"],
         }],
     )
     assert packed is not None
     text = packed[1]
     assert text.index("具体事件") < text.index("热门板块")
     assert "华为发布盘古新模型" in text
+    assert "重大" in text
     assert "首见" in text
     assert "相对基线 1.5 倍" in text
 

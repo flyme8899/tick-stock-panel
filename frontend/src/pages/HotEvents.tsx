@@ -191,9 +191,15 @@ export function HotEvents() {
                   >
                     <div className="flex items-baseline justify-between gap-3">
                       <span className="font-medium">{item.name}</span>
-                      <span className="text-xs text-muted">热度 {item.heat}</span>
+                      <span className="shrink-0 text-xs text-muted">热度 {item.heat}</span>
                     </div>
                     <div className="mt-1 flex flex-wrap gap-1">
+                      {item.importance && (
+                        <span className={cn(
+                          'rounded px-1 text-[10px] leading-4',
+                          item.importance === '重大' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
+                        )}>{item.importance}</span>
+                      )}
                       {item.category && (
                         <span className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{item.category}</span>
                       )}

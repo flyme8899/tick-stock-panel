@@ -2259,6 +2259,14 @@ export interface NewsHotEvent {
   source_count: number
   first_seen: string
   heat: number
+  importance?: string
+  score?: number
+  breakdown?: {
+    importance: number
+    mapping: number
+    freshness: number
+    heat: number
+  }
   stocks: NewsHotStock[]
   etfs?: NewsHotStock[]
 }
@@ -2333,6 +2341,7 @@ export interface PickerSourceItem {
   headline?: string | null
   category?: string
   direction?: string
+  importance?: string
   mapped_stocks?: string[]
 }
 

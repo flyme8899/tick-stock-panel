@@ -825,6 +825,7 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             "headline": headline,
             "category": str(event.get("category") or ""),
             "direction": str(event.get("direction") or ""),
+            "importance": str(event.get("importance") or ""),
             "mapped_stocks": mapped,
         })
     return {

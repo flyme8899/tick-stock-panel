@@ -416,6 +416,18 @@ def public_hot_event(event: dict) -> dict:
     headline = str(event.get("headline") or "")
     if headline and headline not in headlines:
         headlines.insert(0, headline)
+    importance = str(event.get("importance") or "")
+    if importance not in {"琐碎", "一般", "重要", "重大"}:
+        importance = "一般"
+    try:
+        score = round(float(event.get("score") or 0), 4)
+    except (TypeError, ValueError):
+        score = 0.0
+    raw_parts = event.get("breakdown") if isinstance(event.get("breakdown"), dict) else {}
+    breakdown = {
+        part: _public_score_part(raw_parts.get(part))
+        for part in ("importance", "mapping", "freshness", "heat")
+    }
     return {
         "key": str(event.get("key") or ""),
         "name": str(event.get("name") or ""),
@@ -430,13 +442,23 @@ def public_hot_event(event: dict) -> dict:
         "source_count": int(event.get("source_count") or 0),
         "first_seen": str(event.get("first_seen") or ""),
         "heat": round(heat, 4),
+        "importance": importance,
+        "score": score,
+        "breakdown": breakdown,
         "stocks": stocks,
         "etfs": etfs,
     }
 
 
+def _public_score_part(value) -> float:
+    try:
+        return round(float(value or 0), 4)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def hot_event_listing(now: datetime | None = None, *, limit: int = 20) -> dict:
-    """热门事件页的主列表。和选股用同一套聚类，按热度从高到低。"""
+    """热门事件页的主列表。和选股、推送用同一套聚类，按事件分量从高到低。"""
     snapshot = top_hot_events(now)
     events = [public_hot_event(item) for item in snapshot.get("events") or [] if isinstance(item, dict)]
     return {
@@ -478,11 +500,12 @@ def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> d
 
 
 def top_hot_events(now: datetime | None = None) -> dict:
-    """当前交易日热度最高的具体事件。
+    """当前交易日分量最高的具体事件。
 
-    同一交易日的标题按主体、动作和细概念聚类，热度是资讯条数乘来源数，再按更新时间衰减。
+    同一交易日的标题按主体、动作和细概念聚类。排序先看事件重要性，再看 A 股映射、
+    首见新鲜度，热度（条数乘来源数，再按更新时间衰减）只作加分。
     当天没有资讯时，改用不晚于今天、且落在回看窗口里的最近一天，并在 hint 里标明。
-    结果缓存约 10 分钟。模型不可用时保留关键词标题。
+    结果缓存约 10 分钟。模型不可用时保留关键词标题和规则分级。
     """
     from app.news.hot_events import build_top_hot_events
 

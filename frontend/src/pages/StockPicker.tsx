@@ -206,6 +206,7 @@ export function StockPicker() {
               headline: item.headline ?? undefined,
               category: item.category,
               direction: item.direction,
+              importance: item.importance,
               mappedStocks: item.mapped_stocks,
             }))}
             selectedIds={idsOf(picks, 'hot_events')}
