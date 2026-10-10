@@ -2238,6 +2238,84 @@ export interface NewsPushStatus {
   types: NewsPushType[]
 }
 
+export interface PickerSourceItem {
+  id: string
+  name: string
+  description: string
+}
+
+export interface PickerSourceGroup {
+  id: 'fundamental' | 'hot_events' | 'technical' | 'factor' | 'dsa' | string
+  label: string
+  items: PickerSourceItem[]
+  live?: boolean
+  updated_at?: string | null
+  beta?: boolean
+  available?: boolean
+  error?: string | null
+  empty_hint?: string
+  empty_href?: string
+  params?: Array<{
+    id: string
+    label: string
+    default?: string | number
+    min?: number
+    max?: number
+    options?: Array<{ id: string; label: string }>
+  }>
+}
+
+export interface PickerSourcesResponse {
+  groups: PickerSourceGroup[]
+  industries: string[]
+}
+
+export interface PickerRunRequest {
+  sources: Array<{ type: string; id: string; params?: { window?: '24h' | '3d'; min_sources?: number } }>
+  combine: 'and' | 'or'
+  filters: {
+    industries?: string[]
+    market_cap_min?: number
+    market_cap_max?: number
+    pe_min?: number
+    pe_max?: number
+    exclude_st?: boolean
+    exclude_financial?: boolean
+    max_per_industry?: number
+  }
+}
+
+export interface PickerRow {
+  symbol: string
+  name: string
+  industry: string
+  score: number | null
+  strategies: Array<{ id: string; name: string }>
+  event: string
+  roe: number | null
+  profit_yoy: number | null
+  pe: number | null
+  market_cap: number | null
+  change: 'new' | 'kept'
+}
+
+export interface PickerRunResponse {
+  rows: PickerRow[]
+  summary: {
+    total: number
+    combine: 'and' | 'or'
+    combine_label: string
+    as_of: string | null
+    previous_as_of: string | null
+    added: number
+    removed: number
+    first_snapshot: boolean
+    profit_yoy_label: string
+    hot_updated_at: string | null
+    warnings: string[]
+  }
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
@@ -4161,6 +4239,19 @@ export const api = {
     request<{ ok: boolean }>('/api/news/push/test', {
       method: 'POST',
       body: JSON.stringify({ confirm: true }),
+    }),
+
+  pickerSources: () => request<PickerSourcesResponse>('/api/picker/sources'),
+  pickerRun: (body: PickerRunRequest) =>
+    request<PickerRunResponse>('/api/picker/run', {
+      method: 'POST',
+      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+      body: JSON.stringify(body),
+    }),
+  pickerDsaSync: (symbols: string[]) =>
+    request<{ ok: boolean; synced: number; failed: string[]; message: string }>('/api/picker/dsa-sync', {
+      method: 'POST',
+      body: JSON.stringify({ symbols }),
     }),
 }
 

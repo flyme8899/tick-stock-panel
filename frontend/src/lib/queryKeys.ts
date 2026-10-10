@@ -151,6 +151,7 @@ export const QK = {
   newsMessages:         (kind: string, key: string) => ['news-messages', kind, key] as const,
   newsHealth:           ['news-health'] as const,
   newsPush:             ['news-push'] as const,
+  pickerSources:        ['picker-sources'] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

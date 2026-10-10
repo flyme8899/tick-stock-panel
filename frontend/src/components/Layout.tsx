@@ -44,6 +44,7 @@ import {
 import {
   IconDashboard,
   IconWatchlist,
+  IconPicker,
   IconStrategy,
   IconFactors,
   IconBacktest,
@@ -94,6 +95,7 @@ type CoreIndex = (typeof CORE_INDEXES)[number]
 const nav = [
   { to: '/',                 label: '看板',     icon: IconDashboard },
   { to: '/watchlist',        label: '自选',     icon: IconWatchlist },
+  { to: '/stock-picker',     label: '选股',     icon: IconPicker },
   { to: '/screener',         label: '策略',     icon: IconStrategy },
   { to: '/factors',          label: '因子',     icon: IconFactors },
   { to: '/backtest',         label: '回测',     icon: IconBacktest },

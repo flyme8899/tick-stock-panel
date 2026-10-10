@@ -50,6 +50,16 @@ export const IconWatchlist = make(
   </>,
 )
 
+/** 选股 — 清单中点中的一行 */
+export const IconPicker = make(
+  <>
+    <path d="M4 6H20" />
+    <path d="M4 12H20" />
+    <path d="M4 18H14" />
+    <path d="M16 16.2L17.7 18.2L21 14" />
+  </>,
+)
+
 /** 策略 — 直角漏斗 (筛选/选股策略) */
 export const IconStrategy = make(
   <path d="M4 5H20L14 12.2V19.2L10 17.2V12.2Z" />,

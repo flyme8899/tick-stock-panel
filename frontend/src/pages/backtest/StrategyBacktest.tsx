@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download } from 'lucide-react'
 import {
@@ -951,6 +952,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   onLoadConsumed?: () => void
 }) {
   const queryClient = useQueryClient()
+  const [searchParams] = useSearchParams()
   const signalNames = useSignalNames()
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
@@ -998,6 +1000,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
   // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
   const [result, setResult] = useState<StrategyBacktestResult | null>(null)
+
+  // 选股页「一键回测」把代码和策略放在查询参数里，只在参数变化时回填。
+  const linkedSymbols = searchParams.get('symbols')
+  const linkedStrategy = searchParams.get('strategy')
+  useEffect(() => {
+    if (linkedSymbols) setSymbols(linkedSymbols)
+    if (linkedStrategy) setSelectedStrategy(linkedStrategy)
+  }, [linkedSymbols, linkedStrategy])
 
   // 候选方案「载入复测」: 把保存的 23 项回测配置回填到表单 (字段缺失时保留当前值)
   useEffect(() => {
