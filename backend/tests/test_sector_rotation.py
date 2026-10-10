@@ -615,3 +615,121 @@ def test_rank_reference_counts_trading_minutes_across_lunch(tmp_path):
     assert a["pct_prev"] == pytest.approx(0.02, abs=1e-4)
     assert b["rank_prev"] == 2 and b["rank_change"] == 1
     assert a["rank_prev"] == 1 and a["rank_change"] == -1
+
+
+def _write_mixed_boards(data_dir: Path) -> None:
+    """概念表、伪装成行业的概念表、以及真正的三级行业路径。"""
+    concept = ExtConfig(
+        id="ext_gn_ths",
+        label="扩展概念",
+        mode="snapshot",
+        fields=[ExtField("symbol", "string", "代码"), ExtField("所属概念", "string", "所属概念")],
+    )
+    ExtConfigStore(data_dir).upsert(concept)
+    write_ext_parquet(
+        pl.DataFrame({
+            "symbol": SYMS_A + SYMS_B,
+            "所属概念": ["融资融券", "短剧游戏", "融资融券", "深股通"],
+        }),
+        concept,
+        data_dir,
+    )
+    mix = ExtConfig(
+        id="board_mix",
+        label="行业板块",
+        mode="snapshot",
+        fields=[ExtField("symbol", "string", "代码"), ExtField("所属概念", "string", "概念 sector")],
+    )
+    ExtConfigStore(data_dir).upsert(mix)
+    write_ext_parquet(
+        pl.DataFrame({
+            "symbol": SYMS_A + SYMS_B,
+            "所属概念": ["融资融券", "融资融券", "深股通", "深股通"],
+        }),
+        mix,
+        data_dir,
+    )
+    industry = ExtConfig(
+        id="ext_hy_ths",
+        label="扩展行业",
+        mode="snapshot",
+        fields=[
+            ExtField("symbol", "string", "代码"),
+            ExtField("所属同花顺行业", "string", "所属同花顺行业"),
+        ],
+    )
+    ExtConfigStore(data_dir).upsert(industry)
+    write_ext_parquet(
+        pl.DataFrame({
+            "symbol": SYMS_A + SYMS_B,
+            "所属同花顺行业": [
+                "银行-国有大行-大型",
+                "银行-股份制-中型",
+                "农林牧渔-种植业-种子生产",
+                "农林牧渔-种植业-种子生产",
+            ],
+        }),
+        industry,
+        data_dir,
+    )
+
+
+def _mixed_repo(tmp_path: Path):
+    _reset_caches()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _write_minute(data_dir)
+    _write_prev_daily(data_dir)
+    _write_mixed_boards(data_dir)
+    return SimpleNamespace(store=SimpleNamespace(data_dir=data_dir)), data_dir
+
+
+def test_industry_level_filters_paths_and_ignores_concept_rows(tmp_path):
+    """行业 1/2/3 级只切行业路径; 概念表和「标签里夹了 sector」的概念字段不能混进来。"""
+    repo, _data_dir = _mixed_repo(tmp_path)
+
+    level1 = sector_rotation.build_sector_rotation(repo, kind="industry", level=1, bucket_minutes=5)
+    assert level1["status"] == "ok"
+    names1 = {item["name"] for item in level1["universe"]}
+    assert names1 == {"银行", "农林牧渔"}
+    assert level1["member_count"] == 2
+
+    level3 = sector_rotation.build_sector_rotation(repo, kind="industry", level=3, bucket_minutes=5)
+    names3 = {item["name"] for item in level3["universe"]}
+    assert names3 == {"大型", "中型", "种子生产"}
+    assert names3.isdisjoint(names1)
+
+    again = sector_rotation.build_sector_rotation(repo, kind="industry", level=1, bucket_minutes=5)
+    assert {item["name"] for item in again["universe"]} == names1
+
+    concept = sector_rotation.build_sector_rotation(repo, kind="concept", level=1, bucket_minutes=5)
+    concept_names = {item["name"] for item in concept["universe"]}
+    assert {"融资融券", "短剧游戏", "深股通"} <= concept_names
+    assert concept_names.isdisjoint(names1)
+
+    with pytest.raises(ValueError, match="行业层级"):
+        sector_rotation.build_sector_rotation(repo, kind="industry", level=4)
+
+
+def test_sector_rotation_api_passes_industry_level(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import sector_rotation as sector_rotation_api
+
+    _repo, data_dir = _mixed_repo(tmp_path)
+    app = FastAPI()
+    app.include_router(sector_rotation_api.router)
+    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
+    client = TestClient(app)
+
+    level1 = client.get("/api/sector-rotation", params={"kind": "industry", "level": 1, "bucket": 5})
+    assert level1.status_code == 200
+    assert {item["name"] for item in level1.json()["universe"]} == {"银行", "农林牧渔"}
+
+    level3 = client.get("/api/sector-rotation", params={"kind": "industry", "level": 3, "bucket": 5})
+    assert level3.status_code == 200
+    assert {item["name"] for item in level3.json()["universe"]} == {"大型", "中型", "种子生产"}
+
+    rejected = client.get("/api/sector-rotation", params={"kind": "industry", "level": 9, "bucket": 5})
+    assert rejected.status_code == 422

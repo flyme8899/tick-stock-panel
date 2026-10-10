@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { groupByIndustryLevel, industryLevelName, type DimensionGroup } from './analysis-adapter'
+import { groupByIndustryLevel, industryLevelName, isMembershipTag, resolveDimension, selectSectorConfig, type DimensionGroup } from './analysis-adapter'
 
 function group(key: string, symbols: string[]): DimensionGroup {
   return {
@@ -40,6 +40,68 @@ describe('groupByIndustryLevel', () => {
     expect(level2.every(g => g.count === 1)).toBe(true)
   })
 
+  it('does not treat a concept-labeled table as an industry source', () => {
+    const configs = [
+      {
+        id: 'ext_gn_ths',
+        fields: [{ name: '所属概念', label: '所属概念' }],
+      },
+      {
+        id: 'board_mix',
+        fields: [{ name: '所属概念', label: '概念 sector' }],
+      },
+      {
+        id: 'ext_hy_ths',
+        fields: [{ name: '所属同花顺行业', label: '所属同花顺行业' }],
+      },
+      {
+        id: 'sw_industry',
+        fields: [{ name: '申万行业', label: '申万一级行业' }],
+      },
+    ]
+    expect(selectSectorConfig('industry', configs)?.id).toBe('ext_hy_ths')
+    expect(selectSectorConfig('industry', configs, 'ext_gn_ths')?.id).toBe('ext_hy_ths')
+    expect(selectSectorConfig('industry', configs, 'board_mix')?.id).toBe('ext_hy_ths')
+    expect(selectSectorConfig('industry', configs, 'sw_industry')?.id).toBe('sw_industry')
+    expect(selectSectorConfig('concept', configs)?.id).toBe('ext_gn_ths')
+    expect(selectSectorConfig('industry', configs.filter(item => item.id !== 'ext_hy_ths'))?.id).toBe('sw_industry')
+  })
+
+  it('does not group concept rows when the industry column asks for an industry field', () => {
+    const fields = [{ name: 'symbol', dtype: 'str', label: '代码' }, { name: '所属概念', dtype: 'str', label: '概念 sector' }]
+    const data = {
+      id: 'board_mix',
+      label: '行业板块',
+      mode: 'snapshot' as const,
+      date: null,
+      total: 1,
+      limit: 10,
+      fields,
+      rows: [{ symbol: '000001.SZ', 所属概念: '融资融券' }],
+    }
+    const config = { id: 'board_mix', label: '行业板块', mode: 'snapshot' as const, fields, created_at: '', updated_at: '' }
+    const resolved = resolveDimension(data, config, ['行业', 'sector'], { kind: 'industry' })
+    expect(resolved.ok).toBe(false)
+    expect(resolved.groups).toEqual([])
+  })
+})
+
+describe('isMembershipTag', () => {
+  it('matches index and margin tags without swallowing real industries', () => {
+    expect(isMembershipTag('融资融券')).toBe(true)
+    expect(isMembershipTag('深股通')).toBe(true)
+    expect(isMembershipTag('沪深300')).toBe(true)
+    expect(isMembershipTag('MSCI中国')).toBe(true)
+    expect(isMembershipTag('标普道琼斯A股')).toBe(true)
+    expect(isMembershipTag('转融券标的')).toBe(true)
+    expect(isMembershipTag('HS300')).toBe(true)
+    expect(isMembershipTag('机器人')).toBe(false)
+    expect(isMembershipTag('银行')).toBe(false)
+    expect(isMembershipTag('机械设备')).toBe(false)
+  })
+})
+
+describe('groupByIndustryLevel source stability', () => {
   it('does not mutate the source groups', () => {
     const source = [group('银行-国有大行-大型', ['000001.SZ'])]
     groupByIndustryLevel(source, 1)

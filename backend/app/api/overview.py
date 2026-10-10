@@ -41,14 +41,26 @@ def invalidate_overview_cache() -> None:
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
 
 
+_CONCEPT_FIELD_TOKENS = ("概念", "concept", "theme", "题材")
+_INDUSTRY_FIELD_TOKENS = ("行业", "industry", "申万", "中信", "sector")
+
+
 def _dimension_field(config: ExtConfig, kind: str) -> str | None:
-    candidates = ["概念", "concept", "theme"] if kind == "concept" else ["行业", "industry", "sector"]
-    for candidate in candidates:
-        needle = candidate.lower()
-        for field in config.fields:
-            haystack = f"{field.name} {field.label}".lower()
-            if needle in haystack:
-                return field.name
+    # 与 market_overview_builder._dimension_field 同一口径: 预设不串种类,
+    # 行业列不接受带「概念」字样的字段。
+    if config.id == "ext_gn_ths" and kind != "concept":
+        return None
+    if config.id == "ext_hy_ths" and kind != "industry":
+        return None
+    want = _CONCEPT_FIELD_TOKENS if kind == "concept" else _INDUSTRY_FIELD_TOKENS
+    blocked = _INDUSTRY_FIELD_TOKENS if kind == "concept" else _CONCEPT_FIELD_TOKENS
+    for field in config.fields:
+        haystack = f"{field.name} {field.label}".lower()
+        if not any(token in haystack for token in want):
+            continue
+        if kind == "industry" and any(token in haystack for token in blocked):
+            continue
+        return field.name
     return None
 
 

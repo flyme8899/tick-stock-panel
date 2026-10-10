@@ -4,7 +4,13 @@ import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { QK } from '@/lib/queryKeys'
 import { SectorAnalysis } from './SectorAnalysis'
+
+const calls = vi.hoisted(() => ({
+  rows: [] as string[],
+  rotation: [] as { kind: string; level?: number }[],
+}))
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -20,6 +26,16 @@ vi.mock('@/lib/api', () => ({
           ],
         },
         {
+          // 名字和描述都更像行业, 但字段是概念。旧的关键词打分会把它选成行业源。
+          id: 'board_mix',
+          label: '行业板块',
+          description: '行业 sector 申万',
+          fields: [
+            { name: 'symbol', dtype: 'str', label: '代码' },
+            { name: '所属概念', dtype: 'str', label: '概念 sector' },
+          ],
+        },
+        {
           id: 'ext_hy_ths',
           label: '扩展行业',
           description: '同花顺行业分类',
@@ -31,6 +47,7 @@ vi.mock('@/lib/api', () => ({
       ],
     }),
     extDataRows: async (id: string) => {
+      calls.rows.push(id)
       if (id === 'ext_gn_ths') {
         return {
           id,
@@ -40,8 +57,23 @@ vi.mock('@/lib/api', () => ({
             { name: '所属概念', dtype: 'str', label: '所属概念' },
           ],
           rows: [
-            { symbol: '000001.SZ', name: '平安银行', 所属概念: '银行概念' },
+            { symbol: '000001.SZ', name: '平安银行', 所属概念: '银行概念;融资融券' },
             { symbol: '000002.SZ', name: '万科A', 所属概念: '地产概念' },
+          ],
+        }
+      }
+      if (id === 'board_mix') {
+        return {
+          id,
+          total: 3,
+          fields: [
+            { name: 'symbol', dtype: 'str', label: '代码' },
+            { name: '所属概念', dtype: 'str', label: '概念 sector' },
+          ],
+          rows: [
+            { symbol: '000001.SZ', name: '平安银行', 所属概念: '融资融券' },
+            { symbol: '600000.SH', name: '浦发银行', 所属概念: '深股通' },
+            { symbol: '000002.SZ', name: '万科A', 所属概念: '短剧游戏' },
           ],
         }
       }
@@ -67,30 +99,35 @@ vi.mock('@/lib/api', () => ({
         { symbol: '000002.SZ', name: '万科A', change_pct: 0.03, amount: 5e8, turnover_rate: 2, vol_ratio_5d: 1.4 },
       ],
     }),
-    sectorRotation: async (params: { kind: string }) => ({
-      status: 'ok',
-      date: '2026-10-10',
-      as_of: '15:00',
-      timeline: [{
-        time: '15:00',
-        rotation: params.kind === 'industry' ? 0.31 : 0.42,
-        leader: params.kind === 'industry' ? '银行' : '银行概念',
-        leader_pct: 0.02,
-        market_pct: 0.01,
-      }],
-      sectors: [{
-        name: params.kind === 'industry' ? '银行' : '银行概念',
-        pct_now: 0.02,
-        pct_prev: 0.01,
-        rank_now: 1,
-        rank_prev: 2,
-        rank_change: 1,
-        flow: null,
-        score: 1,
-        n_members: 2,
-        n_members_with_bars: 2,
-      }],
-    }),
+    sectorRotation: async (params: { kind: string; level?: number }) => {
+      calls.rotation.push({ kind: params.kind, level: params.level })
+      const industryName = params.level === 3 ? '大型' : params.level === 2 ? '国有大行' : '银行'
+      const name = params.kind === 'industry' ? industryName : '银行概念'
+      return {
+        status: 'ok',
+        date: '2026-10-10',
+        as_of: '15:00',
+        timeline: [{
+          time: '15:00',
+          rotation: params.kind === 'industry' ? 0.31 : 0.42,
+          leader: name,
+          leader_pct: 0.02,
+          market_pct: 0.01,
+        }],
+        sectors: [{
+          name,
+          pct_now: 0.02,
+          pct_prev: 0.01,
+          rank_now: 1,
+          rank_prev: 2,
+          rank_change: 1,
+          flow: null,
+          score: 1,
+          n_members: 2,
+          n_members_with_bars: 2,
+        }],
+      }
+    },
     rpsRotation: async () => ({
       dates: ['2026-10-09', '2026-10-10'],
       columns: {
@@ -115,6 +152,8 @@ let client: QueryClient
 
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  calls.rows.length = 0
+  calls.rotation.length = 0
   localStorage.clear()
   localStorage.setItem('industry-analysis-config', JSON.stringify({ hierarchyLevel: 1 }))
   localStorage.setItem('concept-analysis-config', JSON.stringify({ dimensionField: '所属概念' }))
@@ -157,6 +196,10 @@ function column(kind: string) {
   return node
 }
 
+function sectorKeys(kind: string) {
+  return [...column(kind).querySelectorAll('[data-sector]')].map(node => node.getAttribute('data-sector'))
+}
+
 function useNarrowViewport(matches: boolean) {
   window.matchMedia = ((query: string) => ({
     matches: matches && query.includes('max-width'),
@@ -181,13 +224,30 @@ it('shows concept and industry side by side, with industry-only level and heatma
   expect(column('concept').textContent).toContain('切换强度 0.42')
   expect(column('concept').textContent).not.toContain('热度分布')
   expect(column('concept').querySelector('[aria-label="行业层级"]')).toBeNull()
+  expect(column('concept').getAttribute('data-source')).toBe('ext_gn_ths')
 
   expect(column('industry').textContent).toContain('1级行业')
+  expect(column('industry').textContent).toContain('2 个')
   expect(column('industry').textContent).toContain('热度分布')
   expect(column('industry').textContent).toContain('银行')
   expect(column('industry').textContent).toContain('行业轮动')
   expect(column('industry').textContent).not.toContain('国有大行')
   expect(column('industry').textContent).not.toContain('银行概念')
+  expect(column('industry').getAttribute('data-source')).toBe('ext_hy_ths')
+  expect(new Set(sectorKeys('concept'))).toEqual(new Set(['银行概念', '地产概念']))
+  expect(new Set(sectorKeys('industry'))).toEqual(new Set(['银行', '房地产']))
+  expect(sectorKeys('concept').some(key => sectorKeys('industry').includes(key))).toBe(false)
+  expect(sectorKeys('industry')).not.toContain('融资融券')
+  expect(sectorKeys('concept')).not.toContain('融资融券')
+  expect(calls.rows).toContain('ext_gn_ths')
+  expect(calls.rows).toContain('ext_hy_ths')
+  expect(calls.rows).not.toContain('board_mix')
+  expect(calls.rotation).toContainEqual({ kind: 'industry', level: 1 })
+  expect(calls.rotation).toContainEqual({ kind: 'concept', level: undefined })
+  expect(QK.sectorBoardRows('industry', 'ext_hy_ths', 12000)).not.toEqual(QK.sectorBoardRows('concept', 'ext_gn_ths', 12000))
+  expect(QK.sectorRotation('industry', undefined, 5, '', 'summary', 1)).not.toEqual(
+    QK.sectorRotation('industry', undefined, 5, '', 'summary', 3),
+  )
   expect(host.querySelectorAll('[data-rotation]')).toHaveLength(2)
   expect(host.querySelector('#sector-detail')?.textContent).toContain('点击上方概念或行业')
 })
@@ -254,8 +314,12 @@ it('keeps each column config, and the industry level control, on their own side'
     ;[...column('industry').querySelectorAll('button')].find(el => el.textContent === '3级')?.click()
   })
   await settle()
+  expect(column('industry').textContent).toContain('3级行业')
+  expect(new Set(sectorKeys('industry'))).toEqual(new Set(['大型', '中型', '全国']))
   expect(column('industry').textContent).toContain('大型')
   expect(column('industry').textContent).not.toContain('国有大行')
+  expect(column('industry').textContent).not.toContain('融资融券')
+  expect(calls.rotation).toContainEqual({ kind: 'industry', level: 3 })
   expect(JSON.parse(localStorage.getItem('industry-analysis-config') || '{}').hierarchyLevel).toBe(3)
   expect(JSON.parse(localStorage.getItem('concept-analysis-config') || '{}').dimensionField).toBe('所属概念')
 })
@@ -275,4 +339,50 @@ it('stacks the columns and collapses the other one when a narrow screen is focus
   await settle()
   expect(column('industry').getAttribute('data-collapsed')).toBe('false')
   expect(column('industry').textContent).toContain('热度分布')
+  expect(new Set(sectorKeys('industry'))).toEqual(new Set(['银行', '房地产']))
+  expect(sectorKeys('industry')).not.toContain('融资融券')
+})
+
+it('keeps industry rows when the saved industry source points at the concept preset', async () => {
+  localStorage.setItem('industry-analysis-config', JSON.stringify({
+    hierarchyLevel: 1,
+    configId: 'ext_gn_ths',
+    dimensionField: '所属概念',
+  }))
+  renderAt('/sector-analysis')
+  await settle()
+
+  expect(column('industry').getAttribute('data-source')).toBe('ext_hy_ths')
+  expect(new Set(sectorKeys('industry'))).toEqual(new Set(['银行', '房地产']))
+  expect(new Set(sectorKeys('concept'))).toEqual(new Set(['银行概念', '地产概念']))
+  expect(calls.rows).not.toContain('board_mix')
+})
+
+it('shows turnover on the amount tab and the leader name on the leader tab', async () => {
+  renderAt('/sector-analysis')
+  await settle()
+
+  await act(async () => {
+    ;[...column('industry').querySelectorAll('button')].find(el => el.textContent === '成交')?.click()
+  })
+  await settle()
+  const industryAmounts = [...column('industry').querySelectorAll('[data-metric="amount"]')].map(node => node.textContent)
+  expect(industryAmounts).toContain('18.00亿')
+  expect(industryAmounts).toContain('5.00亿')
+  expect(column('industry').textContent).toContain('+3.00%')
+
+  await act(async () => {
+    ;[...column('concept').querySelectorAll('button')].find(el => el.textContent === '成交')?.click()
+  })
+  await settle()
+  expect(column('concept').querySelector('[data-metric="amount"]')?.textContent).toMatch(/亿|万/)
+
+  await act(async () => {
+    ;[...column('industry').querySelectorAll('button')].find(el => el.textContent === '龙头')?.click()
+  })
+  await settle()
+  const leaders = [...column('industry').querySelectorAll('[data-metric="leader"]')].map(node => node.textContent)
+  expect(leaders).toContain('平安银行')
+  expect(leaders).toContain('万科A')
+  expect(column('industry').textContent).toContain('+2.00%')
 })

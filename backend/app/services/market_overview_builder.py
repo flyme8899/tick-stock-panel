@@ -162,14 +162,26 @@ def _index_quotes(repo, quote_service, as_of: date | None = None) -> list[dict]:
 # 扩展数据(行业 / 概念)维度聚合
 # ================================================================
 
+_CONCEPT_FIELD_TOKENS = ("概念", "concept", "theme", "题材")
+_INDUSTRY_FIELD_TOKENS = ("行业", "industry", "申万", "中信", "sector")
+
+
 def _dimension_field(config: ExtConfig, kind: str) -> str | None:
-    candidates = ["概念", "concept", "theme"] if kind == "concept" else ["行业", "industry", "sector"]
-    for candidate in candidates:
-        needle = candidate.lower()
-        for field in config.fields:
-            haystack = f"{field.name} {field.label}".lower()
-            if needle in haystack:
-                return field.name
+    # 内置预设锁死种类: 概念表不能给行业列供数, 反过来也一样。
+    if config.id == "ext_gn_ths" and kind != "concept":
+        return None
+    if config.id == "ext_hy_ths" and kind != "industry":
+        return None
+    want = _CONCEPT_FIELD_TOKENS if kind == "concept" else _INDUSTRY_FIELD_TOKENS
+    blocked = _INDUSTRY_FIELD_TOKENS if kind == "concept" else _CONCEPT_FIELD_TOKENS
+    for field in config.fields:
+        haystack = f"{field.name} {field.label}".lower()
+        if not any(token in haystack for token in want):
+            continue
+        # 行业列遇到「概念」字样直接跳过, 即使标签里夹了 sector。
+        if kind == "industry" and any(token in haystack for token in blocked):
+            continue
+        return field.name
     return None
 
 

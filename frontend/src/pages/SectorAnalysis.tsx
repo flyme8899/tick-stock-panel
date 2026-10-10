@@ -24,8 +24,11 @@ import { storage } from '@/lib/storage'
 import { fmtBigNum, fmtPct, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import {
+  classifyDimensionField,
   groupByIndustryLevel,
+  isMembershipTag,
   resolveDimension,
+  selectSectorConfig,
   type DimensionGroup,
   type StockRow,
 } from '@/lib/analysis-adapter'
@@ -150,23 +153,6 @@ interface SectorStat {
   leader: EnrichedStock | null
   heatScore: number
   riskScore: number
-}
-
-function pickBestConfig(
-  configs: { id: string; label: string; description?: string; fields: { name: string; label: string }[] }[],
-  keywords: string[],
-): string {
-  let best = ''
-  let bestScore = 0
-  for (const c of configs) {
-    const haystack = [c.id, c.label, c.description ?? '', ...c.fields.flatMap(f => [f.name, f.label])].join(' ').toLowerCase()
-    const score = keywords.reduce((n, k) => n + (haystack.includes(k) ? 1 : 0), 0)
-    if (score > bestScore) {
-      bestScore = score
-      best = c.id
-    }
-  }
-  return best
 }
 
 function symbolKeys(symbol: unknown): string[] {
@@ -343,14 +329,16 @@ function useSectorBoard(kind: SectorKind) {
 
   const configsQuery = useQuery({ queryKey: QK.extData, queryFn: api.extDataList })
   const availableConfigs = configsQuery.data?.items ?? []
-  // 用户配置的 configId 可能已失效 (扩展数据被删除), 此时回退到自动选择。
-  const preferredConfigId = fieldConfig.configId || pickBestConfig(availableConfigs, spec.keywords)
-  const preferredConfig = availableConfigs.find(c => c.id === preferredConfigId)
-  const activeConfigId = preferredConfig ? preferredConfigId : pickBestConfig(availableConfigs, spec.keywords)
-  const activeConfig = availableConfigs.find(c => c.id === activeConfigId)
+  // 只接受归类一致的数据源。概念预设不能给行业列, 名字像行业但字段是概念的表也不行。
+  const activeConfig = selectSectorConfig(kind, availableConfigs, fieldConfig.configId)
+  const activeConfigId = activeConfig?.id ?? ''
+  const preferredField = fieldConfig.dimensionField
+    && classifyDimensionField(fieldConfig.dimensionField) === kind
+    ? fieldConfig.dimensionField
+    : undefined
 
   const rowsQuery = useQuery({
-    queryKey: QK.extDataRows(activeConfigId, undefined, PAGE_LIMIT),
+    queryKey: QK.sectorBoardRows(kind, activeConfigId, PAGE_LIMIT),
     queryFn: () => api.extDataRows(activeConfigId, { limit: PAGE_LIMIT }),
     enabled: !!activeConfigId,
   })
@@ -360,7 +348,7 @@ function useSectorBoard(kind: SectorKind) {
     mutationFn: () => api.extDataPresetFetch(spec.presetId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: QK.extData })
-      queryClient.invalidateQueries({ queryKey: QK.extDataRows(spec.presetId, undefined, PAGE_LIMIT) })
+      queryClient.invalidateQueries({ queryKey: QK.sectorBoardRows(kind, spec.presetId, PAGE_LIMIT) })
     },
   })
   const needsPresetFetch =
@@ -375,19 +363,15 @@ function useSectorBoard(kind: SectorKind) {
 
   const marketMap = useMemo(() => buildMarketMap(marketQuery.data?.rows ?? []), [marketQuery.data?.rows])
   const resolved = useMemo(
-    () => resolveDimension(
-      rowsQuery.data,
-      activeConfig,
-      fieldConfig.dimensionField ? [fieldConfig.dimensionField, ...spec.candidateFields] : spec.candidateFields,
-    ),
-    [rowsQuery.data, activeConfig, fieldConfig.dimensionField, spec.candidateFields],
+    () => resolveDimension(rowsQuery.data, activeConfig, spec.candidateFields, { kind, preferredField }),
+    [rowsQuery.data, activeConfig, spec.candidateFields, kind, preferredField],
   )
 
   const industryLevel = (fieldConfig.hierarchyLevel ?? 2) as 1 | 2 | 3
-  const groups = useMemo(
-    () => spec.hierarchy ? groupByIndustryLevel(resolved.groups, industryLevel) : resolved.groups,
-    [spec.hierarchy, resolved.groups, industryLevel],
-  )
+  const groups = useMemo(() => {
+    const leveled = spec.hierarchy ? groupByIndustryLevel(resolved.groups, industryLevel) : resolved.groups
+    return leveled.filter(group => !isMembershipTag(group.key))
+  }, [spec.hierarchy, resolved.groups, industryLevel])
 
   const stats = useMemo(() => {
     return groups
@@ -446,6 +430,7 @@ function useSectorBoard(kind: SectorKind) {
     heatmapQuoteMap,
     industryLevel,
     setIndustryLevel,
+    dimensionField: resolved.dimensionField,
     resolvedHint: resolved.hint || '',
     marketAsOf: marketQuery.data?.as_of ?? null,
   }
@@ -578,14 +563,22 @@ export function SectorAnalysis() {
       <AnimatePresence>
         {concept.showConfig && (
           <AnalysisConfigDialog
-            currentConfig={concept.fieldConfig}
+            currentConfig={{
+              ...concept.fieldConfig,
+              configId: concept.activeConfig?.id ?? concept.fieldConfig.configId,
+              dimensionField: concept.dimensionField || concept.fieldConfig.dimensionField,
+            }}
             onSave={config => saveConfig('concept', config)}
             onClose={() => concept.setShowConfig(false)}
           />
         )}
         {industry.showConfig && (
           <AnalysisConfigDialog
-            currentConfig={industry.fieldConfig}
+            currentConfig={{
+              ...industry.fieldConfig,
+              configId: industry.activeConfig?.id ?? industry.fieldConfig.configId,
+              dimensionField: industry.dimensionField || industry.fieldConfig.dimensionField,
+            }}
             onSave={config => saveConfig('industry', config)}
             onClose={() => industry.setShowConfig(false)}
             showHierarchyLevel
@@ -642,6 +635,7 @@ function SectorColumn({
     <section
       id={`sector-column-${spec.kind}`}
       data-kind={spec.kind}
+      data-source={board.activeConfig?.id ?? ''}
       data-focused={focused ? 'true' : 'false'}
       data-collapsed={collapsed ? 'true' : 'false'}
       className={cn(
@@ -716,7 +710,7 @@ function SectorColumn({
             />
           ) : (
             <>
-              <RotationSummary kind={spec.kind} dimLabel={spec.dimLabel} strongest={strongest} breadthLabel={spec.heroBreadth} strongestLabel={spec.heroStrong} onSelect={onSelect} />
+              <RotationSummary kind={spec.kind} level={spec.hierarchy ? board.industryLevel : undefined} dimLabel={spec.dimLabel} strongest={strongest} breadthLabel={spec.heroBreadth} strongestLabel={spec.heroStrong} onSelect={onSelect} />
               {board.stats.length > 0 ? (
                 <>
                   <SectorRankList
@@ -763,6 +757,7 @@ function SectorColumn({
 
 function RotationSummary({
   kind,
+  level,
   dimLabel,
   strongest,
   strongestLabel,
@@ -770,6 +765,7 @@ function RotationSummary({
   onSelect,
 }: {
   kind: SectorKind
+  level?: 1 | 2 | 3
   dimLabel: string
   strongest?: SectorStat
   strongestLabel: string
@@ -777,8 +773,8 @@ function RotationSummary({
   onSelect: (key: string) => void
 }) {
   const query = useQuery({
-    queryKey: QK.sectorRotation(kind, undefined, 5, '', 'summary'),
-    queryFn: () => api.sectorRotation({ kind, top: 5, autoRows: 5, bucket: 5, sortBy: 'activity' }),
+    queryKey: QK.sectorRotation(kind, undefined, 5, '', 'summary', level),
+    queryFn: () => api.sectorRotation({ kind, top: 5, autoRows: 5, bucket: 5, sortBy: 'activity', level }),
     staleTime: 60_000,
   })
   const latest = query.data?.status === 'ok' ? query.data.timeline.at(-1) : undefined
@@ -826,6 +822,32 @@ function RotationSummary({
         </div>
       )}
     </div>
+  )
+}
+
+function RankMetric({ item, sortMode }: { item: SectorStat; sortMode: SortMode }) {
+  if (sortMode === 'amount') {
+    return (
+      <span className="flex shrink-0 flex-col items-end leading-tight">
+        <span data-metric="amount" className="font-mono text-xs tabular-nums text-foreground">{fmtBigNum(item.totalAmount)}</span>
+        <span className={cn('font-mono text-[10px] tabular-nums', priceColorClass(item.avgPct))}>{item.avgPct != null ? fmtPct(item.avgPct) : '—'}</span>
+      </span>
+    )
+  }
+  if (sortMode === 'leader') {
+    const leader = item.leader
+    const leaderName = leader?.name || leader?.symbol || '—'
+    return (
+      <span className="flex max-w-[9rem] shrink-0 flex-col items-end leading-tight">
+        <span data-metric="leader" className="truncate text-xs text-foreground">{leaderName}</span>
+        <span className={cn('font-mono text-[10px] tabular-nums', priceColorClass(leader?.change_pct))}>{leader ? fmtPct(leader.change_pct) : '—'}</span>
+      </span>
+    )
+  }
+  return (
+    <span data-metric="pct" className={cn('shrink-0 font-mono text-xs tabular-nums', priceColorClass(item.avgPct))}>
+      {item.avgPct != null ? fmtPct(item.avgPct) : '—'}
+    </span>
   )
 }
 
@@ -900,7 +922,7 @@ function SectorRankList({
             >
               <div className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">{item.key}</span>
-                <span className={cn('font-mono text-xs tabular-nums', priceColorClass(item.avgPct))}>{item.avgPct != null ? fmtPct(item.avgPct) : '—'}</span>
+                <RankMetric item={item} sortMode={sortMode} />
               </div>
               <div className="mt-1 flex items-center gap-2 text-[10px] text-muted">
                 <span>{item.count}只</span>

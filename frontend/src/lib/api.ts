@@ -3567,7 +3567,7 @@ export const api = {
   },
 
   // ===== 板块切换 (盘中轮动) =====
-  sectorRotation: (params: { kind: 'concept' | 'industry'; flow?: string; top?: number; bucket?: number; seriesNames?: string[]; autoRows?: number; excludeSectors?: string[]; sortBy?: 'activity' | 'score' | 'pct' | 'rank_change' | 'momentum' | 'flow' }) => {
+  sectorRotation: (params: { kind: 'concept' | 'industry'; flow?: string; top?: number; bucket?: number; seriesNames?: string[]; autoRows?: number; excludeSectors?: string[]; sortBy?: 'activity' | 'score' | 'pct' | 'rank_change' | 'momentum' | 'flow'; level?: number }) => {
     const query = new URLSearchParams({ kind: params.kind })
     if (params.flow) query.set('flow', params.flow)
     if (params.top != null) query.set('top', String(params.top))
@@ -3577,6 +3577,7 @@ export const api = {
     if (params.autoRows != null) query.set('auto_rows', String(params.autoRows))
     if (params.excludeSectors != null) query.set('exclude_sectors', JSON.stringify(params.excludeSectors))
     if (params.sortBy) query.set('sort_by', params.sortBy)
+    if (params.kind === 'industry' && params.level != null) query.set('level', String(params.level))
     return request<SectorRotation>(`/api/sector-rotation?${query}`)
   },
 
