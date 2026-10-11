@@ -512,7 +512,7 @@ def test_realistic_batch_keeps_subtitles(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", fake)
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     events = top_hot_events(NOW)["events"]
     subtitles = [str(event.get("subtitle") or "") for event in events]
@@ -614,7 +614,7 @@ def test_subtitle_repeats_are_dropped_and_listing_keeps_the_field(tmp_path, monk
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", first)
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     listed = hot_event_listing(NOW)
     by_name = {event["name"]: event for event in listed["events"]}
@@ -655,7 +655,7 @@ def test_omitted_subtitle_row_is_not_cached_as_miss(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", partial)
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     first = {event["name"]: event for event in top_hot_events(NOW)["events"]}
     assert first[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
@@ -692,3 +692,67 @@ def test_same_company_earnings_notes_are_one_event(tmp_path):
     assert len(events) == 1
     assert events[0]["mentions"] == 2
     assert events[0]["name"] == raw
+
+
+def test_event_body_uses_article_text_and_skips_title_repeat():
+    """正文取事件里的文章正文；和主标题重复的当没有正文。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "粤芯半导体将于10月13日在创业板上市",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "粤芯半导体：将于10月13日在创业板上市",
+                "text": (
+                    "粤芯半导体：将于10月13日在创业板上市\n"
+                    "发行价12.01元/股，发行后总股本28.78亿股，公开发行5.13亿股。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    assert "12.01元/股" in body
+    assert "28.78亿股" in body
+    # 正文行首的标题行要剥掉。
+    assert not body.startswith("粤芯半导体：")
+
+    # 正文只是把主标题重复一遍（带省略号），等于没有正文。
+    repeated = {
+        "name": "IEA下调原油供需预期",
+        "_candidates": [{"source": "cls", "title": "IEA下调原油供需预期", "text": "IEA下调原油供需预期\nIEA下调原油供需预期..."}],
+    }
+    assert _event_body(repeated) == ""
+
+
+def test_title_prompt_feeds_article_body_and_asks_for_gap_filling():
+    """提示词里带上各事件的正文，并要求只写主标题没有的事实。"""
+    from app.news.hot_events import _title_prompt
+
+    events = [
+        {
+            "_batch_id": "1",
+            "name": "宁德时代与赛力斯签署长期战略合作协议",
+            "_candidates": [
+                {
+                    "source": "cls",
+                    "title": "宁德时代与赛力斯签署长期战略合作协议",
+                    "text": (
+                        "宁德时代与赛力斯签署长期战略合作协议\n"
+                        "签约地点为重庆，问界全系车型累计交付已突破120万台。"
+                    ),
+                },
+            ],
+        },
+    ]
+    prompt = _title_prompt(events, retry=False)
+    assert "补充要点" in prompt
+    assert "1. 主标题：宁德时代与赛力斯签署长期战略合作协议" in prompt
+    assert "正文：签约地点为重庆" in prompt
+    assert "120万台" in prompt
+    # 明确禁止把主标题换个说法当要点。
+    assert "不要复述主标题" in prompt
+    # 没有正文的事件退回只给主标题。
+    bare = _title_prompt([{"_batch_id": "1", "name": "某公司公告"}], retry=False)
+    assert "1. 主标题：某公司公告" in bare
+    assert "正文：" not in bare

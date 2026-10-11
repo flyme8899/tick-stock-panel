@@ -708,7 +708,12 @@ def _openai_retry_kwargs(exc: Exception, kwargs: dict) -> dict | None:
     return None
 
 
-_DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+# DeepSeek V4 系列默认开思考模式。模型名的版本后缀会变（deepseek-v4-flash、
+# deepseek-v4.1-flash、后续的 v4.2…），中转服务也不会用官方主机名，所以按前缀
+# 匹配模型、不限定 base_url。判定过窄会让 extra_body 永远注不进去：线上跑的是
+# deepseek-v4.1-flash @ tokenhub.tencentmaas.com，两个旧条件都不满足，思考把
+# max_tokens 全吃掉、正文返回空串。参数被上游拒时仍由 _is_thinking_body_rejected 兜底。
+_DEEPSEEK_V4_PREFIX = "deepseek-v4"
 
 
 def _openai_kwargs(
@@ -734,11 +739,7 @@ def _openai_kwargs(
         reasoning_effort = current_openai_reasoning_effort()
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
-    if (
-        prefer_final_answer
-        and model.strip().lower() in _DEEPSEEK_V4_MODELS
-        and urlsplit(base_url.strip()).hostname == "api.deepseek.com"
-    ):
+    if prefer_final_answer and model.strip().lower().startswith(_DEEPSEEK_V4_PREFIX):
         # DeepSeek V4 defaults to thinking mode. For report-style tasks the
         # hidden reasoning shares max_tokens with the final answer and can
         # exhaust the budget before any visible content is emitted.

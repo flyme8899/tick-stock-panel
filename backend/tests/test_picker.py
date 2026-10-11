@@ -1106,7 +1106,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", fake_text)
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     named = top_hot_events(NOW)
     assert named["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
@@ -1118,7 +1118,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert named["events"][0]["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利空"}]
     assert named["events"][0]["mentioned_stocks"] == []
     assert len(prompts) == 1
-    assert "一句话要点" in prompts[0]
+    assert "补充要点" in prompts[0]
     assert "国内政策/宏观" in prompts[0]
 
     hot_mod.clear_hot_event_cache(llm=False)
@@ -1127,7 +1127,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert again["events"][0]["subtitle"] == "华为发布新模型"
     assert len(prompts) == 1
 
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: False)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: False)
     hot_mod.clear_hot_event_cache()
     fallback = top_hot_events(NOW + timedelta(minutes=22))
     assert fallback["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
@@ -1141,15 +1141,15 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
         return '{"title":"华为发布新模型","importance":"琐碎"}'
 
     monkeypatch.setattr(news_service, "_llm_text", trivial)
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     kept = top_hot_events(NOW + timedelta(minutes=33))
     assert kept["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
     assert kept["events"][0]["importance"] == "一般"
 
 
-def test_hot_event_llm_labels_top_twenty_in_one_batch(tmp_path, monkeypatch):
-    """展示标题一次批量问完前 20 条；不合格再问一次，第 21 条不进提示。"""
+def test_hot_event_llm_labels_all_events_in_one_batch(tmp_path, monkeypatch):
+    """展示标题一次批量问完；20 多条也要一次装进同一批，不合格再问一次。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
@@ -1169,16 +1169,17 @@ def test_hot_event_llm_labels_top_twenty_in_one_batch(tmp_path, monkeypatch):
         "_llm_text",
         lambda prompt, **_kwargs: prompts.append(prompt) or "{}",
     )
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     snapshot = top_hot_events(NOW)
     assert len(snapshot["events"]) == 21
     assert len(prompts) == 2
-    assert "一句话要点" in prompts[0]
-    assert "上一轮标题不合格" in prompts[1]
+    assert "补充要点" in prompts[0]
+    assert "上一轮要点不合格" in prompts[1]
+    # 21 条全在同一批里。早前批次上限是 20，第 21 条永远拿不到要点。
     in_first = [title for title in titles if title in prompts[0]]
-    assert len(in_first) == 20
-    assert len({title for title in titles if title not in prompts[0]}) == 1
+    assert len(in_first) == 21
+    assert not [title for title in titles if title not in prompts[0]]
 
 
 def test_blocked_clustering_matches_pairwise_rank_and_merges(tmp_path, monkeypatch):

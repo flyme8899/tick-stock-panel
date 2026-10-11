@@ -65,9 +65,12 @@ _HEAT_HALF_LIFE_HOURS = 12
 # 加红稿在热度里按 2.5 条计，普通稿仍按 1 条。
 _RED_MENTION_WEIGHT = 2.5
 # 要展示的事件一次批量起标题，不再逐条各问一次。
-_LLM_TITLE_BATCH = 20
-# 20 条要点的 JSON 放得下。1600 在思考模式里只够写出前几条。
-_LLM_TITLE_TOKENS = 4096
+# 20 条覆盖不了一个交易日的事件数（实测 104 条），改成 40 条一批、最多问两批。
+_LLM_TITLE_BATCH = 40
+# 40 条要点的 JSON 加正文输入放得下。正文进 prompt 后输入变长，4096 不够。
+_LLM_TITLE_TOKENS = 8192
+# 一条正文在 prompt 里最多带这么多字符，够放下数字和原因，又不至于把预算吃光。
+_BODY_IN_PROMPT_CHARS = 800
 _TITLE_LIMIT = 20
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
 _TITLE_HARD = 28
@@ -974,7 +977,13 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         "mentioned_stocks": mentioned,
         "item_ids": item_ids,
         "_candidates": [
-            {"source": str(item.get("source") or ""), "title": str(item.get("title") or "")}
+            {
+                "source": str(item.get("source") or ""),
+                "title": str(item.get("title") or ""),
+                # 正文跟着候选一起带出来。要点要写「主标题没提到的事实」，没有正文
+                # 就只能把主标题换个说法（实测 20 条要点 20 条都是同义改写）。
+                "text": str(item.get("text") or ""),
+            }
             for item in members
             if str(item.get("title") or "").strip()
         ],
@@ -3302,11 +3311,60 @@ def _ensure_shown_name(event: dict) -> None:
 
 
 def _drop_repeated_subtitle(event: dict) -> None:
-    """要点和主标题相同，或已经写在主标题里，就不再占一行。"""
+    """要点和主标题重复、几乎只是换个说法、或跟主标题不是同一件事时，留空。
+
+    判定分三层：
+
+    1. 完全相同、或要点整个包含在主标题里 —— 最直接的一种。
+    2. 字符重合率（bigram Jaccard）高到 ``_SUBTITLE_SAME_TOPIC``：模型多数时候
+       只是把主标题换个说法（「被立案」→「被立案并实施留置」），不值得占一行。
+    3. 要点里没有一点实体或数字能和主标题对上 —— 模型写串了编号，把别的资讯
+       写到了这一条（实测「纳斯达克金龙中国指数」拿到「WTI原油」那句）。
+    """
     name = _compact(str(event.get("name") or ""))
     subtitle = _compact(str(event.get("subtitle") or ""))
-    if name and subtitle and (subtitle == name or subtitle in name):
+    if not name or not subtitle:
+        return
+    if subtitle == name or subtitle in name:
         event["subtitle"] = ""
+        return
+    if _headline_similarity(name, subtitle) >= _SUBTITLE_SAME_TOPIC:
+        event["subtitle"] = ""
+        return
+    if not _shares_subject_or_number(name, subtitle):
+        event["subtitle"] = ""
+
+
+# 要点与主标题的 bigram 重合率到这一档就算「只是换个说法」。0.7 是评审给的
+# 参考值；实测「被立案」→「被立案并实施留置」这类改写落在 0.6~0.75。
+_SUBTITLE_SAME_TOPIC = 0.7
+
+
+def _subtitle_entities(text: str) -> set[str]:
+    """一句话里已登记的机构名和英文缩写。"""
+    body = _compact(text)
+    signals: set[str] = set()
+    for entity in _explicit_entities(body):
+        signals.add(entity)
+    for latin in re.findall(r"[A-Za-z]{2,}", body):
+        signals.add(latin.upper())
+    return signals
+
+
+def _shares_subject_or_number(name: str, subtitle: str) -> bool:
+    """要点要和主标题讲同一件事，否则视为写串了编号。
+
+    只看**实体**（机构名、英文缩写），不看数字 —— 要点带上一个主标题没有的数字
+    恰恰是它的价值（「召回30064辆」→「涉及2022至2025款S级」），拿数字判错配会
+    把正确补充全误杀。只在两边都有实体、且完全不相交时才判定为错配；任何一边
+    实体不足就放行（中文专名抽取覆盖不到「柴油协议」这类，一严就连带误杀）。
+    实测能抓住「纳斯达克金龙中国指数」拿到「WTI原油」这种整条串号的情况。
+    """
+    wanted = _subtitle_entities(name)
+    got = _subtitle_entities(subtitle)
+    if not wanted or not got:
+        return True
+    return bool(wanted & got)
 
 
 def _event_is_cutoff_of(short: dict, host: dict) -> bool:
@@ -3440,28 +3498,89 @@ def _event_source_text(event: dict) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _event_body(event: dict) -> str:
+    """事件里最完整的一条正文，去掉标题行后返回。
+
+    要点要写「主标题没提到的事实」，素材必须来自正文。只给标题的话，模型手里
+    没有任何新信息，只能把主标题换个说法（实测 20 条要点 20 条都是同义改写）。
+    正文优先取和主标题对得上的那条候选，再退而取最长的一条。正文和主标题
+    重合（只是把标题重复一遍）的，当没有正文处理，免得白占 token。
+    """
+    name = _compact(str(event.get("name") or ""))
+    rows = event.get("_candidates")
+    best = ""
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+        if not body:
+            continue
+        if _body_repeats_title(name, body):
+            continue
+        title = _compact(str(row.get("title") or ""))
+        if name and title and name in title:
+            return body
+        if len(body) > len(best):
+            best = body
+    return best
+
+
+def _body_repeats_title(name: str, body: str) -> bool:
+    """正文只是把主标题重复一遍（带省略号、加来源前缀都算）。"""
+    if not name:
+        return False
+    flat = _compact(body)
+    if not flat:
+        return True
+    if name in flat:
+        # 主标题整句都在正文里，剩下的字不超过标题一小截，就是重复。
+        # 常见的是后面挂个省略号、来源后缀（「IEA下调原油供需预期...」）。
+        return len(flat) - len(name) <= max(3, len(name) // 5)
+    return _headline_similarity(name, flat) >= _SUBTITLE_SAME_TOPIC
+
+
 def _title_prompt(events: list[dict], *, retry: bool) -> str:
     blocks = []
     for event in events:
-        headlines = [
-            str(item).strip()
-            for item in (event.get("headlines") or [])
-            if str(item).strip()
-        ]
-        if not headlines:
-            fallback = str(event.get("headline") or event.get("name") or "").strip()
-            headlines = [fallback] if fallback else []
-        blocks.append(f"{event.get('_batch_id')}. " + " / ".join(headlines))
-    retry_line = "上一轮标题不合格，请重写。\n" if retry else ""
+        # 主标题 + 正文。主标题是已经定稿的展示标题，正文里才有细节。早先只喂
+        # 主标题（怕混进同簇别的标题）结果是「无米下锅」——模型只能把主标题
+        # 换个说法，产出一堆无价值的重复句。正文按事件各自取，不跨条拼接，
+        # 也就不会出现「拿别条标题当内容」的错配。
+        primary = str(event.get("name") or "").strip()
+        if not primary:
+            headlines = [
+                str(item).strip()
+                for item in (event.get("headlines") or [])
+                if str(item).strip()
+            ]
+            if not headlines:
+                fallback = str(event.get("headline") or "").strip()
+                headlines = [fallback] if fallback else []
+            primary = " / ".join(headlines)
+        body = _event_body(event)[:_BODY_IN_PROMPT_CHARS]
+        if body:
+            blocks.append(f"{event.get('_batch_id')}. 主标题：{primary}\n正文：{body}")
+        else:
+            blocks.append(f"{event.get('_batch_id')}. 主标题：{primary}")
+    retry_line = "上一轮要点不合格，请重写。\n" if retry else ""
     names = "、".join(_dictionary_names())
     return (
-        "下面每条是一件与资本市场有关的资讯。主标题用原标题，不要改写。"
-        "你只为每一条写一句话要点。"
+        "下面每条是一件与资本市场有关的资讯，给出主标题和正文。"
+        "你只为每一条写一句话**补充要点**：要点只能包含主标题里没有的具体事实，"
+        "也就是正文里的数字、金额、比例、日期、地点、原因、影响对象。"
+        "主标题本身已经说清楚的，一个字都不要重复。"
+        "如果正文里没有主标题之外的事实，title 必须留空字符串，不要硬凑。"
+        "绝对不要把主标题换个说法当作要点：不要复述主标题，不要给主标题加「称」"
+        "「表示」「建议」「将」「并」，也不要去掉主标题的标点另写一句。"
         "只输出 JSON："
         '{"events":[{"id":"与输入编号相同","title":"","concepts":[],"category":"",'
         '"direction":"利好或利空","importance":"重大或重要或一般或琐碎"}]}。'
         "输入有几条，events 就有几条。id 必须原样抄写下面的编号，不要漏，不要改成从 0 起，也不要按数组顺序另编。"
-        "title 是这一条的一句话要点，写明这条资讯发生了什么。不要把别的编号的内容写到这一条上。"
+        "不要把别的编号的内容写到这一条上。"
         "不要半句话，不要时间戳，不要【】，不要省略号，不要把词从中间截断。"
         "不要写早上好、各位或利空叙事。不要用「事件」当要点。"
         "不要带来源前缀。不要输出重点、点评或栏目标签。不要只写媒体名。"
@@ -3473,7 +3592,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "对不上就留空。不要新造概念。不要用来源栏目，栏目名里的快报不是概念。"
         "概念要和标题里的国家地区一致，不要把伊朗或中东标成俄乌。"
         "direction 表示对 A 股相关方向是利好还是利空。"
-        "没有把握就留空，不要编造标题里没出现的事实。\n"
+        "没有把握就留空，不要编造正文里没出现的事实。\n"
         f"{retry_line}\n"
         + "\n".join(blocks)
     )
@@ -3498,11 +3617,11 @@ def _label_with_llm(events: list[dict]) -> None:
 
     if not events or not llm_extract_enabled():
         return
-    from app.news.service import _reserve_llm_call
+    from app.news.service import reserve_hot_title_call
 
     _purge_stale_title_cache()
     pending: list[dict] = []
-    for event in events[:_LLM_TITLE_BATCH]:
+    for event in events:
         cache_key = _title_cache_key(str(event.get("_fp") or ""))
         cached = _LLM_CACHE.get(cache_key)
         if isinstance(cached, dict) and _cached_title_usable(cached):
@@ -3511,13 +3630,29 @@ def _label_with_llm(events: list[dict]) -> None:
             continue
         if cached is not None:
             _LLM_CACHE.pop(cache_key, None)
-        event["_batch_id"] = str(len(pending) + 1)
         pending.append(event)
-    if not pending or not _reserve_llm_call():
+    if not pending:
         return
-    first = _parse_title_batch(_request_titles(pending, retry=False), pending)
+    # 事件数经常上百条，一个批次装不下。按批循环问，每批各自编号，
+    # 否则只有前一批有点要、后面的永远轮不到（实测 104 条只问了 20 条）。
+    for start in range(0, len(pending), _LLM_TITLE_BATCH):
+        batch = pending[start:start + _LLM_TITLE_BATCH]
+        _label_batch_with_llm(batch, reserve_call=reserve_hot_title_call)
+
+
+def _label_batch_with_llm(batch: list[dict], *, reserve_call) -> None:
+    """问一批要点，没通过的再问一轮。batch 内的编号从 1 起。"""
+    if not batch:
+        return
+    for index, event in enumerate(batch, start=1):
+        event["_batch_id"] = str(index)
+    if not reserve_call():
+        # 「额度用光」和「问了但没通过」是两回事，分开记，否则线上看不出真实通过率。
+        logger.info("热门事件要点本轮未询问: 额度已用满 (%d 条待问)", len(batch))
+        return
+    first = _parse_title_batch(_request_titles(batch, retry=False), batch)
     failed: list[dict] = []
-    for event in pending:
+    for event in batch:
         parsed = first.get(str(event.get("_batch_id")))
         if parsed is None:
             failed.append(event)
@@ -3529,8 +3664,10 @@ def _label_with_llm(events: list[dict]) -> None:
     for index, event in enumerate(failed, start=1):
         event["_batch_id"] = str(index)
     second: dict[str, dict] = {}
-    if _reserve_llm_call():
+    if reserve_call():
         second = _parse_title_batch(_request_titles(failed, retry=True), failed)
+    else:
+        logger.info("热门事件要点重试未进行: 额度已用满 (%d 条)", len(failed))
     for event in failed:
         batch_id = str(event.get("_batch_id"))
         parsed = second.get(batch_id)

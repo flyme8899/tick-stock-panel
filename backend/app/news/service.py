@@ -88,6 +88,13 @@ _LEXICON: tuple[float, Lexicon] | None = None
 _LLM_TIMES: list[float] = []
 _LLM_LOCK = threading.Lock()
 _LLM_PER_HOUR = 10
+# 热门要点（副标题）和个股抽取共用同一个进程，但用途不同：热门要点一轮就要问
+# 最多 20 条（分两批），个股抽取是一次外文轮询可能几十条。挤在一个小时额度里，
+# 热门要点经常轮不到 —— 线上表现为「有要点的 0 条」，日志里也没有拒绝记录。
+# 给它单独开一份额度，两个用途互不抢占。
+_HOT_TITLE_TIMES: list[float] = []
+_HOT_TITLE_LOCK = threading.Lock()
+_HOT_TITLE_PER_HOUR = 12
 # 一次外文轮询可能带上几十条新稿。模型只处理前几条，避免单轮把额度打光。
 _FOREIGN_LLM_PER_POLL = 10
 # 本地维表里的 ETF / 股票集合。请求线程不扫盘，大约 10 分钟复用一次。
@@ -1324,6 +1331,18 @@ def _reserve_llm_call() -> bool:
         if len(_LLM_TIMES) >= _LLM_PER_HOUR:
             return False
         _LLM_TIMES.append(now)
+        return True
+
+
+def reserve_hot_title_call() -> bool:
+    """热门要点单独占一份小时额度，不和个股抽取抢。"""
+    now = time.monotonic()
+    with _HOT_TITLE_LOCK:
+        while _HOT_TITLE_TIMES and now - _HOT_TITLE_TIMES[0] > 3600:
+            _HOT_TITLE_TIMES.pop(0)
+        if len(_HOT_TITLE_TIMES) >= _HOT_TITLE_PER_HOUR:
+            return False
+        _HOT_TITLE_TIMES.append(now)
         return True
 
 
