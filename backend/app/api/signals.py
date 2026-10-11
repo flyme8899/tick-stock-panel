@@ -130,6 +130,16 @@ def get_options():
         groups.append(str_group)
         fields.extend(str_entries)
 
+    from app.indicators.candles import available_patterns
+
+    candle_fields = [
+        {"key": pat.column, "label": f"{pat.name}（{pat.talib}）"}
+        for pat in available_patterns()
+    ]
+    if candle_fields:
+        groups.append({"key": "candle", "label": "K线形态", "fields": candle_fields})
+        fields.extend(candle_fields)
+
     return {
         "fields": fields,
         "groups": groups,

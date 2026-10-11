@@ -21,6 +21,7 @@ const PERSISTABLE_KEY_ROOTS = new Set([
   'watchlist',                // 自选清单 (不含 enriched/quotes 等行情族)
   'watchlist-groups',
   'screener-strategies',      // 策略池清单
+  'screener-candle-catalog',  // K 线形态目录（引擎不变就不变；命中名单不持久化）
   'regime-history',           // 以下 regime 族一天最多变一次
   'regime-states',
   'regime-coverage',

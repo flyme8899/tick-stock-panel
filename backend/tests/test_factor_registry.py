@@ -99,6 +99,11 @@ GOLDEN_COLUMNS: list[dict] = [
     {"id": "position_240d", "label": "一年价格位置", "group": "价格位置", "desc": "收盘价在近240个交易日最低价到最高价之间的位置 (0~1)"},
     {"id": "distance_to_high_240d", "label": "距一年高点", "group": "价格位置", "desc": "收盘价 / 240日最高收盘价 - 1, 接近0代表贴近一年新高"},
     {"id": "kdj_kd_diff", "label": "KDJ K-D差", "group": "趋势", "desc": "KDJ K值 - D值, 正值代表快线在慢线上方"},
+    {"id": "bps_latest", "label": "每股净资产(最新公告)", "group": "财务", "desc": "最新已公告每股净资产; 公告前为空"},
+    {"id": "eps_latest", "label": "每股收益(最新公告)", "group": "财务", "desc": "最新已公告基本每股收益。按 basic_eps、eps、eps_basic 的顺序取第一列，列都没有时为空"},
+    {"id": "pe_latest", "label": "收盘价/最新报告期每股收益（未年化）", "group": "财务", "desc": "收盘价 / 最新报告期基本每股收益。报告期未年化，一季报会把比值放大到约四倍；不是市盈率TTM。收益缺失或非正时为空"},
+    {"id": "roa_latest", "label": "ROA(最新公告)", "group": "财务", "desc": "最新已公告总资产收益率。财务表无 roa 列时为空"},
+    {"id": "ocf_to_revenue_latest", "label": "经营现金流/营收(最新公告)", "group": "财务", "desc": "最新已公告经营现金净额/营业收入。列缺失时为空"},
 ]
 
 GOLDEN_VIRTUAL_DEPS: dict[str, frozenset[str]] = {
@@ -230,15 +235,19 @@ def test_scoring_warmup_snapshot() -> None:
 
 def test_catalog_counts_and_kinds() -> None:
     specs = all_factors(stable_only=True)
-    # 77 个黄金目录因子，另加 2 个股票资金因子。挖掘 FACTOR_COLUMNS 仍排除 fund_flow 标签。
-    assert len(specs) == 79
-    assert len({spec.id for spec in specs}) == 79  # id 唯一
+    # 82 个目录因子（原 77 个再加 5 个财务列），另加 7 个股票资金因子。
+    # 挖掘 FACTOR_COLUMNS 仍排除 fund_flow 标签。
+    assert len(specs) == 89
+    assert len({spec.id for spec in specs}) == 89  # id 唯一
     fund_flow = {spec.id for spec in specs if "fund_flow" in spec.tags}
-    assert fund_flow == {"ff_main_net_5d", "ff_sector_net_inflow_rank"}
+    assert fund_flow == {
+        "ff_main_net", "ff_main_net_3d", "ff_main_net_5d", "ff_main_net_10d",
+        "ff_large_net", "ff_super_net", "ff_sector_net_inflow_rank",
+    }
     virtual = [spec for spec in specs if spec.kind == "virtual"]
     assert len(virtual) == 52  # ma/ema 10 + 原有 26 + 扩充批次 16
     financial = [spec for spec in specs if spec.pit]
-    assert len(financial) == 7
+    assert len(financial) == 12
     assert all(spec.pit_source == "financial_announce" for spec in financial)
     assert all(spec.asset_types == frozenset({"stock"}) for spec in financial)
 
@@ -264,8 +273,8 @@ def test_get_factor_and_dependencies() -> None:
 def test_asset_type_filter() -> None:
     stock = all_factors(asset_type="stock", stable_only=True)
     etf = all_factors(asset_type="etf")
-    assert len(stock) == 79  # 含 2 个股票资金因子
-    assert len(etf) == 70  # 财务 7 项与资金因子仅股票; Alpha158 实验组只覆盖股票且默认另计
+    assert len(stock) == 89  # 含 7 个股票资金因子
+    assert len(etf) == 70  # 财务 12 项与资金因子仅股票; Alpha158 实验组只覆盖股票且默认另计
 
 
 def test_register_factor_rejects_duplicate() -> None:
@@ -312,7 +321,7 @@ def test_factors_api_contract() -> None:
     assert response.status_code == 200
     payload = response.json()
     factors = payload["factors"]
-    assert len(factors) == 79
+    assert len(factors) == 89
     assert not any(item["id"].startswith("a158_") for item in factors)
     assert any(item["id"] == "ff_main_net_5d" for item in factors)
     first = factors[0]
@@ -335,11 +344,11 @@ def test_factors_api_include_experimental() -> None:
     client = _client()
     payload = client.get("/api/factors", params={"include_experimental": "true"}).json()
     factors = payload["factors"]
-    assert len(factors) == 79 + 158
+    assert len(factors) == 89 + 158
     assert factors[0]["id"] == "momentum_5d"
     assert any(item["id"] == "a158_vwap_0" for item in factors)
     default = client.get("/api/factors").json()["factors"]
-    assert len(default) == 79
+    assert len(default) == 89
 
 
 def test_factors_api_asset_filter_and_validation() -> None:

@@ -1105,3 +1105,27 @@ def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str]]:
             continue
         result.append((config_id, field_name))
     return result
+
+
+@router.get("/candle-patterns")
+def candle_pattern_catalog():
+    """K 线形态目录。当前引擎算不了的形态 available=false。"""
+    from app.indicators.candles import catalog_payload
+
+    return catalog_payload()
+
+
+@router.get("/candle-patterns/match")
+def candle_pattern_match(
+    request: Request,
+    pattern: str = Query(..., description="形态 id，如 engulfing"),
+    side: str = Query(..., description="bull 或 bear"),
+    within: int = Query(1, ge=1, le=30, description="含最近一个交易日在内的交易日数"),
+):
+    """最近 within 个交易日里，该形态方向命中的股票。"""
+    from app.indicators.candle_store import match_symbols
+
+    try:
+        return match_symbols(request.app.state.repo.store.data_dir, pattern, side, within)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

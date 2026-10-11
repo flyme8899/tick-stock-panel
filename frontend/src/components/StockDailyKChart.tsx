@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { type KlineRow } from '@/lib/api'
+import { type KlineDailyResponse, type KlineRow } from '@/lib/api'
 import { klineDailyQueryOptions } from '@/lib/kline'
 import { storage } from '@/lib/storage'
 import {
@@ -82,6 +82,15 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
     }))
 }
 
+function buildPatternMarkers(markers: KlineDailyResponse['candle_markers']): ChartMarker[] {
+  if (!markers?.length) return []
+  return markers.map((marker) => ({
+    date: marker.date.slice(0, 10),
+    kind: marker.side === 'bear' ? 'sell' as const : marker.side === 'neutral' ? 'neutral' as const : 'buy' as const,
+    label: marker.name,
+  }))
+}
+
 function buildLimitUpMarkers(rows: KlineRow[]): ChartMarker[] {
   const markers: ChartMarker[] = []
   for (const r of rows) {
@@ -152,6 +161,7 @@ export function StockDailyKChart({
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
+  const [showPatternMarkers, setShowPatternMarkers] = useState(true)
   // 加入自选日标注（与「异动」标记相互独立）
   const [showAddedMark, setShowAddedMark] = useState(true)
   const [volumeCompare, setVolumeCompare] = useState<VolumeCompareConfig>(() =>
@@ -165,10 +175,15 @@ export function StockDailyKChart({
   const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
+  const patternMarkers = useMemo(
+    () => buildPatternMarkers(kline.data?.candle_markers),
+    [kline.data?.candle_markers],
+  )
   const allMarkers = useMemo(() => [
     ...(markers ?? []),
     ...(showLimitMarkers && showMarkers ? limitMarkers : []),
-  ], [limitMarkers, markers, showLimitMarkers, showMarkers])
+    ...(showPatternMarkers ? patternMarkers : []),
+  ], [limitMarkers, patternMarkers, markers, showLimitMarkers, showMarkers, showPatternMarkers])
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -255,6 +270,14 @@ export function StockDailyKChart({
                 onClick={() => setShowMarkers(v => !v)}
               />
             )}
+          {showMarkerToggle && (
+            <ChartPill
+              active={showPatternMarkers}
+              label="形态"
+              activeClass="text-[#C74040] bg-[#C74040]/10"
+              onClick={() => setShowPatternMarkers(v => !v)}
+            />
+          )}
             {/* 激活色与图表里的 ADDED_DATE_COLOR 一致; Tailwind 只认字面量类名, 故写死色值 */}
             {showMarkerToggle && addedDate && (
               <ChartPill

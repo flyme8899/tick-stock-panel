@@ -82,7 +82,7 @@ def test_custom_factor_definition_roundtrip(tmp_path, cleanup_registry) -> None:
 
     # 快照约束不受影响: 未注册动态因子时目录 = 77 内置
     unregister_factor("uf_test_rev")
-    assert len(factor_columns_view()) == 77
+    assert len(factor_columns_view()) == 82
 
 
 def test_custom_factor_invalid_rejected(cleanup_registry) -> None:
