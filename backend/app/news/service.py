@@ -94,7 +94,11 @@ _LLM_PER_HOUR = 10
 # 给它单独开一份额度，两个用途互不抢占。
 _HOT_TITLE_TIMES: list[float] = []
 _HOT_TITLE_LOCK = threading.Lock()
-_HOT_TITLE_PER_HOUR = 12
+# 一次 _compute 里事件常上百条，按 40 条一批要问 3~4 批，每批没通过还要重试一轮，
+# 一轮下来最多 8 次。额度设 12 时，同小时内再算一次就轮不到后面的批次 ——
+# 线上表现为「排在前面的批次有要点，靠后的整批 0 条」。留出两轮完整算量（16 次），
+# 让快照重算不至于把后面的批次饿死。热门要点是低频后台任务，不至于打爆上游。
+_HOT_TITLE_PER_HOUR = 16
 # 一次外文轮询可能带上几十条新稿。模型只处理前几条，避免单轮把额度打光。
 _FOREIGN_LLM_PER_POLL = 10
 # 本地维表里的 ETF / 股票集合。请求线程不扫盘，大约 10 分钟复用一次。
@@ -1346,7 +1350,13 @@ def reserve_hot_title_call() -> bool:
         return True
 
 
-def _llm_text(prompt: str, *, max_tokens: int = 400, prefer_final_answer: bool = False) -> str:
+def _llm_text(
+    prompt: str,
+    *,
+    max_tokens: int = 400,
+    prefer_final_answer: bool = False,
+    timeout: float = 30,
+) -> str:
     try:
         import asyncio
 
@@ -1356,7 +1366,7 @@ def _llm_text(prompt: str, *, max_tokens: int = 400, prefer_final_answer: bool =
             [{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=max_tokens,
-            timeout=30,
+            timeout=timeout,
             prefer_final_answer=prefer_final_answer,
         ))
     except Exception as exc:  # noqa: BLE001

@@ -1444,11 +1444,11 @@ def test_truncation_stops_at_the_clause_boundary():
 
 
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v16 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v17 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 16
+    assert hot_mod._TITLE_CACHE_VERSION == 17
     reset_store_for_tests(tmp_path / "cache-v13.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)

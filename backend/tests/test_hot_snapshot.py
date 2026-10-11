@@ -58,6 +58,27 @@ def test_refresh_interval_is_five_minutes():
     assert HOT_REFRESH_SECONDS == 300
 
 
+def test_stale_threshold_adapts_to_compute_cost(monkeypatch):
+    """冷算比基础间隔慢时，过期阈值要跟着抬高，别刚发布就判过期。
+
+    线上冷算含两批模型调用约 282 秒，固定 300 秒阈值会让请求路径每次都触发重算。
+    """
+    import app.news.hot_snapshot as snap
+
+    original = snap._LAST_COST_S
+    try:
+        monkeypatch.setattr(snap, "_LAST_COST_S", 0.0)
+        assert snap._stale_seconds() == HOT_REFRESH_SECONDS
+        # 上一轮耗时 400 秒 → 阈值抬到 400×1.5=600。
+        monkeypatch.setattr(snap, "_LAST_COST_S", 400.0)
+        assert snap._stale_seconds() == 600.0
+        # 耗时再长也不超过上限，否则盘中数据会明显滞后。
+        monkeypatch.setattr(snap, "_LAST_COST_S", 10_000.0)
+        assert snap._stale_seconds() == snap.HOT_REFRESH_MAX_SECONDS
+    finally:
+        snap._LAST_COST_S = original
+
+
 def test_missing_snapshot_returns_computing_without_blocking(monkeypatch):
     done = threading.Event()
 

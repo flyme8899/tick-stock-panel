@@ -237,14 +237,14 @@ def _publish(hour: int, minute: int) -> datetime:
     return datetime(2026, 10, 9, hour, minute, tzinfo=CN_TZ)
 
 
-def _insert(source_id: str, title: str, hour: int, minute: int, source: str = "cls", level: str = "") -> None:
+def _insert(source_id: str, title: str, hour: int, minute: int, source: str = "cls", level: str = "", clean: str = "") -> None:
     status = get_store().insert_item(
         source=source,
         source_id=source_id,
         published_at=_publish(hour, minute),
         author="",
         title=title,
-        clean_text=title,
+        clean_text=clean or title,
         raw=None,
         content_hash=source_id,
         url="",
@@ -473,26 +473,32 @@ def test_realistic_batch_keeps_subtitles(tmp_path, monkeypatch):
     from app.news import service as news_service
 
     reset_store_for_tests(tmp_path / "subtitle-batch.sqlite")
+    # (source_id, 主标题, 期望要点, 正文)。线上 clean_text 里有正文，要点引用的
+    # 数字（11月、0.36 美元、30%）都来自正文。这里必须带上正文，否则「要点事实
+    # 必须出自素材」这道核对会把正确要点判成编造 —— 那正是要防的误杀。
     samples = (
         (
             "wti",
             "WTI原油期货上涨报91.85美元",
             "WTI11月原油期货收涨0.36美元报91.85美元/桶",
+            "WTI11月原油期货收涨0.36美元报91.85美元/桶，市场关注供需变化。",
         ),
         (
             "apple",
             "苹果宣布追加iPhone订单",
             "苹果iPhoneDuo加单30%，iPhone18Pro系列总订单量未变",
+            "苹果iPhoneDuo加单30%，iPhone18Pro系列总订单量未变。",
         ),
         (
             "diesel",
             "财政部宣布柴油协议触发制裁",
             "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法",
+            "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法。",
         ),
     )
-    for index, (source_id, title, _subtitle) in enumerate(samples):
-        _insert(source_id, title, 9, 10 + index)
-        _insert(source_id + "-b", title, 9, 20 + index, source="wscn")
+    for index, (source_id, title, _subtitle, body) in enumerate(samples):
+        _insert(source_id, title, 9, 10 + index, clean=body)
+        _insert(source_id + "-b", title, 9, 20 + index, source="wscn", clean=body)
 
     def fake(prompt: str, **_kwargs: object) -> str:
         rows = []
@@ -518,7 +524,7 @@ def test_realistic_batch_keeps_subtitles(tmp_path, monkeypatch):
     subtitles = [str(event.get("subtitle") or "") for event in events]
     assert events
     assert all(subtitles)
-    for _source_id, _title, subtitle in samples:
+    for _source_id, _title, subtitle, _body in samples:
         assert subtitle in subtitles
 
 
@@ -725,6 +731,63 @@ def test_event_body_uses_article_text_and_skips_title_repeat():
     assert _event_body(repeated) == ""
 
 
+def test_event_body_strips_leading_sentence_that_repeats_title():
+    """正文首句是主标题的扩写时摘掉，避免模型拿它当要点复述。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "财政部表示有力有效实施更加积极的财政政策",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "财政部表示有力有效实施更加积极的财政政策",
+                "text": (
+                    "财政部表示有力有效实施更加积极的财政政策\n"
+                    "财政部表示有力有效实施更加积极的财政政策并谋划出台增量政策。\n"
+                    "上半年新增减税降费及退税缓费 1.6 万亿元。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    # 与主标题重合的首句被摘掉，剩下的是真正的新事实。
+    assert "1.6 万亿元" in body
+    assert body.count("有力有效") == 0
+
+
+def test_subtitle_length_is_capped():
+    """补充要点是「一行挑 1~2 个事实」，超长直接丢，不做截断。"""
+    from app.news.hot_events import _SUBTITLE_MAX, _subtitle_reject_reason
+
+    long_text = "拟以3.16亿元收购光探测芯片公司52.67%股权，标的去年营收8.2亿元净利润0.6亿元主营光模块封装测试业务"
+    assert len(long_text) > _SUBTITLE_MAX
+    assert "过长" in _subtitle_reject_reason(long_text, long_text)
+    short = "拟3.16亿元收购快灵光电52.67%股权"
+    assert _subtitle_reject_reason(short, short) == ""
+
+
+def test_subtitle_facts_must_come_from_source():
+    """要点里的数字和机构名必须能在正文/标题里找到，编造的丢掉。"""
+    from app.news.hot_events import _subtitle_reject_reason
+
+    source = "公司发布业绩公告\n公司上半年归母净利润12.3亿元，同比增长40%。"
+    # 数字来自正文 → 通过。
+    assert _subtitle_reject_reason("上半年归母净利润12.3亿元", source) == ""
+    # 编造的数字（正文里没有）→ 丢。
+    assert "数字" in _subtitle_reject_reason("上半年归母净利润15.8亿元", source)
+    # 没有来源可核对时不拦（缓存路径拿不到 source）。
+    assert _subtitle_reject_reason("上半年归母净利润15.8亿元") == ""
+
+
+def test_subtitle_entity_check_is_case_insensitive():
+    """拉丁实体大小写不同不算编造（iPhone/Pro 不能被拆成碎片误杀）。"""
+    from app.news.hot_events import _subtitle_reject_reason
+
+    source = "苹果宣布追加iPhone订单\niPhone18Pro系列总订单量未变，Duo加单30%。"
+    subtitle = "iPhoneDuo加单30%，iPhone18Pro系列总订单量未变"
+    assert _subtitle_reject_reason(subtitle, source) == ""
+
+
 def test_title_prompt_feeds_article_body_and_asks_for_gap_filling():
     """提示词里带上各事件的正文，并要求只写主标题没有的事实。"""
     from app.news.hot_events import _title_prompt
@@ -752,7 +815,31 @@ def test_title_prompt_feeds_article_body_and_asks_for_gap_filling():
     assert "120万台" in prompt
     # 明确禁止把主标题换个说法当要点。
     assert "不要复述主标题" in prompt
+    # 长度约束写进 prompt（要点是一行，不超过 40 字）。
+    assert "不超过 40 个字" in prompt
     # 没有正文的事件退回只给主标题。
     bare = _title_prompt([{"_batch_id": "1", "name": "某公司公告"}], retry=False)
     assert "1. 主标题：某公司公告" in bare
     assert "正文：" not in bare
+
+
+def test_label_stats_logs_zero_because_of_what(caplog):
+    """分类统计要能把「为什么没要点」拆开：额度用满时记未询问、无正文单列。"""
+    import logging
+
+    from app.news.hot_events import _label_batch_with_llm
+
+    batch = [
+        {"name": "有正文", "_fp": "a", "_candidates": [
+            {"source": "cls", "title": "有正文", "text": "有正文\n正文里有 12.3 亿元这个事实。"},
+        ]},
+        {"name": "无正文", "_fp": "b", "_candidates": [
+            {"source": "cls", "title": "无正文", "text": "无正文"},
+        ]},
+    ]
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        # 额度用满：不该问模型，日志里要区分「未询问」和「无正文」。
+        _label_batch_with_llm(batch, reserve_call=lambda: False)
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "未询问" in text
+    assert "无正文 1 条" in text

@@ -901,7 +901,7 @@ def test_feed_matches_compare_digest(monkeypatch):
     assert caught.value.status_code == 404
 
 
-def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
+def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path, monkeypatch):
     from datetime import time as dt_time
 
     from app.api import news as news_api
@@ -913,6 +913,13 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
 
     reset_store_for_tests(tmp_path / "events.sqlite")
     day = current_trading_day(cn_now())
+    # 基准时刻取当天 16:00（收盘后）。资讯时间戳固定挂在当天下午，若直接用
+    # cn_now() 当作 now，在午后三点前跑测试时这些稿会落在 now 之后，被
+    # 「未发布稿不进榜」的守卫整批滤掉，事件列表为空（时间依赖的假失败）。
+    now = datetime.combine(day, dt_time(16, 0), CN_TZ)
+    # 榜单类接口（hot_candidates / feed_for_source）内部各自取 cn_now()，
+    # 一并钉到同一时刻，否则白天跑测试时它们仍会按真实时间算而漏掉这批稿。
+    monkeypatch.setattr("app.news.service.cn_now", lambda: now)
     lexicon = Lexicon([], ["人工智能", "昇腾"])
     ingest_items([
         Item(
@@ -937,13 +944,13 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
         Item(
             source="cls",
             source_id="sector-now",
-            published_at=cn_now() - timedelta(minutes=30),
+            published_at=now - timedelta(minutes=30),
             title="人工智能板块午后走强",
             text="人工智能板块午后走强，这条只用来保留板块升温榜。",
             sectors=["人工智能"],
         ),
     ], lexicon)
-    listing = hot_event_listing(cn_now(), limit=20)
+    listing = hot_event_listing(now, limit=20)
     names = [item["name"] for item in listing["events"]]
     assert names[0] == "华为发布盘古新模型，昇腾链走强"
     assert "人工智能" not in names
@@ -961,8 +968,8 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     assert head["stocks"][0]["key"] == "600519.SH"
     assert "item_ids" not in head
 
-    detail = event_detail(head["key"], now=cn_now())
-    publish_hot_snapshot(top_hot_events(cn_now()), persist=False)
+    detail = event_detail(head["key"], now=now)
+    publish_hot_snapshot(top_hot_events(now), persist=False)
     assert {item["title"] for item in detail["items"]} == {
         "华为发布盘古新模型，昇腾链走强",
         "华为发布盘古新模型",
@@ -1048,6 +1055,10 @@ def test_hot_stocks_exclude_funds_and_events_list_them_apart(tmp_path, monkeypat
     monkeypatch.setattr("app.news.service.known_asset_types", lambda: {})
     reset_store_for_tests(tmp_path / "funds.sqlite")
     day = current_trading_day(cn_now())
+    # 同上：把基准时刻钉在当天 16:00，避免午后三点前运行时固定时间戳的稿
+    # 被「未发布稿不进榜」滤掉，导致事件列表为空。
+    now = datetime.combine(day, dt_time(16, 0), CN_TZ)
+    monkeypatch.setattr("app.news.service.cn_now", lambda: now)
     lexicon = Lexicon([], [])
     funds = [
         StructuredStock(name="沪深300ETF", code="510300"),
@@ -1067,7 +1078,7 @@ def test_hot_stocks_exclude_funds_and_events_list_them_apart(tmp_path, monkeypat
         Item(
             source="cls",
             source_id="mix-hot",
-            published_at=cn_now() - timedelta(minutes=20),
+            published_at=now - timedelta(minutes=20),
             title="资金涌入宽基基金",
             text="资金涌入宽基基金，这条用来把基金和个股同时送进近24小时热度榜。",
             stocks=[StructuredStock(name="贵州茅台", code="600519"), *funds],
@@ -1079,12 +1090,12 @@ def test_hot_stocks_exclude_funds_and_events_list_them_apart(tmp_path, monkeypat
     assert stock_keys == {"600519.SH"}
     assert etf_keys == {"510300.SH", "159915.SZ", "501018.SH", "161226.SZ"}
 
-    listing = hot_event_listing(cn_now(), limit=20)
+    listing = hot_event_listing(now, limit=20)
     head = next(item for item in listing["events"] if any(stock["key"] == "600519.SH" for stock in item["stocks"]))
     assert [item["key"] for item in head["stocks"]] == ["600519.SH"]
     assert {item["key"] for item in head["etfs"]} == etf_keys
 
-    detail = event_detail(head["key"], now=cn_now())
+    detail = event_detail(head["key"], now=now)
     assert [item["key"] for item in detail["stocks"]] == ["600519.SH"]
     assert {item["key"] for item in detail["etfs"]} == etf_keys
 

@@ -508,22 +508,25 @@ async def _run_openai_message_once(
         prefer_final_answer=prefer_final_answer,
         tools=tools,
     )
-    while True:
-        try:
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=req_messages,
-                **kwargs,
-            )
-            break
-        except Exception as exc:
-            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
-            if retry_kwargs is not None:
-                kwargs = retry_kwargs
-                continue
-            if _is_openai_transport_error(exc):
-                raise RuntimeError(_format_openai_error(exc)) from exc
-            raise
+    try:
+        while True:
+            try:
+                resp = await client.chat.completions.create(
+                    model=model,
+                    messages=req_messages,
+                    **kwargs,
+                )
+                break
+            except Exception as exc:
+                retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+                if retry_kwargs is not None:
+                    kwargs = retry_kwargs
+                    continue
+                if _is_openai_transport_error(exc):
+                    raise RuntimeError(_format_openai_error(exc)) from exc
+                raise
+    finally:
+        await _close_client(client)
     if not resp.choices:
         return None
     return resp.choices[0].message
@@ -553,32 +556,35 @@ async def _stream_openai(
         base_url=base_url,
         prefer_final_answer=prefer_final_answer,
     )
-    while True:
+    try:
+        while True:
+            try:
+                stream = await client.chat.completions.create(
+                    model=model,
+                    messages=req_messages,
+                    **kwargs,
+                    stream=True,
+                )
+                break
+            except Exception as exc:
+                # 流尚未开始 yield, 可安全移除被拒绝的可选参数后重建。
+                retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+                if retry_kwargs is not None:
+                    kwargs = retry_kwargs
+                    continue
+                if _is_openai_transport_error(exc):
+                    raise RuntimeError(_format_openai_error(exc)) from exc
+                raise
+
         try:
-            stream = await client.chat.completions.create(
-                model=model,
-                messages=req_messages,
-                **kwargs,
-                stream=True,
-            )
-            break
+            async for piece in _iter_openai_text(stream):
+                yield piece
         except Exception as exc:
-            # 流尚未开始 yield, 可安全移除被拒绝的可选参数后重建。
-            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
-            if retry_kwargs is not None:
-                kwargs = retry_kwargs
-                continue
             if _is_openai_transport_error(exc):
                 raise RuntimeError(_format_openai_error(exc)) from exc
             raise
-
-    try:
-        async for piece in _iter_openai_text(stream):
-            yield piece
-    except Exception as exc:
-        if _is_openai_transport_error(exc):
-            raise RuntimeError(_format_openai_error(exc)) from exc
-        raise
+    finally:
+        await _close_client(client)
 
 
 _LENGTH_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
@@ -642,6 +648,20 @@ def _openai_client(api_key: str, timeout: float):
         max_retries=2,
         default_headers={"User-Agent": user_agent},
     )
+
+
+async def _close_client(client) -> None:
+    """关闭 AsyncOpenAI/httpx 连接池。
+
+    后台线程用 asyncio.run() 跑一次性调用时，客户端若不显式关闭，靠 __del__ 回收
+    会在事件循环已经关闭之后才去 aclose()，抛 "Event loop is closed" 刷日志（实测
+    热门要点后台刷新反复出现）。在循环还活着时主动关掉就干净了。关闭失败不能影响
+    主流程（结果已经拿到），只忽略。
+    """
+    try:
+        await client.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # 不同模型可能拒绝 temperature 或 reasoning_effort。这里不靠模型名猜测,
