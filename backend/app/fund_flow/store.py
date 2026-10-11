@@ -150,7 +150,10 @@ def frame_of(kind: str, rows: list[dict]) -> pl.DataFrame:
 
 
 def _looks_like_raw_etf(rows: list[dict]) -> bool:
-    return any("基金份额" in row or "基金代码" in row for row in rows)
+    return any(
+        "基金份额" in row or "基金代码" in row or "基金规模(份)" in row
+        for row in rows
+    )
 
 
 def prepare_rows(kind: str, rows: list[dict]) -> list[dict]:

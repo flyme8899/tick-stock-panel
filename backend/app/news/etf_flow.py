@@ -350,6 +350,301 @@ def parse_sogou_account(html_text: str, now: datetime) -> list[ArticleRef]:
     return refs
 
 
+def parse_sogou_articles(html_text: str, now: datetime) -> list[ArticleRef]:
+    """搜狗微信文章搜索（type=2）。只收公众号「ETF领航者」的申赎稿。"""
+    if "antispider" in html_text or "请输入验证码" in html_text:
+        raise RuntimeError("搜狗微信搜索需要验证码")
+    refs: list[ArticleRef] = []
+    for block in re.findall(r"<li\b[^>]*>(.*?)</li>", html_text, re.S | re.I):
+        account = re.search(r'class="all-time-y2"[^>]*>([^<]*)', block)
+        if account is None or _plain(account.group(1)) != ACCOUNT:
+            continue
+        published = _sogou_time(block, now)
+        if published is None:
+            continue
+        for match in re.finditer(
+            r'<a\b[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+            block,
+            re.S | re.I,
+        ):
+            title = _plain(match.group(2))
+            if not _FLOW_TITLE.search(title):
+                continue
+            href = _normalize_sogou_href(match.group(1))
+            if not href:
+                continue
+            refs.append(
+                ArticleRef(
+                    article_id="",
+                    title=title,
+                    url=href,
+                    published_at=published,
+                    channel="wechat",
+                )
+            )
+            break
+    return refs
+
+
+def index_flow_refs(refs: list[ArticleRef]) -> dict[str, ArticleRef]:
+    """按标题里的交易日索引。同一天保留发布时间更晚的一篇。"""
+    found: dict[str, ArticleRef] = {}
+    for ref in refs:
+        day = trade_date_from_title(ref.title, ref.published_at)
+        if not day:
+            continue
+        previous = found.get(day)
+        if previous is None or ref.published_at >= previous.published_at:
+            found[day] = ref
+    return found
+
+
+MISSING_SOURCE = "源缺失"
+_BACKFILL_NAME = "etf_flow_backfill.json"
+_DATE_TEXT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def backfill_dates(
+    *,
+    dates: str = "",
+    since: str = "",
+    until: str = "",
+    today: date | None = None,
+) -> list[str]:
+    """指定日期，或 ``since`` 到 ``until`` 的工作日。没有 2026-07-08 下限。
+
+    区间跳过周六日。``--dates`` 里的日期按原样保留，用来补单个交易日。
+    """
+    picked: list[str] = []
+    for part in dates.replace("，", ",").split(","):
+        text = part.strip()
+        if not text:
+            continue
+        if not _DATE_TEXT.match(text):
+            raise ValueError(f"日期格式应为 YYYY-MM-DD: {text}")
+        date.fromisoformat(text)
+        picked.append(text)
+    if since or until:
+        if not since:
+            raise ValueError("填写了 until 时也要填写 since")
+        if not _DATE_TEXT.match(since):
+            raise ValueError(f"日期格式应为 YYYY-MM-DD: {since}")
+        start = date.fromisoformat(since)
+        if until:
+            if not _DATE_TEXT.match(until):
+                raise ValueError(f"日期格式应为 YYYY-MM-DD: {until}")
+            end = date.fromisoformat(until)
+        else:
+            end = today or _cn_now().date()
+        if end < start:
+            raise ValueError("since 不能晚于 until")
+        cursor = start
+        while cursor <= end:
+            if cursor.weekday() < 5:
+                picked.append(cursor.isoformat())
+            cursor += timedelta(days=1)
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for day in picked:
+        if day in seen:
+            continue
+        seen.add(day)
+        ordered.append(day)
+    return ordered
+
+
+def backfill_etf_flow(
+    client: httpx.Client | None = None,
+    *,
+    dates: list[str],
+    now: datetime | None = None,
+    data_dir: Path | None = None,
+    retry_missing: bool = False,
+) -> dict:
+    """回补指定交易日的申赎稿。
+
+    先读网易号列表。列表目前包含早于 2026-07-08 的稿，这些日期不另设下限。
+    列表里没有的日期再按标题搜微信归档。两边都没有文章时记「源缺失」，
+    默认不再重试。搜狗额度用尽时留到下次，不写成源缺失。
+    """
+    now = (now or _cn_now()).astimezone(CN_TZ)
+    root = data_dir or settings.data_dir
+    status = _load_backfill_status(root)
+    stored = _stored_flow_dates()
+    missing: list[str] = []
+    deferred: list[str] = []
+    errors: list[str] = []
+    skipped: list[str] = []
+    inserted = 0
+    duplicate = 0
+    pending: list[str] = []
+    for day in dates:
+        if not _DATE_TEXT.match(day):
+            errors.append(f"{day}: 日期格式应为 YYYY-MM-DD")
+            continue
+        if day in stored or (not retry_missing and status.get(day) == MISSING_SOURCE):
+            skipped.append(day)
+            continue
+        pending.append(day)
+    summary = {
+        "inserted": inserted,
+        "duplicate": duplicate,
+        "missing": missing,
+        "deferred": deferred,
+        "errors": errors,
+        "skipped": skipped,
+    }
+    if not pending:
+        return summary
+    own = client is None
+    client = client or httpx.Client(timeout=60.0, follow_redirects=False)
+    try:
+        refs, netease_error = _netease_refs(client)
+        indexed = index_flow_refs(refs)
+        for day in pending:
+            ref = indexed.get(day)
+            if ref is None:
+                try:
+                    found, blocked = _search_wechat_archive(
+                        client, now, root, date.fromisoformat(day),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"{day}: {_public_error(exc) or '微信归档搜索失败'}")
+                    deferred.append(day)
+                    continue
+                if blocked:
+                    deferred.append(day)
+                    continue
+                if found is None:
+                    if netease_error is not None:
+                        errors.append(f"{day}: {_public_error(netease_error)}")
+                        deferred.append(day)
+                        continue
+                    _remember_backfill(root, status, day, MISSING_SOURCE)
+                    missing.append(day)
+                    continue
+                ref = found
+            if not vision_api_key():
+                errors.append(f"{day}: 未配置 VISION_AI_API_KEY")
+                deferred.append(day)
+                continue
+            try:
+                saved = _ingest_ref(client, ref)
+            except Exception as exc:  # noqa: BLE001 — 单日失败不能挡住其余日期
+                errors.append(f"{day}: {_public_error(exc) or '采集失败'}")
+                continue
+            inserted += int(saved.get("inserted") or 0)
+            duplicate += int(saved.get("duplicate") or 0)
+            _remember_backfill(root, status, day, "已入库")
+    finally:
+        if own:
+            client.close()
+    summary["inserted"] = inserted
+    summary["duplicate"] = duplicate
+    return summary
+
+
+def _search_wechat_archive(
+    client,
+    now: datetime,
+    root: Path,
+    day: date,
+) -> tuple[ArticleRef | None, bool]:
+    """返回 (稿件, 是否因额度没搜)。搜过但没有稿件时是 (None, False)。"""
+    budget = root / "news" / "etf_sogou_budget.json"
+    if not sogou_begin(budget, now):
+        return None, True
+    title = f"{day.month}月{day.day}日ETF基金申购和赎回"
+    html_text, _final = _fetch(
+        client,
+        SOGOU_SEARCH_URL,
+        allow_hosts={"weixin.sogou.com"},
+        params={"type": "2", "query": f"{ACCOUNT} {title}", "ie": "utf8"},
+    )
+    wanted = day.isoformat()
+    for ref in parse_sogou_articles(html_text, now):
+        if trade_date_from_title(ref.title, ref.published_at) == wanted:
+            return ref, False
+    return None, False
+
+
+def _stored_flow_dates() -> set[str]:
+    from app.news.service import get_store
+
+    found: set[str] = set()
+    for title, published_at in get_store().source_titles(SOURCE):
+        published = parse_time(published_at)
+        if published is None:
+            continue
+        day = trade_date_from_title(title, published)
+        if day:
+            found.add(day)
+    return found
+
+
+def _backfill_path(root: Path) -> Path:
+    return root / "news" / _BACKFILL_NAME
+
+
+def _load_backfill_status(root: Path) -> dict[str, str]:
+    payload = _load_budget(_backfill_path(root))
+    raw = payload.get("dates")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items() if _DATE_TEXT.match(str(key))}
+
+
+def _remember_backfill(root: Path, status: dict[str, str], day: str, value: str) -> None:
+    status[day] = value
+    path = _backfill_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"dates": status}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("ETF领航者回补状态写不进去: %s", _public_error(exc))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """命令行回补。``--dates`` 指定交易日，``--since`` 可以早于 2026-07-08。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="回补 ETF领航者指定交易日的申赎稿")
+    parser.add_argument("--data-dir", default="", help="TSP data 目录，默认 DATA_DIR 或 ./data")
+    parser.add_argument("--dates", default="", help="逗号分隔的交易日，如 2026-07-07,2026-06-30")
+    parser.add_argument("--since", default="", help="回补起点（含）。可以早于 2026-07-08")
+    parser.add_argument("--until", default="", help="回补终点（含）。默认今天（北京时间）")
+    parser.add_argument("--retry-missing", action="store_true", help="重新查找已经标成源缺失的日期")
+    args = parser.parse_args(argv)
+    try:
+        days = backfill_dates(dates=args.dates, since=args.since, until=args.until)
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    if not days:
+        print("没有要回补的日期。用 --dates 或 --since。")
+        return 2
+    root = _cli_data_dir(args.data_dir)
+    summary = backfill_etf_flow(dates=days, data_dir=root, retry_missing=args.retry_missing)
+    print(json.dumps(summary, ensure_ascii=False))
+    return 1 if summary.get("errors") else 0
+
+
+def _cli_data_dir(raw: str) -> Path:
+    import os
+
+    from app.config import settings
+
+    if raw:
+        return Path(raw)
+    env = os.environ.get("DATA_DIR") or ""
+    if env:
+        return Path(env)
+    return Path(settings.data_dir)
+
+
 def parse_wechat_article(html_text: str, final_url: str, ref: ArticleRef) -> ArticlePage:
     article_id = wechat_article_id(final_url)
     if not article_id:
@@ -674,6 +969,10 @@ def collect_etf_flow(
 
 def _pull(client, now: datetime, root: Path, expect: bool) -> dict:
     ref, _reason = _resolve_ref(client, now, root, expect)
+    return _ingest_ref(client, ref)
+
+
+def _ingest_ref(client, ref: ArticleRef) -> dict:
     if ref.channel == "netease" and ref.article_id and _known(f"netease:{ref.article_id}"):
         _mark_ok()
         return _result(found=True)

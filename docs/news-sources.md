@@ -58,6 +58,15 @@ VISION_AI_MODEL=deepseek/deepseek-v4-flash-vision-exp
 
 进程如果在 09:00 之后才起来，当天补看一次，然后等到下一个 07:35。
 
+补历史不设 2026-07-08 下限。网易号列表里早于这一天的申赎稿会一并收下；列表里没有的日期，再按标题搜搜狗微信文章（和每日备份同一个额度：一天最多 4 次，两次至少隔 20 分钟）。两边都没有这篇时，把该交易日记成「源缺失」，下次默认不再请求。搜狗额度用尽或网易列表请求失败时留到下次，不写成源缺失。抽取失败同样不记成源缺失。这些申赎稿不受资讯库 45 天清理限制，入库后会留下来。
+
+```bash
+python scripts/etf_flow_backfill.py --data-dir ./data --dates 2026-07-07,2026-06-30
+python scripts/etf_flow_backfill.py --data-dir ./data --since 2026-06-01 --until 2026-07-07
+```
+
+`--since` / `--until` 只含工作日。要重找已经标成源缺失的日期，加上 `--retry-missing`。需要 `VISION_AI_API_KEY`，表格抽取和每日采集相同。
+
 CNBC、MarketWatch、华尔街日报市场、彭博约 5 分钟一次，南华早报和路透约 15 分钟一次，SEC 8-K 约 3 分钟一次。Reddit 每次只请求一个子版，两次请求至少隔 75 秒。这几档固定间隔，不按 A 股交易时段加快或放慢。请求带上次响应的 `ETag` / `Last-Modified`，返回 304 时不再解析。采集只请求 feed 地址，不打开条目链接，也不保存 `content:encoded` 或 Atom `content`。Reddit 是例外，见下文。
 
 南华早报的地址必须带结尾斜杠：<https://www.scmp.com/rss/92/feed/>（商业）和 <https://www.scmp.com/rss/318421/feed/>（中国经济）。没有斜杠会 301。摘要用 RSS 的 `description`，付费正文不入库。
@@ -164,7 +173,7 @@ python3 scripts/deploy_preflight.py --data-dir ./data
 
 ## 库和接口
 
-SQLite 在 `data/news/news.sqlite`，保留约 45 天。同一来源的 `source_id` 只入库一次。跨源用正文指纹合并成一条故事；短文本不按正文合并，避免纯图片互相撞车。
+SQLite 在 `data/news/news.sqlite`，一般资讯保留约 45 天。ETF领航者（`etf_flow`）的申赎稿不参与这次清理，否则早于 45 天的回补会在入库后立刻被删掉，下次还会重新调用视觉模型。同一来源的 `source_id` 只入库一次。跨源用正文指纹合并成一条故事；短文本不按正文合并，避免纯图片互相撞车。
 
 对外接口只返回摘录，不返回 `raw_json`：
 

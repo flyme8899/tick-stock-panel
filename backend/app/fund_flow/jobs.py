@@ -15,6 +15,9 @@ from app.fund_flow.circuit import CircuitBreaker, CircuitOpenError, call_with_re
 from app.fund_flow.sources import NORTHBOUND_SYMBOL, SOUTHBOUND_SYMBOL, SourceClients
 
 BACKFILL_DATES = 120
+# 深市 ETF 份额回补起点。官方报表一次超过 6 个月会返回空表，窗口留在 150 天内。
+ETF_SHARES_HISTORY_START = "2025-10-10"
+SZSE_WINDOW_DAYS = 150
 NORMAL_RPS = 2.5
 SLOW_RPS = 1.0
 FAIL_RATE = 0.05
@@ -476,6 +479,139 @@ def sync_margin(
     return result
 
 
+def iter_szse_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """深交所基金规模报表超过 6 个月会返回空表。按 150 天切窗口。"""
+    if end < start:
+        return []
+    windows: list[tuple[date, date]] = []
+    cursor = start
+    while cursor <= end:
+        stop = min(end, cursor + timedelta(days=SZSE_WINDOW_DAYS - 1))
+        windows.append((cursor, stop))
+        cursor = stop + timedelta(days=1)
+    return windows
+
+
+def szse_windows_for_dates(days: list[str]) -> list[tuple[date, date]]:
+    """按请求到的日期聚类。两头相距超过 150 天就切开，避免空窗被接口丢掉。"""
+    parsed = sorted({date.fromisoformat(day) for day in days if len(day) == 10})
+    if not parsed:
+        return []
+    windows: list[tuple[date, date]] = []
+    start = parsed[0]
+    end = parsed[0]
+    for day in parsed[1:]:
+        if (day - start).days >= SZSE_WINDOW_DAYS:
+            windows.append((start, end))
+            start = day
+        end = day
+    windows.append((start, end))
+    return windows
+
+
+def etf_share_history_dates(
+    *,
+    start: str = ETF_SHARES_HISTORY_START,
+    end: str | None = None,
+    known_days: list[date] | None = None,
+    today: date | None = None,
+) -> list[str]:
+    """``2025-10-10`` 到最近一日。有交易日列表时只用交易日，否则用工作日。"""
+    start_day = date.fromisoformat(start)
+    if end is not None:
+        end_day = date.fromisoformat(end)
+    elif today is not None:
+        end_day = today
+    else:
+        from app.market_time import cn_now
+
+        end_day = cn_now().date()
+    if end_day < start_day:
+        return []
+    if known_days is not None:
+        picked = [day for day in known_days if start_day <= day <= end_day]
+        return [day.isoformat() for day in sorted(set(picked))]
+    days: list[str] = []
+    cursor = start_day
+    while cursor <= end_day:
+        if cursor.weekday() < 5:
+            days.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return days
+
+
+def _compact(day: str) -> str:
+    return day.replace("-", "")
+
+
+def _load_sse_shares(clients, trade_date: str, breaker: CircuitBreaker, sleeper) -> list[dict]:
+    compact = _compact(trade_date)
+    raw = call_with_retry(
+        "akshare",
+        lambda: clients.ak("fund_etf_scale_sse", date=compact),
+        breaker,
+        sleeper=sleeper,
+    )
+    return [
+        row for row in normalize.normalize_etf_shares(raw)
+        if row["trade_date"] == trade_date
+    ]
+
+
+def _load_szse_shares(
+    clients,
+    start: date,
+    end: date,
+    breaker: CircuitBreaker,
+    sleeper,
+    *,
+    keep: set[str] | None = None,
+) -> dict[str, list[dict]]:
+    start_compact = start.strftime("%Y%m%d")
+    end_compact = end.strftime("%Y%m%d")
+    raw = call_with_retry(
+        "akshare",
+        lambda: clients.ak(
+            "fund_scale_daily_szse",
+            start_date=start_compact,
+            end_date=end_compact,
+            symbol="ETF",
+        ),
+        breaker,
+        sleeper=sleeper,
+    )
+    grouped: dict[str, list[dict]] = {}
+    for row in normalize.normalize_etf_shares(raw):
+        day = row["trade_date"]
+        if keep is not None and day not in keep:
+            continue
+        grouped.setdefault(day, []).append(row)
+    return grouped
+
+
+def backfill_etf_share_history(
+    data_dir: Path,
+    clients: SourceClients,
+    *,
+    breaker: CircuitBreaker,
+    sleeper: Sleeper | None = None,
+    start: str = ETF_SHARES_HISTORY_START,
+    end: str | None = None,
+    known_days: list[date] | None = None,
+    today: date | None = None,
+) -> RunResult:
+    """回补 ``start``（默认 2025-10-10）到 ``end`` 的沪深 ETF 份额。"""
+    return backfill_etf_shares(
+        data_dir,
+        clients,
+        trade_dates=etf_share_history_dates(
+            start=start, end=end, known_days=known_days, today=today,
+        ),
+        breaker=breaker,
+        sleeper=sleeper,
+    )
+
+
 def backfill_etf_shares(
     data_dir: Path,
     clients: SourceClients,
@@ -484,14 +620,40 @@ def backfill_etf_shares(
     breaker: CircuitBreaker,
     sleeper: Sleeper | None = None,
 ) -> RunResult:
-    """按日回补 ETF 份额。每一天都经 ``normalize_etf_shares`` 再 ``store.write_rows``。"""
+    """按日回补 ETF 份额。深市按窗口请求，再和沪市按日落到同一张表。"""
     result = RunResult(kind="etf_shares")
-    for trade_date in trade_dates:
-        one = sync_etf_shares(
-            data_dir, clients, trade_date=trade_date, breaker=breaker, sleeper=sleeper,
-        )
-        result.wrote += one.wrote
-        result.errors.extend(one.errors)
+    days = sorted({day for day in trade_dates if len(day) == 10})
+    sse_rows: dict[str, list[dict]] = {}
+    for trade_date in days:
+        try:
+            sse_rows[trade_date] = _load_sse_shares(clients, trade_date, breaker, sleeper)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"fund_etf_scale_sse {trade_date}: {exc}")
+    szse_rows: dict[str, list[dict]] = {}
+    wanted = set(days)
+    for win_start, win_end in szse_windows_for_dates(days):
+        label = f"{win_start.isoformat()}..{win_end.isoformat()}"
+        try:
+            grouped = _load_szse_shares(
+                clients, win_start, win_end, breaker, sleeper, keep=wanted,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(f"fund_scale_daily_szse {label}: {exc}")
+            continue
+        if not grouped:
+            result.errors.append(f"fund_scale_daily_szse {label} 无数据")
+            continue
+        for day, rows in grouped.items():
+            szse_rows.setdefault(day, []).extend(rows)
+    for trade_date in days:
+        rows = sse_rows.get(trade_date, []) + szse_rows.get(trade_date, [])
+        if not rows:
+            continue
+        result.wrote += store.write_rows(data_dir, "etf_shares", trade_date, rows)
+    store.update_kind_state(
+        data_dir, "etf_shares",
+        last_error=result.errors[-1] if result.errors else None,
+    )
     return result
 
 
@@ -503,22 +665,29 @@ def sync_etf_shares(
     breaker: CircuitBreaker,
     sleeper: Sleeper | None = None,
 ) -> RunResult:
+    """当日沪深 ETF 份额。一边失败仍写入另一边，并留下错误以便重试。"""
     result = RunResult(kind="etf_shares")
-    compact = trade_date.replace("-", "")
+    rows: list[dict] = []
+    day = date.fromisoformat(trade_date)
     try:
-        raw = call_with_retry(
-            "akshare",
-            lambda: clients.ak("fund_etf_scale_sse", date=compact),
-            breaker,
-            sleeper=sleeper,
-        )
+        rows.extend(_load_sse_shares(clients, trade_date, breaker, sleeper))
     except Exception as exc:  # noqa: BLE001
-        result.errors.append(str(exc))
-        store.update_kind_state(data_dir, "etf_shares", last_error=str(exc))
-        return result
-    rows = [row for row in normalize.normalize_etf_shares(raw) if row["trade_date"] == trade_date]
-    result.wrote = store.write_rows(data_dir, "etf_shares", trade_date, rows)
-    store.update_kind_state(data_dir, "etf_shares", last_error=None)
+        result.errors.append(f"fund_etf_scale_sse: {exc}")
+    try:
+        grouped = _load_szse_shares(clients, day, day, breaker, sleeper, keep={trade_date})
+    except Exception as exc:  # noqa: BLE001
+        result.errors.append(f"fund_scale_daily_szse: {exc}")
+        grouped = {}
+    szse = grouped.get(trade_date) or []
+    if not szse and not any(item.startswith("fund_scale_daily_szse") for item in result.errors):
+        result.errors.append("fund_scale_daily_szse 无数据")
+    rows.extend(szse)
+    if rows:
+        result.wrote = store.write_rows(data_dir, "etf_shares", trade_date, rows)
+    store.update_kind_state(
+        data_dir, "etf_shares",
+        last_error=result.errors[-1] if result.errors else None,
+    )
     return result
 
 

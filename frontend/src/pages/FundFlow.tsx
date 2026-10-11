@@ -292,7 +292,8 @@ export function FundFlow() {
                           {row.name || row.code}
                           {row.broad ? (
                             <span className="ml-2 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent">
-                              {row.broad} · 国家队代理
+                              {row.broad}
+                              {row.broad === '沪深300' || row.broad === '科创50' ? ' · 国家队代理' : ''}
                             </span>
                           ) : null}
                         </span>
