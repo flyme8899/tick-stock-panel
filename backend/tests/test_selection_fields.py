@@ -1,6 +1,8 @@
 """选股补充字段：解析、日 K 推导、缺数不删行、PE 断点、调度让路。"""
 from __future__ import annotations
 
+import json
+import threading
 from datetime import date, datetime, timedelta
 
 import polars as pl
@@ -424,6 +426,62 @@ def test_one_index_failure_still_writes_the_others(tmp_path) -> None:
     assert by_symbol["300750.SZ"] == "创业板50"
     assert "指数成分" not in result["field_gaps"]
     assert any(note == "指数成分未完成：中证500" for note in result["field_notes"])
+
+
+def test_timed_out_index_is_recorded_and_later_tasks_still_run(monkeypatch, tmp_path) -> None:
+    for name in (
+        "SELECTION_FIELDS_ENABLED",
+        "SELECTION_NORTHBOUND",
+        "SELECTION_HOLDERS",
+        "SELECTION_INDEX_MEMBERS",
+        "SELECTION_UNLOCK",
+        "SELECTION_PE_TTM",
+    ):
+        monkeypatch.setenv(name, "true")
+    monkeypatch.setattr("app.fund_flow.scheduler.tickflow_sync_busy", lambda: False)
+    monkeypatch.setattr("app.selection_fields.timeouts.DEFAULT_TASK_TIMEOUT_S", 0.4)
+    now = datetime(2024, 1, 6, 18, 0, tzinfo=CN_TZ)
+    day = "2024-01-05"
+    state_path = tmp_path / "selection_fields" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        '{"northbound_date": "2024-01-05", "holders_date": "2024-01-05"}',
+        encoding="utf-8",
+    )
+    blocked = threading.Event()
+    calls: list[str] = []
+
+    def ak(name, **_kwargs):
+        calls.append(name)
+        if name in {"index_stock_cons_csindex", "index_detail_cni"}:
+            blocked.wait(5)
+            return [{"成分券代码": "600519"}]
+        return []
+
+    worker = SelectionWorker(tmp_path, ak=ak)
+    try:
+        assert worker.run_once(now) == "index"
+    finally:
+        blocked.set()
+    assert "stock_restricted_release_detail_em" in calls
+    assert "stock_value_em" not in calls
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved.get("index_date") != day
+    assert saved.get("unlock_date") == day
+    assert saved.get("last_error") == "指数成分任务超时"
+
+
+def test_northbound_request_sets_connect_and_read_timeout(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake(_url, *, params, headers=None, timeout=None):
+        seen["timeout"] = timeout
+        return _json_response({"success": False, "code": 9201, "message": "返回数据为空"})
+
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake)
+    with pytest.raises(RuntimeError, match="北向季度日期为空"):
+        fetch_northbound_quarter()
+    assert seen["timeout"] == (10.0, 30.0)
 
 
 def _json_response(payload: dict):

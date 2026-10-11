@@ -112,6 +112,15 @@ def test_pdf_and_foreign_hosts_are_rejected(url: str) -> None:
         limiter.get(url)
 
 
+def test_tuple_timeout_keeps_connect_and_read() -> None:
+    from app.eastmoney.client import httpx_timeout
+
+    timeout = httpx_timeout((10, 30))
+    assert timeout.connect == 10
+    assert timeout.read == 30
+    assert httpx_timeout(15) == 15
+
+
 def test_em_get_uses_the_shared_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_for_tests()
     monkeypatch.setenv("EASTMONEY_MIN_INTERVAL", "0.1")

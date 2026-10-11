@@ -138,6 +138,72 @@ def test_other_threads_are_not_rate_limited() -> None:
         requests.sessions.Session.request = saved  # type: ignore[method-assign]
 
 
+def test_default_timeout_applies_to_cni_csindex_and_eastmoney_only_on_this_thread() -> None:
+    from app.selection_fields.timeouts import REQUEST_TIMEOUT
+
+    limiter_timeouts: list = []
+    original_timeouts: list[tuple[str, object]] = []
+
+    def limited(url, **kwargs):
+        limiter_timeouts.append(kwargs.get("timeout"))
+        return SimpleNamespace(
+            status_code=200,
+            url=url,
+            content=b"{}",
+            text="{}",
+            headers={},
+            encoding="utf-8",
+        )
+
+    def original(self, method, url, *args, **kwargs):
+        original_timeouts.append((str(url), kwargs.get("timeout")))
+        return SimpleNamespace(status_code=200, url=url, content=b"ok", text="ok", headers={}, ok=True)
+
+    limiter = EastMoneyLimiter(
+        min_interval_s=1.0,
+        clock=lambda: 0.0,
+        sleeper=lambda _seconds: None,
+        request=limited,
+        jitter=lambda: 0.0,
+    )
+    saved = requests.sessions.Session.request
+    requests.sessions.Session.request = original  # type: ignore[method-assign]
+    reset_for_tests()
+    other: dict = {}
+
+    def worker() -> None:
+        response = requests.Session().get("https://www.cnindex.com.cn/other")
+        other["timeout"] = original_timeouts[-1][1]
+        other["ok"] = getattr(response, "ok", None)
+
+    try:
+        install(limiter)
+        session = requests.Session()
+        session.get("https://www.cnindex.com.cn/sample-detail/download-history")
+        session.get("https://oss-ch.csindex.com.cn/static/000300cons.xls")
+        session.get("https://datacenter-web.eastmoney.com/api/data/v1/get")
+        session.get("https://www.csindex.com.cn/explicit", timeout=5)
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(2)
+        assert original_timeouts[0] == (
+            "https://www.cnindex.com.cn/sample-detail/download-history",
+            REQUEST_TIMEOUT,
+        )
+        assert original_timeouts[1] == (
+            "https://oss-ch.csindex.com.cn/static/000300cons.xls",
+            REQUEST_TIMEOUT,
+        )
+        assert original_timeouts[2][0] == "https://www.csindex.com.cn/explicit"
+        assert original_timeouts[2][1] == 5
+        assert limiter_timeouts == [REQUEST_TIMEOUT]
+        assert other["timeout"] is None
+        assert other["ok"] is True
+    finally:
+        reset_for_tests()
+        requests.sessions.Session.request = saved  # type: ignore[method-assign]
+
+
 def test_default_interval_stays_one_second(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EASTMONEY_MIN_INTERVAL", raising=False)
     assert DEFAULT_MIN_INTERVAL == 1.0

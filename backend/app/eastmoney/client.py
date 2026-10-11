@@ -106,7 +106,7 @@ class EastMoneyLimiter:
         *,
         params: dict | None = None,
         headers: dict | None = None,
-        timeout: float = 15.0,
+        timeout: float | tuple[float, float] = 15.0,
     ) -> Any:
         if not _host_allowed(url) or url.lower().split("?", 1)[0].endswith(".pdf"):
             raise ValueError("东财限流器只接受 eastmoney 的非 PDF 地址")
@@ -140,12 +140,24 @@ class EastMoneyLimiter:
             self._next = self._clock() + self.min_interval_s + max(0.0, self._jitter())
             return response
 
-    def _send(self, url: str, *, params: dict | None, headers: dict | None, timeout: float) -> Any:
+    def _send(
+        self,
+        url: str,
+        *,
+        params: dict | None,
+        headers: dict | None,
+        timeout: float | tuple[float, float],
+    ) -> Any:
         if self._request is not None:
             return self._request(url, params=params, headers=headers, timeout=timeout)
         if self._session is None:
             self._session = _default_session()
-        return self._session.get(url, params=params, headers=headers, timeout=timeout)
+        return self._session.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=httpx_timeout(timeout),
+        )
 
     def _fail(self) -> None:
         self.consecutive_failures += 1
@@ -180,12 +192,20 @@ def reset_for_tests() -> None:
         _limiter = None
 
 
+def httpx_timeout(timeout: float | tuple[float, float]) -> httpx.Timeout | float:
+    """``(connect, read)`` 交给 httpx。单独的秒数保持原样，其它调用方不受影响。"""
+    if isinstance(timeout, tuple):
+        connect, read = timeout
+        return httpx.Timeout(read, connect=connect)
+    return timeout
+
+
 def em_get(
     url: str,
     *,
     params: dict | None = None,
     headers: dict | None = None,
-    timeout: float = 15.0,
+    timeout: float | tuple[float, float] = 15.0,
 ) -> Any:
     """东财统一请求。PDF 地址直接拒绝，不发起下载。"""
     return get_limiter().get(url, params=params, headers=headers, timeout=timeout)
