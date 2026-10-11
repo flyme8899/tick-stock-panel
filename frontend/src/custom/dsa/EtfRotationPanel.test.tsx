@@ -61,6 +61,10 @@ it('shows the rotation card and keeps the raw log collapsed', async () => {
   expect(text).toContain('不构成投资建议')
   expect(text).toContain('今日为调仓日')
 
+  const table = host.querySelector('table')
+  expect(table?.parentElement?.className).toContain('overflow-x-auto')
+  expect(table?.className).toContain('min-w-[28rem]')
+
   const logs = host.querySelector('details')
   expect(logs).not.toBeNull()
   expect(logs?.open).toBe(false)

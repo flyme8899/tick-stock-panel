@@ -125,7 +125,20 @@ it('keeps counts in one row above the pool and does not repeat an unknown code',
   expect(unknown?.textContent?.match(/603626/g)).toEqual(['603626'])
 })
 
-it('shows the stock name, code, and red-up green-down quote', async () => {
+it('uses the shared empty state when the pool and decisions have no rows', async () => {
+  await renderBoard({ pool: [], rows: [], total: 0, sample: true, reachable: false })
+  const titles = [...host.querySelectorAll('h2')].map(node => node.textContent)
+  expect(titles).toContain('观察池是空的')
+  expect(titles).toContain('还没有分析记录')
+  expect(host.textContent).toContain('到「定时推送」写入自选列表后，每日分析会回到这里。')
+  expect(host.textContent).toContain('到「个股研报」提交一只股票，或等定时任务跑完。')
+
+  await renderBoard({ pool: [], rows: [], total: 0, sample: false, reachable: false })
+  const offline = [...host.querySelectorAll('h2')].map(node => node.textContent)
+  expect(offline.filter(title => title === '决策服务未连接')).toHaveLength(2)
+})
+
+it('shows the stock name, code, and A-share bull/bear quote colors', async () => {
   await renderBoard({
     pool: [
       { code: '600105', name: '永鼎股份', price: 8.42, changePctPoints: 3.25 },

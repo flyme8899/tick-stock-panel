@@ -21,6 +21,7 @@ import {
   Sparkles,
   Upload,
 } from 'lucide-react'
+import { EmptyState } from '@/components/EmptyState'
 import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { cn } from '@/lib/cn'
@@ -427,7 +428,13 @@ function Intelligence({ sample, reachable }: { sample: boolean; reachable: boole
     >
       {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
       {fetchAll.isError && <div className="mb-2"><Failure error={fetchAll.error} /></div>}
-      {rows.length === 0 && !query.isError && <Notice>{reachable ? '情报库是空的。先在上游配置搜索源，再点立即拉取。' : '决策服务未连接。'}</Notice>}
+      {rows.length === 0 && !query.isError && (
+        <EmptyState
+          icon={Newspaper}
+          title={reachable ? '情报库是空的' : '决策服务未连接'}
+          hint={reachable ? '先在上游配置搜索源，再点立即拉取。' : undefined}
+        />
+      )}
       <ul className="mt-2 divide-y divide-border">
         {rows.map((row, index) => (
           <li key={`${textOf(row.title, 'item')}-${index}`} className="py-2">
@@ -499,25 +506,28 @@ function Screening({ sample, reachable }: { sample: boolean; reachable: boolean 
       </form>
       {strategies.isError && <Failure error={strategies.error} />}
       {run.isError && <div className="mb-2"><Failure error={run.error} /></div>}
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs">
-          <thead className="text-muted">
-            <tr><th className="py-1 font-normal">代码</th><th className="font-normal">名称</th><th className="font-normal">市场</th><th className="font-normal">分数</th><th className="font-normal">说明</th></tr>
-          </thead>
-          <tbody>
-            {rows.map(row => (
-              <tr key={textOf(row.code, textOf(row.stock_code))} className="border-t border-border">
-                <td className="py-1.5 font-mono">{textOf(row.code, textOf(row.stock_code))}</td>
-                <td>{textOf(row.name, textOf(row.stock_name))}</td>
-                <td className="uppercase">{textOf(row.market, '')}</td>
-                <td className="num">{textOf(row.score, '')}</td>
-                <td className="text-secondary">{textOf(row.reason, textOf(row.summary, ''))}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {rows.length === 0 && <Notice>还没有筛选结果。</Notice>}
+      {rows.length === 0 ? (
+        <EmptyState icon={ScanSearch} title="还没有筛选结果" hint="选择策略和市场后开始筛选。" />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[36rem] text-left text-xs">
+            <thead className="text-muted">
+              <tr><th className="py-1 pr-3 font-normal">代码</th><th className="pr-3 font-normal">名称</th><th className="pr-3 font-normal">市场</th><th className="pr-3 font-normal">分数</th><th className="font-normal">说明</th></tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr key={textOf(row.code, textOf(row.stock_code))} className="border-t border-border">
+                  <td className="whitespace-nowrap py-1.5 pr-3 font-mono">{textOf(row.code, textOf(row.stock_code))}</td>
+                  <td className="whitespace-nowrap pr-3">{textOf(row.name, textOf(row.stock_name))}</td>
+                  <td className="whitespace-nowrap pr-3 uppercase">{textOf(row.market, '')}</td>
+                  <td className="num whitespace-nowrap pr-3">{textOf(row.score, '')}</td>
+                  <td className="min-w-[12rem] text-secondary">{textOf(row.reason, textOf(row.summary, ''))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Panel>
   )
 }
@@ -548,23 +558,27 @@ export function EtfRotationCard({ result }: { result: EtfRotationView }) {
           <div>下次调仓 {result.next_rebalance || '—'}</div>
         </div>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs">
-          <thead className="text-muted">
-            <tr>
-              <th className="px-3 py-1.5 font-normal">标的</th>
-              {showBucket && <th className="py-1.5 font-normal">分桶</th>}
-              <th className="py-1.5 font-normal">权重</th>
-              <th className="px-3 py-1.5 font-normal">{scoreLabel}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {result.holdings.map(row => (
-              <EtfHoldingRow key={`${row.code}-${row.bucket}`} row={row} kind={kind} showBucket={showBucket} />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {result.holdings.length === 0 ? (
+        <EmptyState icon={PieChart} title="这一轮没有持仓" hint="规则没有选出标的。" />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[28rem] text-left text-xs">
+            <thead className="text-muted">
+              <tr>
+                <th className="px-3 py-1.5 font-normal">标的</th>
+                {showBucket && <th className="py-1.5 pr-3 font-normal">分桶</th>}
+                <th className="py-1.5 pr-3 font-normal">权重</th>
+                <th className="px-3 py-1.5 font-normal">{scoreLabel}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.holdings.map(row => (
+                <EtfHoldingRow key={`${row.code}-${row.bucket}`} row={row} kind={kind} showBucket={showBucket} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       <div className="space-y-1 px-3 py-2 text-[11px] leading-relaxed text-muted">
         <p>{basis}</p>
         {result.risk_off && <p>组合回撤已触发防守仓位。</p>}
@@ -881,7 +895,7 @@ function Alerts({ sample, reachable }: { sample: boolean; reachable: boolean }) 
   return (
     <Panel title={sample ? '决策预警 · 样例' : '决策预警'} hint="这些规则来自分析结论。监控中心的价格和信号规则不会出现在这里。">
       {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
-      {rows.length === 0 && !query.isError && <Notice>还没有决策预警。</Notice>}
+      {rows.length === 0 && !query.isError && <EmptyState icon={Bell} title="还没有决策预警" />}
       <ul className="divide-y divide-border">
         {rows.map((row, index) => (
           <li key={`${textOf(row.name, 'rule')}-${index}`} className="flex items-center justify-between gap-3 py-2 text-xs">
@@ -932,7 +946,13 @@ function Portfolio({ sample, reachable }: { sample: boolean; reachable: boolean 
   return (
     <Panel title={sample ? '持仓风险 · 样例' : '持仓风险'} hint="DSA 自己的账户账本。持仓提醒和模拟盘的数据不会混进来。">
       {risk.isError && <Failure error={risk.error} onRetry={() => risk.refetch()} />}
-      {rows.length === 0 && !risk.isError && risk.data == null && <Notice>{reachable ? '还没有组合账户。可在上游导入成交。' : '决策服务未连接。'}</Notice>}
+      {rows.length === 0 && !risk.isError && risk.data == null && (
+        <EmptyState
+          icon={PieChart}
+          title={reachable ? '还没有组合账户' : '决策服务未连接'}
+          hint={reachable ? '可在上游导入成交。' : undefined}
+        />
+      )}
       {rows.length > 0 && (
         <ul className="divide-y divide-border">
           {rows.map((row, index) => (

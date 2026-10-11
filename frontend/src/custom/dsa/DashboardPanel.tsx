@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type TouchEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MoreHorizontal } from 'lucide-react'
+import { FileText, Inbox, MoreHorizontal, type LucideIcon } from 'lucide-react'
+import { EmptyState } from '@/components/EmptyState'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { priceColorClass } from '@/lib/format'
@@ -39,6 +40,20 @@ interface ConfirmState {
   body: string
   confirmLabel: string
   run: () => void
+}
+
+function BoardEmpty({
+  ready,
+  icon,
+  title,
+  hint,
+}: {
+  ready: boolean
+  icon: LucideIcon
+  title: string
+  hint: string
+}) {
+  return <EmptyState icon={icon} title={ready ? title : '决策服务未连接'} hint={ready ? hint : undefined} />
 }
 
 function adviceClass(advice: string) {
@@ -334,7 +349,14 @@ export function DashboardBoard({
           </div>
         </header>
         <div className="px-4 py-3">
-          {pool.length === 0 && <p className="rounded-btn bg-elevated px-3 py-2 text-xs text-secondary">{reachable || sample ? '观察池是空的。到「定时推送」写入自选列表后，每日分析会回到这里。' : '决策服务未连接。'}</p>}
+          {pool.length === 0 && (
+            <BoardEmpty
+              ready={reachable || sample}
+              icon={Inbox}
+              title="观察池是空的"
+              hint="到「定时推送」写入自选列表后，每日分析会回到这里。"
+            />
+          )}
           <ul className="grid gap-2 sm:grid-cols-2">
             {pool.map(item => {
               const title = meaningfulStockName(item.name, item.code)
@@ -456,9 +478,12 @@ export function DashboardBoard({
             </div>
           )}
           {rows.length === 0 && !errorText && (
-            <p className="rounded-btn bg-elevated px-3 py-2 text-xs text-secondary">
-              {reachable || sample ? '还没有分析记录。到「个股研报」提交一只股票，或等定时任务跑完。' : '决策服务未连接。'}
-            </p>
+            <BoardEmpty
+              ready={reachable || sample}
+              icon={FileText}
+              title="还没有分析记录"
+              hint="到「个股研报」提交一只股票，或等定时任务跑完。"
+            />
           )}
           <div className="grid gap-2 lg:grid-cols-2">
             {rows.map(row => {
