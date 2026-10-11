@@ -32,13 +32,17 @@ interface Props {
   disabled?: boolean
   searchable?: boolean
   hintClassName?: string
+  /** 面板从关闭变为打开时调用。用来在列表为空或上次加载失败时重新请求。 */
+  onOpen?: () => void
 }
 
 /** 带搜索的多选。桌面展开为下拉，窄屏展开为底部面板。 */
 export function SourceDropdown({
   label, options, selectedIds, onToggle, badge, hint, empty, footer, disabled,
-  searchable = true, hintClassName,
+  searchable = true, hintClassName, onOpen,
 }: Props) {
+  const onOpenRef = useRef(onOpen)
+  onOpenRef.current = onOpen
   const desktop = useIsDesktop()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -51,6 +55,10 @@ export function SourceDropdown({
     return options.filter(item =>
       item.name.toLowerCase().includes(text) || item.id.toLowerCase().includes(text))
   }, [options, query])
+
+  useEffect(() => {
+    if (open) onOpenRef.current?.()
+  }, [open])
 
   useEffect(() => {
     if (!open || !desktop) return

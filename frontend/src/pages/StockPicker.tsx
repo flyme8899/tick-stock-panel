@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ComponentProps, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Download, FlaskConical, Loader2, Play, Star, X } from 'lucide-react'
@@ -7,7 +7,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { SourceDropdown } from '@/components/picker/SourceDropdown'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { toast } from '@/components/Toast'
-import { api, type PickerRow, type PickerRunResponse, type PickerSourceGroup } from '@/lib/api'
+import { ApiError, api, type PickerRow, type PickerRunResponse, type PickerSourceGroup } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { fmtBigNum } from '@/lib/format'
 import { toNavItems } from '@/lib/listNav'
@@ -76,6 +76,56 @@ function exportCsv(rows: PickerRow[], profitLabel: string) {
 
 function groupById(groups: PickerSourceGroup[] | undefined, id: string): PickerSourceGroup | undefined {
   return groups?.find(group => group.id === id)
+}
+
+interface SourceQuery {
+  isPending: boolean
+  isFetching: boolean
+  isError: boolean
+  error: unknown
+  refetch: () => unknown
+}
+
+function sourcesEmpty(query: SourceQuery, count: number, ready?: ReactNode): ReactNode | undefined {
+  // 有选项时，搜索无命中仍用下拉自己的「没有匹配项」。
+  if (count > 0) return undefined
+  if (query.isPending || (query.isFetching && query.isError)) {
+    return <p className="px-2 py-3 text-xs text-muted">加载中…</p>
+  }
+  if (query.isError) {
+    const expired = query.error instanceof ApiError && query.error.status === 401
+    return (
+      <div className="px-2 py-3 text-xs text-danger">
+        {expired ? '登录已过期，请重新登录' : '来源列表加载失败'}
+        <button type="button" className="ml-2 text-accent" onClick={() => query.refetch()}>
+          重试
+        </button>
+      </div>
+    )
+  }
+  return ready
+}
+
+function SourcesMenu({
+  query,
+  ready,
+  options,
+  ...rest
+}: Omit<ComponentProps<typeof SourceDropdown>, 'empty' | 'onOpen'> & {
+  query: SourceQuery
+  ready?: ReactNode
+}) {
+  return (
+    <SourceDropdown
+      {...rest}
+      options={options}
+      onOpen={() => {
+        if (query.isFetching) return
+        if (query.isError || options.length === 0) void query.refetch()
+      }}
+      empty={sourcesEmpty(query, options.length, ready)}
+    />
+  )
 }
 
 export function StockPicker() {
@@ -199,13 +249,15 @@ export function StockPicker() {
       />
       <div className="flex flex-col gap-3 p-3 md:p-4">
         <div className="grid grid-cols-1 gap-2 md:grid-cols-5">
-          <SourceDropdown
+          <SourcesMenu
+            query={sources}
             label="基本面"
             options={groupById(groups, 'fundamental')?.items ?? []}
             selectedIds={idsOf(picks, 'fundamental')}
             onToggle={id => setPicks(current => togglePick(current, 'fundamental', id))}
           />
-          <SourceDropdown
+          <SourcesMenu
+            query={sources}
             label="热门事件"
             searchable={false}
             options={(hot?.items ?? []).map(item => ({
@@ -227,41 +279,40 @@ export function StockPicker() {
             onToggle={id => setPicks(current => togglePick(current, 'hot_events', id))}
             hint={hot?.hint || undefined}
             hintClassName={hot?.fallback ? 'text-amber-600 dark:text-amber-400' : undefined}
-            empty={sources.isError ? (
-              <p className="px-2 py-3 text-xs text-danger">来源列表加载失败</p>
-            ) : hot?.error ? (
+            ready={hot?.error ? (
               <p className="px-2 py-3 text-xs text-danger">{hot.error}</p>
-            ) : sources.isPending ? (
-              <p className="px-2 py-3 text-xs text-muted">加载中…</p>
             ) : (
               <p className="px-2 py-3 text-xs text-muted">今日暂无热门事件</p>
             )}
           />
-          <SourceDropdown
+          <SourcesMenu
+            query={sources}
             label="技术面/短线"
             options={groupById(groups, 'technical')?.items ?? []}
             selectedIds={idsOf(picks, 'technical')}
             onToggle={id => setPicks(current => togglePick(current, 'technical', id))}
           />
-          <SourceDropdown
+          <SourcesMenu
+            query={sources}
             label="因子打分"
             options={factor?.items ?? []}
             selectedIds={idsOf(picks, 'factor')}
             onToggle={id => setPicks(current => togglePick(current, 'factor', id))}
-            empty={factor && factor.items.length === 0 ? (
+            ready={(
               <p className="px-2 py-3 text-xs text-muted">
                 还没有因子生成的策略。
                 <Link to="/factors" className="ml-1 text-accent">去因子页生成</Link>
               </p>
-            ) : undefined}
+            )}
           />
-          <SourceDropdown
+          <SourcesMenu
+            query={sources}
             label="DSA 选股"
             badge="beta"
             options={dsa?.available ? dsa.items : []}
             selectedIds={idsOf(picks, 'dsa')}
             onToggle={id => setPicks(current => togglePick(current, 'dsa', id))}
-            empty={!dsa?.available ? (
+            ready={!dsa?.available ? (
               <p className="px-2 py-3 text-xs text-muted">{dsa?.error || '决策服务未连接'}</p>
             ) : undefined}
           />
@@ -294,7 +345,8 @@ export function StockPicker() {
               </button>
             ))}
           </div>
-          <SourceDropdown
+          <SourcesMenu
+            query={sources}
             label={industries.length ? `行业 ${industries.length}` : '行业'}
             options={(sources.data?.industries ?? []).map(name => ({ id: name, name }))}
             selectedIds={industries}
