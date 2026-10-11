@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -247,13 +247,41 @@ def test_scheduler_close_then_research_and_weekend_idle() -> None:
     morning = datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ)
     assert due_tasks(morning, trading=True, state={}, flags=flags) == ["limit_intraday"]
     close = datetime(2026, 10, 9, 15, 20, tzinfo=CN_TZ)
-    assert due_tasks(close, trading=True, state={}, flags=flags)[0] == "limit_close"
+    assert due_tasks(close, trading=True, state={}, flags=flags) == ["limit_close"]
+    # 收盘快照落定后（research 窗口 16:00 起）才轮到研报
     after = datetime(2026, 10, 9, 16, 5, tzinfo=CN_TZ)
     state = {"limit_close_date": _DAY}
     assert due_tasks(after, trading=True, state=state, flags=flags) == ["research"]
+    # 周末/非交易日要补上一交易日的收盘快照（原实现把非交易日整个排除，导致
+    # 上线后首个周末之后 limit_board 目录一直没有数据）。收盘快照优先，
+    # 补到位后这一轮只剩研报。run_once 每轮只跑 tasks[0]，所以两次调用都要看。
     weekend = datetime(2026, 10, 10, 11, 0, tzinfo=CN_TZ)
-    assert due_tasks(weekend, trading=False, state={}, flags=flags) == []
-    monday = datetime(2026, 10, 12, 8, 0, tzinfo=CN_TZ)
-    monday_due = due_tasks(monday, trading=True, state={}, flags=flags)
-    assert monday_due[0] == "limit_close"
-    assert "research" in monday_due
+    assert due_tasks(weekend, trading=False, state={}, flags=flags) == ["limit_close"]
+    assert due_tasks(weekend, trading=False,
+                     state={"limit_close_date": _DAY}, flags=flags) == ["research"]
+    monday = datetime(2026, 10, 12, 8, 0, tzinfo=CN_TZ)  # 周一 08:00 盘前
+    # 交易日盘前 session_day 还是上一交易日（09:35 才切当天），快照没补 → 先补快照
+    assert due_tasks(monday, trading=True, state={}, flags=flags) == ["limit_close"]
+    assert due_tasks(monday, trading=True,
+                     state={"limit_close_date": _DAY}, flags=flags) == []
+
+def test_non_trading_holiday_catches_up_previous_session() -> None:
+    """长假期间（周三，非交易日）也要回补上一交易日，不能整个假期空转。"""
+    flags = {"limit_board": True, "research": True}
+    holiday = datetime(2026, 10, 7, 11, 0, tzinfo=CN_TZ)  # 国庆假期中的周三
+    due = due_tasks(holiday, trading=False, state={}, flags=flags)
+    assert due[0] == "limit_close"
+    # 收盘快照补到 session_day 后，同一窗口继续补研报（run_once 每轮只跑 tasks[0]）
+    session = date(2026, 10, 6).isoformat()
+    assert due_tasks(holiday, trading=False,
+                     state={"limit_close_date": session}, flags=flags) == ["research"]
+
+
+def test_non_close_day_retry_is_gap_limited() -> None:
+    """补跑受 30 分钟冷却保护，不会每 30 秒一轮疯狂重试。"""
+    flags = {"limit_board": True, "research": True}
+    sat = datetime(2026, 10, 10, 11, 0, tzinfo=CN_TZ)
+    just_ran = {"limit_close_at": (sat - timedelta(minutes=5)).isoformat()}
+    assert "limit_close" not in due_tasks(sat, trading=False, state=just_ran, flags=flags)
+    cooled = {"limit_close_at": (sat - timedelta(minutes=45)).isoformat()}
+    assert "limit_close" in due_tasks(sat, trading=False, state=cooled, flags=flags)

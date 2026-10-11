@@ -69,7 +69,7 @@ def sync_symbol(
     seen_now = list(known) + [row["info_code"] for row in fresh]
     _seen_map(state, "seen_stock")[code] = seen_now[-_SEEN_CAP:]
     store.save_state(data_dir, state)
-    inserted = _ingest(fresh, today=today or cn_today()) if ingest else 0
+    inserted = _ingest(fresh, data_dir=data_dir, today=today or cn_today()) if ingest else 0
     return {"symbol": symbol, "fetched_pages": pages, "new": len(fresh), "ingested": inserted}
 
 
@@ -112,7 +112,7 @@ def sync_industry(
     _remember(state, "seen_industry", [row["info_code"] for row in fresh], cap=800)
     state["industry_begin"] = begin
     store.save_state(data_dir, state)
-    inserted = _ingest(fresh, today=day) if ingest else 0
+    inserted = _ingest(fresh, data_dir=data_dir, today=day) if ingest else 0
     return {"industry_code": code, "fetched_pages": pages, "new": len(fresh), "ingested": inserted}
 
 
@@ -163,9 +163,25 @@ def _write_grouped(data_dir: Path, kind: str, rows: list[dict]) -> None:
         grouped.setdefault(str(row["publish_date"]), []).append(row)
     for day, chunk in grouped.items():
         store.write_rows(data_dir, kind, day, chunk)
+    _mark_health(data_dir, kind, ok=True, note=f"{len(rows)} new rows" if rows else "no new rows")
 
 
-def _ingest(rows: list[dict], *, today: date) -> int:
+def _mark_health(data_dir: Path, kind: str, *, ok: bool, note: str = "") -> None:
+    """记录研报抓取健康度。
+
+    抓取成功但一条都没抓到（无新研报 / 该股本来就没研报）时不能记为 ok —— 那会把
+    「拉取链路断了」和「确实没内容」混成同一个绿点。用 ok=False + 说明文案，让
+    健康页能区分「今天没新研报」和「抓取失败」。
+    """
+    try:
+        from app.news.service import get_store
+
+        get_store().mark_health(f"research_{kind}", ok=ok, error="" if ok else note[:200], auth_state="n/a")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("研报健康状态未写入: %s", exc)
+
+
+def _ingest(rows: list[dict], *, data_dir: Path, today: date) -> int:
     cutoff = (today - timedelta(days=_NEWS_DAYS)).isoformat()
     recent = [row for row in rows if str(row.get("publish_date") or "") >= cutoff]
     if not recent:
@@ -207,12 +223,7 @@ def _ingest(rows: list[dict], *, today: date) -> int:
             raw={"kind": row.get("kind"), "rating": rating},
         ))
     result = ingest_items(items, Lexicon([]))
-    try:
-        from app.news.service import get_store
-
-        get_store().mark_health("research", ok=True, auth_state="ok")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("研报健康状态未写入: %s", exc)
+    _mark_health(data_dir, "news", ok=True, note=f"ingested {int(result.get('inserted') or 0)}")
     return int(result.get("inserted") or 0)
 
 

@@ -328,7 +328,10 @@ def _stock_sides(
     if frame.is_empty() or column not in frame.columns or "code" not in frame.columns:
         return None
     usable = frame.filter(pl.col(column).is_not_null()).unique(subset=["code"], keep="last")
-    if store.is_partial_ranking(usable.height, _listed_count(root)):
+    expected, full = store.board_coverage(root)
+    if store.is_partial_ranking(
+        usable.height, _listed_count(root), usable, expected=expected, full=full,
+    ):
         return None
     keep = [name for name in ("symbol", "code", "name", column, "large_net", "super_net") if name in usable.columns]
     names = _instrument_names(root)

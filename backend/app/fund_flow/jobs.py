@@ -197,7 +197,10 @@ def sync_stock(
     universe = len({code for symbol in symbols if (code := normalize.code6(symbol))})
     if trade_date:
         current = store.read_partition(data_dir, "stock", trade_date)
-        refresh_day = store.is_partial_ranking(store.code_count(current), universe)
+        expected, full = store.board_coverage(data_dir)
+        refresh_day = store.is_partial_ranking(
+            store.code_count(current), universe, current, expected=expected, full=full,
+        )
         present_sources = _present_sources(current)
     elif target is not None:
         present_sources = _present_sources(store.read_partition(data_dir, "stock", target))
@@ -294,6 +297,20 @@ def sync_stock(
                 collected.extend(ranked)
             else:
                 logger.warning("全市场排名没有补上 %s 只股票", len(needed))
+            # 上游排名本身可能缺整段板块（同花顺个股资金榜实测缺深主板 000/001/002/003，
+            # 约 1612 只）。补完后仍然缺的按板块聚合记 WARNING —— 让「上游数据源覆盖不全」
+            # 这件事在日志里可见，而不是默默写下一个看似完整的 3723 行分区。
+            got_now = {
+                row["code"] for row in (*collected, *ranked)
+                if row.get("code") and row.get("trade_date") == trade_date
+            }
+            still = [symbol for symbol in needed if (code := normalize.code6(symbol)) and code not in got_now]
+            gaps = store.missing_boards(pl.DataFrame({"code": sorted({normalize.code6(s) for s in still if normalize.code6(s)})}))
+            logger.warning(
+                "全市场资金排名 %s 覆盖不全: 仍缺 %d 只%s",
+                trade_date, len(still),
+                f"（整段缺板块: {', '.join(gaps)}）" if gaps else "",
+            )
 
     for day, rows in _group_dates(collected).items():
         result.wrote += store.write_rows(data_dir, "stock", day, rows)

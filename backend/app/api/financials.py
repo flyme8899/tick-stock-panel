@@ -34,6 +34,20 @@ def _require_financial(capset) -> None:
         raise CapabilityDenied(Cap.FINANCIAL)
 
 
+
+def _require_symbol(symbol: str | None) -> str:
+    """财务表必须按股票查。
+
+    五张表是全市场宽表（单表 8 万+ 行、序列化 61~262MB）。不带 symbol 直接
+    to_dicts() 会把整表塞成 JSON，一次请求就能把内存打满/把容器打 OOM。
+    前端所有调用点都带 symbol，这里把"省略即全表"的隐式行为改成显式报错。
+    """
+    text = str(symbol or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="必须提供 symbol 参数")
+    return text
+
+
 @router.get("/status")
 def financial_status(request: Request):
     """返回各财务表的同步状态。无需 FINANCIAL 权限（前端根据 available 决定是否展示）。"""
@@ -77,12 +91,11 @@ def get_metrics(request: Request, symbol: str | None = None):
     capset = request.app.state.capabilities
     _require_financial(capset)
 
+    code = _require_symbol(symbol)
     df = get_financial_df(request.app.state.repo.store.data_dir, "metrics")
     if df.is_empty():
         return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return {"data": df.filter(pl.col("symbol") == code).to_dicts()}
 
 
 @router.get("/income")
@@ -91,12 +104,11 @@ def get_income(request: Request, symbol: str | None = None):
     capset = request.app.state.capabilities
     _require_financial(capset)
 
+    code = _require_symbol(symbol)
     df = get_financial_df(request.app.state.repo.store.data_dir, "income")
     if df.is_empty():
         return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return {"data": df.filter(pl.col("symbol") == code).to_dicts()}
 
 
 @router.get("/balance-sheet")
@@ -105,12 +117,11 @@ def get_balance_sheet(request: Request, symbol: str | None = None):
     capset = request.app.state.capabilities
     _require_financial(capset)
 
+    code = _require_symbol(symbol)
     df = get_financial_df(request.app.state.repo.store.data_dir, "balance_sheet")
     if df.is_empty():
         return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return {"data": df.filter(pl.col("symbol") == code).to_dicts()}
 
 
 @router.get("/cash-flow")
@@ -119,12 +130,11 @@ def get_cash_flow(request: Request, symbol: str | None = None):
     capset = request.app.state.capabilities
     _require_financial(capset)
 
+    code = _require_symbol(symbol)
     df = get_financial_df(request.app.state.repo.store.data_dir, "cash_flow")
     if df.is_empty():
         return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return {"data": df.filter(pl.col("symbol") == code).to_dicts()}
 
 
 @router.get("/shares")
@@ -133,12 +143,11 @@ def get_shares(request: Request, symbol: str | None = None):
     capset = request.app.state.capabilities
     _require_financial(capset)
 
+    code = _require_symbol(symbol)
     df = get_financial_df(request.app.state.repo.store.data_dir, "shares")
     if df.is_empty():
         return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return {"data": df.filter(pl.col("symbol") == code).to_dicts()}
 
 
 @router.post("/sync/{table}")

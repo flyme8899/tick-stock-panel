@@ -811,6 +811,13 @@ def test_weekend_catchup_fills_missing_stock_partition(tmp_path, monkeypatch) ->
 def test_catchup_skips_complete_partition_and_respects_retry_gap(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
     monkeypatch.setenv("FUND_FLOW_STOCK", "true")
+    # 覆盖判定现在会读 instruments 维表算各板块应有只数（深主板整段缺失才判不完整）。
+    # 测试库的"全市场"就是这一只沪市主板股，维表必须同步写上。
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({"symbol": ["600519.SH"], "code": ["600519"]}).write_parquet(
+        inst / "instruments.parquet"
+    )
     store.write_rows(tmp_path, "stock", "2026-10-09", [{
         "symbol": "600519.SH", "code": "600519", "trade_date": "2026-10-09",
         "main_net": 8.0, "large_net": 1.0, "super_net": 2.0, "source": "efinance",
@@ -1013,3 +1020,107 @@ def test_szse_margin_summary_converts_yi_and_repairs_old_partitions(tmp_path) ->
     assert day["label"] == "沪深合计"
     assert day["szse_margin_balance"] == pytest.approx(1_238_027_000_000)
     assert day["margin_balance"] == pytest.approx(1_291_437_000_000 + 1_238_027_000_000)
+
+
+def test_industry_by_code_uses_level2_to_match_fund_rank_names(tmp_path) -> None:
+    """同花顺行业是三级串，资金榜 name 是二级名。取末段会 0 命中。"""
+    ext = tmp_path / "ext_data" / "ext_hy_ths"
+    ext.mkdir(parents=True)
+    pl.DataFrame({
+        "code": ["000001", "600519", "300835"],
+        "所属同花顺行业": ["银行-银行-股份制银行", "食品饮料-白酒-白酒Ⅲ", "电子-半导体-半导体材料"],
+    }).write_parquet(ext / "part.parquet")
+    by_code = factors._industry_by_code(tmp_path)
+    got = {row["code"]: row["industry"] for row in by_code.to_dicts()}
+    assert got == {"000001": "银行", "600519": "白酒", "300835": "半导体"}
+    # 二级名必须与资金榜 name 同口径（东财/同花顺行业榜用的就是二级）
+    assert "银行" in got.values()
+    assert not any("-" in name for name in got.values())
+
+
+def test_ths_industry_level2_handles_short_and_empty() -> None:
+    assert factors.ths_industry_level2("银行-银行-股份制银行") == "银行"
+    assert factors.ths_industry_level2("电子-半导体-半导体材料") == "半导体"
+    # 只有一级时原样返回，不要抛
+    assert factors.ths_industry_level2("银行") == "银行"
+    assert factors.ths_industry_level2("") is None
+    assert factors.ths_industry_level2(None) is None
+
+
+def test_sector_rank_attaches_when_industry_is_level2(tmp_path) -> None:
+    """attach_columns 的 ff_sector_net_inflow_rank 必须能贴上（此前恒为 null）。"""
+    d = tmp_path
+    (d / "fund_flow").mkdir()
+    ext = d / "ext_data" / "ext_hy_ths"
+    ext.mkdir(parents=True)
+    pl.DataFrame({
+        "code": ["000001"],
+        "所属同花顺行业": ["银行-银行-股份制银行"],
+    }).write_parquet(ext / "part.parquet")
+    store.write_rows(d, "industry", "2026-10-09", [
+        {"name": "银行", "trade_date": "2026-10-09", "captured_at": "2026-10-09T15:05:00",
+         "snapshot": "close", "net_inflow": 1.2e9, "rank": 7, "source": "akshare_ths"},
+    ])
+    frame = pl.DataFrame({"symbol": ["000001.SZ"], "date": ["2026-10-09"]})
+    out = factors.attach_columns(frame, include_rank=True, data_dir=d)
+    assert "ff_sector_net_inflow_rank" in out.columns
+    assert out["ff_sector_net_inflow_rank"][0] == 7
+
+
+def test_missing_boards_flags_absent_deep_main_board() -> None:
+    """3723 只全是创业板/科创板/沪主板时，深主板整段缺失必须被识别。"""
+    codes = (
+        [f"300{i:03d}" for i in range(900)]      # 创业板 900
+        + [f"688{i:03d}" for i in range(600)]    # 科创板 600
+        + [f"600{i:03d}" for i in range(700)]    # 沪主板 700
+    )
+    frame = pl.DataFrame({"code": codes})
+    gaps = store.missing_boards(frame)
+    assert "sz_main" in gaps  # 000/001/002/003 一只都没有
+    assert "sz_gem" not in gaps
+    assert "sh_main" not in gaps
+    assert "star" not in gaps
+
+
+def test_partial_ranking_detects_board_gap_despite_large_count() -> None:
+    """总数远超 FULL_MARKET_MIN，但缺深主板 → 仍判不完整，否则永不重拉。"""
+    codes = [f"300{i:03d}" for i in range(900)] + [f"600{i:03d}" for i in range(700)]
+    frame = pl.DataFrame({"code": codes})
+    count = store.code_count(frame)
+    assert count > store.FULL_MARKET_MIN
+    assert store.is_partial_ranking(count, len(codes), frame) is True
+    # 传 None 时退化成只看总数，保持旧行为
+    assert store.is_partial_ranking(count, None) is False
+
+
+def test_partial_ranking_respects_small_universe_from_instruments(tmp_path) -> None:
+    """小库只有沪市主板时不该因为「缺深主板」被反复判不完整。"""
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({"symbol": ["600519.SH", "601398.SH"], "code": ["600519", "601398"]}).write_parquet(
+        inst / "instruments.parquet"
+    )
+    expected, full = store.board_coverage(tmp_path)
+    assert expected == {"sh_main"}
+    frame = pl.DataFrame({"code": ["600519", "601398"]})
+    assert store.is_partial_ranking(2, 2, frame, expected=expected, full=full) is False
+    # 少了其中一只 → 板块覆盖不足 20% 应有只数 → 判不完整
+    assert store.is_partial_ranking(1, 2, pl.DataFrame({"code": ["600519"]}),
+                                    expected=expected, full=full) is True
+
+
+def test_board_coverage_reports_each_board_size(tmp_path) -> None:
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({
+        "symbol": ["600519.SH", "000001.SZ", "000002.SZ", "300001.SZ", "688981.SH"],
+        "code": ["600519", "000001", "000002", "300001", "688981"],
+    }).write_parquet(inst / "instruments.parquet")
+    expected, full = store.board_coverage(tmp_path)
+    assert expected == {"sh_main", "sz_main", "sz_gem", "star"}
+    assert full == {"sh_main": 1, "sz_main": 2, "sz_gem": 1, "star": 1}
+
+
+def test_listed_boards_returns_none_without_instruments(tmp_path) -> None:
+    assert store.listed_boards(tmp_path) is None
+    assert store.board_coverage(tmp_path) == (None, None)

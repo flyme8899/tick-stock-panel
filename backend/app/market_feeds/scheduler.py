@@ -95,12 +95,19 @@ def due_tasks(
     clock = local.timetz().replace(tzinfo=None)
     due: list[str] = []
     close_day = session_day(local, trading=trading)
-    morning = local.weekday() < 5 and clock < _OPEN_AT
+    # 收盘快照的到期条件。
+    #   交易日：过了 15:10 写当天快照；盘前（<09:35）补上一交易日 —— 昨晚收盘
+    #     快照没写成时，次日开盘前是唯一的补跑窗口，原实现只判 weekday<5 而
+    #     不判 trading，节假日里会误补。
+    #   非交易日（周末/长假）：不设时刻门槛，直接补上一交易日。原实现完全不补，
+    #     导致上线后首个非交易日之后 limit_board 目录一直没有数据。
+    # 补跑由 close_missing 幂等守卫加 30 分钟冷却控频，不会重复拉。
     close_missing = str(state.get("limit_close_date") or "") != close_day
     close_cooled = not _recent(state, "limit_close_at", local, RETRY_GAP_S)
-    if flags.get("limit_board") and close_missing and close_cooled and (
-        (trading and clock >= _CLOSE_AT) or morning
-    ):
+    close_due = close_missing and close_cooled and (
+        clock >= _CLOSE_AT or clock < _OPEN_AT or not trading
+    )
+    if flags.get("limit_board") and close_due:
         due.append("limit_close")
     if (
         flags.get("limit_board")
@@ -110,7 +117,9 @@ def due_tasks(
         and "limit_close" not in due
     ):
         due.append("limit_intraday")
-    research_window = (trading and clock >= _RESEARCH_AT) or morning
+    # 研报窗口：交易日过了 16:00 才拉（避开盘中和收盘快照抢东财配额），
+    # 交易日开盘前补跑。非交易日不设时刻门槛 —— 已经补完收盘快照要接着补研报。
+    research_window = (trading and clock >= _RESEARCH_AT) or (not trading and "limit_close" not in due)
     if (
         flags.get("research")
         and research_window
@@ -221,7 +230,10 @@ class MarketFeedWorker:
             state["industry_date"] = day
         if config.research_industry() and str(state.get("industry_date") or "") != day:
             try:
-                sync_industry(data_dir, today=now.date())
+                # 用 close_day（最近交易日）而不是 now.date()：非交易日补跑时 now 是
+                # 周末日期，东财研报列表按 beginTime 过滤会取不到当周数据；且
+                # industry_date 记成周末后，下个交易日又会重拉一遍。
+                sync_industry(data_dir, today=date.fromisoformat(day))
                 state["industry_date"] = day
                 state["research_error"] = ""
             except Exception as exc:  # noqa: BLE001
@@ -237,7 +249,7 @@ class MarketFeedWorker:
         finished = list(state.get("research_done") or [])
         for symbol in batch:
             try:
-                sync_symbol(data_dir, symbol, today=now.date())
+                sync_symbol(data_dir, symbol, today=date.fromisoformat(day))
                 finished.append(symbol)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("个股研报 %s 失败: %s", symbol, exc)

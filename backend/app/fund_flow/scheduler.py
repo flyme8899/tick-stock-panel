@@ -211,10 +211,13 @@ def _partition_missing(data_dir: Path, kind: str, day: str) -> bool:
 
 
 def _stock_incomplete(data_dir: Path, day: str, universe: int) -> bool:
-    count = 0 if _partition_missing(data_dir, "stock", day) else store.code_count(
-        store.read_partition(data_dir, "stock", day),
+    if _partition_missing(data_dir, "stock", day):
+        return True
+    frame = store.read_partition(data_dir, "stock", day)
+    expected, full = store.board_coverage(data_dir)
+    return store.is_partial_ranking(
+        store.code_count(frame), universe, frame, expected=expected, full=full,
     )
-    return store.is_partial_ranking(count, universe)
 
 
 def _sector_close_missing(data_dir: Path, day: str) -> bool:
