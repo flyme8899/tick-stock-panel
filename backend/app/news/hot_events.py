@@ -5,9 +5,13 @@
 
 聚类看标题里的主体、动作，以及标题里出现的细概念，再加同一时间窗。正文里抽到、
 但标题没写的概念不参与聚类，避免旁支概念把无关消息粘成一件事。同一主体和动作，
-或标题高度相似，会在较短时间窗内合并。「A与B签署」和「B与A签署」是同一组双方，
-不分前后；双方和动作都相同的，合并窗口是整个交易日（上一收盘到下一 9:25），
-不再卡 6 小时。摘要只在标题没有主体时参与，避免各条资讯共用的页脚把整天粘成一件事。
+或标题高度相似，会在较短时间窗内合并。动词前面那一段经常不是公司名（「公司董事被立案」、
+「全资子公司拟收购」），标题里点名的上市公司仍算主体：以集团、股份结尾，左边是边界或
+向、与、的这类衔接，并且名字里没有回购、立案这类动作。同一家公司、同一个动作、相差
+不超过 6 小时，并成一件。分桶键用的就是这组主体，不能把该并的稿分到两个桶。
+「A与B签署」和「B与A签署」是同一组双方，不分前后；双方和动作都相同的，合并窗口是
+整个交易日（上一收盘到下一 9:25），不再卡 6 小时。摘要只在标题没有主体时参与，
+避免各条资讯共用的页脚把整天粘成一件事。
 宽行业名不参与聚类，也不拿去扩成分股。
 
 展示主标题是簇里最可信的新闻原标题，只去掉来源前缀、括号、券商组名，以及开头的「报道」「据报道」「消息称」。
@@ -1192,6 +1196,59 @@ def _headline_similarity(left: str, right: str) -> float:
     return len(ga & gb) / union
 
 
+# 公司名左边可以是句首，或这些衔接字。「向东百集团」「与建发股份」里的公司要能切出来。
+_COMPANY_GLUE = frozenset("向对就的与和及被把将为给让由从在于")
+_COMPANY_HEAD_BLOCK = frozenset({
+    "增持", "减持", "持股", "控股", "参股", "本公司", "子公司", "全资",
+})
+
+
+def _company_name_ok(name: str) -> bool:
+    """集团、股份结尾，且不是「回购股份」这种把动作当成公司的片段。"""
+    if not name.endswith(("集团", "股份")) or len(name) < 4:
+        return False
+    head = name[:-2]
+    if not 2 <= len(head) <= 6 or not all("\u4e00" <= char <= "\u9fff" for char in head):
+        return False
+    if any(char in _COMPANY_GLUE for char in head):
+        return False
+    blocked = _STOP | _NOT_SUBJECT | _GENERIC_TOKENS | BROAD_SECTORS | _COMPANY_HEAD_BLOCK
+    if head in blocked or name in blocked:
+        return False
+    for verb in (*_ACTIONS, *_PRICE_NARRATIVE, *_DIRECTIVE_VERBS, *_GATE_EXTRA_VERBS):
+        if verb in name:
+            return False
+    return True
+
+
+def _listed_companies(text: str) -> list[str]:
+    """标题里点名的上市公司。动词前的主语经常不是这家公司，所以单独扫一遍。"""
+    body = _compact(text)
+    found: list[str] = []
+    for suffix in ("集团", "股份"):
+        start = 0
+        while True:
+            index = body.find(suffix, start)
+            if index < 0:
+                break
+            start = index + len(suffix)
+            for size in range(2, 7):
+                if index < size:
+                    break
+                head = body[index - size:index]
+                if not all("\u4e00" <= char <= "\u9fff" for char in head):
+                    break
+                name = head + suffix
+                if not _company_name_ok(name):
+                    continue
+                prev = body[index - size - 1] if index - size else ""
+                if prev and "\u4e00" <= prev <= "\u9fff" and prev not in _COMPANY_GLUE:
+                    continue
+                if name not in found:
+                    found.append(name)
+    return found
+
+
 def _subject_keys(doc: dict) -> set[str]:
     keys = {entity for entity in (doc.get("entities") or []) if entity}
     lead = str(doc.get("lead") or "")
@@ -1199,6 +1256,12 @@ def _subject_keys(doc: dict) -> set[str]:
         if len(lead) <= 8:
             keys.add(lead)
         core = _subject_core(lead)
+        if core:
+            keys.add(core)
+    # 只扫标题。正文页脚会带出别的公司，不能拿来并事件。
+    for name in _listed_companies(str(doc.get("title") or "")):
+        keys.add(name)
+        core = _subject_core(name)
         if core:
             keys.add(core)
     return keys

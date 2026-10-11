@@ -151,11 +151,22 @@ _BOARD_LABEL = {
     "bj": "北交所",
 }
 # push2 行情列表在部分云服务器上一直 502。个股资金流改走数据中心，和龙虎榜、两融、PE 同一套。
-_SZ_MAIN_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-_SZ_MAIN_REPORT = "RPT_DMSK_TS_FUNDFLOW"
-_SZ_MAIN_COLUMNS = "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,NET_INFLOW,BIGDEAL_NET,SUPERDEAL_NET"
-_SZ_MAIN_PAGE = 500
+_DC_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_DC_REPORT = "RPT_DMSK_TS_FUNDFLOW"
+_DC_COLUMNS = "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,NET_INFLOW,BIGDEAL_NET,SUPERDEAL_NET"
+_DC_PAGE = 500
 _DC_EMPTY = 9201
+# 北交所按代码段过滤后再分页。920 是新段，800000–899999 和 430 是老段。
+# 全市场一天约 12 页，只补北交所时不要把沪深再拉一遍。
+_BJ_CODE_FILTERS = (
+    '(SECURITY_CODE>="430000")(SECURITY_CODE<="439999")',
+    '(SECURITY_CODE>="800000")(SECURITY_CODE<="899999")',
+    '(SECURITY_CODE>="920000")(SECURITY_CODE<="929999")',
+)
+_DC_BOARD_SOURCE = {
+    "sz_main": "eastmoney_sz_main",
+    "bj": "eastmoney_bj",
+}
 
 
 def _entirely_missing_labels(missing_codes: list[str], universe_codes: list[str]) -> list[str]:
@@ -181,67 +192,85 @@ def _entirely_missing_labels(missing_codes: list[str], universe_codes: list[str]
 
 
 def fetch_sz_main_rank(trade_date: str, *, get=None) -> list[dict]:
-    """深市主板个股资金流，东财数据中心按交易日分页。
+    """深市主板个股资金流。数据中心按交易日给出全市场，这里只留下深市主板。"""
+    return fetch_board_rank(trade_date, "sz_main", get=get)
+
+
+def fetch_bj_rank(trade_date: str, *, get=None) -> list[dict]:
+    """北交所个股资金流。同花顺榜没有这一板，按代码段向数据中心分页补。"""
+    return fetch_board_rank(trade_date, "bj", get=get)
+
+
+def fetch_board_rank(trade_date: str, board: str, *, get=None) -> list[dict]:
+    """东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 按板块补当日资金流。
 
     ``NET_INFLOW`` 是主力净流入，``BIGDEAL_NET`` 是大单，``SUPERDEAL_NET`` 是超大单。
-    这三个字段的单位是万元，落盘前换成元。
+    这三个字段的单位是万元，落盘前换成元。北交所带代码段过滤；深市主板仍按交易日
+    拉全市场再在本地筛，避免改掉已经在用的请求。
     """
     from app.fund_flow.units import BARE_WAN, money_to_yuan
     from app.selection_fields.timeouts import REQUEST_TIMEOUT
 
+    if board not in _DC_BOARD_SOURCE:
+        raise ValueError(f"数据中心资金流不补这个板块: {board}")
+    label = _BOARD_LABEL.get(board, board)
+    filters = _BJ_CODE_FILTERS if board == "bj" else ("",)
     if get is None:
         from app.eastmoney.client import em_get
 
         get = em_get
     shaped: list[dict] = []
-    page = 1
-    while page <= 20:
-        response = get(
-            _SZ_MAIN_URL,
-            params={
-                "reportName": _SZ_MAIN_REPORT,
-                "columns": _SZ_MAIN_COLUMNS,
-                "pageNumber": str(page),
-                "pageSize": str(_SZ_MAIN_PAGE),
-                "sortColumns": "SECURITY_CODE",
-                "sortTypes": "1",
-                "source": "WEB",
-                "client": "WEB",
-                "filter": f"(TRADE_DATE='{trade_date}')",
-            },
-            headers={"Referer": "https://data.eastmoney.com/zjlx/detail.html"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        payload = response.json() if hasattr(response, "json") else response
-        if not isinstance(payload, dict):
-            raise RuntimeError("深市主板资金流返回异常")
-        if not payload.get("success"):
-            if int(payload.get("code") or 0) == _DC_EMPTY:
+    seen: set[str] = set()
+    for extra in filters:
+        page = 1
+        while page <= 20:
+            response = get(
+                _DC_URL,
+                params={
+                    "reportName": _DC_REPORT,
+                    "columns": _DC_COLUMNS,
+                    "pageNumber": str(page),
+                    "pageSize": str(_DC_PAGE),
+                    "sortColumns": "SECURITY_CODE",
+                    "sortTypes": "1",
+                    "source": "WEB",
+                    "client": "WEB",
+                    "filter": f"(TRADE_DATE='{trade_date}'){extra}",
+                },
+                headers={"Referer": "https://data.eastmoney.com/zjlx/detail.html"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            payload = response.json() if hasattr(response, "json") else response
+            if not isinstance(payload, dict):
+                raise RuntimeError(f"{label}资金流返回异常")
+            if not payload.get("success"):
+                if int(payload.get("code") or 0) == _DC_EMPTY:
+                    break
+                raise RuntimeError(str(payload.get("message") or f"{label}资金流失败")[:300])
+            result = payload.get("result") or {}
+            rows = result.get("data") or []
+            if not isinstance(rows, list) or not rows:
                 break
-            raise RuntimeError(str(payload.get("message") or "深市主板资金流失败")[:300])
-        result = payload.get("result") or {}
-        rows = result.get("data") or []
-        if not isinstance(rows, list) or not rows:
-            break
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            code = normalize.code6(str(row.get("SECURITY_CODE") or ""))
-            if store.board_of(code) != "sz_main":
-                continue
-            shaped.append({
-                "股票代码": code,
-                "股票简称": row.get("SECURITY_NAME_ABBR") or "",
-                "今日主力净流入-净额": money_to_yuan(row.get("NET_INFLOW"), bare=BARE_WAN),
-                "今日大单净流入-净额": money_to_yuan(row.get("BIGDEAL_NET"), bare=BARE_WAN),
-                "今日超大单净流入-净额": money_to_yuan(row.get("SUPERDEAL_NET"), bare=BARE_WAN),
-            })
-        pages = int(result.get("pages") or 0)
-        if (pages and page >= pages) or len(rows) < _SZ_MAIN_PAGE:
-            break
-        page += 1
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                code = normalize.code6(str(row.get("SECURITY_CODE") or ""))
+                if store.board_of(code) != board or code in seen:
+                    continue
+                seen.add(code)
+                shaped.append({
+                    "股票代码": code,
+                    "股票简称": row.get("SECURITY_NAME_ABBR") or "",
+                    "今日主力净流入-净额": money_to_yuan(row.get("NET_INFLOW"), bare=BARE_WAN),
+                    "今日大单净流入-净额": money_to_yuan(row.get("BIGDEAL_NET"), bare=BARE_WAN),
+                    "今日超大单净流入-净额": money_to_yuan(row.get("SUPERDEAL_NET"), bare=BARE_WAN),
+                })
+            pages = int(result.get("pages") or 0)
+            if (pages and page >= pages) or len(rows) < _DC_PAGE:
+                break
+            page += 1
     return normalize.normalize_rank_rows(
-        shaped, trade_date=trade_date, source="eastmoney_sz_main", window="today",
+        shaped, trade_date=trade_date, source=_DC_BOARD_SOURCE[board], window="today",
     )
 
 
@@ -310,7 +339,7 @@ def sync_stock(
             # 样本连门槛都没到：整份重拉，不限板块。
             refresh_day = True
         else:
-            # 样本够，但上游缺整段板块（同花顺个股榜不覆盖深主板）。
+            # 样本够，但上游缺整段板块（同花顺个股榜不覆盖深主板和北交所）。
             # 只补缺的那几个板块里的代码，已有的照常 skip —— 否则 refresh_day
             # 会让 _skip 对所有代码返回 False，每轮把 5882 只全量重打一遍东财，
             # 而缺口又永远补不上，等于 30 分钟一次的无限全量重跑。
@@ -335,10 +364,14 @@ def sync_stock(
             return store.board_of(code) not in refresh_boards
         return True
 
-    sz_batch = bool(trade_date and refresh_boards and "sz_main" in refresh_boards)
+    # 同花顺个股榜缺深市主板和北交所。这两板走数据中心整批，不再逐只打历史账单。
+    batch_boards = {
+        board for board in ("sz_main", "bj")
+        if trade_date and refresh_boards and board in refresh_boards
+    }
 
     def _skip_history(code: str) -> bool:
-        if sz_batch and store.board_of(code) == "sz_main":
+        if store.board_of(code) in batch_boards:
             return True
         return _skip(code)
 
@@ -354,18 +387,21 @@ def sync_stock(
 
     missing: list[str] = []
     collected: list[dict] = []
-    if sz_batch:
+    for board in ("sz_main", "bj"):
+        if board not in batch_boards:
+            continue
+        label = _BOARD_LABEL[board]
         batched: list[dict] = []
         try:
-            batched = fetch_sz_main_rank(trade_date or "")
+            batched = fetch_board_rank(trade_date or "", board)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("深市主板资金流整批失败: %s", exc)
-            result.errors.append(f"深市主板资金流整批失败: {exc}")
+            logger.warning("%s资金流整批失败: %s", label, exc)
+            result.errors.append(f"{label}资金流整批失败: {exc}")
         else:
             if batched:
                 collected.extend(batched)
             else:
-                result.errors.append("深市主板资金流整批为空，保留上次结果")
+                result.errors.append(f"{label}资金流整批为空，保留上次结果")
 
     def _dated(raw: list[dict], symbol: str, source: str) -> list[dict]:
         return _select_bill_dates(
@@ -437,9 +473,8 @@ def sync_stock(
                 collected.extend(ranked)
             else:
                 logger.warning("全市场排名没有补上 %s 只股票", len(needed))
-            # 上游排名本身可能缺整段板块（同花顺个股资金榜实测缺深主板 000/001/002/003，
-            # 约 1612 只）。补完后仍然缺的按板块聚合记 WARNING —— 让「上游数据源覆盖不全」
-            # 这件事在日志里可见，而不是默默写下一个看似完整的 3723 行分区。
+            # 同花顺个股资金榜缺深主板和北交所。这两板应已由数据中心整批补上；
+            # 这里仍缺，说明整批也没拿到。按板块记 WARNING，避免把缺整板写成完整分区。
             got_now = {
                 row["code"] for row in (*collected, *ranked)
                 if row.get("code") and row.get("trade_date") == trade_date
