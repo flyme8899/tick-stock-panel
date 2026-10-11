@@ -1,6 +1,8 @@
 """把各源的原始行收成内部字段。金额单位在这里一次换完，上层只见元或份。"""
 from __future__ import annotations
 
+import math
+
 from app.fund_flow.units import (
     BARE_SHARES,
     BARE_YI,
@@ -257,27 +259,54 @@ def normalize_margin_detail(rows: list[dict], *, market: str, trade_date: str) -
     return out
 
 
+def _fund_code(value: object) -> str:
+    """基金代码收成 6 位。浮点 ``159915.0`` 不能先变成字符串再抽数字。"""
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int):
+        return f"{value:06d}" if 0 <= value <= 999999 else code6(str(value))
+    if isinstance(value, float):
+        if not math.isfinite(value) or value < 0 or value != int(value):
+            return ""
+        return f"{int(value):06d}" if value <= 999999 else code6(str(int(value)))
+    text = str(value).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return code6(text)
+
+
+def _etf_share_value(row: dict) -> object:
+    if "shares" in row and row.get("shares") is not None:
+        return row.get("shares")
+    if row.get("基金份额") is not None:
+        return row.get("基金份额")
+    return row.get("基金规模(份)")
+
+
 def normalize_etf_shares(rows: list[dict]) -> list[dict]:
-    """上交所基金份额。akshare 返回的裸 ``基金份额`` 已是份，入库不再乘 10000。"""
+    """沪深 ETF 份额。裸数字已是份，入库不再乘 10000。
+
+    上交所 ``基金份额`` 经 akshare 把万份乘过 10000。深交所官方报表列名是
+    「基金规模(份)」，akshare 改名为 ``基金份额`` 后同样是份。带「万」「亿」
+    的文本仍按后缀换。
+    """
     out = []
     for row in rows:
-        code = code6(_text(row, "code", "基金代码", "symbol"))
+        code = _fund_code(row.get("code", row.get("基金代码", row.get("symbol"))))
         trade_date = _date(_text(row, "trade_date", "统计日期", "日期", "stat_date"))
         if not code or not trade_date:
             continue
-        if "shares" in row and row.get("shares") is not None:
-            shares = shares_to_count(row.get("shares"), bare=BARE_SHARES)
-        else:
-            shares = shares_to_count(row.get("基金份额"), bare=BARE_SHARES)
+        shares = shares_to_count(_etf_share_value(row), bare=BARE_SHARES)
         if shares is None:
             continue
+        source = _text(row, "source") or "akshare"
         out.append({
             "symbol": code,
             "code": code,
             "name": _text(row, "name", "基金简称"),
             "trade_date": trade_date,
             "shares": shares,
-            "source": "akshare",
+            "source": source,
         })
     return out
 

@@ -20,6 +20,7 @@ from app.news.config import (
     vision_model,
 )
 from app.news.etf_flow import (
+    MISSING_SOURCE,
     VISION_LENGTH_MAX_TOKENS,
     ArticleRef,
     ExtractFailedError,
@@ -27,6 +28,8 @@ from app.news.etf_flow import (
     _fetch,
     _public_error,
     apply_trade_date,
+    backfill_dates,
+    backfill_etf_flow,
     choose_flow_article,
     collect_etf_flow,
     day_was_trading,
@@ -34,10 +37,12 @@ from app.news.etf_flow import (
     expects_publication,
     flow_mentions,
     is_check_morning,
+    main,
     normalize_flow,
     parse_netease_article,
     parse_netease_media,
     parse_sogou_account,
+    parse_sogou_articles,
     parse_vision_response,
     sogou_begin,
     trade_date_from_title,
@@ -996,3 +1001,172 @@ def test_monday_extract_failure_does_not_alert(news_db, monkeypatch):
     assert sent == []
     rows = {row["source"]: row for row in get_store().health_rows()}
     assert rows["etf_flow"]["last_error"]
+
+
+def _article(title: str) -> str:
+    return (
+        f"<h1 class=\"post_title\">{title}</h1>"
+        "<div class=\"post_body\"><img src=\"https://nimg.ws.126.net/a.jpg\"/></div>"
+    )
+
+
+def _media_item(docid: str, title: str, published: str) -> str:
+    return (
+        "<li class=\"js-item item\">"
+        f"<a href=\"https://www.163.com/dy/article/{docid}.html\" class=\"title\">{title}</a>"
+        f"<span class=\"time\">{published}</span>"
+        "</li>"
+    )
+
+
+_ARCHIVE_MEDIA = (
+    "<ul>"
+    + _media_item("JULY07ART123456", "7月7日ETF基金申购和赎回", "2026-07-08 07:40")
+    + _media_item("JUNE30ART123456", "6月30日ETF基金申购和赎回", "2026-07-01 07:40")
+    + "</ul>"
+)
+
+
+def _sogou_hit(title: str, epoch: int) -> str:
+    return (
+        "<ul><li>"
+        f"<a href=\"/link?url=oldarticle\">"
+        f"<em><!--red_beg-->{title}<!--red_end--></em></a>"
+        f"<span class=\"all-time-y2\">ETF领航者</span>"
+        f"<script>document.write(timeConvert('{epoch}'))</script>"
+        "</li></ul>"
+    )
+
+
+def _wechat(title: str) -> str:
+    return (
+        "<h1 id=\"activity-name\">"
+        f"{title}</h1><div id=\"js_content\">"
+        "<img data-src=\"https://mmbiz.qpic.cn/table.jpg\" /></div>"
+    )
+
+
+class ArchiveClient:
+    def __init__(self, *, sogou_html: str = "<ul></ul>", wechat_html: str = ""):
+        self.sogou_html = sogou_html
+        self.wechat_html = wechat_html
+        self.gets: list[tuple[str, dict | None]] = []
+        self.posts: list = []
+
+    def get(self, url, params=None, headers=None):
+        self.gets.append((url, params))
+        if url.startswith(("https://nimg.ws.126.net/", "https://mmbiz.qpic.cn/")):
+            return Resp("", url, headers={"content-type": "image/jpeg"}, content=b"img")
+        if url.startswith("https://www.163.com/dy/media/"):
+            return Resp(_ARCHIVE_MEDIA, url)
+        if "/dy/article/JULY07" in url:
+            return Resp(_article("7月7日ETF基金申购和赎回"), url)
+        if "/dy/article/JUNE30" in url:
+            return Resp(_article("6月30日ETF基金申购和赎回"), url)
+        if url.startswith("https://weixin.sogou.com/weixin"):
+            return Resp(self.sogou_html, url)
+        if url.startswith("https://weixin.sogou.com/link"):
+            return Resp("", url, status=302, headers={"location": WECHAT_FINAL})
+        if url.startswith("https://mp.weixin.qq.com/"):
+            return Resp(self.wechat_html, url)
+        raise AssertionError(url)
+
+    def post(self, url, headers=None, json=None):
+        self.posts.append(url)
+        return Resp("", url, payload=_vision())
+
+
+def test_backfill_dates_include_days_before_2026_07_08():
+    days = backfill_dates(since="2026-06-30", until="2026-07-08")
+    assert days[0] == "2026-06-30"
+    assert "2026-07-07" in days
+    assert "2026-07-08" in days
+    assert "2026-07-04" not in days
+    explicit = backfill_dates(dates="2026-07-07,2026-02-27")
+    assert explicit == ["2026-07-07", "2026-02-27"]
+
+
+def test_backfill_reads_netease_archive_before_2026_07_08(news_db):
+    client = ArchiveClient()
+    summary = backfill_etf_flow(
+        client,
+        dates=["2026-07-07", "2026-06-30"],
+        now=datetime(2026, 10, 11, 12, 0, tzinfo=CN_TZ),
+        data_dir=news_db,
+    )
+    assert summary["errors"] == []
+    assert summary["missing"] == []
+    assert summary["inserted"] == 2
+    assert not any("sogou.com" in url for url, _params in client.gets)
+    titles = {row["title"] for row in get_store().recent_for_feed("etf_flow", 10)}
+    assert "7月7日ETF基金申购和赎回" in titles
+    assert "6月30日ETF基金申购和赎回" in titles
+
+
+def test_backfill_uses_wechat_archive_and_marks_missing_source(news_db):
+    epoch = int(datetime(2026, 2, 28, 7, 40, tzinfo=CN_TZ).timestamp())
+    client = ArchiveClient(
+        sogou_html=_sogou_hit("2月27日ETF基金申购和赎回", epoch),
+        wechat_html=_wechat("2月27日ETF基金申购和赎回"),
+    )
+    found = backfill_etf_flow(
+        client,
+        dates=["2026-02-27"],
+        now=datetime(2026, 10, 11, 12, 0, tzinfo=CN_TZ),
+        data_dir=news_db,
+    )
+    assert found["inserted"] == 1
+    assert found["missing"] == []
+    titles = {row["title"] for row in get_store().recent_for_feed("etf_flow", 10)}
+    assert "2月27日ETF基金申购和赎回" in titles
+    assert any(
+        (params or {}).get("type") == "2" and "2月27日" in (params or {}).get("query", "")
+        for _url, params in client.gets
+    )
+    refs = parse_sogou_articles(client.sogou_html, datetime(2026, 10, 11, tzinfo=CN_TZ))
+    assert refs[0].title == "2月27日ETF基金申购和赎回"
+
+    absent = ArchiveClient()
+    later = datetime(2026, 10, 11, 13, 0, tzinfo=CN_TZ)
+    missing = backfill_etf_flow(
+        absent,
+        dates=["2026-01-05"],
+        now=later,
+        data_dir=news_db,
+    )
+    assert missing["missing"] == ["2026-01-05"]
+    status = json.loads((news_db / "news" / "etf_flow_backfill.json").read_text(encoding="utf-8"))
+    assert status["dates"]["2026-01-05"] == MISSING_SOURCE
+    again = ArchiveClient()
+
+    def boom(self, url, params=None, headers=None):
+        raise AssertionError(url)
+
+    again.get = boom.__get__(again, ArchiveClient)  # type: ignore[method-assign]
+    skipped = backfill_etf_flow(
+        again,
+        dates=["2026-01-05"],
+        now=later + timedelta(hours=1),
+        data_dir=news_db,
+    )
+    assert skipped["skipped"] == ["2026-01-05"]
+    assert skipped["missing"] == []
+
+
+def test_backfill_cli_passes_dates_before_floor(news_db, monkeypatch, capsys):
+    captured: dict = {}
+
+    def fake(**kwargs):
+        captured.update(kwargs)
+        return {"inserted": 0, "duplicate": 0, "missing": [], "deferred": [], "errors": [], "skipped": []}
+
+    monkeypatch.setattr("app.news.etf_flow.backfill_etf_flow", fake)
+    code = main(["--data-dir", str(news_db), "--since", "2026-06-30", "--until", "2026-07-07"])
+    assert code == 0
+    assert "2026-06-30" in captured["dates"]
+    assert "2026-07-07" in captured["dates"]
+    assert "2026-07-04" not in captured["dates"]
+    assert captured["retry_missing"] is False
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["errors"] == []
+    assert printed["missing"] == []

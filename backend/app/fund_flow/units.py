@@ -44,7 +44,8 @@ def shares_to_count(value: object, *, bare: str = BARE_SHARES) -> float | None:
     """基金份额换成份。
 
     akshare 1.19.1 的 ``fund_etf_scale_sse`` 在返回前把上交所的万份乘了 10000，
-    裸数字已经是份。字符串里的「亿」「万」仍按后缀换，不看数值大小猜单位。
+    裸数字已经是份。深交所 ``fund_scale_daily_szse`` 的列是「基金规模(份)」，
+    裸数字同样是份，不再乘 10000。字符串里的「亿」「万」仍按后缀换，不看数值大小猜单位。
     """
     if value is None or isinstance(value, bool):
         return None

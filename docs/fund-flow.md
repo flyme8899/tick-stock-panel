@@ -23,7 +23,7 @@ HK 服务器上这些入口不可用，调用表里没有它们：
 | 个股主力 / 大单 / 超大单 | 东财 push2his 日 K，secid 由代码推导（沪市 `1.`，深市和北交所 `0.`）。已经请求过但没拿到的代码用妙想 `MX_APIKEY`。熔断后还没轮到的代码不进妙想，改走全市场排名 | 交易日 16:30 之后。单线程，约 2.5 次/秒，带浏览器请求头。本轮失败率超过 5%（至少 20 次）后降到 1 次/秒。第一次每个代码留最近 120 个日期。当天分区不足全市场时会整表重拉。排名兜底只写当日主力，以及单独一列的 5 日合计 |
 | 行业 / 概念资金 | akshare 同花顺，`symbol="即时"` | 交易日 9:30–15:00 每 3 分钟一份盘中快照，60 秒内不重复请求。15:05 之后再写一份收盘快照 |
 | 融资融券 | `stock_margin_sse`、`stock_margin_detail_sse`、深交所对应接口。深市空表（pandas `Length mismatch`）不当成源故障，保留已拿到的沪市，并再试上一交易日的深市 | 次日约 08:30 拉上一交易日。20:00 若那天还没落盘再试一次。融资余额按 akshare 的元入库，页面除以 1 亿显示为亿元。2026-10-09 沪市融资余额 12914.37 亿元，约 1.29 万亿元 |
-| ETF 份额 | `fund_etf_scale_sse` | 交易日 16:40。akshare 1.19.1 返回的基金份额已是份（库内把万份乘了 10000），入库不再乘。带「万」「亿」的文本仍按后缀换。`data/etf_flow` 里已有的 ETF领航者净流入按代码和日期接上，对不上就空着 |
+| ETF 份额 | 上交所 `fund_etf_scale_sse`；深交所 `fund_scale_daily_szse`（[ETF规模](https://www.szse.cn/market/fund/volume/etf/index.html)，`symbol="ETF"`） | 交易日 16:40。两边的裸数字都是份：上交所接口在 akshare 1.19.1 里已经把万份乘了 10000；深交所列名是「基金规模(份)」，入库不再乘。带「万」「亿」的文本仍按后缀换。`fund_etf_scale_szse` 只有当前快照、没有交易日，不用它回补。深市不走东财，所以不进东财限流器。一边失败时另一边仍落盘，当天记错误并稍后重试。`data/etf_flow` 里已有的 ETF领航者净流入按代码和日期接上，对不上就空着 |
 | 龙虎榜 | 现有 fuyao `data/dragon_tiger` 仍是主源。没有结果时读 akshare `stock_lhb_detail_em` 备份 | 备份在 17:30 之后拉当天 |
 | 南向 | `stock_hsgt_hist_em(symbol="南向资金")` | 16:40。净流入入库，裸数字按亿元 |
 | 北向成交额 | 同一接口，`symbol="北向资金"` | 只在 `FUND_FLOW_NORTHBOUND_TURNOVER` 打开时拉。只存买入加卖出的成交额，不存净流入。北向净流入自 2024-08-16 起没有数据 |
@@ -45,6 +45,20 @@ data/fund_flow/<kind>/date=YYYY-MM-DD/part.parquet
 `kind` 是 `stock`、`industry`、`concept`、`margin`、`etf_shares`、`southbound`、`northbound_turnover`、`lhb`。
 
 写入先写临时文件再替换。同一主键后写覆盖先写。金额进库后是元，份额是份。板块排名 1 表示净流入最大。
+
+历史份额从 2025-10-10 补到最近一个工作日（有本地交易日列表时只用交易日）。这一年按日拉上交所，不挂在 30 秒调度上，需要时手动跑：
+
+```python
+from pathlib import Path
+
+from app.fund_flow.circuit import CircuitBreaker
+from app.fund_flow.jobs import backfill_etf_share_history
+from app.fund_flow.sources import live_clients
+
+backfill_etf_share_history(Path("data"), live_clients(), breaker=CircuitBreaker("akshare"))
+```
+
+深交所报表一次超过 6 个月会返回带表头的空表，回补按不超过 150 天的窗口切。资金页的宽基名单包含沪深 300（含深市 159919）、科创 50，以及创业板（159915，名称像「创业板ETF」「创业板50ETF」）。沪深 300 和科创 50 标成国家队代理，创业板只标指数名。主题产品（例如创业板成长 ETF）不进这份固定名单。
 
 这套拉取不进界面上的数据任务槽，也不占重任务执行槽。调度器每 30 秒只唤醒后台线程。日 K 管道或分钟同步正在写盘时，这一轮让路。
 

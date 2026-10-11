@@ -31,6 +31,8 @@ AK_ALLOWLIST = frozenset({
     "stock_margin_szse",
     "stock_margin_detail_szse",
     "fund_etf_scale_sse",
+    # 深交所 ETF 规模日频。fund_etf_scale_szse 只有当前快照，没有交易日，不能回补。
+    "fund_scale_daily_szse",
     "stock_lhb_detail_em",
     "stock_hsgt_hist_em",
 })

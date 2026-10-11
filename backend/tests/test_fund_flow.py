@@ -108,6 +108,23 @@ def test_sector_rank_and_etf_share_units() -> None:
         "基金份额": "553.371668万",
     }])
     assert tagged[0]["shares"] == pytest.approx(553.371668 * 1e4)
+    # 深交所「基金规模(份)」裸数字已是份。159915.0 不能被收成别的代码。
+    szse = normalize.normalize_etf_shares([{
+        "基金代码": 159915.0,
+        "基金简称": "创业板ETF",
+        "日期": "2026-10-09",
+        "基金规模(份)": 1.8e10,
+    }])
+    assert szse[0]["code"] == "159915"
+    assert szse[0]["shares"] == pytest.approx(1.8e10)
+    yi = normalize.normalize_etf_shares([{
+        "基金代码": "159915",
+        "基金简称": "创业板ETF",
+        "日期": "20261009",
+        "基金份额": "1.25亿",
+    }])
+    assert yi[0]["trade_date"] == "2026-10-09"
+    assert yi[0]["shares"] == pytest.approx(1.25e8)
 
 
 def test_partition_merge_is_atomic(tmp_path) -> None:
@@ -590,10 +607,13 @@ def test_write_raw_etf_normalizes_and_rejects_unknown_columns(tmp_path) -> None:
         }])
 
 
-def test_etf_backfill_writes_normalized_rows(tmp_path) -> None:
-    def ak(name, **kwargs):
-        assert name == "fund_etf_scale_sse"
-        day = f"{kwargs['date'][:4]}-{kwargs['date'][4:6]}-{kwargs['date'][6:]}"
+def _iso_compact(compact: str) -> str:
+    return f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
+
+
+def _etf_ak(name, **kwargs):
+    if name == "fund_etf_scale_sse":
+        day = _iso_compact(kwargs["date"])
         return [{
             "序号": 1,
             "基金代码": "510300",
@@ -603,18 +623,94 @@ def test_etf_backfill_writes_normalized_rows(tmp_path) -> None:
             "基金份额": 2.439e10,
             "stat_date": day,
         }]
+    if name == "fund_scale_daily_szse":
+        assert kwargs["symbol"] == "ETF"
+        start = date.fromisoformat(_iso_compact(kwargs["start_date"]))
+        end = date.fromisoformat(_iso_compact(kwargs["end_date"]))
+        assert (end - start).days < jobs.SZSE_WINDOW_DAYS
+        rows = []
+        cursor = start
+        while cursor <= end:
+            rows.append({
+                "基金代码": "159915",
+                "基金简称": "创业板ETF",
+                "日期": cursor.isoformat(),
+                "基金份额": 1.8e10,
+            })
+            cursor += timedelta(days=1)
+        return rows
+    raise AssertionError(name)
 
+
+def test_etf_backfill_writes_normalized_rows(tmp_path) -> None:
     result = jobs.backfill_etf_shares(
         tmp_path,
-        SourceClients(ak_call=ak),
+        SourceClients(ak_call=_etf_ak),
         trade_dates=["2026-10-08", "2026-10-09"],
         breaker=CircuitBreaker("akshare", clock=lambda: 0),
         sleeper=lambda _seconds: None,
     )
-    assert result.wrote == 2
-    saved = store.read_range(tmp_path, "etf_shares").sort("trade_date")
-    assert saved["shares"].to_list() == pytest.approx([2.439e10, 2.439e10])
+    assert result.errors == []
+    assert result.wrote == 4
+    saved = store.read_range(tmp_path, "etf_shares").sort("trade_date", "code")
+    assert saved["code"].to_list() == ["159915", "510300", "159915", "510300"]
+    assert saved.filter(pl.col("code") == "510300")["shares"].to_list() == pytest.approx([2.439e10, 2.439e10])
+    assert saved.filter(pl.col("code") == "159915")["shares"].to_list() == pytest.approx([1.8e10, 1.8e10])
     assert "基金份额" not in saved.columns
+
+
+def test_szse_windows_cover_history_without_exceeding_six_months() -> None:
+    days = jobs.etf_share_history_dates(start="2025-10-10", end="2026-10-09")
+    assert days[0] == "2025-10-10"
+    assert days[-1] == "2026-10-09"
+    assert "2026-07-07" in days
+    windows = jobs.szse_windows_for_dates(days)
+    assert windows[0][0] == date(2025, 10, 10)
+    assert len(windows) >= 3
+    for start, end in windows:
+        assert (end - start).days < jobs.SZSE_WINDOW_DAYS
+    sparse = jobs.szse_windows_for_dates(["2025-10-10", "2026-10-09"])
+    assert sparse == [
+        (date(2025, 10, 10), date(2025, 10, 10)),
+        (date(2026, 10, 9), date(2026, 10, 9)),
+    ]
+
+
+def test_sync_etf_shares_keeps_sse_when_szse_fails(tmp_path) -> None:
+    def ak(name, **kwargs):
+        if name == "fund_etf_scale_sse":
+            return _etf_ak(name, **kwargs)
+        raise RuntimeError("深交所超时")
+
+    result = jobs.sync_etf_shares(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_date="2026-10-09",
+        breaker=CircuitBreaker("akshare", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+    )
+    assert result.wrote == 1
+    assert any("fund_scale_daily_szse" in item for item in result.errors)
+    saved = store.read_partition(tmp_path, "etf_shares", "2026-10-09")
+    assert saved["code"].to_list() == ["510300"]
+
+
+def test_board_pins_szse_broad_etfs(tmp_path) -> None:
+    store.write_rows(tmp_path, "etf_shares", "2026-10-09", [{
+        "symbol": "159915", "code": "159915", "name": "创业板ETF易方达",
+        "trade_date": "2026-10-09", "shares": 1.8e10, "source": "akshare",
+    }, {
+        "symbol": "159919", "code": "159919", "name": "沪深300ETF",
+        "trade_date": "2026-10-09", "shares": 2e9, "source": "akshare",
+    }, {
+        "symbol": "159996", "code": "159996", "name": "创业板成长ETF",
+        "trade_date": "2026-10-09", "shares": 3e9, "source": "akshare",
+    }])
+    items = {item["code"]: item for item in query.board(tmp_path)["etf_shares"]["items"]}
+    assert items["159915"]["broad"] == "创业板"
+    assert items["159915"]["share_change"] is None
+    assert items["159919"]["broad"] == "沪深300"
+    assert "159996" not in items
 
 
 def test_eastmoney_secid_and_bill_request(monkeypatch: pytest.MonkeyPatch) -> None:

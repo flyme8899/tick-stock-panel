@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS feed_http_cache (
 
 _RAW_LIMIT = 24_000
 _RETENTION_DAYS = 45
+# 申赎稿按交易日回补，会早于 45 天。其余资讯仍按短保留期清理。
+_KEEP_SOURCES = ("etf_flow",)
 
 
 class NewsStore:
@@ -195,6 +197,15 @@ class NewsStore:
             )
             self._conn.commit()
 
+    def source_titles(self, source: str) -> list[tuple[str, str]]:
+        """该来源已入库的标题和发布时间。ETF 回补用标题里的交易日跳过重复抽取。"""
+        with self._lock:
+            rows = list(self._conn.execute(
+                "SELECT title, published_at FROM news_items WHERE source = ?",
+                (source,),
+            ))
+        return [(str(row["title"] or ""), str(row["published_at"] or "")) for row in rows]
+
     def existing_ids(self, source: str, source_ids: list[str]) -> set[str]:
         """已经入库的 source_id。调用方据此跳过抽取，避免重复消耗额度。"""
         wanted = [item for item in source_ids if item]
@@ -242,8 +253,12 @@ class NewsStore:
 
     def apply_retention(self, days: int = _RETENTION_DAYS) -> int:
         cutoff = (datetime.now(CN_TZ) - timedelta(days=days)).isoformat(timespec="seconds")
+        kept = ",".join("?" for _ in _KEEP_SOURCES)
         with self._lock:
-            cur = self._conn.execute("DELETE FROM news_items WHERE published_at < ?", (cutoff,))
+            cur = self._conn.execute(
+                f"DELETE FROM news_items WHERE published_at < ? AND source NOT IN ({kept})",
+                (cutoff, *_KEEP_SOURCES),
+            )
             self._conn.commit()
             return cur.rowcount
 

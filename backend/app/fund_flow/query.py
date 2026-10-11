@@ -1,6 +1,7 @@
 """给 API 读的查询。只读本地 parquet，不触发出网。"""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import polars as pl
@@ -356,19 +357,24 @@ def _empty_stock(day: str | None, *, partial: bool = False, note: str | None = N
 
 _BROAD_HS300 = frozenset({"510300", "510310", "510330", "159919"})
 _BROAD_KC50 = frozenset({"588000", "588080", "588050"})
+_BROAD_CYB = frozenset({"159915"})
+# 「创业板ETF」「创业板50ETF」是宽基。主题名（创业板成长ETF）对不上。
+_CYB_NAME = re.compile(r"创业板(?:50)?ETF|创业板指")
 _BOARD_SECTOR_LIMIT = 12
 _BOARD_HISTORY = 40
 _BOARD_ETF_OTHERS = 12
 
 
 def _broad_label(code: str | None, name: str | None) -> str | None:
-    """沪深300 / 科创50 宽基，页面上当作国家队代理。对不上就不是宽基。"""
+    """宽基名单。沪深300 / 科创50 在页面上标国家队代理，创业板只标指数名。"""
     text = name or ""
     code6 = normalize.code6(code or "") or ""
     if "科创50" in text or code6 in _BROAD_KC50:
         return "科创50"
     if "沪深300" in text or code6 in _BROAD_HS300:
         return "沪深300"
+    if code6 in _BROAD_CYB or _CYB_NAME.search(text):
+        return "创业板"
     return None
 
 
