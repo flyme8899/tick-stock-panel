@@ -576,6 +576,9 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert [stock["key"] for stock in head["mentioned_stocks"]] == ["600519.SH", "000001.SZ"]
     assert head["mentioned_stocks"][0]["mentions"] == 2
 
+    from app.news.hot_snapshot import publish_hot_snapshot
+
+    publish_hot_snapshot(snapshot, persist=False)
     friday_afternoon = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
     same_day = top_hot_events(friday_afternoon)
     assert same_day["fallback"] is False
@@ -930,6 +933,9 @@ def test_hot_event_failure_does_not_drop_other_sources_but_true_miss_does(tmp_pa
         title="药监局出台医药细则",
     )
     missed_event = top_hot_events(NOW)["events"][0]
+    from app.news.hot_snapshot import publish_hot_snapshot
+
+    publish_hot_snapshot(top_hot_events(NOW), persist=False)
     assert missed_event["concepts"] == []
     true_miss = _deps(
         tmp_path,
@@ -1172,3 +1178,64 @@ def test_hot_event_llm_labels_top_twenty_in_one_batch(tmp_path, monkeypatch):
     in_first = [title for title in titles if title in prompts[0]]
     assert len(in_first) == 20
     assert len({title for title in titles if title not in prompts[0]}) == 1
+
+
+def test_blocked_clustering_matches_pairwise_rank_and_merges(tmp_path, monkeypatch):
+    """分桶只减少比较次数，排序、合并和事件键与两两比较一致。"""
+    from app.news import hot_events as hot_mod
+    from app.news.hot_events import build_top_hot_events
+
+    _seed_friday(tmp_path)
+    friday = date(2026, 10, 9)
+    _insert_news(
+        "cls", "party-a", _publish(friday, 0, 13), [], [],
+        title="赛力斯与宁德时代签署战略合作",
+    )
+    _insert_news(
+        "wscn", "party-b", _publish(friday, 8, 39), [], [],
+        title="宁德时代与赛力斯签署战略合作",
+    )
+    _insert_news(
+        "cls", "earn-a", _publish(friday, 9, 12), [], [],
+        title="立讯精密业绩预告扣非增长",
+    )
+    _insert_news(
+        "wscn", "earn-b", _publish(friday, 11, 40), [], [],
+        title="立讯精密业绩预增扣非增长",
+    )
+    marks = "子丑寅卯辰巳午未申酉戌亥金木水火土山川风雨"
+    for index, mark in enumerate(marks):
+        _insert_news(
+            "cls", f"solo-{index}", _publish(friday, 10, index % 60), [], [],
+            title=f"{mark}厂宣布回购股份",
+        )
+    store = get_store()
+    calls = {"n": 0}
+    real = hot_mod._can_merge
+
+    def counted(left, right):
+        calls["n"] += 1
+        return real(left, right)
+
+    monkeypatch.setattr(hot_mod, "_can_merge", counted)
+    naive = build_top_hot_events(NOW, store, refresh=True, blocked=False)
+    naive_calls = calls["n"]
+    calls["n"] = 0
+    fast = build_top_hot_events(NOW, store, refresh=True, blocked=True)
+    assert calls["n"] < naive_calls
+
+    def signature(snapshot: dict) -> list[tuple]:
+        return [
+            (
+                event["name"],
+                event["key"],
+                event["mentions"],
+                event["source_count"],
+                event["score"],
+                event["importance"],
+                tuple(event.get("headlines") or []),
+            )
+            for event in snapshot["events"]
+        ]
+
+    assert signature(fast) == signature(naive)

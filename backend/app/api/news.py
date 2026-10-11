@@ -66,6 +66,8 @@ def hot(
         payload["fallback"] = listing["fallback"]
         payload["hint"] = listing["hint"]
         payload["updated_at"] = listing["updated_at"]
+        payload["computed_at"] = listing.get("computed_at")
+        payload["status"] = listing.get("status")
     if kind != "event":
         rows = hot_candidates(
             kind=kind,

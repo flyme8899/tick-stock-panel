@@ -229,9 +229,9 @@ def _ingest(rows: list[dict], *, data_dir: Path, today: date) -> int:
 
 def _hot_symbols() -> list[str]:
     try:
-        from app.news.service import top_hot_events
+        from app.news.hot_snapshot import read_served_snapshot
 
-        snapshot = top_hot_events()
+        snapshot = read_served_snapshot()
     except Exception as exc:  # noqa: BLE001
         logger.info("热门事件股票未读到: %s", exc)
         return []

@@ -333,9 +333,10 @@ def _fit(header: str, sections: list[str]) -> str:
 
 
 def _load_events(symbol: str, now: datetime) -> dict:
-    from app.news.service import public_hot_event, top_hot_events
+    from app.news.hot_snapshot import read_served_snapshot
+    from app.news.service import public_hot_event
 
-    snapshot = top_hot_events(now)
+    snapshot = read_served_snapshot()
     public = [
         public_hot_event(item)
         for item in (snapshot.get("events") or [])
@@ -346,7 +347,7 @@ def _load_events(symbol: str, now: datetime) -> dict:
         note = (note + " 非当日事件。").strip()
     return {
         "events": match_events(public, symbol),
-        "as_of": str(snapshot.get("as_of") or snapshot.get("updated_at") or ""),
+        "as_of": str(snapshot.get("computed_at") or snapshot.get("as_of") or snapshot.get("updated_at") or now.isoformat()),
         "note": note,
     }
 

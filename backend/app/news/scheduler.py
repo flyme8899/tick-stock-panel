@@ -1,4 +1,4 @@
-"""资讯轮询线程。交易时段密、盘后疏，单线程，不占 API 事件循环。"""
+"""资讯轮询线程。交易时段密、盘后疏，不占 API 事件循环。热门事件在另一条后台线程里算。"""
 from __future__ import annotations
 
 import logging
@@ -10,6 +10,7 @@ from app.market_time import cn_now
 from app.news.collectors import FOREIGN_RSS_SOURCES, FOREIGN_SLOW_SOURCES, REDDIT_MIN_GAP
 from app.news.config import SOURCE_ORDER, source_enabled
 from app.news.etf_flow import etf_wait_seconds
+from app.news.hot_snapshot import HOT_REFRESH_SECONDS
 from app.news.service import backfill_mentions, collect_inbox, get_lexicon, run_due
 
 logger = logging.getLogger(__name__)
@@ -56,19 +57,36 @@ class NewsScheduler:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._hot_thread: threading.Thread | None = None
         self._next: dict[str, float] = {}
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        collector_alive = self._thread is not None and self._thread.is_alive()
+        hot_alive = self._hot_thread is not None and self._hot_thread.is_alive()
+        if collector_alive and hot_alive:
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="news-collector", daemon=True)
-        self._thread.start()
+        if not hot_alive:
+            from app.news.hot_snapshot import load_persisted_snapshot
+
+            try:
+                load_persisted_snapshot()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("热门事件快照读取失败: %s", exc)
+            self._hot_thread = threading.Thread(
+                target=self._hot_loop, name="news-hot-events", daemon=True,
+            )
+            self._hot_thread.start()
+        if not collector_alive:
+            self._thread = threading.Thread(target=self._loop, name="news-collector", daemon=True)
+            self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=3)
+        if self._hot_thread:
+            self._hot_thread.join(timeout=3)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -111,3 +129,13 @@ class NewsScheduler:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("钉钉推送失败: %s", exc)
             self._stop.wait(15)
+
+    def _hot_loop(self) -> None:
+        from app.news.hot_snapshot import refresh_hot_events_sync
+
+        while not self._stop.is_set():
+            try:
+                refresh_hot_events_sync()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("热门事件快照计算失败: %s", exc)
+            self._stop.wait(HOT_REFRESH_SECONDS)

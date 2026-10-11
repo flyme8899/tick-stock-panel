@@ -49,6 +49,7 @@ import unicodedata
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
+from functools import lru_cache
 
 from app.market_time import CN_TZ, cn_now, current_trading_day
 from app.news.collectors import is_red, parse_time
@@ -430,15 +431,27 @@ def clear_hot_event_cache(*, llm: bool = True) -> None:
     _CACHE.clear()
     if llm:
         _LLM_CACHE.clear()
+    _compact.cache_clear()
+    _strip_source_prefix.cache_clear()
+    _norm_title.cache_clear()
+    _title_grams.cache_clear()
 
 
-def build_top_hot_events(now: datetime | None, store: NewsStore) -> dict:
+def build_top_hot_events(
+    now: datetime | None,
+    store: NewsStore,
+    *,
+    refresh: bool = False,
+    blocked: bool = True,
+) -> dict:
     now = (now or cn_now()).astimezone(CN_TZ)
-    key = (str(store.path), int(now.timestamp()) // _CACHE_SECONDS)
-    cached = _CACHE.get(key)
-    if cached is not None:
-        return copy.deepcopy(cached)
-    snapshot = _compute(now, store)
+    # blocked 放进键里，对照测试才能分别拿到分桶结果和两两比较结果。
+    key = (str(store.path), int(now.timestamp()) // _CACHE_SECONDS, blocked)
+    if not refresh:
+        cached = _CACHE.get(key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+    snapshot = _compute(now, store, blocked=blocked)
     _CACHE[key] = snapshot
     return copy.deepcopy(snapshot)
 
@@ -476,7 +489,7 @@ def _attach_limit_reasons(events: list[dict], chosen: date) -> None:
         logger.info("涨停原因未能核对热门事件", exc_info=True)
 
 
-def _compute(now: datetime, store: NewsStore) -> dict:
+def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     today = now.date()
     trading = current_trading_day(now)
     active = _active_session_day(now)
@@ -494,7 +507,7 @@ def _compute(now: datetime, store: NewsStore) -> dict:
         row = dict(row)
         row["published"] = published
         by_day[_news_session_day(published)].append(row)
-    ranked = {day: _cluster_day(rows, now) for day, rows in by_day.items()}
+    ranked = {day: _cluster_day(rows, now, blocked=blocked) for day, rows in by_day.items()}
     ranked = {day: events for day, events in ranked.items() if events}
     fallback = False
     if active in ranked:
@@ -553,11 +566,103 @@ def _compute(now: datetime, store: NewsStore) -> dict:
     }
 
 
-def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
+def _prepare_merge_doc(doc: dict) -> None:
+    """合并要用的主体、双方、业绩公司和清洗结果只算一次，避免两两比较时重复跑正则。"""
+    title = str(doc.get("title") or "")
+    doc["_party"] = _party_pair(title)
+    doc["_earn"] = _earnings_company(title)
+    doc["_policy"] = _policy_subject(doc)
+    doc["_subjects"] = _subject_keys(doc)
+    doc["_compact"] = _compact(title)
+    doc["_norm"] = _norm_title(title)
+
+
+def _block_keys(doc: dict) -> list[str]:
+    """只把可能合并的稿放进同一桶。桶外的两两比较 `_can_merge` 一定是假。"""
+    keys: list[str] = []
+    action = str(doc.get("action") or "")
+    for subject in doc.get("_subjects") or ():
+        if action and subject:
+            keys.append(f"s:{action}:{subject}")
+    policy = str(doc.get("_policy") or "")
+    if policy:
+        keys.append(f"o:{policy}")
+    party = doc.get("_party") or ("", "")
+    if party[0] and party[1] and action:
+        keys.append("p:" + action + ":" + "|".join(sorted((party[0], party[1]))))
+    earn = str(doc.get("_earn") or "")
+    if earn:
+        keys.append(f"e:{earn}")
+    for token in doc.get("tokens") or ():
+        text = str(token)
+        if len(text) >= 3 and text not in _GENERIC_TOKENS:
+            keys.append(f"t:{text}")
+    compact = str(doc.get("_compact") or "")
+    if len(compact) >= 4:
+        keys.append("x:" + compact[:4])
+    norm = str(doc.get("_norm") or "")
+    if 1 < len(norm) < 4:
+        keys.append("g:" + norm)
+    elif len(norm) >= 4:
+        for start in range(len(norm) - 2):
+            keys.append("g:" + norm[start:start + 3])
+    return keys
+
+
+def _all_pairs(count: int):
+    for left in range(count):
+        for right in range(left + 1, count):
+            yield left, right
+
+
+def _blocked_pairs(docs: list[dict]):
+    buckets: dict[str, list[int]] = defaultdict(list)
+    for index, doc in enumerate(docs):
+        seen: set[str] = set()
+        for key in _block_keys(doc):
+            if key in seen:
+                continue
+            seen.add(key)
+            buckets[key].append(index)
+    emitted: set[tuple[int, int]] = set()
+    for key, indexes in buckets.items():
+        if len(indexes) < 2:
+            continue
+        # 双方、业绩和标题前缀不受 6 小时限制。其余桶只比时间窗里的稿。
+        limited = not key.startswith(("p:", "e:", "x:"))
+        for left, right in _pairs_in_bucket(docs, indexes, limited=limited):
+            if left > right:
+                left, right = right, left
+            pair = (left, right)
+            if pair in emitted:
+                continue
+            emitted.add(pair)
+            yield left, right
+
+
+def _pairs_in_bucket(docs: list[dict], indexes: list[int], *, limited: bool):
+    if not limited:
+        for pos, left in enumerate(indexes):
+            for right in indexes[pos + 1:]:
+                yield left, right
+        return
+    ordered = sorted(indexes, key=lambda index: docs[index]["published"])
+    start = 0
+    for pos, right in enumerate(ordered):
+        published = docs[right]["published"]
+        while start < pos and published - docs[ordered[start]]["published"] > _CLUSTER_WINDOW:
+            start += 1
+        for left in ordered[start:pos]:
+            yield left, right
+
+
+def _cluster_day(rows: list[dict], now: datetime, *, blocked: bool = True) -> list[dict]:
     docs = [_doc(row) for row in rows]
     docs = [doc for doc in docs if doc is not None]
     if not docs:
         return []
+    for doc in docs:
+        _prepare_merge_doc(doc)
     parent = list(range(len(docs)))
 
     def find(index: int) -> int:
@@ -566,10 +671,10 @@ def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
             index = parent[index]
         return index
 
-    for left in range(len(docs)):
-        for right in range(left + 1, len(docs)):
-            if _can_merge(docs[left], docs[right]):
-                parent[find(right)] = find(left)
+    pairs = _blocked_pairs(docs) if blocked else _all_pairs(len(docs))
+    for left, right in pairs:
+        if _can_merge(docs[left], docs[right]):
+            parent[find(right)] = find(left)
     groups: dict[int, list[dict]] = defaultdict(list)
     for index, doc in enumerate(docs):
         groups[find(index)].append(doc)
@@ -1058,8 +1163,19 @@ def _subject_is_vague(lead: str) -> bool:
     return any(cue in text for cue in _VAGUE_CUES)
 
 
+@lru_cache(maxsize=8192)
 def _norm_title(text: str) -> str:
     return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", _strip_source_prefix(text))
+
+
+@lru_cache(maxsize=8192)
+def _title_grams(text: str) -> frozenset[str]:
+    aa = _norm_title(text)
+    if not aa:
+        return frozenset()
+    if len(aa) < 2:
+        return frozenset({aa})
+    return frozenset(aa[index:index + 2] for index in range(len(aa) - 1))
 
 
 def _headline_similarity(left: str, right: str) -> float:
@@ -1069,13 +1185,7 @@ def _headline_similarity(left: str, right: str) -> float:
         return 0.0
     if aa == bb:
         return 1.0
-
-    def grams(text: str) -> set[str]:
-        if len(text) < 2:
-            return {text}
-        return {text[i:i + 2] for i in range(len(text) - 1)}
-
-    ga, gb = grams(aa), grams(bb)
+    ga, gb = _title_grams(left), _title_grams(right)
     union = len(ga | gb)
     if not union:
         return 0.0
@@ -1097,7 +1207,13 @@ def _subject_keys(doc: dict) -> set[str]:
 def _same_subject_action(left: dict, right: dict) -> bool:
     if not left.get("action") or left.get("action") != right.get("action"):
         return False
-    return bool(_subject_keys(left) & _subject_keys(right))
+    left_keys = left.get("_subjects")
+    if left_keys is None:
+        left_keys = _subject_keys(left)
+    right_keys = right.get("_subjects")
+    if right_keys is None:
+        right_keys = _subject_keys(right)
+    return bool(set(left_keys) & set(right_keys))
 
 
 _PARTY_PAIR = re.compile(
@@ -1127,8 +1243,12 @@ def _same_party_action(left: dict, right: dict) -> bool:
     """A与B做同一件事，和 B与A 是同一事件。动作不同则不并。"""
     if not left.get("action") or left.get("action") != right.get("action"):
         return False
-    first = _party_pair(str(left.get("title") or ""))
-    second = _party_pair(str(right.get("title") or ""))
+    first = left.get("_party")
+    if not isinstance(first, tuple):
+        first = _party_pair(str(left.get("title") or ""))
+    second = right.get("_party")
+    if not isinstance(second, tuple):
+        second = _party_pair(str(right.get("title") or ""))
     if not first[0] or not second[0]:
         return False
     return frozenset(first) == frozenset(second)
@@ -1150,8 +1270,13 @@ def _policy_subject(doc: dict) -> str:
 
 
 def _same_policy_subject(left: dict, right: dict) -> bool:
-    subject = _policy_subject(left)
-    return bool(subject) and subject == _policy_subject(right)
+    subject = left.get("_policy")
+    if subject is None:
+        subject = _policy_subject(left)
+    other = right.get("_policy")
+    if other is None:
+        other = _policy_subject(right)
+    return bool(subject) and subject == other
 
 
 def _earnings_company(text: str) -> str:
@@ -1184,8 +1309,13 @@ def _worth_labeling(event: dict) -> bool:
 
 
 def _same_company_earnings(left: dict, right: dict) -> bool:
-    company = _earnings_company(str(left.get("title") or ""))
-    return bool(company) and company == _earnings_company(str(right.get("title") or ""))
+    company = left.get("_earn")
+    if company is None:
+        company = _earnings_company(str(left.get("title") or ""))
+    other = right.get("_earn")
+    if other is None:
+        other = _earnings_company(str(right.get("title") or ""))
+    return bool(company) and company == other
 
 
 def _can_merge(left: dict, right: dict) -> bool:
@@ -1803,6 +1933,7 @@ def _mode(values: list[str]) -> str:
     return Counter(values).most_common(1)[0][0]
 
 
+@lru_cache(maxsize=8192)
 def _compact(text: str, *, keep_quotes: bool = False) -> str:
     body = re.sub(r"\s+", "", (text or "").strip())
     marks = "，。！？、；："
@@ -1871,6 +2002,7 @@ def _strip_report_label(text: str, *, keep_quotes: bool = False) -> str:
     return body.strip("-_—–#＃")
 
 
+@lru_cache(maxsize=8192)
 def _strip_source_prefix(text: str, *, keep_quotes: bool = False) -> str:
     body = _compact(text, keep_quotes=keep_quotes)
     body = _CLOCK_PREFIX.sub("", body)

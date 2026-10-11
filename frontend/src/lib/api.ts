@@ -40,6 +40,8 @@ export function friendlyStreamError(message: string | undefined | null): string 
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+/** 热门事件请求的兜底超时。正常路径读快照，冷启动或过期重算时仍可能偏慢。 */
+const HOT_EVENTS_TIMEOUT_MS = 90_000
 /** 同步计算型接口 (回测/筛选等) 的放宽超时: 合法耗时可能远超轮询类接口。 */
 const COMPUTE_REQUEST_TIMEOUT_MS = 300_000
 /** 扩展数据拉取类长请求: 跟随后端配置的单次超时 (timeoutSeconds, 默认 30s) + 10s 解析/写盘缓冲。
@@ -2419,6 +2421,8 @@ export interface NewsHotResponse {
   as_of?: string | null
   trading_day?: string | null
   updated_at?: string | null
+  computed_at?: string | null
+  status?: 'ready' | 'computing' | 'stale' | string | null
 }
 
 export interface NewsMessage {
@@ -2504,6 +2508,8 @@ export interface PickerSourceGroup {
   trading_day?: string | null
   fallback?: boolean
   hint?: string | null
+  status?: 'ready' | 'computing' | 'stale' | string | null
+  computed_at?: string | null
   beta?: boolean
   available?: boolean
   error?: string | null
@@ -4502,6 +4508,7 @@ export const api = {
   newsHot: (kind: 'all' | 'stock' | 'sector' | 'etf' | 'event' = 'all') =>
     request<NewsHotResponse>(
       `/api/news/hot?kind=${kind}&limit=20`,
+      { timeoutMs: HOT_EVENTS_TIMEOUT_MS },
     ),
 
   newsMessages: (kind: 'stock' | 'sector' | 'etf', key: string) =>
@@ -4536,7 +4543,9 @@ export const api = {
       body: JSON.stringify({ confirm: true }),
     }),
 
-  pickerSources: () => request<PickerSourcesResponse>('/api/picker/sources'),
+  pickerSources: () => request<PickerSourcesResponse>('/api/picker/sources', {
+    timeoutMs: HOT_EVENTS_TIMEOUT_MS,
+  }),
   pickerRun: (body: PickerRunRequest) =>
     request<PickerRunResponse>('/api/picker/run', {
       method: 'POST',

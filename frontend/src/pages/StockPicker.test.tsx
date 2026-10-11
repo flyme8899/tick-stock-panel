@@ -18,6 +18,7 @@ const harness = vi.hoisted(() => {
   return {
     ApiError,
     mode: 'pending' as 'pending' | 'unauthorized' | 'failed' | 'ready',
+    hotStatus: '' as '' | 'computing',
     calls: 0,
   }
 })
@@ -33,7 +34,13 @@ vi.mock('@/lib/api', () => ({
       return Promise.resolve({
         groups: [
           { id: 'fundamental', label: '基本面', items: [{ id: 'roe', name: '高ROE' }] },
-          { id: 'hot_events', label: '热门事件', items: [] },
+          {
+            id: 'hot_events',
+            label: '热门事件',
+            items: [],
+            hint: harness.hotStatus === 'computing' ? '正在计算' : null,
+            status: harness.hotStatus || undefined,
+          },
           { id: 'technical', label: '技术面', items: [] },
           { id: 'factor', label: '因子', items: [] },
           { id: 'dsa', label: 'DSA', items: [], available: false },
@@ -62,6 +69,7 @@ beforeEach(() => {
     dispatchEvent: () => false,
   })
   harness.mode = 'pending'
+  harness.hotStatus = ''
   harness.calls = 0
   host = document.createElement('div')
   document.body.append(host)
@@ -167,4 +175,14 @@ it('keeps a loaded list searchable and refetches an empty group on open', async 
   await openMenu('DSA 选股')
   expect(host.textContent).toContain('决策服务未连接')
   expect(harness.calls).toBeGreaterThan(1)
+})
+
+it('shows a computing hint while the hot-event snapshot is empty', async () => {
+  harness.mode = 'ready'
+  harness.hotStatus = 'computing'
+  await renderPicker()
+  expect(host.textContent).toContain('正在计算')
+  await openMenu('热门事件')
+  expect(host.textContent).toContain('正在计算热门事件，请稍候')
+  expect(host.textContent).not.toContain('今日暂无热门事件')
 })

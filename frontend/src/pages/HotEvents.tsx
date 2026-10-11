@@ -156,11 +156,13 @@ export function HotEvents() {
           {hot.isError && <p className="text-sm text-danger">热门候选加载失败</p>}
           {hot.isSuccess && tab === 'event' && events.length === 0 && (
             <p className="text-sm text-muted">
-              {redOnly
-                ? '没有加红事件。'
-                : category !== '全部'
-                  ? '这个分类下还没有事件。'
-                  : (hot.data?.hint || '今天还没有收成具体事件。打开右侧来源并等待采集后，这里会列出当天的事件。')}
+              {hot.data?.status === 'computing'
+                ? '正在计算热门事件，请稍候。'
+                : redOnly
+                  ? '没有加红事件。'
+                  : category !== '全部'
+                    ? '这个分类下还没有事件。'
+                    : (hot.data?.hint || '今天还没有收成具体事件。打开右侧来源并等待采集后，这里会列出当天的事件。')}
             </p>
           )}
           {hot.isSuccess && tab !== 'event' && candidates.length === 0 && (

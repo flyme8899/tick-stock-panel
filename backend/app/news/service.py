@@ -114,8 +114,10 @@ def reset_store_for_tests(path: Path | None = None) -> NewsStore:
         _LEXICON = None
         _ASSET_TYPES = None
     from app.news.hot_events import clear_hot_event_cache
+    from app.news.hot_snapshot import clear_hot_snapshot_for_tests
 
     clear_hot_event_cache()
+    clear_hot_snapshot_for_tests()
     return _STORE
 
 
@@ -530,10 +532,15 @@ def _public_score_part(value) -> float:
 
 
 def hot_event_listing(now: datetime | None = None, *, limit: int = 20) -> dict:
-    """热门事件页的主列表。和选股、推送用同一套聚类，按事件分量从高到低。"""
-    snapshot = top_hot_events(now)
+    """热门事件页的主列表。请求不传 now 时只读快照；传入 now 时按该时点现算，供对照测试。"""
+    if now is None:
+        from app.news.hot_snapshot import read_served_snapshot
+
+        snapshot = read_served_snapshot()
+    else:
+        snapshot = top_hot_events(now)
     events = [public_hot_event(item) for item in snapshot.get("events") or [] if isinstance(item, dict)]
-    return {
+    payload = {
         "events": events[: max(1, min(limit, 50))],
         "as_of": snapshot.get("as_of"),
         "trading_day": snapshot.get("trading_day"),
@@ -541,12 +548,21 @@ def hot_event_listing(now: datetime | None = None, *, limit: int = 20) -> dict:
         "hint": snapshot.get("hint"),
         "updated_at": snapshot.get("updated_at"),
     }
+    if now is None:
+        payload["computed_at"] = snapshot.get("computed_at")
+        payload["status"] = snapshot.get("status")
+    return payload
 
 
 def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> dict:
     """点开一个具体事件：簇里的资讯摘录，以及正文里提到的个股。"""
     wanted = (key or "").strip()
-    snapshot = top_hot_events(now)
+    if now is None:
+        from app.news.hot_snapshot import read_served_snapshot
+
+        snapshot = read_served_snapshot()
+    else:
+        snapshot = top_hot_events(now)
     event = next(
         (item for item in snapshot.get("events") or [] if isinstance(item, dict) and item.get("key") == wanted),
         None,
