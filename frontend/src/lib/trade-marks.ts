@@ -6,6 +6,8 @@ export const TRADE_BUY = '#12B76A'
 export const TRADE_SELL = '#F04438'
 
 const DSA_COLOR: Record<TradeLevelKind, string> = {
+  buy: TRADE_BUY,
+  target: '#F97316',
   support: '#3B82F6',
   resistance: '#F97316',
   stop: TRADE_SELL,
@@ -30,7 +32,7 @@ export interface TradeSignalMarker {
   fwd20: number | null
 }
 
-export type TradeLevelKind = 'support' | 'resistance' | 'stop'
+export type TradeLevelKind = 'buy' | 'stop' | 'target' | 'support' | 'resistance'
 
 export interface TradeLevel {
   kind: TradeLevelKind

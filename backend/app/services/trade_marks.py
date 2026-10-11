@@ -30,8 +30,20 @@ T_COOLDOWN_MIN = 60
 _BREAKOUT_TOKENS = ("breakout", "n_day_high", "new_high", "突破")
 _BUY_T = frozenset({"below_vwap", "near_low"})
 _SELL_T = frozenset({"above_vwap", "near_high"})
-_LEVEL_LABEL = {"support": "支撑", "resistance": "压力", "stop": "止损"}
+_LEVEL_LABEL = {
+    "buy": "理想买入",
+    "stop": "止损",
+    "target": "目标价",
+    "support": "支撑",
+    "resistance": "压力",
+}
 _KEY_KIND = {
+    "ideal_buy": "buy",
+    "理想买入": "buy",
+    "理想买入点": "buy",
+    "take_profit": "target",
+    "目标价": "target",
+    "目标位": "target",
     "support_level": "support",
     "support": "support",
     "支撑": "support",
@@ -48,10 +60,13 @@ _KEY_KIND = {
     "止损位": "stop",
 }
 _TEXT_PATTERNS = (
+    ("buy", re.compile(r"理想买入(?:点|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
+    ("target", re.compile(r"目标(?:位|价)\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
     ("support", re.compile(r"支撑(?:位|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
     ("resistance", re.compile(r"压力(?:位|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
     ("stop", re.compile(r"止损(?:位|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
 )
+_LEVEL_ORDER = ("buy", "stop", "target", "support", "resistance")
 _PRICE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)")
 _CROSS_SECTION_NOTE = (
     "基本面预设依赖全市场截面（行业名次、入选数量）。"
@@ -132,7 +147,7 @@ def parse_dsa_levels(report: Any) -> list[dict]:
     if len(found) < 3:
         _scan_level_text(report, found, depth=0)
     ordered = []
-    for kind in ("support", "resistance", "stop"):
+    for kind in _LEVEL_ORDER:
         price = found.get(kind)
         if price is None:
             continue
@@ -341,7 +356,9 @@ def build_payload(
     end_s = end.isoformat()
     intraday_s = intraday.isoformat() if intraday is not None else ""
     # 命中缓存时不再读日K。120 秒 TTL 覆盖新K线；成交文件 mtime 覆盖模拟盘。
-    cache_key = (symbol, strategy_id or "", start_s, end_s, intraday_s, _fills_mtime(data_dir))
+    from app.custom.dsa.sniper_alerts import lines_mtime
+
+    cache_key = (symbol, strategy_id or "", start_s, end_s, intraday_s, _fills_mtime(data_dir), lines_mtime())
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -396,6 +413,14 @@ def build_payload(
 
 
 def load_dsa_levels(symbol: str) -> list[dict]:
+    try:
+        from app.custom.dsa.sniper_alerts import chart_levels
+
+        local = chart_levels(symbol)
+        if local:
+            return local
+    except Exception:  # noqa: BLE001 — 图表叠加失败时留空，不把错误价位当成信号
+        logger.warning("local dsa levels unreadable", exc_info=True)
     try:
         from app.custom.dsa.proxy import InvalidUpstreamPathError, UpstreamError, enabled, forward
     except Exception:  # noqa: BLE001 — 图表叠加失败时留空，不把错误价位当成信号
@@ -812,7 +837,7 @@ def _has_other_symbols(panel: pl.DataFrame, symbol: str) -> bool:
 
 
 def _walk_levels(node: Any, found: dict[str, float], depth: int) -> None:
-    if depth > 8 or len(found) >= 3:
+    if depth > 8 or len(found) >= len(_LEVEL_ORDER):
         return
     if isinstance(node, dict):
         for key, value in node.items():

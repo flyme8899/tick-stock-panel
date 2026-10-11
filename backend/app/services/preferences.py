@@ -774,6 +774,16 @@ def get_strategy_monitor_enabled() -> bool:
     return load().get("strategy_monitor_enabled", False)
 
 
+def get_dsa_sniper_alerts_enabled() -> bool:
+    """DSA 理想买入、止损、目标价的钉钉提醒。缺省开启，关掉后 K 线仍可显示价位。"""
+    return bool(load().get("dsa_sniper_alerts_enabled", True))
+
+
+def set_dsa_sniper_alerts_enabled(enabled: bool) -> bool:
+    save({"dsa_sniper_alerts_enabled": bool(enabled)})
+    return bool(enabled)
+
+
 def get_system_notify_enabled() -> bool:
     """系统通知开关 — 开启后监控告警同时推送到操作系统通知中心。"""
     return load().get("system_notify_enabled", False)

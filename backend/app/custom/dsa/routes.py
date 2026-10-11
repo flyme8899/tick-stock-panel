@@ -18,10 +18,21 @@ from app.custom.dsa.proxy import (
 )
 from app.custom.dsa.quant_evidence import evidence_summary
 from app.custom.dsa.schedule import ScheduleSettingsError, load_schedule, save_schedule
+from app.custom.dsa.stock_context import load_context
 
 
 class BotCommandRequest(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+
+
+class SniperLineRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=32)
+    name: str = ""
+    analysis_id: str = ""
+    analyzed_at: str = ""
+    ideal_buy: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 class ScheduleRequest(BaseModel):
@@ -52,6 +63,20 @@ def build_router() -> APIRouter:
     @router.get("/quant-evidence")
     def quant_evidence() -> dict:
         return evidence_summary()
+
+    @router.get("/stock-context")
+    def stock_context(symbol: str, request: Request) -> dict:
+        repo = getattr(request.app.state, "repo", None)
+        return load_context(symbol, repo=repo)
+
+    @router.post("/sniper-lines")
+    def sniper_lines(body: SniperLineRequest) -> dict:
+        from app.custom.dsa.sniper_alerts import register
+
+        try:
+            return register(body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/bot/command")
     def bot_command(body: BotCommandRequest) -> dict:

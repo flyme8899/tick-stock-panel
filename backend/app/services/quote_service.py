@@ -1203,6 +1203,13 @@ class QuoteService:
             # 基于这些非连续竞价价格。
             if not self._is_continuous_trading():
                 return
+            # DSA 价位只看本轮原始快照里有线的代码。推送不在这条线程上发。
+            try:
+                from app.custom.dsa.sniper_alerts import observe_frame
+
+                observe_frame(daily_df)
+            except Exception:  # noqa: BLE001
+                logger.warning("DSA 价位提醒评估失败", exc_info=True)
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
             # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,

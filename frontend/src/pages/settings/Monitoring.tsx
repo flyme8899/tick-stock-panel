@@ -167,6 +167,11 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     qc.invalidateQueries({ queryKey: QK.preferences })
   }, [qc])
 
+  const toggleDsaSniperAlerts = useCallback(async (enabled: boolean) => {
+    await api.updateDsaSniperAlerts(enabled)
+    qc.invalidateQueries({ queryKey: QK.preferences })
+  }, [qc])
+
   // 勾选/取消勾选某个默认推送渠道。
   const toggleDefaultChannel = useCallback(async (ch: string, enabled: boolean) => {
     const cur = prefs?.webhook_default_channels ?? []
@@ -561,6 +566,12 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
             飞书 / 企业微信 / 第三方 Webhook / 邮件。
             每个渠道合并成一行: 勾选=新建规则默认推送, 点行展开地址配置。 */}
         <Card icon={Webhook} title="推送通知" anchor="webhooks">
+          <ToggleRow
+            label="DSA 价位提醒"
+            desc="理想买入、止损、目标价被盘中价格触及后，用资讯里的钉钉机器人推送。同一条线 30 分钟内只推一次。关闭后 K 线仍显示价位。"
+            checked={prefs?.dsa_sniper_alerts_enabled ?? true}
+            onChange={toggleDsaSniperAlerts}
+          />
           <p className="text-xs text-secondary mb-3">
             监控规则命中后,可把告警推送到外部。勾选渠道作为<b className="text-foreground/80">新建规则的默认推送</b>,
             单条规则仍可在编辑页独立修改。

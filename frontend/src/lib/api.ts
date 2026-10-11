@@ -2058,6 +2058,8 @@ export interface Preferences {
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
   system_notify_enabled: boolean
+  /** DSA 理想买入 / 止损 / 目标价触及后是否走钉钉。缺省开启。 */
+  dsa_sniper_alerts_enabled?: boolean
   feishu_webhook_url?: string
   feishu_webhook_secret?: string
   wecom_webhook_url?: string
@@ -2770,6 +2772,11 @@ export const api = {
     }>('/api/settings/preferences/realtime-monitor', {
       method: 'PUT',
       body: JSON.stringify(cfg),
+    }),
+  updateDsaSniperAlerts: (enabled: boolean) =>
+    request<{ dsa_sniper_alerts_enabled: boolean }>('/api/settings/preferences/dsa-sniper-alerts', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
     }),
   updateSystemNotify: (enabled: boolean) =>
     request<{ system_notify_enabled: boolean }>('/api/settings/preferences/system-notify', {

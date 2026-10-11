@@ -69,6 +69,16 @@ describe('买卖点标记映射', () => {
       '压力 1900.50',
       '止损 1700.00',
     ])
+    const sniper: TradeLevel[] = [
+      { kind: 'buy', label: '理想买入', price: 1800 },
+      { kind: 'stop', label: '止损', price: 1700 },
+      { kind: 'target', label: '目标价', price: 1900 },
+    ]
+    expect(dsaLines(sniper, true).map(line => [line.label, line.color])).toEqual([
+      ['理想买入 1800.00', '#12B76A'],
+      ['止损 1700.00', '#F04438'],
+      ['目标价 1900.00', '#F97316'],
+    ])
   })
 
   it('悬停卡片能对上策略规则和模拟盘成交', () => {
