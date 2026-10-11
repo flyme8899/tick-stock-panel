@@ -16,6 +16,7 @@ import {
   RefreshCw,
   ScanSearch,
   Settings2,
+  ChevronDown,
   ShieldAlert,
   Sparkles,
   Upload,
@@ -23,6 +24,7 @@ import {
 import { PageHeader } from '@/components/PageHeader'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { cn } from '@/lib/cn'
+import { priceColorClass } from '@/lib/format'
 import { QK } from '@/lib/queryKeys'
 import {
   asRecords,
@@ -34,6 +36,7 @@ import {
   dsaUpstream,
   fetchDsaCatalog,
   fetchDsaQuantEvidence,
+  type DsaQuantEvidence,
   fetchDsaSchedule,
   fetchDsaStatus,
   fetchShareImage,
@@ -43,6 +46,7 @@ import {
   type DsaError,
 } from './client'
 import { DashboardPanel } from './DashboardPanel'
+import { formatPercentPoints } from './dashboardHistory'
 import {
   SAMPLE_ALERTS,
   SAMPLE_NEWS,
@@ -179,7 +183,7 @@ export function DecisionWorkspace() {
             )
           })}
         </nav>
-        <div className="min-h-0 min-w-0 flex-1 overflow-auto px-4 py-4 md:px-6">
+        <div className="min-h-0 min-w-0 flex-1 overflow-auto px-4 pb-52 pt-4 md:px-6 md:py-4">
           {sample && (
             <div className="mb-3">
               <Notice>下面带「样例」标记的内容只用于查看版式，不是行情，也不能当作交易依据。连接决策服务并配置模型密钥后会换成真实结果。</Notice>
@@ -189,7 +193,7 @@ export function DecisionWorkspace() {
             <DashboardPanel
               sample={sample}
               reachable={reachable}
-              middle={<QuantEvidence />}
+              footer={<QuantEvidence />}
               review={<MarketReview reachable={reachable} />}
             />
           )}
@@ -222,8 +226,61 @@ export function DecisionWorkspace() {
   )
 }
 
-function formatSignedPercent(value: number): string {
-  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
+export function QuantEvidencePanel({
+  data,
+  defaultOpen = false,
+}: {
+  data: DsaQuantEvidence
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  const scope = [
+    data.meta.period,
+    data.meta.universe != null ? `全市场 ${data.meta.universe} 只` : '',
+    data.meta.benchmark_return ? `同期基准 ${data.meta.benchmark_return}` : '',
+  ].filter(Boolean).join('，')
+  const hint = scope
+    ? `${scope}。同名技能的提示里会附上这些机械回测结果。`
+    : '同名技能的提示里会附上这些机械回测结果。'
+  return (
+    <section className="rounded-lg border border-border bg-surface">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+        aria-expanded={open}
+        onClick={() => setOpen(value => !value)}
+      >
+        <span className="min-w-0">
+          <span className="block text-sm font-medium text-foreground">量化回测参考</span>
+          {open && <span className="mt-0.5 block text-[11px] leading-relaxed text-muted">{hint}</span>}
+        </span>
+        <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="border-t border-border px-4 py-3">
+          <Notice>{data.caveat}</Notice>
+          <ul className="mt-3 space-y-2">
+            {data.skills.map(skill => (
+              <li key={skill.name} className="text-xs leading-relaxed text-secondary">
+                <span className="font-mono text-foreground">{skill.name}</span>
+                {skill.matched.length > 0 && <span className="text-muted"> · {skill.matched.join('、')}</span>}
+                {skill.returns.length > 0 && (
+                  <span className="ml-2">
+                    {skill.returns.map((value, index) => (
+                      <span key={`${skill.name}-${index}`}>
+                        {index > 0 && <span className="text-muted"> / </span>}
+                        <span className={cn('num', priceColorClass(value))}>{formatPercentPoints(value)}</span>
+                      </span>
+                    ))}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  )
 }
 
 function QuantEvidence() {
@@ -235,30 +292,7 @@ function QuantEvidence() {
   })
   const data = query.data
   if (!data?.available) return null
-  const scope = [
-    data.meta.period,
-    data.meta.universe != null ? `全市场 ${data.meta.universe} 只` : '',
-    data.meta.benchmark_return ? `同期基准 ${data.meta.benchmark_return}` : '',
-  ].filter(Boolean).join('，')
-  return (
-    <Panel
-      title="量化回测参考"
-      hint={scope ? `${scope}。同名技能的提示里会附上这些机械回测结果。` : '同名技能的提示里会附上这些机械回测结果。'}
-    >
-      <Notice>{data.caveat}</Notice>
-      <ul className="mt-3 space-y-2">
-        {data.skills.map(skill => (
-          <li key={skill.name} className="text-xs leading-relaxed text-secondary">
-            <span className="font-mono text-foreground">{skill.name}</span>
-            {skill.matched.length > 0 && <span className="text-muted"> · {skill.matched.join('、')}</span>}
-            {skill.returns.length > 0 && (
-              <span className="num ml-2 text-foreground">{skill.returns.map(formatSignedPercent).join(' / ')}</span>
-            )}
-          </li>
-        ))}
-      </ul>
-    </Panel>
-  )
+  return <QuantEvidencePanel data={data} />
 }
 
 function MarketReview({ reachable }: { reachable: boolean }) {

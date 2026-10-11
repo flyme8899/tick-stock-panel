@@ -110,3 +110,36 @@ it('cancels a watch-pool delete and removes the selected codes after confirm', a
   })
   expect(removed).toEqual([['603626']])
 })
+
+it('keeps counts in one row above the pool and does not repeat an unknown code', async () => {
+  await renderBoard()
+  const counts = host.querySelector('[data-decision-counts]')
+  const poolTitle = [...host.querySelectorAll('h2')].find(node => node.textContent?.includes('观察池'))
+  expect(counts).toBeTruthy()
+  expect(counts?.className).toContain('flex')
+  expect(counts?.className).not.toContain('grid-cols-3')
+  expect(counts!.compareDocumentPosition(poolTitle!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+  const unknown = [...host.querySelectorAll('li')].find(item => item.querySelector('[data-pool-name]')?.textContent === '603626')
+  expect(unknown?.querySelector('[data-pool-code]')).toBeNull()
+  expect(unknown?.textContent?.match(/603626/g)).toEqual(['603626'])
+})
+
+it('shows the stock name, code, and red-up green-down quote', async () => {
+  await renderBoard({
+    pool: [
+      { code: '600105', name: '永鼎股份', price: 8.42, changePctPoints: 3.25 },
+      { code: '603626', name: '科森科技', price: 18.36, changePctPoints: -1.8 },
+    ],
+  })
+  const up = [...host.querySelectorAll('li')].find(item => item.textContent?.includes('永鼎股份'))
+  expect(up?.querySelector('[data-pool-name]')?.className).toContain('font-semibold')
+  expect(up?.querySelector('[data-pool-code]')?.textContent).toBe('600105')
+  expect(up?.querySelector('[data-pool-quote]')?.textContent).toContain('8.42')
+  expect(up?.querySelector('[data-pool-quote]')?.textContent).toContain('+3.25%')
+  expect(up?.querySelector('[data-pool-quote]')?.className).toContain('text-bull')
+
+  const down = [...host.querySelectorAll('li')].find(item => item.textContent?.includes('科森科技'))
+  expect(down?.querySelector('[data-pool-quote]')?.textContent).toContain('-1.80%')
+  expect(down?.querySelector('[data-pool-quote]')?.className).toContain('text-bear')
+})
