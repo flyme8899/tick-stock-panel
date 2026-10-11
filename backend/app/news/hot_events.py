@@ -8,11 +8,12 @@
 或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
 共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v5。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v6。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
 清理会去掉开头的钟点、【】标签、末尾省略号、「央视财经：」这类来源前缀，以及研报文件名里的日期戳和 #，并停在句号前。
 栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
+侧面佐证、印证、看好、地位、逻辑这类没有主体和动作的点评不是事件。增长、新增、追加这类业绩和回购动作算事件。
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
@@ -57,8 +58,8 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。旧键里的截断标题、乱码标题和错位概念不再套用，下一轮重新生成。
-_TITLE_CACHE_VERSION = 5
+# 标题缓存按这个版本取。业绩动词和点评判定变了，旧键不再套用，下一轮重新生成。
+_TITLE_CACHE_VERSION = 6
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -75,7 +76,7 @@ BROAD_SECTORS = frozenset({
 _ACTIONS = (
     "发布", "出台", "定调", "涨价", "降价", "提价", "上调", "下调", "报价", "收购", "中标", "获批", "上市",
     "回购", "签约", "停产", "召回", "立案", "补贴", "降准", "降息", "加息", "制裁", "收紧",
-    "追加", "订单",
+    "追加", "订单", "增长", "新增",
 )
 # 先看更具体的市场语境，再退回动作本身。六个分类覆盖政策、海外、产业、地缘、商品和公司。
 CATEGORY_NAMES = (
@@ -112,6 +113,8 @@ _ACTION_CATEGORY = {
     "召回": "公司重大事项",
     "签约": "公司重大事项",
     "中标": "公司重大事项",
+    "增长": "公司重大事项",
+    "新增": "公司重大事项",
 }
 _BEAR_CUES = ("制裁", "立案", "停产", "召回", "下调", "降价", "收紧", "冲突", "战争", "关税", "暴跌", "下跌", "加息")
 _BULL_CUES = ("补贴", "获批", "订单", "涨价", "回购", "发布", "出台", "降息", "降准", "上调", "提价", "中标", "签约", "上涨")
@@ -312,6 +315,8 @@ _REPORT_PREFIX = re.compile(
 _SECTION_MATERIAL = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,12}材料$")
 # 价格叙述后面再出现这些动作，就是下一句被粘进了标题。
 _UNGLUE_VERBS = _GLUE_FOLLOWUPS | frozenset({"涨价", "降价", "提价"})
+# 没有具体主体和动作时，这些是点评，不是事件。
+_COMMENTARY_CUES = ("侧面佐证", "印证", "利好", "看好", "地位", "逻辑")
 
 _CACHE: dict[tuple, dict] = {}
 _LLM_CACHE: dict[str, dict] = {}
@@ -1520,11 +1525,15 @@ def _normalize_subject(before: str) -> str:
 
 
 def _tuple_action(text: str) -> tuple[int, str]:
+    """取最靠前的动作。追加回购要落在追加上，宾语才是回购，而不是空的。"""
+    found: tuple[int, str] | None = None
     for verb in _ACTIONS:
         index = text.find(verb)
-        if index >= 0:
-            return index, verb
-    return -1, ""
+        if index < 0:
+            continue
+        if found is None or index < found[0] or (index == found[0] and len(verb) > len(found[1])):
+            found = (index, verb)
+    return found if found else (-1, "")
 
 
 def _narrative_action(text: str) -> tuple[int, str]:
@@ -1749,6 +1758,15 @@ def _title_name_reject_reason(text: str) -> str:
     return ""
 
 
+def _is_commentary(text: str) -> bool:
+    """侧面佐证、看好、地位这类说法，没有主体和动作时不是事件。"""
+    body = _compact(text)
+    if not body or not any(cue in body for cue in _COMMENTARY_CUES):
+        return False
+    lead, action, _obj = _split_headline(body)
+    return not (action and _subject_ok(lead))
+
+
 def _llm_title_reject_reason(title: str) -> str:
     """模型标题的拒绝原因。空字符串表示可以上屏。
 
@@ -1758,6 +1776,8 @@ def _llm_title_reject_reason(title: str) -> str:
     text = _compact(title)
     if not text or text == "事件":
         return "空标题"
+    if _is_commentary(text):
+        return "不是具体事件"
     name_reason = _title_name_reject_reason(text)
     if name_reason:
         return name_reason
@@ -1828,7 +1848,7 @@ def _fallback_title_ok(name: object) -> bool:
 def _cleaned_display_ok(name: object) -> bool:
     """关键词回退不要求满 6 字，但钟点、括号、省略号和栏目标题不能上屏。"""
     text = _compact(str(name or ""))
-    if _title_incoherent(text) or _has_file_debris(text):
+    if _title_incoherent(text) or _has_file_debris(text) or _is_commentary(text):
         return False
     if not _display_name_ok(text) or _is_section_label(text):
         return False
@@ -1933,6 +1953,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "不要以数字或钟点开头，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
         "不要把下一句粘进来。不要用「事件」当标题。不要输出重点、点评或栏目标签。"
         "不要只写媒体名或公司名，标题里要有动作。"
+        "不要写侧面佐证、印证、看好、地位或逻辑这类没有具体动作的点评。"
         "主体必须写明，例如美联储、国务院、财政部。"
         f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
         "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
