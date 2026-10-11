@@ -34,7 +34,7 @@ def test_eastmoney_gets_sleep_between_calls_and_other_hosts_do_not() -> None:
             encoding="utf-8",
         )
 
-    def original(self, method, url, *args, **kwargs):  # noqa: ANN001
+    def original(self, method, url, *args, **kwargs):
         original_urls.append(str(url))
         return SimpleNamespace(status_code=200, url=url, content=b"ok", text="ok", headers={})
 

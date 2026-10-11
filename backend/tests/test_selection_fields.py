@@ -22,7 +22,6 @@ from app.selection_fields.query import annotate_result
 from app.selection_fields.scheduler import SelectionWorker, due_tasks
 from app.selection_fields.store import commit, read_frame, read_meta, save_checkpoint
 
-
 FLAGS = {
     "enabled": True,
     "northbound": True,

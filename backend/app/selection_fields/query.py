@@ -172,9 +172,7 @@ def _blank(value: object) -> bool:
         return True
     if isinstance(value, float) and value != value:
         return True
-    if isinstance(value, str) and not value.strip():
-        return True
-    return False
+    return bool(isinstance(value, str) and not value.strip())
 
 
 def _note_of(meta: dict) -> str:
