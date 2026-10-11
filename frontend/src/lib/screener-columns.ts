@@ -73,7 +73,7 @@ export const SCREENER_BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:limit_ups', source: { type: 'builtin', key: 'limit_ups' }, label: '连板', visible: true, align: 'center' },
   { id: 'builtin:limit_downs', source: { type: 'builtin', key: 'limit_downs' }, label: '连跌', visible: false, align: 'center' },
   // 选股补充。周/月涨跌和连涨由日 K 现算；北向、股东、指数、解禁、PE 来自收盘后任务。
-  { id: 'builtin:northbound_hold_pct', source: { type: 'builtin', key: 'northbound_hold_pct' }, label: '北向持股', visible: true, align: 'right' },
+  { id: 'builtin:northbound_hold_pct', source: { type: 'builtin', key: 'northbound_hold_pct' }, label: '北向持股(季)', visible: true, align: 'right' },
   { id: 'builtin:holder_num', source: { type: 'builtin', key: 'holder_num' }, label: '股东户数', visible: true, align: 'right' },
   { id: 'builtin:holder_change_pct', source: { type: 'builtin', key: 'holder_change_pct' }, label: '股东增减', visible: false, align: 'right' },
   { id: 'builtin:index_membership', source: { type: 'builtin', key: 'index_membership' }, label: '指数成分', visible: true, align: 'left' },

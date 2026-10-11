@@ -8,7 +8,12 @@ import pytest
 
 from app.market_time import CN_TZ
 from app.selection_fields.bars import derive_period_snapshot
-from app.selection_fields.jobs import advance_pe, sync_indexes
+from app.selection_fields.jobs import (
+    advance_pe,
+    fetch_northbound_quarter,
+    sync_indexes,
+    sync_northbound,
+)
 from app.selection_fields.parse import (
     ashare_symbol,
     combine_index_members,
@@ -20,7 +25,14 @@ from app.selection_fields.parse import (
 )
 from app.selection_fields.query import annotate_result
 from app.selection_fields.scheduler import SelectionWorker, due_tasks
-from app.selection_fields.store import commit, read_frame, read_meta, save_checkpoint
+from app.selection_fields.store import (
+    commit,
+    commit_index,
+    read_frame,
+    read_index_part,
+    read_meta,
+    save_checkpoint,
+)
 
 FLAGS = {
     "enabled": True,
@@ -47,6 +59,16 @@ def test_northbound_percent_is_not_rescaled() -> None:
         "symbol": "600519.SH",
         "northbound_hold_pct": 2.35,
         "trade_date": "2024-01-05",
+    }]
+    quarter = parse_northbound([{
+        "SECURITY_CODE": "600519",
+        "FREE_SHARES_RATIO": 4.2967,
+        "HOLD_DATE": "2026-06-30 00:00:00",
+    }])
+    assert quarter == [{
+        "symbol": "600519.SH",
+        "northbound_hold_pct": 4.2967,
+        "trade_date": "2026-06-30",
     }]
     assert ashare_symbol("000001.SZ") == "000001.SZ"
     assert ashare_symbol("000001.SH") == ""
@@ -84,6 +106,8 @@ def test_holders_unlock_pe_and_index_labels() -> None:
     assert pe == 12.5
 
     hs300 = parse_index_members([{"成分券代码": "600519"}], "沪深300")
+    cyb = parse_index_members([{"样本代码": "300750"}], "创业板50")
+    assert cyb == {"300750.SZ": "创业板50"}
     zz500 = parse_index_members([{"成分券代码": "600519"}, {"成分券代码": "000001"}], "中证500")
     combined = combine_index_members([("沪深300", hs300), ("中证500", zz500)])
     by_symbol = {row["symbol"]: row["index_membership"] for row in combined}
@@ -185,20 +209,6 @@ def test_failed_refresh_keeps_the_previous_parquet(tmp_path) -> None:
     assert frame.to_dicts()[0]["holder_num"] == 100
     assert read_meta(tmp_path, "holders")["status"] == "error"
 
-    commit(tmp_path, "index_members", [{
-        "symbol": "600519.SH",
-        "index_membership": "沪深300",
-    }], ok=True)
-
-    def ak(name, **kwargs):
-        if kwargs.get("symbol") == "000905":
-            raise RuntimeError("csindex down")
-        return [{"成分券代码": "000001"}]
-
-    outcome = sync_indexes(ak, tmp_path)
-    assert outcome["ok"] is False
-    assert read_frame(tmp_path, "index_members").to_dicts()[0]["index_membership"] == "沪深300"
-
 
 def test_scheduler_skips_when_the_heavy_slot_is_busy(monkeypatch, tmp_path) -> None:
     for name in (
@@ -286,6 +296,138 @@ def test_pe_checkpoint_resumes_and_skips_a_symbol_after_two_failures(tmp_path) -
     assert result["rows"][0]["pe_ttm"] == 20
     assert result["rows"][0]["close"] == 1
     assert len(result["rows"]) == 2
+
+
+def test_northbound_uses_quarter_and_keeps_the_previous_snapshot(tmp_path, monkeypatch) -> None:
+    seen: list[tuple] = []
+
+    def fake_em_get(_url, *, params, headers=None, timeout=15.0):
+        seen.append((params["reportName"], params.get("filter"), params.get("pageNumber")))
+        if params["reportName"] == "RPT_MUTUAL_BOARD_HOLDRANKDATE":
+            return _json_response({
+                "success": True,
+                "result": {"data": [
+                    {"TRADE_DATE": "2026-09-30 00:00:00"},
+                    {"TRADE_DATE": "2026-06-30 00:00:00"},
+                ]},
+            })
+        if "2026-09-30" in str(params.get("filter")):
+            return _json_response({"success": False, "code": 9201, "message": "返回数据为空"})
+        if params.get("pageNumber") == "1":
+            data = [{
+                "SECURITY_CODE": "600519",
+                "FREE_SHARES_RATIO": 4.2967,
+                "HOLD_DATE": "2026-06-30 00:00:00",
+            }]
+        else:
+            data = [{
+                "SECURITY_CODE": "000001",
+                "FREE_SHARES_RATIO": 2.35,
+                "HOLD_DATE": "2026-06-30 00:00:00",
+            }]
+        return _json_response({"success": True, "result": {"pages": 2, "data": data}})
+
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake_em_get)
+    fetched = parse_northbound(fetch_northbound_quarter())
+    assert [row["northbound_hold_pct"] for row in fetched] == [4.2967, 2.35]
+    assert fetched[0]["trade_date"] == "2026-06-30"
+    assert [item[0] for item in seen] == [
+        "RPT_MUTUAL_BOARD_HOLDRANKDATE",
+        "RPT_MUTUAL_HOLDRANK_NEW",
+        "RPT_MUTUAL_HOLDRANK_NEW",
+        "RPT_MUTUAL_HOLDRANK_NEW",
+    ]
+    assert "2026-09-30" in str(seen[1][1])
+    assert seen[2][2] == "1" and "2026-06-30" in str(seen[2][1])
+    assert seen[3][2] == "2"
+
+    def ak(name, **_kwargs):
+        assert name == "northbound_quarter"
+        return [
+            {
+                "SECURITY_CODE": "600519",
+                "FREE_SHARES_RATIO": 4.2967,
+                "HOLD_DATE": "2026-06-30 00:00:00",
+            },
+            {
+                "SECURITY_CODE": "000001",
+                "FREE_SHARES_RATIO": 2.35,
+                "HOLD_DATE": "2026-06-30 00:00:00",
+            },
+        ]
+
+    outcome = sync_northbound(ak, tmp_path)
+    assert outcome["ok"] is True
+    assert read_meta(tmp_path, "northbound")["note"] == "北向持股为季度口径，截至 2026-06-30"
+
+    def broken(name, **_kwargs):
+        assert name == "northbound_quarter"
+        raise RuntimeError("down")
+
+    failed = sync_northbound(broken, tmp_path)
+    assert failed["ok"] is False
+    assert read_frame(tmp_path, "northbound").to_dicts()[0]["northbound_hold_pct"] == 4.2967
+    noted = annotate_result({"rows": [{"symbol": "600519.SH", "close": 1}]}, tmp_path)
+    assert any("季度口径，截至 2026-06-30" in note for note in noted["field_notes"])
+    assert "北向持股" not in noted["field_gaps"]
+
+
+def test_one_index_failure_still_writes_the_others(tmp_path) -> None:
+    commit_index(tmp_path, "000905", [{
+        "symbol": "600519.SH",
+        "index_membership": "中证500",
+    }], ok=True, as_of="2024-01-07")
+    calls: list[tuple[str, str]] = []
+
+    def ak(name, **kwargs):
+        symbol = kwargs["symbol"]
+        calls.append((name, symbol))
+        if symbol == "399673":
+            assert name == "index_detail_cni"
+            return [{"样本代码": "300750"}]
+        assert name == "index_stock_cons_csindex"
+        if symbol == "000905":
+            raise RuntimeError("csindex down")
+        return [{"成分券代码": "000001"}]
+
+    outcome = sync_indexes(ak, tmp_path, day="2024-01-08")
+    assert outcome["ok"] is False
+    assert outcome["error"] == "指数成分未完成：中证500"
+    assert ("index_detail_cni", "399673") in calls
+    assert ("index_stock_cons_csindex", "399673") not in calls
+    assert read_index_part(tmp_path, "000300").to_dicts()[0]["symbol"] == "000001.SZ"
+    assert read_index_part(tmp_path, "000905").to_dicts()[0]["symbol"] == "600519.SH"
+    assert read_index_part(tmp_path, "399673").to_dicts()[0]["symbol"] == "300750.SZ"
+
+    again: list[str] = []
+
+    def retry(name, **kwargs):
+        again.append(kwargs["symbol"])
+        if kwargs["symbol"] == "000905":
+            raise RuntimeError("csindex down")
+        return [{"成分券代码": "000001"}]
+
+    sync_indexes(retry, tmp_path, day="2024-01-08")
+    assert again == ["000905"]
+
+    result = annotate_result({
+        "as_of": "2024-01-08",
+        "rows": [
+            {"symbol": "600519.SH"},
+            {"symbol": "000001.SZ"},
+            {"symbol": "300750.SZ"},
+        ],
+    }, tmp_path)
+    by_symbol = {row["symbol"]: row.get("index_membership") for row in result["rows"]}
+    assert by_symbol["600519.SH"] == "中证500"
+    assert by_symbol["000001.SZ"] == "沪深300、上证50、中证1000"
+    assert by_symbol["300750.SZ"] == "创业板50"
+    assert "指数成分" not in result["field_gaps"]
+    assert any(note == "指数成分未完成：中证500" for note in result["field_notes"])
+
+
+def _json_response(payload: dict):
+    return type("Response", (), {"json": lambda self: payload})()
 
 
 def _weekdays(start: date, count: int) -> list[date]:

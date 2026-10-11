@@ -1,8 +1,9 @@
 """把 akshare 里打到东财的 HTTP 收进共用限流。
 
-akshare 自己用 ``requests``。这里只改 ``Session.request``：主机是
-``eastmoney.com`` 时改走 ``EastMoneyLimiter``，其它主机仍走原来的 requests。
-调用结束会把补丁卸掉，避免测试或别的源一直被包在里面。
+akshare 自己用 ``requests``。补丁挂在 ``Session.request`` 上，但只对
+调用 ``call_akshare`` / ``install`` 的那个线程生效：主机是
+``eastmoney.com`` 的 GET 改走 ``EastMoneyLimiter``，其它主机仍走原来的
+requests。资金流、研报等其它线程即使撞上补丁，也拿原来的响应，不进这把锁。
 """
 from __future__ import annotations
 
@@ -13,9 +14,18 @@ from typing import Any
 from app.eastmoney.client import EastMoneyLimiter, _host_allowed, get_limiter
 
 _lock = threading.Lock()
+_local = threading.local()
 _depth = 0
 _original: Callable[..., Any] | None = None
 _limiter: EastMoneyLimiter | None = None
+
+
+def _thread_depth() -> int:
+    return int(getattr(_local, "depth", 0) or 0)
+
+
+def _set_thread_depth(value: int) -> None:
+    _local.depth = value
 
 
 class _Response:
@@ -75,7 +85,12 @@ def _timeout_seconds(value: Any) -> float:
 def _patched(self: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
     limiter = _limiter
     original = _original
-    if limiter is not None and str(method).upper() == "GET" and _host_allowed(str(url)):
+    if (
+        _thread_depth() > 0
+        and limiter is not None
+        and str(method).upper() == "GET"
+        and _host_allowed(str(url))
+    ):
         response = limiter.get(
             str(url),
             params=kwargs.get("params"),
@@ -89,7 +104,7 @@ def _patched(self: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any
 
 
 def install(limiter: EastMoneyLimiter | None = None) -> None:
-    """套上补丁。嵌套调用只记一层，卸的时候才还原。"""
+    """套上补丁，并且只把当前线程放进限流。其它线程仍走原来的请求。"""
     global _depth, _original, _limiter
     import requests
 
@@ -99,12 +114,18 @@ def install(limiter: EastMoneyLimiter | None = None) -> None:
             _limiter = limiter or get_limiter()
             requests.sessions.Session.request = _patched  # type: ignore[method-assign]
         _depth += 1
+    _set_thread_depth(_thread_depth() + 1)
 
 
 def uninstall() -> None:
+    """当前线程退出限流。最后一个线程退出时才把 ``Session.request`` 还原。"""
     global _depth, _original, _limiter
     import requests
 
+    depth = _thread_depth()
+    if depth <= 0:
+        return
+    _set_thread_depth(depth - 1)
     with _lock:
         _depth = max(0, _depth - 1)
         if _depth == 0 and _original is not None:
@@ -123,6 +144,7 @@ def reset_for_tests() -> None:
         _depth = 0
         _original = None
         _limiter = None
+    _set_thread_depth(0)
 
 
 def call_akshare(name: str, /, **kwargs: Any) -> Any:

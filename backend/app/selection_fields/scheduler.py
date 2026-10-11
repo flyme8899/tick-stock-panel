@@ -144,7 +144,10 @@ class SelectionWorker:
                 state["pe_note"] = outcome["note"]
         else:
             state[f"{name}_at"] = now.isoformat(timespec="seconds")
-            outcome = _run_named(name, self._call, data_dir, now.date())
+            if name == "index":
+                outcome = jobs.sync_indexes(self._call, data_dir, day=day)
+            else:
+                outcome = _run_named(name, self._call, data_dir, now.date())
             if outcome.get("ok"):
                 state[f"{name}_date"] = day
             elif outcome.get("error"):

@@ -1,7 +1,9 @@
 """收盘后拉取选股补充字段。
 
-东财函数经 ``call_akshare`` 进共用限流。中证指数公司的成分接口不是东财，
-原样走 akshare。测试传入假的 ``ak``，这里不在模块导入时加载 akshare。
+东财函数经 ``call_akshare`` 进共用限流，而且只包住当前线程。
+北向持股改拉季度口径，不再调用已经停更的逐日排行。
+中证指数走中证指数公司，创业板50 走国证，都不是东财。
+每个指数单独落盘。测试传入假的 ``ak``，这里不在模块导入时加载 akshare。
 """
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from app.selection_fields.parse import (
     INDEXES,
     ashare_symbol,
     code6,
-    combine_index_members,
+    northbound_note,
     parse_holders,
     parse_index_members,
     parse_northbound,
@@ -25,8 +27,10 @@ from app.selection_fields.parse import (
 )
 from app.selection_fields.store import (
     commit,
+    commit_index,
     load_checkpoint,
     read_frame,
+    read_index_meta,
     save_checkpoint,
     update_meta,
     upsert_pe_rows,
@@ -55,6 +59,8 @@ def as_records(frame: Any) -> list[dict]:
 
 
 def live_ak(name: str, /, **kwargs: Any) -> Any:
+    if name == "northbound_quarter":
+        return fetch_northbound_quarter()
     from app.eastmoney.akshare_gate import call_akshare
 
     return call_akshare(name, **kwargs)
@@ -68,15 +74,37 @@ def listed_symbols(data_dir: Path | str) -> list[str]:
     return _symbols_from_enriched(Path(data_dir))
 
 
+_NORTHBOUND_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_NORTHBOUND_REFERER = "https://data.eastmoney.com/hsgtV2/hsgtDetail/bkzj.html"
+_NORTHBOUND_PAGE_SIZE = 500
+_NORTHBOUND_MAX_PAGES = 20
+_EMPTY_CODE = 9201
+
+
+def fetch_northbound_quarter() -> list[dict]:
+    """最近一个有数据的季度持股。逐日接口自 2024-08 起没有数据，这里不调用它。"""
+    dates = _northbound_dates()
+    if not dates:
+        raise RuntimeError("北向季度日期为空")
+    for day in dates:
+        rows = _northbound_rows(day)
+        if rows:
+            return rows
+    raise RuntimeError("北向季度持股为空")
+
+
 def sync_northbound(ak: Ak, data_dir: Path | str) -> dict:
     try:
-        raw = ak("stock_hsgt_hold_stock_em", market="北向", indicator="今日排行")
+        raw = ak("northbound_quarter")
         rows = parse_northbound(as_records(raw))
+        if not rows:
+            raise RuntimeError("北向季度持股为空")
     except Exception as exc:  # noqa: BLE001
         message = str(exc)[:300]
         commit(data_dir, "northbound", [], ok=False, error=message)
         return {"ok": False, "error": message}
-    commit(data_dir, "northbound", rows, ok=True)
+    day = next((str(row.get("trade_date") or "") for row in rows if row.get("trade_date")), "")
+    commit(data_dir, "northbound", rows, ok=True, note=northbound_note(day))
     return {"ok": True, "rows": len(rows)}
 
 
@@ -92,24 +120,31 @@ def sync_holders(ak: Ak, data_dir: Path | str) -> dict:
     return {"ok": True, "rows": len(rows)}
 
 
-def sync_indexes(ak: Ak, data_dir: Path | str) -> dict:
-    """任一指数失败都不替换已有成分快照。"""
-    parts: list[tuple[str, dict[str, str]]] = []
+def sync_indexes(ak: Ak, data_dir: Path | str, day: str | None = None) -> dict:
+    """每个指数单独落盘。一只失败只保留它自己的上次快照，其它指数照常写入。"""
     failed: list[str] = []
-    for code, label in INDEXES:
-        try:
-            raw = ak("index_stock_cons_csindex", symbol=code)
-        except Exception:  # noqa: BLE001
-            failed.append(label)
+    written = 0
+    for code, label, source in INDEXES:
+        meta = read_index_meta(data_dir, code)
+        if day and meta.get("status") == "ok" and str(meta.get("as_of") or "") == day:
+            written += 1
             continue
-        parts.append((label, parse_index_members(as_records(raw), label)))
+        try:
+            raw = ak(source, symbol=code)
+            mapping = parse_index_members(as_records(raw), label)
+            if not mapping:
+                raise RuntimeError(f"{label}成分为空")
+        except Exception as exc:  # noqa: BLE001
+            failed.append(label)
+            commit_index(data_dir, code, [], ok=False, error=str(exc)[:300])
+            continue
+        rows = [{"symbol": symbol, "index_membership": label} for symbol in sorted(mapping)]
+        commit_index(data_dir, code, rows, ok=True, as_of=day or "")
+        written += 1
     if failed:
         message = f"指数成分未完成：{'、'.join(failed)}"
-        update_meta(data_dir, "index_members", status="error", error=message)
-        return {"ok": False, "error": message}
-    rows = combine_index_members(parts)
-    commit(data_dir, "index_members", rows, ok=True)
-    return {"ok": True, "rows": len(rows)}
+        return {"ok": False, "error": message, "rows": written}
+    return {"ok": True, "rows": written}
 
 
 def sync_unlock(ak: Ak, data_dir: Path | str, today: date) -> dict:
@@ -207,6 +242,89 @@ def advance_pe(
         "total": len(symbols),
         "note": "",
     }
+
+
+def _em_json(params: dict) -> dict:
+    from app.eastmoney.client import em_get
+
+    response = em_get(
+        _NORTHBOUND_URL,
+        params=params,
+        headers={"Referer": _NORTHBOUND_REFERER},
+    )
+    reader = getattr(response, "json", None)
+    payload = reader() if callable(reader) else None
+    if not isinstance(payload, dict):
+        raise RuntimeError("北向季度接口返回异常")
+    return payload
+
+
+def _northbound_dates() -> list[str]:
+    payload = _em_json({
+        "reportName": "RPT_MUTUAL_BOARD_HOLDRANKDATE",
+        "columns": "TRADE_DATE,DATE_TYPE",
+        "pageNumber": "1",
+        "pageSize": "10",
+        "sortColumns": "TRADE_DATE",
+        "sortTypes": "-1",
+        "source": "WEB",
+        "client": "WEB",
+    })
+    if not payload.get("success"):
+        if int(payload.get("code") or 0) == _EMPTY_CODE:
+            return []
+        raise RuntimeError(str(payload.get("message") or "北向季度日期失败")[:300])
+    days: list[str] = []
+    for item in (payload.get("result") or {}).get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        day = _day_text(item.get("TRADE_DATE"))
+        if day and day not in days:
+            days.append(day)
+    return days
+
+
+def _northbound_rows(day: str) -> list[dict]:
+    rows: list[dict] = []
+    page = 1
+    pages = 1
+    while page <= pages:
+        if page > _NORTHBOUND_MAX_PAGES:
+            raise RuntimeError("北向季度持股页数异常")
+        payload = _em_json({
+            "reportName": "RPT_MUTUAL_HOLDRANK_NEW",
+            "columns": "SECURITY_CODE,SECUCODE,HOLD_DATE,FREE_SHARES_RATIO",
+            "pageNumber": str(page),
+            "pageSize": str(_NORTHBOUND_PAGE_SIZE),
+            "sortColumns": "HOLD_MARKET_CAP",
+            "sortTypes": "-1",
+            "source": "WEB",
+            "client": "WEB",
+            "filter": f"(HOLD_DATE='{day}')",
+        })
+        if not payload.get("success"):
+            if page == 1 and int(payload.get("code") or 0) == _EMPTY_CODE:
+                return []
+            raise RuntimeError(str(payload.get("message") or "北向季度持股失败")[:300])
+        result = payload.get("result") or {}
+        chunk = result.get("data") or []
+        if not isinstance(chunk, list):
+            raise RuntimeError("北向季度持股返回异常")
+        rows.extend(item for item in chunk if isinstance(item, dict))
+        pages = int(result.get("pages") or 1)
+        if pages > _NORTHBOUND_MAX_PAGES:
+            raise RuntimeError("北向季度持股页数异常")
+        if not chunk:
+            break
+        page += 1
+    return rows
+
+
+def _day_text(value: object) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    return ""
 
 
 def _symbols_from_parquet(directory: Path) -> list[str]:

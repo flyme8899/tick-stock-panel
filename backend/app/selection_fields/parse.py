@@ -1,21 +1,25 @@
-"""把 akshare 表格收成选股用的字段。
+"""把上游表格收成选股用的字段。
 
 百分比保持上游给的百分数：``2.35`` 表示 2.35%，不按数值大小再乘 100。
-北向「占流通股比」是百分数；增减比例里带「‰」的列这里不用。
+北向「占流通股比」是百分数，口径是季度持股；增减比例里带「‰」的列这里不用。
 """
 from __future__ import annotations
 
 from datetime import date, datetime
 
-# 展示顺序。一只股票可以同时在多个指数里。
-INDEXES: tuple[tuple[str, str], ...] = (
-    ("000300", "沪深300"),
-    ("000016", "上证50"),
-    ("000905", "中证500"),
-    ("000852", "中证1000"),
-    ("399673", "创业板50"),
+# 中证指数走中证指数公司。创业板50 是深交所/国证指数，不走中证接口。
+INDEX_SOURCE_CSI = "index_stock_cons_csindex"
+INDEX_SOURCE_CNI = "index_detail_cni"
+
+# 展示顺序。一只股票可以同时在多个指数里。第三项是 akshare 函数名。
+INDEXES: tuple[tuple[str, str, str], ...] = (
+    ("000300", "沪深300", INDEX_SOURCE_CSI),
+    ("000016", "上证50", INDEX_SOURCE_CSI),
+    ("000905", "中证500", INDEX_SOURCE_CSI),
+    ("000852", "中证1000", INDEX_SOURCE_CSI),
+    ("399673", "创业板50", INDEX_SOURCE_CNI),
 )
-INDEX_LABELS = {code: label for code, label in INDEXES}
+INDEX_LABELS = {code: label for code, label, _source in INDEXES}
 
 GAP_NORTHBOUND = "北向持股"
 GAP_HOLDERS = "股东户数"
@@ -140,18 +144,27 @@ def code6(symbol: str) -> str:
     return text.split(".", 1)[0]
 
 
+def northbound_note(day: str) -> str:
+    """页面上的季度口径说明。``day`` 是持股日期。"""
+    if day:
+        return f"北向持股为季度口径，截至 {day}"
+    return "北向持股为季度口径"
+
+
 def parse_northbound(rows: list[dict]) -> list[dict]:
-    """北向持股占流通股比，单位是百分数。"""
+    """北向持股占流通股比，单位是百分数。来源是季度持股，不是逐日。"""
     out = []
     for row in rows:
-        symbol = ashare_symbol(_text(row, "代码", "股票代码"))
+        symbol = ashare_symbol(_text(row, "代码", "股票代码", "SECURITY_CODE", "SECUCODE"))
         hold = _num(row.get("今日持股-占流通股比"))
+        if hold is None:
+            hold = _num(row.get("FREE_SHARES_RATIO"))
         if not symbol or hold is None:
             continue
         out.append({
             "symbol": symbol,
             "northbound_hold_pct": hold,
-            "trade_date": _date_text(row.get("日期")),
+            "trade_date": _date_text(row.get("日期") or row.get("HOLD_DATE")),
         })
     return out
 
@@ -177,7 +190,7 @@ def parse_index_members(rows: list[dict], label: str) -> dict[str, str]:
     """一个指数的成分。键是股票代码。"""
     found: dict[str, str] = {}
     for row in rows:
-        symbol = ashare_symbol(_text(row, "成分券代码", "品种代码", "代码", "股票代码"))
+        symbol = ashare_symbol(_text(row, "成分券代码", "品种代码", "样本代码", "代码", "股票代码"))
         if symbol:
             found[symbol] = label
     return found
@@ -185,7 +198,7 @@ def parse_index_members(rows: list[dict], label: str) -> dict[str, str]:
 
 def combine_index_members(parts: list[tuple[str, dict[str, str]]]) -> list[dict]:
     """按指数表的顺序拼标签。失败的指数不在 parts 里，不会把别的指数清掉。"""
-    order = [label for _code, label in INDEXES]
+    order = [label for _code, label, _source in INDEXES]
     symbols: set[str] = set()
     for _label, mapping in parts:
         symbols.update(mapping)

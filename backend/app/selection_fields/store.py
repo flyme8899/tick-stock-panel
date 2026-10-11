@@ -70,18 +70,53 @@ def read_meta(data_dir: Path | str, kind: str) -> dict:
 
 
 def read_frame(data_dir: Path | str, kind: str) -> pl.DataFrame:
-    path = part_path(data_dir, kind)
-    schema = SCHEMAS[kind]
+    return _read_schema(part_path(data_dir, kind), SCHEMAS[kind])
+
+
+def index_part_path(data_dir: Path | str, code: str) -> Path:
+    _check_index_code(code)
+    return root(data_dir) / "index_members" / f"{code}.parquet"
+
+
+def index_meta_path(data_dir: Path | str, code: str) -> Path:
+    _check_index_code(code)
+    return root(data_dir) / "index_members" / f"{code}.json"
+
+
+def read_index_part(data_dir: Path | str, code: str) -> pl.DataFrame:
+    return _read_schema(index_part_path(data_dir, code), SCHEMAS["index_members"])
+
+
+def read_index_meta(data_dir: Path | str, code: str) -> dict:
+    path = index_meta_path(data_dir, code)
     if not path.exists():
-        return pl.DataFrame(schema=schema)
+        return {}
     try:
-        frame = pl.read_parquet(path)
-    except Exception:  # noqa: BLE001 — 坏文件当成没有，避免读侧把结果清空
-        return pl.DataFrame(schema=schema)
-    for name, dtype in schema.items():
-        if name not in frame.columns:
-            frame = frame.with_columns(pl.lit(None).cast(dtype).alias(name))
-    return frame.select(list(schema)).cast(schema)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def commit_index(
+    data_dir: Path | str,
+    code: str,
+    rows: list[dict],
+    *,
+    ok: bool,
+    error: str = "",
+    note: str = "",
+    as_of: str = "",
+) -> None:
+    """一个指数一份 parquet。失败不替换该指数已有的成分。"""
+    if ok:
+        frame = _frame("index_members", rows)
+        path = index_part_path(data_dir, code)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_parquet(frame, path)
+        _write_index_meta(data_dir, code, status="ok", error="", note=note, as_of=as_of)
+        return
+    _write_index_meta(data_dir, code, status="error", error=error, note=note, as_of="")
 
 
 def update_meta(
@@ -149,6 +184,44 @@ def load_checkpoint(data_dir: Path | str) -> dict:
 def save_checkpoint(data_dir: Path | str, payload: dict) -> None:
     path = checkpoint_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _check_index_code(code: str) -> None:
+    if len(code) != 6 or not code.isdigit():
+        raise ValueError(f"指数代码无效: {code}")
+
+
+def _read_schema(path: Path, schema: dict[str, pl.DataType]) -> pl.DataFrame:
+    if not path.exists():
+        return pl.DataFrame(schema=schema)
+    try:
+        frame = pl.read_parquet(path)
+    except Exception:  # noqa: BLE001 — 坏文件当成没有，避免读侧把结果清空
+        return pl.DataFrame(schema=schema)
+    for name, dtype in schema.items():
+        if name not in frame.columns:
+            frame = frame.with_columns(pl.lit(None).cast(dtype).alias(name))
+    return frame.select(list(schema)).cast(schema)
+
+
+def _write_index_meta(
+    data_dir: Path | str,
+    code: str,
+    *,
+    status: str,
+    error: str,
+    note: str,
+    as_of: str,
+) -> None:
+    path = index_meta_path(data_dir, code)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "error": error[:300],
+        "note": note[:300],
+        "as_of": as_of,
+    }
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 

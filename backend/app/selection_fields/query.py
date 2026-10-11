@@ -19,14 +19,22 @@ from app.selection_fields.parse import (
     GAP_PE,
     GAP_PERIOD,
     GAP_UNLOCK,
+    INDEXES,
+    combine_index_members,
+    northbound_note,
 )
-from app.selection_fields.store import load_checkpoint, read_frame, read_meta
+from app.selection_fields.store import (
+    load_checkpoint,
+    read_frame,
+    read_index_meta,
+    read_index_part,
+    read_meta,
+)
 
 _LOOKBACK_DAYS = 420
 _DATASET_GAPS = (
     ("northbound", GAP_NORTHBOUND),
     ("holders", GAP_HOLDERS),
-    ("index_members", GAP_INDEX),
     ("unlock", GAP_UNLOCK),
 )
 
@@ -65,8 +73,11 @@ def selection_overlay(
             gaps.append(label)
             continue
         _merge_overlay(overlay, frame)
+        if kind == "northbound":
+            _append_northbound_note(notes, frame)
         if meta.get("status") == "error" and frame.height > 0 and meta.get("error"):
             notes.append(str(meta["error"]))
+    _attach_indexes(data_dir, overlay, gaps, notes)
 
     pe_frame = read_frame(data_dir, "pe_ttm")
     pe_meta = read_meta(data_dir, "pe_ttm")
@@ -178,6 +189,54 @@ def _blank(value: object) -> bool:
 def _note_of(meta: dict) -> str:
     text = str(meta.get("note") or "").strip()
     return text
+
+
+def _append_northbound_note(notes: list[str], frame: pl.DataFrame) -> None:
+    if any("季度口径" in item for item in notes):
+        return
+    day = ""
+    if not frame.is_empty() and "trade_date" in frame.columns:
+        values = [str(item) for item in frame["trade_date"].to_list() if item]
+        day = max(values) if values else ""
+    if day or not frame.is_empty():
+        notes.append(northbound_note(day))
+
+
+def _attach_indexes(
+    data_dir: Path | str,
+    overlay: dict[str, dict],
+    gaps: list[str],
+    notes: list[str],
+) -> None:
+    """有数据的指数照常拼上。失败的指数单独写进说明，不把整列标成缺数据。"""
+    parts: list[tuple[str, dict[str, str]]] = []
+    failed: list[str] = []
+    any_rows = False
+    for code, label, _source in INDEXES:
+        frame = read_index_part(data_dir, code)
+        meta = read_index_meta(data_dir, code)
+        if frame.height:
+            any_rows = True
+            mapping = {
+                str(row.get("symbol") or ""): label
+                for row in frame.to_dicts()
+                if row.get("symbol")
+            }
+            parts.append((label, mapping))
+        if frame.height == 0 or meta.get("status") == "error":
+            failed.append(label)
+    if not any_rows:
+        legacy = read_frame(data_dir, "index_members")
+        if legacy.height:
+            _merge_overlay(overlay, legacy)
+            return
+        gaps.append(GAP_INDEX)
+        return
+    combined = combine_index_members(parts)
+    if combined:
+        _merge_overlay(overlay, pl.DataFrame(combined))
+    if failed:
+        notes.append(f"指数成分未完成：{'、'.join(failed)}")
 
 
 def _pe_usable(frame: pl.DataFrame) -> bool:
