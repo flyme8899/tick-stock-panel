@@ -439,7 +439,7 @@ def test_run_due_and_health_include_foreign_sources(tmp_path, monkeypatch):
     assert seen == ["sec", "reuters"]
     _clear_flags(monkeypatch)
     ids = [row["id"] for row in health_payload()["sources"]]
-    assert ids == list(SOURCE_ORDER)
+    assert ids == [*SOURCE_ORDER, "lhb_detail", "margin_detail", "qa", "changes"]
     sec = next(row for row in health_payload()["sources"] if row["id"] == "sec")
     cnbc = next(row for row in health_payload()["sources"] if row["id"] == "cnbc")
     scmp = next(row for row in health_payload()["sources"] if row["id"] == "scmp")

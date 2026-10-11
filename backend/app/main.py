@@ -286,6 +286,16 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("selection-fields worker init failed: %s", e)
 
+    # 龙虎榜、两融、互动问答、公告和盘口异动。开关默认关，线程起来也不出网。
+    try:
+        from app.event_context.scheduler import get_worker as get_event_worker
+
+        event_worker = get_event_worker()
+        event_worker.start()
+        app.state.event_worker = event_worker
+    except Exception as e:  # noqa: BLE001
+        logger.warning("event-context worker init failed: %s", e)
+
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
     app.state.watchdog = start_watchdog(app.state, repo)
@@ -435,6 +445,9 @@ async def _application_lifespan(app: FastAPI):
         selection_worker = getattr(app.state, "selection_worker", None)
         if selection_worker:
             selection_worker.stop()
+        event_worker = getattr(app.state, "event_worker", None)
+        if event_worker:
+            event_worker.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()

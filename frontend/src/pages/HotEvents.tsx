@@ -38,6 +38,12 @@ function confirmBadge(confirm: NonNullable<NewsHotEvent['confirmation']>): strin
   return [head, horizon, session].filter(Boolean).join(' · ')
 }
 
+function stockFlowClass(value: number): string {
+  if (value > 0) return 'text-bull'
+  if (value < 0) return 'text-bear'
+  return 'text-muted'
+}
+
 function fundFlowText(item: NewsCandidate): string {
   const flow = item.fund_flow
   if (!flow) return ''
@@ -310,7 +316,11 @@ export function HotEvents() {
                   </div>
                   <div className="mt-1 text-xs text-muted">
                     {item.story_count} 条故事 · {item.sources.length} 个来源 · 相对基线 {item.growth} 倍
-                    {fundFlowText(item) ? ` · ${fundFlowText(item)}` : ''}
+                    {item.kind === 'stock' && item.fund_flow?.main_net_5d != null ? (
+                      <span className={stockFlowClass(item.fund_flow.main_net_5d)}>
+                        {` · 主力净流入5日 ${(item.fund_flow.main_net_5d / 1e8).toFixed(2)} 亿`}
+                      </span>
+                    ) : fundFlowText(item) ? ` · ${fundFlowText(item)}` : null}
                   </div>
                 </button>
               </li>
