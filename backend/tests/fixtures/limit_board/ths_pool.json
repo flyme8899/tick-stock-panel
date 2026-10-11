@@ -1,0 +1,34 @@
+{
+  "data": {
+    "info": [
+      {
+        "code": "600519",
+        "name": "贵州茅台",
+        "latest": 1680.0,
+        "change_rate": 10.01,
+        "reason_type": "固态电池+白酒",
+        "limit_up_type": "换手板",
+        "limit_up_suc_rate": 0.86,
+        "open_num": 1,
+        "order_amount": 180000000,
+        "high_days": "2天2板",
+        "first_limit_up_time": 1791509462,
+        "is_again_limit": 1
+      },
+      {
+        "code": "300750",
+        "name": "宁德时代",
+        "latest": 250.0,
+        "change_rate": 20.0,
+        "reason_type": "固态电池概念",
+        "limit_up_type": "T字板",
+        "limit_up_suc_rate": 1,
+        "open_num": 0,
+        "order_amount": 50000000,
+        "high_days": "首板",
+        "first_limit_up_time": 1791509462,
+        "is_again_limit": 0
+      }
+    ]
+  }
+}

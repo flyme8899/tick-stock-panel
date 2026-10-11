@@ -412,6 +412,19 @@ def _auction_still_ahead(now: datetime, chosen: date) -> bool:
     return local < datetime.combine(chosen, dt_time(9, 25), CN_TZ)
 
 
+def _attach_limit_reasons(events: list[dict], chosen: date) -> None:
+    """用当天涨停原因核对概念。没有分区或读失败时保持原事件。"""
+    try:
+        from pathlib import Path
+
+        from app.config import settings
+        from app.limit_board.enrich import apply_limit_reasons
+
+        apply_limit_reasons(events, Path(settings.data_dir), chosen.isoformat())
+    except Exception:  # noqa: BLE001
+        logger.info("涨停原因未能核对热门事件", exc_info=True)
+
+
 def _compute(now: datetime, store: NewsStore) -> dict:
     today = now.date()
     trading = current_trading_day(now)
@@ -452,6 +465,7 @@ def _compute(now: datetime, store: NewsStore) -> dict:
             "events": [],
         }
     events = ranked[chosen]
+    _attach_limit_reasons(events, chosen)
     from app.news.market_confirm import attach_confirmations
     attach_confirmations(events, now)
     events = _rank_events(events, now, grade=False)

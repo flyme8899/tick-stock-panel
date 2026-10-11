@@ -91,9 +91,9 @@ def fetch_history_bill(symbol: str) -> list[dict]:
     secid = eastmoney_secid(symbol)
     if not secid:
         raise RuntimeError(f"无法生成 secid: {symbol}")
-    import httpx
+    from app.eastmoney.client import em_get
 
-    response = httpx.get(
+    response = em_get(
         EASTMONEY_BILL_URL,
         params={
             "lmt": "0",

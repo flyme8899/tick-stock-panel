@@ -220,6 +220,20 @@ function useSealedDegrade(asOf: string, latestDate: string | undefined, sealedRe
   return { degraded, hasDepth, isHistorical, sealedReady, sealedCounts }
 }
 
+function formatRatioPercent(value: number | null | undefined, digits: number): string {
+  if (value == null || !Number.isFinite(value) || value < 0 || value > 1) return ''
+  return `${(value * 100).toFixed(digits)}%`
+}
+
+function formatSealRate(value: number | null | undefined): string {
+  const text = formatRatioPercent(value, 0)
+  return text ? `封板 ${text}` : ''
+}
+
+function formatBreakRate(value: number | null | undefined): string {
+  return formatRatioPercent(value, 1) || '—'
+}
+
 // ===== 单只股票卡片 =====
 
 const StockCard = React.memo(function StockCard({ stock, extFields, direction, sealMode, monitored, monitorRule, onMonitorChange, hasDepth, onClick, onDimensionClick, active }: {
@@ -245,6 +259,9 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   const isLimitHit = status === 'limit_up' || status === 'limit_down'
   const conceptTags = getExtTags(stock, extFields.concept)
   const industryTags = getExtTags(stock, extFields.industry)
+  const limitThemes = (stock.limit_themes ?? []).map(item => item.trim()).filter(Boolean).slice(0, 3)
+  const limitReason = (stock.limit_reason ?? '').trim()
+  const sealLabel = formatSealRate(stock.seal_rate)
   const isTextConcept = extFields.concept?.display?.displayMode === 'text'
   const isTextIndustry = extFields.industry?.display?.displayMode === 'text'
   const conceptLayout = extFields.concept?.display?.tagLayout ?? 'horizontal'
@@ -260,7 +277,8 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   const industryCls = 'text-[10px] leading-none px-1.5 py-0.5 rounded-sm text-sky-800 bg-sky-100/80 dark:text-sky-300/90 dark:bg-sky-400/10'
   const textCls = `${tagCls} text-secondary bg-elevated/60 dark:text-secondary/60`
 
-  const hasTags = conceptTags.length > 0 || industryTags.length > 0
+  const hasLimitMeta = limitThemes.length > 0 || limitReason.length > 0 || sealLabel.length > 0
+  const hasTags = conceptTags.length > 0 || industryTags.length > 0 || hasLimitMeta
 
   // 齿轮始终可见: 让免费用户也能看到功能入口, 点开后在菜单内提示权限不足。
   // 有五档盘口能力的用户正常设置; 无能力时保存按钮禁用 + 显示能力提示。
@@ -359,6 +377,26 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
       {/* 标签行 */}
       {hasTags && (
         <div className="flex flex-col gap-0.5 w-full">
+          {hasLimitMeta && (
+            <div className="flex flex-wrap items-center gap-0.5" title={limitReason || undefined}>
+              {limitThemes.map(theme => (
+                <span
+                  key={theme}
+                  className="text-[10px] leading-none px-1.5 py-0.5 rounded-sm text-amber-900 bg-amber-100/90 dark:text-amber-200/80 dark:bg-amber-400/10"
+                >
+                  {theme}
+                </span>
+              ))}
+              {limitThemes.length === 0 && limitReason && (
+                <span className="text-[10px] leading-none text-amber-900/80 dark:text-amber-200/70 truncate max-w-full">
+                  {limitReason}
+                </span>
+              )}
+              {sealLabel && (
+                <span className="text-[9px] leading-none text-muted tabular-nums">{sealLabel}</span>
+              )}
+            </div>
+          )}
           {conceptTags.length > 0 && (
             <div className={`flex gap-0.5 ${conceptLayout === 'vertical' ? 'flex-col items-start' : 'flex-wrap'}`}>
               {conceptTags.map((t, i) => (
@@ -1631,6 +1669,12 @@ export function LimitUpLadder() {
         title={direction === 'down' ? '连跌梯队' : '连板梯队'}
         titleExtra={
           <div className="flex items-center gap-2">
+            {direction === 'up' && data?.sentiment && (
+              <span className="text-[11px] text-muted tabular-nums whitespace-nowrap">
+                炸板率 {formatBreakRate(data.sentiment.break_rate)}
+                {data.sentiment.max_height ? ` · 最高 ${data.sentiment.max_height} 板` : ''}
+              </span>
+            )}
             <SealedBadge
               degraded={sealedDegrade.degraded}
               hasDepth={sealedDegrade.hasDepth}

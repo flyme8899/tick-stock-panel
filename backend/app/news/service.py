@@ -451,7 +451,15 @@ def public_hot_event(event: dict) -> dict:
         "confirmation": confirmation,
         "stocks": stocks,
         "etfs": etfs,
+        "limit_reason": _public_limit_reason(event.get("limit_reason")),
     }
+
+
+def _public_limit_reason(raw) -> dict:
+    payload = raw if isinstance(raw, dict) else {}
+    verified = [str(item) for item in (payload.get("verified") or []) if str(item).strip()]
+    enriched = [str(item) for item in (payload.get("enriched") or []) if str(item).strip()]
+    return {"verified": verified, "enriched": enriched}
 
 
 def _public_confirmation(raw) -> dict:
@@ -484,6 +492,7 @@ def _public_confirmation(raw) -> dict:
             "excess_pct": _optional_score(detail.get("excess_pct")),
             "breadth": _optional_score(detail.get("breadth")),
             "limit_count": int(detail.get("limit_count") or 0),
+            "limit_reason_hits": int(detail.get("limit_reason_hits") or 0),
             "vol_ratio": _optional_score(detail.get("vol_ratio")),
             "main_net": _optional_score(detail.get("main_net")),
             "sector_net_inflow": _optional_score(detail.get("sector_net_inflow")),
@@ -875,6 +884,9 @@ def run_due(source: str) -> dict:
         return collect_reuters()
     if source in FOREIGN_FEEDS:
         return collect_foreign(source)
+    if source == "research":
+        # 研报由 market_feeds 写入资讯库，不在这套轮询里打东财。
+        return {"inserted": 0, "duplicate": 0, "skipped": True}
     return {}
 
 

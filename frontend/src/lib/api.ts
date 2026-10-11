@@ -1282,6 +1282,25 @@ export interface LimitLadderStock {
   sealed_vol?: number | null
   /** 最终状态为涨跌停且当天开高低收四价相同 */
   is_one_word?: boolean
+  /** 同花顺涨停原因。没有落盘时为 null */
+  limit_reason?: string | null
+  /** 从涨停原因拆出的题材 */
+  limit_themes?: string[]
+  /** 封板率，0–1。页面只在这个区间内格式化成百分数 */
+  seal_rate?: number | null
+}
+
+export interface LimitLadderSentiment {
+  trade_date?: string
+  zt_count?: number | null
+  zb_count?: number | null
+  dt_count?: number | null
+  yzt_count?: number | null
+  /** 炸板率，0–1 */
+  break_rate?: number | null
+  max_height?: number | null
+  ladder?: Record<string, number>
+  advance_count?: number | null
 }
 
 export interface LimitLadderTier {
@@ -1307,6 +1326,23 @@ export interface LimitLadderResult {
   sealed_counts_up?: { real: number; fake: number; pending: number }
   /** 跌停侧 sealed 明细 */
   sealed_counts_down?: { real: number; fake: number; pending: number }
+  /** 东财涨停/炸板/跌停汇总。没有当天分区时为 null */
+  sentiment?: LimitLadderSentiment | null
+}
+
+export interface ResearchReport {
+  info_code: string
+  symbol?: string
+  code?: string
+  title: string
+  broker: string
+  rating: string
+  eps_this?: number | null
+  eps_next?: number | null
+  eps_two?: number | null
+  publish_date: string
+  pdf_url: string
+  industry_name?: string
 }
 
 // ===== Backtest =====
@@ -3242,6 +3278,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+
+  researchForStock: (symbol: string, limit = 20) =>
+    request<{ symbol: string; reports: ResearchReport[] }>(
+      `/api/research/stock/${encodeURIComponent(symbol)}?limit=${limit}`,
+    ),
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
     const params = new URLSearchParams()

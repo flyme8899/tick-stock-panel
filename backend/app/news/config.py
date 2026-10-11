@@ -11,6 +11,7 @@ from app.config import settings
 SOURCE_ORDER = (
     "dws", "zsxq", "ima", "cls", "wscn", "etf_flow",
     "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "reddit", "sec",
+    "research",
 )
 
 SOURCE_LABELS = {
@@ -28,6 +29,7 @@ SOURCE_LABELS = {
     "reuters": "路透",
     "reddit": "Reddit",
     "sec": "SEC 8-K",
+    "research": "研报",
     "hot": "TSP热门候选",
 }
 
@@ -187,8 +189,10 @@ def source_enabled(source: str) -> bool:
 
     saved = preferences.load().get("news_sources") or {}
     row = saved.get(source) if isinstance(saved, dict) else None
-    if isinstance(row, dict):
+    if isinstance(row, dict) and "enabled" in row:
         return bool(row.get("enabled"))
+    if source == "research":
+        return True
     return False
 
 

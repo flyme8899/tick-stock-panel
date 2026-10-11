@@ -861,7 +861,9 @@ def limit_ladder(
 
     df = svc._load_enriched_for_date(as_of)
     if df.is_empty():
-        return {"as_of": str(as_of), "tiers": [], "counts": {"up": 0, "down": 0}}
+        payload = {"as_of": str(as_of), "tiers": [], "counts": {"up": 0, "down": 0}}
+        _overlay_limit_board(repo.store.data_dir, str(as_of), payload)
+        return payload
 
     # 双方向涨跌停计数(不论当前 direction, 前端始终同时显示)
     count_up_raw = int(df.filter(pl.col("signal_limit_up").fill_null(False)).height) if "signal_limit_up" in df.columns else 0
@@ -1072,7 +1074,7 @@ def limit_ladder(
         for n, stocks in sorted(tiers.items(), key=lambda x: -x[0])
     ]
 
-    return {
+    payload = {
         "as_of": str(as_of),
         "tiers": tier_list,
         "counts": {"up": count_up, "down": count_down},
@@ -1087,6 +1089,36 @@ def limit_ladder(
         "sealed_counts_up": sealed_counts_up,
         "sealed_counts_down": sealed_counts_down,
     }
+    _overlay_limit_board(repo.store.data_dir, str(as_of), payload)
+    return payload
+
+
+def _overlay_limit_board(data_dir, trade_date: str, payload: dict) -> None:
+    """给梯队里的每只股票补涨停原因、题材和封板率。读本地分区，不出网。"""
+    reasons: dict = {}
+    sentiment = None
+    try:
+        from pathlib import Path
+
+        from app.limit_board.query import overlay_stock, reasons_for, sentiment_for
+
+        root = Path(data_dir)
+        reasons = reasons_for(root, trade_date)
+        sentiment = sentiment_for(root, trade_date)
+        for tier in payload.get("tiers") or []:
+            for stock in tier.get("stocks") or []:
+                if isinstance(stock, dict):
+                    overlay_stock(stock, reasons)
+    except Exception:  # noqa: BLE001
+        logger.info("涨停原因未能叠加到梯队", exc_info=True)
+        for tier in payload.get("tiers") or []:
+            for stock in tier.get("stocks") or []:
+                if not isinstance(stock, dict):
+                    continue
+                stock.setdefault("limit_reason", None)
+                stock.setdefault("limit_themes", [])
+                stock.setdefault("seal_rate", None)
+    payload["sentiment"] = sentiment
 
 
 def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str]]:

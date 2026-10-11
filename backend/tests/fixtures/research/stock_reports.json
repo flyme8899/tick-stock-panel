@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "infoCode": "AP20261009001",
+      "title": "贵州茅台：需求稳健",
+      "orgSName": "中信证券",
+      "emRatingName": "买入",
+      "predictThisYearEps": "68.5",
+      "predictNextYearEps": "75.2",
+      "predictNextTwoYearEps": "82.0",
+      "publishDate": "2026-10-09 08:30:00",
+      "indvInduName": "白酒"
+    },
+    {
+      "infoCode": "AP20261008002",
+      "title": "渠道调研更新",
+      "orgSName": "华泰证券",
+      "emRatingName": "增持",
+      "predictThisYearEps": "--",
+      "predictNextYearEps": "70.1",
+      "predictNextTwoYearEps": null,
+      "publishDate": "2026-10-08",
+      "industryName": "白酒"
+    }
+  ],
+  "hits": 2,
+  "TotalPage": 1,
+  "size": 50,
+  "pageNo": 1
+}

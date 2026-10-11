@@ -191,6 +191,10 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 个股账单、板块资金、两融、ETF 份额、南向和龙虎榜备份。代码默认关闭。本仓库 `.env.example` 里为本 HK 部署写了打开值，复制到 `.env` 后才会拉数。字段、时刻和禁止使用的接口见 [fund-flow.md](./fund-flow.md)。妙想密钥是 `MX_APIKEY`，留空则不补个股。
 
+## 打板与研报
+
+东财涨停池、炸板池、跌停池、昨日涨停池、同花顺涨停揭秘，以及个股/行业研报列表。代码默认打开，`.env.example` 同样写成 true。`LIMIT_BOARD_ENABLED`、`LIMIT_BOARD_EASTMONEY`、`LIMIT_BOARD_THS`、`RESEARCH_ENABLED`、`RESEARCH_STOCK`、`RESEARCH_INDUSTRY` 设为 false 才关闭对应拉取。`EASTMONEY_MIN_INTERVAL` 默认 1 秒，低于 0.5 秒时仍按 0.5 秒。`NEWS_RESEARCH_ENABLED` 控制研报是否进入热门事件。字段、分区和调度见 [limit-board.md](./limit-board.md)。
+
 ## 配置优先级
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`

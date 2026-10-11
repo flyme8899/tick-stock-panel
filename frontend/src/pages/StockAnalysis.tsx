@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
@@ -10,7 +10,7 @@ import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/st
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { TradeMarksOverlay } from '@/components/trade-marks/TradeMarksPanel'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
-import { api } from '@/lib/api'
+import { api, type KlineRow, type ResearchReport, type StockLevels } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -191,33 +191,49 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     staleTime: 60_000,
   })
 
+  const rows = kline.data?.rows ?? []
+  let chart: ReactNode
   if (kline.isLoading) {
-    return <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
-  }
-
-  if (kline.isError) {
-    return (
+    chart = <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
+  } else if (kline.isError) {
+    chart = (
       <EmptyState
         icon={AlertTriangle}
         title="日 K 数据加载失败"
         hint="请检查网络或数据源配置后重试。"
       />
     )
+  } else if (rows.length === 0) {
+    chart = <EmptyState icon={LineChart} title="暂无日 K 数据" hint="该标的尚未同步日 K,请先在数据页或自选页同步。" />
+  } else {
+    chart = <StockAnalysisChart symbol={symbol} rows={rows} levels={levelsQ.data} />
   }
 
-  const rows = kline.data?.rows ?? []
-  if (rows.length === 0) {
-    return <EmptyState icon={LineChart} title="暂无日 K 数据" hint="该标的尚未同步日 K,请先在数据页或自选页同步。" />
-  }
+  return (
+    <div className="space-y-4">
+      {chart}
+      <ResearchReports symbol={symbol} />
+    </div>
+  )
+}
 
-  const levels = (levelsQ.data?.levels ?? {}) as Record<LevelType, PriceLevel[]>
+function StockAnalysisChart({
+  symbol,
+  rows,
+  levels: levelsData,
+}: {
+  symbol: string
+  rows: KlineRow[]
+  levels?: StockLevels
+}) {
+  const levels = (levelsData?.levels ?? {}) as Record<LevelType, PriceLevel[]>
   const rangeStart = String(rows[0].date).slice(0, 10)
   const rangeEnd = String(rows[rows.length - 1].date).slice(0, 10)
 
   // 涨跌色:最后一根 K 线收 vs 前一根收(无前日则按开收判断)
   const last = rows[rows.length - 1]
   const prev = rows[rows.length - 2]
-  const curClose = levelsQ.data?.close
+  const curClose = levelsData?.close
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
 
   return (
@@ -250,8 +266,8 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
               <AnalysisKChart
                 rows={rows}
                 levels={levels}
-                series={levelsQ.data?.series}
-                seriesDates={levelsQ.data?.dates}
+                series={levelsData?.series}
+                seriesDates={levelsData?.dates}
                 defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
                 markers={overlay.markers}
                 extraPriceLines={overlay.priceLines}
@@ -276,6 +292,84 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
         </TradeMarksOverlay>
       </div>
     </div>
+  )
+}
+
+function ResearchReports({ symbol }: { symbol: string }) {
+  const reports = useQuery({
+    queryKey: QK.researchReports(symbol),
+    queryFn: () => api.researchForStock(symbol),
+    enabled: !!symbol,
+    staleTime: 5 * 60_000,
+  })
+  const rows = reports.data?.reports ?? []
+
+  return (
+    <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
+      <div className="px-4 py-3 border-b border-border/40 flex items-center gap-2">
+        <span className="text-sm font-medium text-foreground">机构研报</span>
+        <span className="text-[10px] text-muted">标题、机构、评级和 EPS。PDF 只打开外链</span>
+      </div>
+      {reports.isLoading ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="h-4 w-4 animate-spin text-muted" />
+        </div>
+      ) : reports.isError ? (
+        <div className="px-4 py-8 text-center">
+          <p className="text-xs text-muted">研报加载失败</p>
+          <button
+            type="button"
+            onClick={() => reports.refetch()}
+            className="mt-2 text-[11px] text-sky-300 hover:text-sky-200"
+          >
+            重试
+          </button>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="px-4 py-8 text-center">
+          <p className="text-xs text-muted">暂无机构研报</p>
+          <p className="text-[10px] text-muted/60 mt-1">自选和热门事件里的股票会在收盘后增量同步</p>
+        </div>
+      ) : (
+        <ul className="divide-y divide-border/40">
+          {rows.map(row => (
+            <ResearchRow key={row.info_code} row={row} />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function ResearchRow({ row }: { row: ResearchReport }) {
+  const eps = [row.eps_this, row.eps_next, row.eps_two]
+    .map(value => (value == null || !Number.isFinite(value) ? '—' : value.toFixed(2)))
+    .join(' / ')
+  const title = (
+    <span className="text-xs text-foreground group-hover:text-sky-300 truncate">{row.title}</span>
+  )
+  return (
+    <li className="px-4 py-2.5">
+      <div className="flex items-center gap-2 min-w-0">
+        {row.pdf_url ? (
+          <a
+            href={row.pdf_url}
+            target="_blank"
+            rel="noreferrer"
+            className="group flex items-center gap-1.5 min-w-0"
+          >
+            {title}
+            <ExternalLink className="h-3 w-3 shrink-0 text-muted" />
+          </a>
+        ) : title}
+        <span className="ml-auto shrink-0 text-[10px] font-mono text-muted">{row.publish_date}</span>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted">
+        {row.broker && <span>{row.broker}</span>}
+        {row.rating && <span className="text-sky-300/80">{row.rating}</span>}
+        <span className="font-mono">EPS {eps}</span>
+      </div>
+    </li>
   )
 }
 

@@ -641,9 +641,7 @@ def test_eastmoney_secid_and_bill_request(monkeypatch: pytest.MonkeyPatch) -> No
         captured["timeout"] = timeout
         return Response()
 
-    import httpx
-
-    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake_get)
     rows = fetch_history_bill("600519.SH")
     assert captured["params"]["secid"] == "1.600519"
     assert captured["url"].startswith("https://push2his.eastmoney.com/")
@@ -655,7 +653,7 @@ def test_eastmoney_secid_and_bill_request(monkeypatch: pytest.MonkeyPatch) -> No
     def forbidden(*_args, **_kwargs):
         raise AssertionError("空 secid 不应出网")
 
-    monkeypatch.setattr(httpx, "get", forbidden)
+    monkeypatch.setattr("app.eastmoney.client.em_get", forbidden)
     with pytest.raises(RuntimeError, match="secid"):
         fetch_history_bill("not-a-code")
 
