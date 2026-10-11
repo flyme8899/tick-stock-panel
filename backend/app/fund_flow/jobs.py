@@ -142,99 +142,6 @@ def _load_rank(clients: SourceClients, window: str) -> tuple[list[dict], str]:
     return [], ""
 
 
-_ENTIRE_GAP_RATIO = 0.8
-_BOARD_LABEL = {
-    "sh_main": "沪市主板",
-    "star": "科创板",
-    "sz_main": "深市主板",
-    "sz_gem": "创业板",
-    "bj": "北交所",
-}
-_SZ_MAIN_URL = "https://push2.eastmoney.com/api/qt/clist/get"
-_SZ_MAIN_FS = "m:0+t:6+f:!2,m:0+t:13+f:!2"
-
-
-def _entirely_missing_labels(missing_codes: list[str], universe_codes: list[str]) -> list[str]:
-    """缺失占该板块应有只数达到 80% 才算整段缺失。只缺几只时不报整段。"""
-    def counts(codes: list[str]) -> dict[str, int]:
-        found: dict[str, int] = {}
-        for code in codes:
-            board = store.board_of(code)
-            if board == "unknown":
-                continue
-            found[board] = found.get(board, 0) + 1
-        return found
-
-    missing = counts(missing_codes)
-    universe = counts(universe_codes)
-    labels = []
-    for board, need in sorted(universe.items()):
-        if need <= 0:
-            continue
-        if missing.get(board, 0) / need >= _ENTIRE_GAP_RATIO:
-            labels.append(_BOARD_LABEL.get(board, board))
-    return labels
-
-
-def fetch_sz_main_rank(trade_date: str, *, get=None) -> list[dict]:
-    """深市主板个股资金流，东财行情列表按板块分页。金额是元。"""
-    from app.selection_fields.timeouts import REQUEST_TIMEOUT
-
-    if get is None:
-        from app.eastmoney.client import em_get
-
-        get = em_get
-    shaped: list[dict] = []
-    page = 1
-    while page <= 30:
-        response = get(
-            _SZ_MAIN_URL,
-            params={
-                "pn": str(page),
-                "pz": "100",
-                "po": "1",
-                "np": "1",
-                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                "fltt": "2",
-                "invt": "2",
-                "fid": "f62",
-                "fs": _SZ_MAIN_FS,
-                "fields": "f12,f14,f62,f66,f72",
-            },
-            headers={"Referer": "https://data.eastmoney.com/zjlx/detail.html"},
-            timeout=REQUEST_TIMEOUT,
-        )
-        payload = response.json() if hasattr(response, "json") else response
-        if not isinstance(payload, dict):
-            break
-        data = payload.get("data") or {}
-        diff = data.get("diff") or []
-        if isinstance(diff, dict):
-            diff = list(diff.values())
-        if not diff:
-            break
-        for row in diff:
-            if not isinstance(row, dict):
-                continue
-            code = normalize.code6(str(row.get("f12") or ""))
-            if store.board_of(code) != "sz_main":
-                continue
-            shaped.append({
-                "股票代码": code,
-                "股票简称": row.get("f14") or "",
-                "今日主力净流入-净额": row.get("f62"),
-                "今日大单净流入-净额": row.get("f72"),
-                "今日超大单净流入-净额": row.get("f66"),
-            })
-        total = int(data.get("total") or 0)
-        if page * 100 >= total or len(diff) < 100:
-            break
-        page += 1
-    return normalize.normalize_rank_rows(
-        shaped, trade_date=trade_date, source="eastmoney_sz_main", window="today",
-    )
-
-
 def _rank_fallback(clients: SourceClients, symbols: list[str], trade_date: str) -> list[dict]:
     wanted = {code for symbol in symbols if (code := normalize.code6(symbol))}
     if not wanted:
@@ -325,13 +232,6 @@ def sync_stock(
             return store.board_of(code) not in refresh_boards
         return True
 
-    sz_batch = bool(trade_date and refresh_boards and "sz_main" in refresh_boards)
-
-    def _skip_history(code: str) -> bool:
-        if sz_batch and store.board_of(code) == "sz_main":
-            return True
-        return _skip(code)
-
     def _paced(source: str, breaker: CircuitBreaker, fn):
         sleep(pace.delay_s)
         try:
@@ -344,18 +244,6 @@ def sync_stock(
 
     missing: list[str] = []
     collected: list[dict] = []
-    if sz_batch:
-        batched: list[dict] = []
-        try:
-            batched = fetch_sz_main_rank(trade_date or "")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("深市主板资金流整批失败: %s", exc)
-            result.errors.append(f"深市主板资金流整批失败: {exc}")
-        else:
-            if batched:
-                collected.extend(batched)
-            else:
-                result.errors.append("深市主板资金流整批为空，保留上次结果")
 
     def _dated(raw: list[dict], symbol: str, source: str) -> list[dict]:
         return _select_bill_dates(
@@ -367,7 +255,7 @@ def sync_stock(
 
     for symbol in symbols:
         code = normalize.code6(symbol)
-        if not code or _skip_history(code):
+        if not code or _skip(code):
             continue
         try:
             raw = _paced("efinance", efinance, lambda symbol=symbol: clients.history_bill(symbol))
@@ -435,9 +323,7 @@ def sync_stock(
                 if row.get("code") and row.get("trade_date") == trade_date
             }
             still = [symbol for symbol in needed if (code := normalize.code6(symbol)) and code not in got_now]
-            still_codes = [code for symbol in still if (code := normalize.code6(symbol))]
-            universe_codes = [code for symbol in symbols if (code := normalize.code6(symbol))]
-            gaps = _entirely_missing_labels(still_codes, universe_codes)
+            gaps = store.missing_boards(pl.DataFrame({"code": sorted({normalize.code6(s) for s in still if normalize.code6(s)})}))
             logger.warning(
                 "全市场资金排名 %s 覆盖不全: 仍缺 %d 只%s",
                 trade_date, len(still),
