@@ -8,15 +8,17 @@
 或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
 共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v7。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v8。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
-清理会去掉开头的钟点、【】标签、末尾省略号、「央视财经：」这类来源前缀，以及研报文件名里的日期戳和 #，并停在句号前。
+清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社），券商「电新/计算机/研究称」，以及研报文件名里的日期戳和 #，并停在句号前。
+公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
 栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
-侧面佐证、印证、看好、地位、逻辑、关注、把握这类没有主体和动作的点评不是事件。
+侧面佐证、印证、看好、地位、逻辑、关注、把握这类没有主体和动作的点评不是事件。持续关注开头，以及 1）、① 这类列表残句，也不是事件。
 国务院、证监会、工信部、发改委、国资委、央行或点名的公司后面，布局、建议、推荐是动作，不是点评。
 增长、新增、追加这类业绩和回购动作算事件，但同比、数据显示这种没有具体主体的不算。
-已经点名的公司不能换成「公司」。叠加、接续粘成的长标题收成不超过 20 字的核心事件。
+已经点名的公司不能换成「公司」，这个对照看原始标题，不看清掉冒号之后的句子。叠加、接续粘成的长标题收成不超过 20 字的核心事件。
+签约、签署、战略合作要留下双方，不能只剩建发股份或只剩优必选。
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
@@ -61,8 +63,8 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。主体、点评和长度的判定变了，旧键不再套用。
-_TITLE_CACHE_VERSION = 7
+# 标题缓存按这个版本取。公司冒号、列表残句和签约双方的判定变了，旧键不再套用。
+_TITLE_CACHE_VERSION = 8
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -78,8 +80,8 @@ BROAD_SECTORS = frozenset({
 })
 _ACTIONS = (
     "发布", "出台", "定调", "涨价", "降价", "提价", "上调", "下调", "报价", "收购", "中标", "获批", "上市",
-    "回购", "签约", "停产", "召回", "立案", "补贴", "降准", "降息", "加息", "制裁", "收紧",
-    "追加", "订单", "增长", "新增",
+    "回购", "签约", "签署", "签订", "停产", "召回", "立案", "补贴", "降准", "降息", "加息", "制裁", "收紧",
+    "追加", "订单", "增长", "新增", "加速释放",
 )
 # 先看更具体的市场语境，再退回动作本身。六个分类覆盖政策、海外、产业、地缘、商品和公司。
 CATEGORY_NAMES = (
@@ -95,7 +97,7 @@ _CATEGORY_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "加息", "降息", "美股", "纳指", "标普", "欧股", "日经")),
     ("国内政策/宏观", ("出台", "补贴", "降准", "国务院", "发改委", "工信部", "证监会", "财政部", "国资委", "央行", "宏观", "政策")),
     ("大宗商品/期货价格异动", ("碳酸锂", "原油", "期货", "黄金", "铜价", "铁矿", "煤炭", "稀土", "豆粕", "螺纹", "报价", "橡胶")),
-    ("公司重大事项", ("收购", "回购", "上市", "立案", "停产", "召回", "签约", "中标", "停牌", "退市")),
+    ("公司重大事项", ("收购", "回购", "上市", "立案", "停产", "召回", "签约", "签署", "签订", "中标", "停牌", "退市")),
     ("科技与产业", ("发布", "订单", "追加", "获批", "涨价", "降价", "提价", "上调", "下调", "量产", "芯片", "模型")),
 )
 _ACTION_CATEGORY = {
@@ -280,6 +282,13 @@ _SOURCE_DATELINE = re.compile(
 _SOURCE_LABEL = re.compile(
     r"^(?:(?:" + _SOURCE_ALT + r")(?:报道|快讯|讯|电)?|快讯|突发|独家|刚刚)[：:|｜]"
 )
+# 招商电新称、中信计算机称、华泰研究称。监管机构研究称不是券商前缀。
+_BROKER_NOTE = re.compile(
+    r"^(?!(?:国务院|发改委|工信部|证监会|财政部|央行|国资委|商务部|美联储|政治局|欧央行))"
+    r"[\u4e00-\u9fff]{2,8}(?:电新|计算机|研究)称"
+)
+# 1）和①是列表残句，不是事件标题。
+_LIST_MARKER = re.compile(r"(?:[0-9]+[)）]|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫])")
 _REUTERS_TAIL = re.compile(r"(?:[-|｜]\s*)?(?:Reuters|路透社|路透)$")
 # 15:32【财联社】被冒号切开后，会剩「32【…】」这种钟点碎片。
 _CLOCK_PREFIX = re.compile(r"^(?:\d{1,2}[:：]\d{2})+")
@@ -330,8 +339,8 @@ _VAGUE_ACTORS = frozenset({
     "资金", "投资者", "业内", "人士", "专家", "报告", "点评", "策略",
     "继续", "建议", "推荐", "布局", "关注", "把握",
 })
-# 模型若把「立讯精密」写成「公司」，标题不能用。
-_GENERIC_SUBJECT_HEADS = ("公司", "企业", "厂商", "集团")
+# 模型若把「立讯精密」写成「公司」或「本公司」，标题不能用。
+_GENERIC_SUBJECT_HEADS = ("本公司", "公司", "企业", "厂商", "集团")
 # 叠加、接续把原因和事件粘成一句时，只留后面的核心事件。
 _RUNON_GLUE = ("再叠加", "叠加", "接续", "再加上", "加上", "以及", "并且", "同时")
 _CAUSE_TAILS = ("需求", "压力", "影响", "带动", "推动", "背景", "因素")
@@ -1198,10 +1207,20 @@ def _ends_mid_number(text: str) -> bool:
     return bool(text) and text[-1].isdigit()
 
 
+def _watch_or_list_fragment(text: str) -> bool:
+    """持续关注开头，或带 1）、① 的列表残句，不是事件。"""
+    body = _compact(text)
+    if not body:
+        return False
+    if body.startswith("持续关注"):
+        return True
+    return _LIST_MARKER.search(body) is not None
+
+
 def _display_clause_ok(text: str) -> bool:
     """整句可以比 20 字长，但不能停在半个动词、半个数字或半个词上。"""
     body = _compact(text)
-    if _title_incoherent(body) or _has_file_debris(body):
+    if _title_incoherent(body) or _has_file_debris(body) or _watch_or_list_fragment(body):
         return False
     if not body or body == "事件" or len(body) < 4 or len(body) > _TITLE_HARD:
         return False
@@ -1216,35 +1235,87 @@ def _display_clause_ok(text: str) -> bool:
     return not body[consumed:].strip("，。！？、；：")
 
 
+def _colon_subject(head: str) -> bool:
+    """冒号左边是公司或机构简称，不是已经剥过的媒体名。"""
+    if not head or len(head) > 8 or head in _SOURCE_NAMES:
+        return False
+    if _tuple_action(head)[0] >= 0 or _narrative_action(head)[0] >= 0:
+        return False
+    if head in _NOT_SUBJECT or head in _STOP or head in BROAD_SECTORS or head in _GENERIC_TOKENS:
+        return False
+    return bool(re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9]{2,8}", head))
+
+
+def _join_colon_head(head: str, nxt: str) -> str:
+    """公司名不是来源。后面以公司/本公司起笔就换上这家公司，与/和则把双方接上。"""
+    if not _colon_subject(head) or not nxt:
+        return ""
+    for generic in ("本公司", "公司"):
+        if nxt.startswith(generic):
+            return head + nxt[len(generic):]
+    if nxt.startswith("与") and not nxt.startswith("与此"):
+        return head + nxt
+    if nxt.startswith("和") and not _starts_fragment(nxt):
+        return head + nxt
+    if _starts_fragment(nxt):
+        return ""
+    if _tuple_action(nxt)[0] == 0 or _narrative_action(nxt)[0] == 0:
+        return ""
+    if _tuple_action(nxt)[0] > 0 or _narrative_action(nxt)[0] > 0:
+        return head + nxt
+    return ""
+
+
 def _stitch_subject_verb(body: str) -> str:
-    """「IEA：下调原油供需预期」的冒号把主体和动词拆开了，先接回去。"""
+    """「IEA：下调原油供需预期」的冒号把主体和动词拆开了，先接回去。
+
+    已知媒体前缀已经剥过。公司名后面的冒号同样接回去，不能把公司名当成来源丢掉。
+    """
     parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()]
     if len(parts) < 2:
         return body
     head, nxt = parts[0], parts[1]
-    if len(head) > 8 or _tuple_action(head)[0] >= 0 or _narrative_action(head)[0] >= 0:
-        return body
-    if _tuple_action(nxt)[0] != 0 and _narrative_action(nxt)[0] != 0:
-        return body
-    parts[0] = head + nxt
+    joined = _join_colon_head(head, nxt)
+    if not joined:
+        if len(head) > 8 or _tuple_action(head)[0] >= 0 or _narrative_action(head)[0] >= 0:
+            return body
+        if _tuple_action(nxt)[0] != 0 and _narrative_action(nxt)[0] != 0:
+            return body
+        joined = head + nxt
+    parts[0] = joined
     del parts[1]
     return parts[0] if len(parts) == 1 else parts[0] + "，" + "，".join(parts[1:])
 
 
+def _cut_ellipsis_tail(text: str) -> str:
+    """省略号后面的「持续关注」是点评尾巴，事件停在省略号前。"""
+    match = re.search(r"\.{2,}|…+", text or "")
+    if not match:
+        return text
+    head = text[:match.start()].strip("，。！？、；：")
+    return head or text
+
+
+def _prepare_headline(text: str) -> str:
+    body = _cut_ellipsis_tail(_strip_source_prefix(text))
+    body = _first_sentence(_stitch_subject_verb(body))
+    return _cut_glued_sentence(body)
+
+
 def _cleaned_headline(text: str) -> str:
     """去掉来源前缀和钟点，停在第一句，过长时再停在分句内部的自然断点。"""
-    body = _first_sentence(_stitch_subject_verb(_strip_source_prefix(text)))
-    body = _cut_glued_sentence(body)
+    body = _prepare_headline(text)
     if not body or body == "事件":
         return ""
+    signed = _signing_title(body)
     parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()] or [body]
     for part in parts:
         cleaned = _TIME_PREFIX.sub("", _drop_leading_fragment(part)).strip("，。！？、；：\"'“”")
         if cleaned and cleaned != "事件":
             clipped = _clip_at_boundary(cleaned)
             if clipped and clipped != "事件":
-                return clipped
-    return ""
+                return _prefer_signed(clipped, body, signed)
+    return signed
 
 
 def _core_event_clause(text: str) -> str:
@@ -1277,7 +1348,7 @@ def _core_event_clause(text: str) -> str:
 
 
 def _clip_at_boundary(text: str) -> str:
-    if _title_incoherent(text):
+    if _title_incoherent(text) or _watch_or_list_fragment(text):
         return ""
     core = _core_event_clause(text)
     if core and core != _compact(text):
@@ -1288,6 +1359,9 @@ def _clip_at_boundary(text: str) -> str:
         return ""
     if _display_clause_ok(text):
         return text
+    signed = _signing_title(text)
+    if signed:
+        return signed
     window = text[:_TITLE_HARD]
     if len(text) > _TITLE_HARD and _ends_mid_number(window):
         while window and window[-1].isdigit():
@@ -1493,7 +1567,7 @@ def _strip_source_prefix(text: str) -> str:
     changed = True
     while body and changed:
         changed = False
-        for pattern in (_SOURCE_BRACKET, _SOURCE_DATELINE, _SOURCE_LABEL):
+        for pattern in (_SOURCE_BRACKET, _SOURCE_DATELINE, _SOURCE_LABEL, _BROKER_NOTE):
             updated = pattern.sub("", body, count=1)
             if updated != body:
                 body = updated.lstrip("，。！？、；：")
@@ -1690,7 +1764,7 @@ def _cut_glued_sentence(text: str) -> str:
 def _title_ok(title: str) -> bool:
     """完整、有主体和动作、不超过 20 字，且不是半句话或词中间截断。"""
     text = _compact(title)
-    if _title_incoherent(text) or _has_file_debris(text):
+    if _title_incoherent(text) or _has_file_debris(text) or _watch_or_list_fragment(text):
         return False
     if not text or len(text) > _TITLE_LIMIT or text in BROAD_SECTORS:
         return False
@@ -1758,9 +1832,85 @@ def _repair_headline(text: str) -> str:
     return _fit_object(base, obj)
 
 
+_SIGNING_PARTY = re.compile(
+    r"([\u4e00-\u9fffA-Za-z0-9]{2,10})[与和及]"
+    r"([\u4e00-\u9fffA-Za-z0-9]{2,10}?)"
+    r"(?=战略合作|签署|签订|签约|达成|合作)"
+)
+
+
+def _signing_parties(text: str) -> tuple[str, str]:
+    """签约、战略合作标题里用与/和连起来的双方。"""
+    body = _compact(text)
+    body = re.sub(r"([\u4e00-\u9fffA-Za-z0-9]{2,10})[：:]与", r"\1与", body)
+    if not any(cue in body for cue in ("签约", "签署", "签订", "战略合作")):
+        return "", ""
+    match = _SIGNING_PARTY.search(body)
+    if not match:
+        return "", ""
+    left, right = match.group(1), match.group(2)
+    if left in _NOT_SUBJECT or right in _NOT_SUBJECT or left in _SOURCE_NAMES or right in _SOURCE_NAMES:
+        return "", ""
+    return left, right
+
+
+def _signing_title(text: str) -> str:
+    """双方都留下。长标题被从「与」切开时，收成一句仍带对手方的签约标题。"""
+    left, right = _signing_parties(text)
+    if not left or not right:
+        return ""
+    body = _compact(text)
+    if "签约" in body and "战略合作" in body:
+        title = f"{left}与{right}战略合作签约"
+    elif "签约" in body:
+        title = f"{left}与{right}签约"
+    elif "签署" in body:
+        title = f"{left}与{right}签署战略合作" if "战略合作" in body else f"{left}与{right}签署合作"
+    elif "签订" in body:
+        title = f"{left}与{right}签订战略合作" if "战略合作" in body else f"{left}与{right}签订合作"
+    elif "战略合作" in body:
+        title = f"{left}与{right}战略合作签约"
+    else:
+        return ""
+    if _display_clause_ok(title) or _title_ok(title):
+        return title
+    return ""
+
+
+def _keeps_signing_parties(title: str, source: str) -> bool:
+    left, right = _signing_parties(source)
+    if not left:
+        return True
+    return left in title and right in title
+
+
+def _prefer_signed(chosen: str, body: str, signed: str) -> str:
+    """完整分句里双方都在就留原句。被截短或丢掉一方时，改用带双方的签约标题。"""
+    if not signed:
+        return chosen
+    if not _keeps_signing_parties(chosen, body):
+        return signed
+    compact_body = _compact(body)
+    compact_chosen = _compact(chosen)
+    if compact_chosen and compact_chosen != compact_body and len(compact_chosen) > len(signed):
+        return signed
+    return chosen
+
+
+def _dropped_signing_party(title: str, source: str) -> bool:
+    text = _compact(title)
+    if not text or not any(cue in text for cue in ("签约", "签署", "签订", "战略合作")):
+        return False
+    for raw in source.split("\n"):
+        left, right = _signing_parties(raw)
+        if left and right and (left not in text or right not in text):
+            return True
+    return False
+
+
 def _fit_clause(clause: str) -> str:
     compact = _drop_leading_fragment(_strip_source_prefix(clause))
-    if not compact:
+    if not compact or _watch_or_list_fragment(compact):
         return ""
     if _display_clause_ok(compact) or _title_ok(compact):
         return compact
@@ -1771,15 +1921,16 @@ def _fit_clause(clause: str) -> str:
 
 
 def _representative_clause(text: str) -> str:
-    body = _first_sentence(_stitch_subject_verb(_strip_source_prefix(text)))
-    body = _cut_glued_sentence(body)
+    body = _prepare_headline(text)
     if not body:
         return ""
+    chosen = ""
     for part in _CLAUSE.split(body):
         fitted = _fit_clause(part)
         if fitted:
-            return fitted
-    return ""
+            chosen = fitted
+            break
+    return _prefer_signed(chosen, body, _signing_title(body))
 
 
 def _title_cache_key(fingerprint: str) -> str:
@@ -1872,8 +2023,29 @@ def _is_commentary(text: str) -> bool:
     return not (action and _subject_ok(lead))
 
 
+def _proper_opener(prefix: str) -> str:
+    """冒号前的公司名也算专名。媒体名和「公司」本身不是。"""
+    parts = [part for part in re.split(r"[：:]", prefix.strip("：:")) if part]
+    while parts and (
+        parts[-1] in _GENERIC_SUBJECT_HEADS
+        or parts[-1] in _SOURCE_NAMES
+        or parts[-1] in _NOT_SUBJECT
+    ):
+        parts.pop()
+    if not parts:
+        return ""
+    opener = parts[-1]
+    if len(opener) < 2 or len(opener) > 12:
+        return ""
+    if not re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9]+", opener):
+        return ""
+    if opener in _NOT_SUBJECT or opener in _STOP or opener in _GENERIC_TOKENS or opener in _SOURCE_NAMES:
+        return ""
+    return opener
+
+
 def _named_subject_swapped(title: str, source: str) -> bool:
-    """标题用「公司」换掉了原标题里的专名。原标题本来就以「公司」开头则不是。"""
+    """标题用「公司」换掉了原标题里的专名。对照原始标题，不先按分句清掉冒号前的公司名。"""
     text = _compact(title)
     generic = next((word for word in _GENERIC_SUBJECT_HEADS if text.startswith(word)), "")
     if not generic or not source:
@@ -1882,18 +2054,16 @@ def _named_subject_swapped(title: str, source: str) -> bool:
     if len(rest) < 2:
         return False
     for raw in source.split("\n"):
-        src = _strip_source_prefix(raw)
-        if len(src) < 4 or src.startswith(generic):
+        src = _compact(raw)
+        if len(src) < 4:
             continue
-        index = src.find(rest)
-        if index < 2:
-            continue
-        opener = src[:index]
-        if len(opener) > 12 or not re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9]+", opener):
-            continue
-        if opener in text or opener in _NOT_SUBJECT or opener in _STOP or opener in _GENERIC_TOKENS:
-            continue
-        return True
+        for needle in (text, rest):
+            index = src.find(needle)
+            if index < 2:
+                continue
+            opener = _proper_opener(src[:index])
+            if opener and opener not in text:
+                return True
     return False
 
 
@@ -1906,7 +2076,7 @@ def _llm_title_reject_reason(title: str, source: str = "") -> str:
     text = _compact(title)
     if not text or text == "事件":
         return "空标题"
-    if _is_commentary(text):
+    if _is_commentary(text) or _watch_or_list_fragment(text):
         return "不是具体事件"
     name_reason = _title_name_reject_reason(text)
     if name_reason:
@@ -1944,6 +2114,8 @@ def _llm_title_reject_reason(title: str, source: str = "") -> str:
         return "标题过长"
     if source and _named_subject_swapped(text, source):
         return "主体被换成泛称"
+    if source and _dropped_signing_party(text, source):
+        return "缺少合作方"
     lead, action, obj = _split_headline(text)
     if not (action and obj and _subject_ok(lead) and _concrete_subject(lead)):
         return "缺少主体、动作或宾语"
@@ -1985,7 +2157,7 @@ def _fallback_title_ok(name: object) -> bool:
 def _cleaned_display_ok(name: object) -> bool:
     """关键词回退不要求满 6 字，但钟点、括号、省略号和栏目标题不能上屏。"""
     text = _compact(str(name or ""))
-    if _title_incoherent(text) or _has_file_debris(text) or _is_commentary(text):
+    if _title_incoherent(text) or _has_file_debris(text) or _is_commentary(text) or _watch_or_list_fragment(text):
         return False
     if _core_event_clause(text) != text:
         return False
@@ -2097,6 +2269,10 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "不要用「事件」当标题。不要输出重点、点评或栏目标签。"
         "不要只写媒体名或公司名，标题里要有动作。"
         "不要把已经点名的公司换成「公司」，立讯精密仍写立讯精密。"
+        "冒号前面如果是公司名，要保留公司名。公司名后面接着「公司」或「本公司」时，用公司名替换，不要写成「公司」。"
+        "不要以持续关注开头，不要写1）或①这样的列表序号。"
+        "不要写招商电新称、计算机称、研究称这类券商前缀。"
+        "签约、签署和战略合作要保留双方名称。"
         "不要写侧面佐证、印证、看好、关注或把握这类没有具体动作的点评。"
         "国务院、工信部、发改委、国资委、央行或公司名后面的布局、建议、推荐是事件，要保留。"
         "主体必须写明，例如美联储、国务院、财政部。不要只写同比或数据显示。"
