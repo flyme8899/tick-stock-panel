@@ -441,6 +441,12 @@ export interface ScreenerResult {
   rows: any[]
   total: number
   elapsed_ms: number
+  /** 整项缺失时的中文名。有值的格子仍显示，不会把结果行清掉。 */
+  field_gaps?: string[]
+  field_notes?: string[]
+  pe_incomplete?: boolean
+  /** 值为空且键在这里时，格子显示「缺数据」。 */
+  gap_keys?: string[]
 }
 
 export interface ScreenerResultSummary {
@@ -3274,7 +3280,7 @@ export const api = {
         : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
     ),
   screenerCached: (extColumns?: string) =>
-    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
+    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null; field_gaps?: string[]; field_notes?: string[]; pe_incomplete?: boolean; gap_keys?: string[] }>(
       extColumns
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',

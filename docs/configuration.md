@@ -195,6 +195,14 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 东财涨停池、炸板池、跌停池、昨日涨停池、同花顺涨停揭秘，以及个股/行业研报列表。代码默认打开，`.env.example` 同样写成 true。`LIMIT_BOARD_ENABLED`、`LIMIT_BOARD_EASTMONEY`、`LIMIT_BOARD_THS`、`RESEARCH_ENABLED`、`RESEARCH_STOCK`、`RESEARCH_INDUSTRY` 设为 false 才关闭对应拉取。`EASTMONEY_MIN_INTERVAL` 默认 1 秒，低于 0.5 秒时仍按 0.5 秒。`NEWS_RESEARCH_ENABLED` 控制研报是否进入热门事件。字段、分区和调度见 [limit-board.md](./limit-board.md)。
 
+## 选股补充字段（可选）
+
+北向持股、股东户数、指数成分、解禁时间和 PE(TTM)。代码默认关闭，`.env.example` 里写了打开值。总开关是 `SELECTION_FIELDS_ENABLED`，子开关是 `SELECTION_NORTHBOUND`、`SELECTION_HOLDERS`、`SELECTION_INDEX_MEMBERS`、`SELECTION_UNLOCK`、`SELECTION_PE_TTM`。子开关在总开关关闭时不生效。
+
+收盘后单独线程拉取，不占重任务槽。交易日 15:10 之前不拉。周末、节假日和工作日 09:35 之前补上一交易日。北向约 16:20，股东户数约 16:30（季报源头，每个交易日刷新一次最新值），指数成分约 16:40，解禁约 16:50（未来 120 天内最近一次）。PE(TTM) 约 17:10 起逐只增量，`SELECTION_PE_FLUSH_EVERY` 默认 25。默认东财间隔 1 秒时全市场大约一个多小时；间隔 0.5 秒时大约 45 分钟。中断后续跑，同一天失败两次的代码当天跳过。
+
+北向、股东户数、解禁和 PE 的东财请求进入 `EASTMONEY_MIN_INTERVAL`。指数成分来自中证指数公司，不走这把限速。周线、月线和连涨天数用本地日 K 现算，没有开关。缺某一项时结果行保留，页面标明缺了哪一项。
+
 ## 配置优先级
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`

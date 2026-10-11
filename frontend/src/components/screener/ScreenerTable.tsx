@@ -61,6 +61,8 @@ interface ScreenerTableProps {
   onSortToggle?: (colId: string) => void
   /** 正在 K 线弹窗预览中的 symbol → 高亮该行 */
   activeSymbol?: string | null
+  /** 整项缺失的列键。空值显示「缺数据」，已有数值照常显示。 */
+  gapKeys?: string[]
 }
 
 /** 渲染标签数组（含 maxTags 折叠/展开、横竖排列）。策略列与 ext 列共用。
@@ -165,7 +167,7 @@ export function ScreenerTable({
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
   intradayAutoRefresh = false, onRefreshIntraday, intradayRefreshing = false,
   strategyTagsExpanded = false, onToggleStrategyTags,
-  sort, onSortToggle, activeSymbol,
+  sort, onSortToggle, activeSymbol, gapKeys,
 }: ScreenerTableProps) {
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
@@ -383,7 +385,7 @@ export function ScreenerTable({
       }
       default:
         // 纯数据列 → 共享原语
-        return renderBuiltinDataCell(r, col)
+        return renderBuiltinDataCell(r, col, { gapKeys })
     }
   }
 

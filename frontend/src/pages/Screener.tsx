@@ -487,6 +487,11 @@ export function Screener() {
   // 表头排序（受控）：用户点击列则按该列；未点时下方按评分默认降序
   const { sort, toggle, sortRows } = useTableSort()
 
+  const selectionMeta = showAll ? fullCachedQuery.data : result
+  const fieldGaps = selectionMeta?.field_gaps ?? []
+  const fieldNotes = selectionMeta?.field_notes ?? []
+  const gapKeys = selectionMeta?.gap_keys ?? []
+
   // 当前显示的行数据 (全部模式 或 单策略模式) + 失效行
   const displayRows = useMemo(() => {
     let rows = showAll
@@ -1134,6 +1139,17 @@ export function Screener() {
                 </div>
               )}
 
+              {(fieldGaps.length > 0 || fieldNotes.length > 0) && (
+                <div className="mb-2 space-y-0.5 text-xs text-warning">
+                  {fieldGaps.length > 0 && (
+                    <div>缺数据：{fieldGaps.join('、')}。其余列仍显示已有结果。</div>
+                  )}
+                  {fieldNotes.map(note => (
+                    <div key={note}>{note}</div>
+                  ))}
+                </div>
+              )}
+
               {displayRows.length === 0 ? (
                 <EmptyState
                   icon={ScanSearch}
@@ -1169,6 +1185,7 @@ export function Screener() {
                     onToggleStrategyTags={toggleStrategyTags}
                     sort={sort}
                     onSortToggle={toggle}
+                    gapKeys={gapKeys}
                   />
                 </>
               )}
