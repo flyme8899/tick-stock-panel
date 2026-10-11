@@ -1565,6 +1565,148 @@ def test_broker_tail_report_label_and_subjectless_product():
     assert kept.startswith("国务院") and "研究称" in kept
 
 
+def test_same_company_and_action_merge_even_when_the_lead_differs(tmp_path):
+    """东百收购和哈药立案曾各占两条：动词前不是公司名，分桶对不上。
+
+    标题里的集团、股份才是主体。同一公司、同一个动作、6 小时内并成一件。
+    动作不同，或超出 6 小时，仍然分开。分桶结果要和两两比较一致。
+    """
+    from app.news.hot_events import (
+        _block_keys,
+        _blocked_pairs,
+        _can_merge,
+        _doc,
+        _listed_companies,
+        _prepare_merge_doc,
+        build_top_hot_events,
+    )
+
+    assert _listed_companies("上交所向东百集团下发监管工作函") == ["东百集团"]
+    assert _listed_companies("东百集团：拟3.16亿元收购快灵光电股权") == ["东百集团"]
+    assert "哈药股份" in _listed_companies("哈药股份：公司董事兼总裁被立案、实施留置")
+    assert _listed_companies("优必选与建发股份回购股份") == ["建发股份"]
+
+    reset_store_for_tests(tmp_path / "same-company.sqlite")
+    friday = date(2026, 10, 9)
+    bodies = {
+        "dongbai-buy": (
+            "东百集团：拟3.16亿元收购快灵光电股权",
+            "东百集团公告，公司全资子公司拟收购杭州快灵光电股权，暂定对价3.16亿元。",
+            10, 5,
+        ),
+        "dongbai-wire": (
+            "东百集团：全资子公司拟收购光探测芯片公司快灵光电",
+            "东百集团公告，全资子公司东百创智拟收购快灵光电52.67%股权。",
+            10, 20,
+        ),
+        "dongbai-letter": (
+            "上交所向东百集团下发监管工作函",
+            "上交所向东百集团下发关于福建东百集团股份有限公司收购资产事项的监管工作函。",
+            11, 30,
+        ),
+        "dongbai-buyback": (
+            "东百集团拟回购股份",
+            "东百集团拟回购股份。",
+            11, 40,
+        ),
+        "hayao-file": (
+            "哈药股份：公司董事兼总裁被立案、实施留置",
+            "哈药股份公告，公司董事、总裁被立案并实施留置。",
+            14, 10,
+        ),
+        "hayao-wire": (
+            "哈药股份：公司董事兼总裁芦传有被实施留置",
+            "哈药股份公告，公司于近日收到相关监察委员会关于公司董事、总裁芦传有的立案通知书和留置通知书。",
+            14, 40,
+        ),
+        "huawei": (
+            "华为发布盘古新模型",
+            "华为发布盘古新模型。",
+            9, 0,
+        ),
+    }
+    for source_id, (title, text, hour, minute) in bodies.items():
+        status = get_store().insert_item(
+            source="cls" if not source_id.endswith("wire") else "wscn",
+            source_id=source_id,
+            published_at=_publish(friday, hour, minute),
+            author="",
+            title=title,
+            clean_text=text,
+            raw=None,
+            content_hash=source_id,
+            url="",
+            level="",
+            media_ids=[],
+            extra=None,
+            mentions=[],
+        )
+        assert status == "inserted"
+
+    def prepared(source_id: str) -> dict:
+        title, text, hour, minute = bodies[source_id]
+        doc = _doc({
+            "id": source_id,
+            "source": "cls",
+            "title": title,
+            "clean_text": text,
+            "published": _publish(friday, hour, minute),
+            "mentions": [],
+            "level": "",
+        })
+        assert doc is not None
+        _prepare_merge_doc(doc)
+        return doc
+
+    buy = prepared("dongbai-buy")
+    letter = prepared("dongbai-letter")
+    assert buy["action"] == letter["action"] == "收购"
+    assert _can_merge(buy, letter)
+    shared = set(_block_keys(buy)) & set(_block_keys(letter))
+    assert any(key.startswith("s:收购:东百") for key in shared)
+    hayao_a = prepared("hayao-file")
+    hayao_b = prepared("hayao-wire")
+    assert hayao_a["action"] == hayao_b["action"] == "立案"
+    assert _can_merge(hayao_a, hayao_b)
+    assert set(_block_keys(hayao_a)) & set(_block_keys(hayao_b))
+    buyback = prepared("dongbai-buyback")
+    assert not _can_merge(buy, buyback)
+    late = prepared("dongbai-buy")
+    late["published"] = _publish(friday, 18, 30)
+    assert not _can_merge(buy, late)
+
+    docs = [buy, letter, hayao_a, hayao_b]
+    for doc in docs:
+        _prepare_merge_doc(doc)
+    pairs = set(_blocked_pairs(docs))
+    assert (0, 1) in pairs
+    assert (2, 3) in pairs
+
+    store = get_store()
+
+    def signature(snapshot: dict) -> list[tuple]:
+        return [
+            (event["name"], event["mentions"], event["key"], tuple(event.get("headlines") or []))
+            for event in snapshot["events"]
+        ]
+
+    naive = build_top_hot_events(NOW, store, refresh=True, blocked=False)
+    fast = build_top_hot_events(NOW, store, refresh=True, blocked=True)
+    assert signature(fast) == signature(naive)
+    events = fast["events"]
+    dongbai = [event for event in events if "东百" in event["name"] and "回购" not in event["name"]]
+    assert len(dongbai) == 1
+    assert dongbai[0]["mentions"] >= 2
+    assert any("收购" in title or "快灵" in title for title in dongbai[0]["headlines"])
+    assert sum(1 for event in events if "回购" in event["name"] and "东百" in event["name"]) == 1
+    hayao = [event for event in events if "哈药" in event["name"]]
+    assert len(hayao) == 1
+    assert hayao[0]["mentions"] >= 2
+    huawei = [event for event in events if "盘古" in event["name"]]
+    assert len(huawei) == 1
+    assert huawei[0]["mentions"] == 1
+
+
 def test_same_party_merges_across_the_trading_day(tmp_path):
     """同一组双方、同一动作，00:13 和 08:39 并成一件。别的合并仍看 6 小时。"""
     reset_store_for_tests(tmp_path / "party-day.sqlite")

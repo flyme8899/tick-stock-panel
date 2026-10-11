@@ -6,7 +6,7 @@
 
 个股历史失败后，妙想只补已经请求过、但没有拿到的代码。全市场今日 / 5 日排名用
 同花顺 ``stock_fund_flow_individual``，不行再用东财 ``stock_individual_fund_flow_rank``。
-深市主板整段缺口改为东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 按交易日分页补一次，走统一限速，不再逐只打历史账单。
+深市主板和北交所的整段缺口改为东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 分页补一次，走统一限速，不再逐只打历史账单。北交所按代码段过滤。
 逐只的 ``stock_individual_fund_flow`` 和 push2 板块资金流接口仍然不调用。
 """
 from __future__ import annotations

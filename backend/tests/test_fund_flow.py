@@ -1443,6 +1443,133 @@ def test_sz_main_gap_uses_one_board_batch(tmp_path, monkeypatch) -> None:
     assert row["600519"]["source"] == "efinance"
 
 
+def test_bj_gap_uses_code_range_pages_and_converts_wan_to_yuan(tmp_path, monkeypatch) -> None:
+    """同花顺榜没有北交所。数据中心按代码段分页补，万元换成元，不打 push2，也不逐只回历史账单。"""
+    monkeypatch.setattr(store, "ranking_limit", lambda _universe: 1)
+    monkeypatch.setattr(store, "missing_boards", lambda _frame, **_kwargs: ["bj"])
+    store.write_rows(tmp_path, "stock", "2026-10-09", [{
+        "symbol": "600519",
+        "code": "600519",
+        "name": "贵州茅台",
+        "trade_date": "2026-10-09",
+        "main_net": 10.0,
+        "source": "efinance",
+    }])
+    bills: list[str] = []
+    seen: list[dict] = []
+
+    def bill(symbol: str):
+        bills.append(symbol)
+        raise AssertionError(symbol)
+
+    def fake(url, *, params=None, headers=None, timeout=None):
+        params = params or {}
+        seen.append({"url": url, "timeout": timeout, "params": params})
+        assert "datacenter-web.eastmoney.com" in url
+        assert params["reportName"] == "RPT_DMSK_TS_FUNDFLOW"
+        assert "push2" not in url
+        filt = params["filter"]
+        assert filt.startswith("(TRADE_DATE='2026-10-09')")
+        if '920000' in filt:
+            rows = [
+                {
+                    "SECURITY_CODE": "920001",
+                    "SECURITY_NAME_ABBR": "纬达光电",
+                    "NET_INFLOW": 39.1608,
+                    "BIGDEAL_NET": 10.5,
+                    "SUPERDEAL_NET": 28.6608,
+                },
+                {
+                    "SECURITY_CODE": "600519",
+                    "SECURITY_NAME_ABBR": "贵州茅台",
+                    "NET_INFLOW": 1,
+                    "BIGDEAL_NET": 1,
+                    "SUPERDEAL_NET": 1,
+                },
+            ]
+            pages = 1
+        elif '800000' in filt:
+            rows = [{
+                "SECURITY_CODE": "832566",
+                "SECURITY_NAME_ABBR": "梓橦宫",
+                "NET_INFLOW": -2.5,
+                "BIGDEAL_NET": -1.5,
+                "SUPERDEAL_NET": -1,
+            }]
+            pages = 1
+        else:
+            return type("Response", (), {"json": lambda self: {"success": False, "code": 9201, "message": "返回数据为空"}})()
+        return type("Response", (), {"json": lambda self: {
+            "success": True,
+            "result": {"pages": pages, "data": rows},
+        }})()
+
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake)
+    jobs.sync_stock(
+        tmp_path,
+        ["600519.SH", "920001.BJ", "832566.BJ"],
+        SourceClients(history_bill=bill, ak_call=lambda *args, **kwargs: []),
+        efinance=CircuitBreaker("efinance", clock=lambda: 0),
+        mx=CircuitBreaker("mx", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+        mx_key="",
+        trade_date="2026-10-09",
+    )
+    assert bills == []
+    filters = [item["params"]["filter"] for item in seen]
+    assert any("920000" in item for item in filters)
+    assert any("800000" in item for item in filters)
+    assert any("430000" in item for item in filters)
+    assert all(item["timeout"] == (10.0, 30.0) for item in seen)
+    frame = store.read_partition(tmp_path, "stock", "2026-10-09")
+    row = {item["code"]: item for item in frame.to_dicts()}
+    assert row["920001"]["main_net"] == pytest.approx(391608)
+    assert row["920001"]["large_net"] == pytest.approx(105000)
+    assert row["920001"]["super_net"] == pytest.approx(286608)
+    assert row["920001"]["source"] == "eastmoney_bj"
+    assert row["832566"]["main_net"] == pytest.approx(-25000)
+    assert row["832566"]["source"] == "eastmoney_bj"
+    assert "600519" in row
+    assert row["600519"]["source"] == "efinance"
+    assert row["600519"]["main_net"] == pytest.approx(10.0)
+
+
+def test_bj_batch_failure_does_not_fall_back_to_history_bill(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(store, "ranking_limit", lambda _universe: 1)
+    monkeypatch.setattr(store, "missing_boards", lambda _frame, **_kwargs: ["bj"])
+    store.write_rows(tmp_path, "stock", "2026-10-09", [{
+        "symbol": "600519",
+        "code": "600519",
+        "name": "贵州茅台",
+        "trade_date": "2026-10-09",
+        "main_net": 10.0,
+        "source": "efinance",
+    }])
+    bills: list[str] = []
+
+    def bill(symbol: str):
+        bills.append(symbol)
+        raise AssertionError(symbol)
+
+    def fake(*_args, **_kwargs):
+        raise RuntimeError("datacenter down")
+
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake)
+    result = jobs.sync_stock(
+        tmp_path,
+        ["600519.SH", "920001.BJ"],
+        SourceClients(history_bill=bill, ak_call=lambda *args, **kwargs: []),
+        efinance=CircuitBreaker("efinance", clock=lambda: 0),
+        mx=CircuitBreaker("mx", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+        mx_key="",
+        trade_date="2026-10-09",
+    )
+    assert bills == []
+    assert any("北交所" in item and "整批失败" in item for item in result.errors)
+    assert store.read_partition(tmp_path, "stock", "2026-10-09").height == 1
+
+
 def test_sz_main_batch_failure_does_not_fall_back_to_history_bill(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(store, "ranking_limit", lambda _universe: 1)
     monkeypatch.setattr(store, "missing_boards", lambda _frame, **_kwargs: ["sz_main"])
