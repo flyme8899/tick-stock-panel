@@ -1,5 +1,8 @@
 """把一个交易日的资讯收成具体事件，而不是宽行业榜。
 
+上一收盘（15:00）之后到下一交易日 9:25 的资讯归入下一交易日，和隔夜竞价是同一窗口。
+周末打开页面时，这场开盘已经有稿就列出这些还在等待竞价的事件；还没有就显示上一个交易日。
+
 聚类看标题里的主体、动作，以及标题里出现的细概念，再加同一时间窗。正文里抽到、
 但标题没写的概念不参与聚类，避免旁支概念把无关消息粘成一件事。同一主体和动作，
 或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
@@ -271,9 +274,30 @@ def build_top_hot_events(now: datetime | None, store: NewsStore) -> dict:
     return copy.deepcopy(snapshot)
 
 
+def _active_session_day(now: datetime) -> date:
+    """当前这份榜对应的交易日。周末是下一场开盘，工作日是当天。"""
+    day = now.astimezone(CN_TZ).date()
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return day
+
+
+def _news_session_day(published: datetime) -> date:
+    """资讯归入哪一个交易日的热门榜。和竞价确认窗口同一口径。"""
+    from app.news.market_confirm import _confirm_day
+
+    return _confirm_day(published)
+
+
+def _auction_still_ahead(now: datetime, chosen: date) -> bool:
+    local = now.astimezone(CN_TZ)
+    return local < datetime.combine(chosen, dt_time(9, 25), CN_TZ)
+
+
 def _compute(now: datetime, store: NewsStore) -> dict:
     today = now.date()
     trading = current_trading_day(now)
+    active = _active_session_day(now)
     start = datetime.combine(today - timedelta(days=_LOOKBACK_DAYS), dt_time.min, CN_TZ)
     end = datetime.combine(today + timedelta(days=1), dt_time.min, CN_TZ)
     by_day: dict[date, list[dict]] = defaultdict(list)
@@ -281,16 +305,23 @@ def _compute(now: datetime, store: NewsStore) -> dict:
         published = parse_time(row.get("published_at"))
         if published is None:
             continue
+        published = published.astimezone(CN_TZ)
+        # 还没发布的稿不进榜，避免周末提前看到当天更晚的快讯。
+        if published > now:
+            continue
         row = dict(row)
-        row["published"] = published.astimezone(CN_TZ)
-        by_day[row["published"].date()].append(row)
+        row["published"] = published
+        by_day[_news_session_day(published)].append(row)
     ranked = {day: _cluster_day(rows, now) for day, rows in by_day.items()}
     ranked = {day: events for day, events in ranked.items() if events}
     fallback = False
-    if trading in ranked:
-        chosen: date | None = trading
+    if active in ranked:
+        chosen: date | None = active
+    elif trading in ranked:
+        # 周末还没有隔夜稿时，继续显示上一个交易日，不算回退。
+        chosen = trading
     else:
-        earlier = [day for day in ranked if day <= today]
+        earlier = [day for day in ranked if day < active]
         chosen = max(earlier) if earlier else None
         fallback = chosen is not None
     if chosen is None:
@@ -329,7 +360,7 @@ def _compute(now: datetime, store: NewsStore) -> dict:
     updated_hm = latest.astimezone(CN_TZ).strftime("%H:%M")
     return {
         "as_of": chosen.isoformat(),
-        "trading_day": trading.isoformat(),
+        "trading_day": (chosen if not fallback else trading).isoformat(),
         "fallback": fallback,
         "hint": _hint(now, trading, chosen, fallback, updated_hm),
         "updated_at": updated_hm,
@@ -1517,6 +1548,9 @@ def _hint(now: datetime, trading: date, chosen: date, fallback: bool, updated_hm
     clock = f" · 更新于 {updated_hm}" if updated_hm else ""
     if fallback:
         return f"暂无{_month_day(trading)}数据，显示{_month_day(chosen)}{clock}"
+    if _auction_still_ahead(now, chosen):
+        pending = f"交易日 {_month_day(chosen)} · 等待竞价" if chosen != now.date() else "等待竞价"
+        return f"{pending}{clock}"
     if chosen != now.date():
         return f"交易日 {_month_day(chosen)}{clock}"
     return f"更新于 {updated_hm}" if updated_hm else ""

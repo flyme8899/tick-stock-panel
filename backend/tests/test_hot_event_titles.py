@@ -346,7 +346,7 @@ def test_dropdown_examples_keep_subject_drop_bare_event_and_unrelated_maps(tmp_p
     _insert_rich(
         "policy",
         "中共中央政治局会议：根据宏观经济运行情况及时谋划出台增量政策",
-        16,
+        14,
         27,
     )
     _insert_rich(
@@ -401,7 +401,7 @@ def test_dropdown_examples_keep_subject_drop_bare_event_and_unrelated_maps(tmp_p
     policy = next(event for event in events if "出台" in event["name"] and "政治局" in event["name"])
     assert policy["name"] != "宏观经济运行情况及时谋划出台"
     assert "政治局" in policy["name"]
-    assert policy["first_seen"] == "10-09 16:27"
+    assert policy["first_seen"] == "10-09 14:27"
 
     assert "结构性降息" in names
     assert rubber["key"].startswith("ev_")
