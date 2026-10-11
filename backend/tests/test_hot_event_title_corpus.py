@@ -5,14 +5,17 @@ from datetime import datetime
 
 from app.market_time import CN_TZ
 from app.news.hot_events import (
+    _apply_llm,
     _cleaned_display_ok,
     _cleaned_headline,
     _clip_at_boundary,
     _display_clause_ok,
     _display_gate_reason,
+    _display_original,
     _ensure_shown_name,
     _fallback_title_ok,
     _first_credible_title,
+    _headline_tier,
     _keyword_title,
     _llm_title_ok,
 )
@@ -300,8 +303,49 @@ def test_source_fallback_strips_the_broker_prefix():
     assert not _cleaned_headline(ellipsis).startswith("招商")
 
 
+def test_original_headline_keeps_the_long_source_line():
+    """主标题是清理后的原标题。要点失败不会把它换成短改写。"""
+    assert _headline_tier("sec", "宁德时代公告发布固态电池新品") < _headline_tier(
+        "cls", "新华社：财政部发布2026年上半年中长期财政规划",
+    )
+    assert _headline_tier("cls", "新华社：财政部发布2026年上半年中长期财政规划") < _headline_tier(
+        "cls", "美联储降息25基点",
+    )
+    assert _headline_tier("cls", "美联储降息25基点") < _headline_tier("reuters", "美联储宣布降息25基点")
+    assert _headline_tier("reuters", "美联储宣布降息25基点") < _headline_tier("ima", "美联储宣布降息25基点")
+    assert _first_credible_title([
+        ("ima", "群里说橡胶价格大涨超预期发布公告"),
+        ("cls", "橡胶价格大涨超预期发布公告"),
+        ("sec", "宁德时代公告发布固态电池新品"),
+    ]) == "宁德时代公告发布固态电池新品"
+    assert _display_original("央视财经：橡胶价格大涨超预期发布公告") == "橡胶价格大涨超预期发布公告"
+    assert _display_original("【GLMS通信】橡胶价格大涨超预期发布公告") == "橡胶价格大涨超预期发布公告"
+    assert _display_original("光智科技：公司发布新品") == "光智科技发布新品"
+    assert _display_original("某某公司发布新品天风计算机") == "某某公司发布新品"
+    long = "橡胶价格大涨超60家轮胎企业集体涨价，" + "后续多家企业继续跟进并上调出厂报价以及经销商报价"
+    shown = _display_original(long)
+    assert len(long) > 40
+    assert shown == "橡胶价格大涨超60家轮胎企业集体涨价"
+    assert "后续" not in shown
+    event = {
+        "name": "短改写",
+        "headline": "央视财经：橡胶价格大涨超预期发布公告",
+        "headlines": ["央视财经：橡胶价格大涨超预期发布公告"],
+        "_candidates": [{"source": "cls", "title": "央视财经：橡胶价格大涨超预期发布公告"}],
+    }
+    _apply_llm(event, {"title": "橡胶价格大涨超预期"})
+    assert event["subtitle"] == ""
+    assert event["name"] == "短改写"
+    _apply_llm(event, {"title": "美联储宣布降息二十五基点"})
+    assert event["subtitle"] == "美联储宣布降息二十五基点"
+    assert event["name"] == "短改写"
+    _ensure_shown_name(event)
+    assert event["name"] == "橡胶价格大涨超预期发布公告"
+    assert event["subtitle"] == "美联储宣布降息二十五基点"
+
+
 def test_same_company_earnings_notes_are_one_event(tmp_path):
-    """同一家公司的业绩预告并成一件，括号和点评不留在标题里。"""
+    """同一家公司的业绩预告并成一件。主标题用更可信来源的完整原标题。"""
     reset_store_for_tests(tmp_path / "jushi.sqlite")
     raw = "中国巨石预告点评扣非表现好于预期（激励费环比增长）"
     other = "中国巨石扣非净利润同比增长"
@@ -311,5 +355,4 @@ def test_same_company_earnings_notes_are_one_event(tmp_path):
     events = [event for event in top_hot_events(NOW)["events"] if "巨石" in event["name"]]
     assert len(events) == 1
     assert events[0]["mentions"] == 2
-    assert "点评" not in events[0]["name"]
-    assert "（" not in events[0]["name"] and "(" not in events[0]["name"]
+    assert events[0]["name"] == raw

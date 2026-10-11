@@ -65,6 +65,7 @@ export function HotEvents() {
   const [redOnly, setRedOnly] = useState(false)
   const [picked, setPicked] = useState<NewsCandidate | null>(null)
   const [pickedEvent, setPickedEvent] = useState<NewsHotEvent | null>(null)
+  const [openTitles, setOpenTitles] = useState<Record<string, boolean>>({})
   const [pushNote, setPushNote] = useState('')
   const queryClient = useQueryClient()
 
@@ -213,18 +214,32 @@ export function HotEvents() {
                 <li key={item.key}>
                   <button
                     type="button"
-                    title={item.headline || undefined}
+                    title={item.headline || item.name}
                     className={cn(
                       'w-full rounded-md border px-3 py-2 text-left',
                       pickedEvent?.key === item.key ? 'border-accent' : 'border-border',
                     )}
-                    onClick={() => setPickedEvent(item)}
+                    onClick={() => {
+                      setPickedEvent(item)
+                      setOpenTitles(current => ({
+                        ...current,
+                        [item.key]: pickedEvent?.key === item.key ? !current[item.key] : true,
+                      }))
+                    }}
                   >
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="font-medium">
-                        {item.name}
-                        {(item.red_count ?? 0) > 0 && (
-                          <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
+                    <div className="flex items-start justify-between gap-3">
+                      <span className="min-w-0">
+                        <span className={cn(
+                          'block break-words font-medium',
+                          openTitles[item.key] ? '' : 'line-clamp-2',
+                        )}>
+                          {item.name}
+                          {(item.red_count ?? 0) > 0 && (
+                            <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
+                          )}
+                        </span>
+                        {item.subtitle && (
+                          <span className="mt-0.5 block text-xs text-muted">{item.subtitle}</span>
                         )}
                       </span>
                       <span className="shrink-0 text-xs text-muted">热度 {item.heat}</span>
@@ -267,9 +282,6 @@ export function HotEvents() {
                       提及 {item.mentions} · 来源 {item.source_count}
                       {item.first_seen ? ` · 首见 ${item.first_seen}` : ''}
                     </div>
-                    {item.headline && item.headline !== item.name && (
-                      <div className="mt-1 truncate text-xs text-secondary">{item.headline}</div>
-                    )}
                   </button>
                 </li>
               ))}
@@ -304,7 +316,10 @@ export function HotEvents() {
 
           {tab === 'event' && pickedEvent && (
             <div className="mt-4 border-t border-border pt-3">
-              <h2 className="mb-2 text-sm font-medium">{pickedEvent.name}</h2>
+              <h2 className="mb-1 break-words text-sm font-medium">{pickedEvent.name}</h2>
+              {pickedEvent.subtitle && (
+                <p className="mb-2 text-xs text-muted">{pickedEvent.subtitle}</p>
+              )}
               {(eventDetail.data?.stocks ?? pickedEvent.stocks).length > 0 && (
                 <p className="mb-2 text-xs text-muted">
                   相关个股：{(eventDetail.data?.stocks ?? pickedEvent.stocks).map(stock => stock.name || stock.key).join('、')}

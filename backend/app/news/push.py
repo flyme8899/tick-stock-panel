@@ -250,13 +250,17 @@ def format_hot_markdown(
             confirm = row.get("confirmation") if isinstance(row.get("confirmation"), dict) else {}
             checked = _confirm_label(confirm)
             label = "".join(f" · {part}" for part in (level, checked, tag, direction) if part)
+            name = str(row.get("name") or row.get("key") or "")
             lines.append(
-                f"{index}. {row.get('name') or row.get('key')}{label}{concept_text} · "
+                f"{index}. {name}{label}{concept_text} · "
                 f"提及 {row.get('story_count', 0)} · "
                 f"来源 {row.get('source_count', 0)}{seen_text}"
             )
+            subtitle = str(row.get("subtitle") or "").strip()
+            if subtitle:
+                lines.append(f"   {subtitle}")
             headline = str(row.get("headline") or "")
-            if headline and headline != (row.get("name") or ""):
+            if headline and headline != name and name not in headline and headline not in name:
                 lines.append(f"   - {headline}")
             for ref in row.get("refs") or []:
                 text = _ref_text(ref)
@@ -957,6 +961,7 @@ def _load_hot() -> list[dict]:
             "first_seen": event["first_seen"],
             "concepts": event["concepts"],
             "headline": event["headline"],
+            "subtitle": event.get("subtitle") or "",
             "category": event.get("category") or "",
             "direction": event.get("direction") or "",
             "importance": event.get("importance") or "",
