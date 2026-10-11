@@ -22,6 +22,7 @@ from app.selection_fields.parse import (
     parse_holders,
     parse_index_members,
     parse_northbound,
+    parse_pe_market,
     parse_pe_ttm,
     parse_unlock_schedule,
 )
@@ -106,6 +107,17 @@ def test_holders_unlock_pe_and_index_labels() -> None:
         {"数据日期": "2024-01-03", "PE(TTM)": None},
     ])
     assert pe == 12.5
+    market = parse_pe_market([
+        {"SECURITY_CODE": "000001", "PE_TTM": 5.17532828},
+        {"SECURITY_CODE": "000002", "PE_TTM": -0.52903084},
+        {"SECURITY_CODE": "000006", "PE_TTM": None},
+        {"SECURITY_CODE": "399001", "PE_TTM": 9},
+    ])
+    by_symbol = {row["symbol"]: row["pe_ttm"] for row in market}
+    assert by_symbol["000001.SZ"] == 5.17532828
+    assert by_symbol["000002.SZ"] == -0.52903084
+    assert by_symbol["000006.SZ"] is None
+    assert "399001.SZ" not in by_symbol
 
     hs300 = parse_index_members([{"成分券代码": "600519"}], "沪深300")
     cyb = parse_index_members([{"样本代码": "300750"}], "创业板50")
@@ -244,46 +256,56 @@ def test_due_window_is_after_close_and_on_weekends() -> None:
     assert due_tasks(monday_after, trading=True, state={}, flags=FLAGS)[0] == "northbound"
 
 
-def test_pe_checkpoint_resumes_and_skips_a_symbol_after_two_failures(tmp_path) -> None:
+def test_pe_batch_fills_the_market_and_skips_a_missing_symbol_once(tmp_path) -> None:
     symbols = ["000001.SZ", "300750.SZ", "600519.SH"]
     directory = tmp_path / "instruments" / "stock"
     directory.mkdir(parents=True)
     pl.DataFrame({"symbol": symbols}).write_parquet(directory / "part.parquet")
-    seen: list[str] = []
+    pages: list[int] = []
+    singles: list[str] = []
 
-    def ak(_name, **kwargs):
-        code = kwargs["symbol"]
-        seen.append(code)
-        if code == "300750":
+    def ak(name, **kwargs):
+        if name == "pe_market":
+            pages.append(int(kwargs["page"]))
+            if kwargs["page"] == 1:
+                return {
+                    "rows": [{"SECURITY_CODE": "000001", "PE_TTM": 5.17532828}],
+                    "pages": 2,
+                    "empty": False,
+                }
+            return {"rows": [{"SECURITY_CODE": "000002", "PE_TTM": -1.5}], "pages": 2, "empty": False}
+        singles.append(kwargs["symbol"])
+        if kwargs["symbol"] == "300750":
             raise RuntimeError("boom")
-        if code == "000001":
-            return [{"数据日期": "2024-01-05", "PE(TTM)": 18}]
         return [{"数据日期": "2024-01-05", "PE(TTM)": 20}]
 
-    first = advance_pe(
+    hold = {"on": True}
+    stopped = advance_pe(
         tmp_path,
         ak,
         "2024-01-05",
         flush_every=1,
-        busy=lambda: seen == ["000001"],
+        busy=lambda: hold["on"] and pages == [1],
     )
-    assert first["complete"] is False
-    assert seen == ["000001"]
+    hold["on"] = False
+    assert stopped["complete"] is False
+    assert pages == [1]
+    assert singles == []
+    assert read_frame(tmp_path, "pe_ttm").filter(pl.col("symbol") == "000001.SZ")["pe_ttm"][0] == 5.17532828
 
-    advance_pe(tmp_path, ak, "2024-01-05", flush_every=1, busy=lambda: False)
-    advance_pe(tmp_path, ak, "2024-01-05", flush_every=1, busy=lambda: False)
-    fourth = advance_pe(tmp_path, ak, "2024-01-05", flush_every=1, busy=lambda: False)
-    assert seen == ["000001", "300750", "300750", "600519"]
-    assert fourth["complete"] is True
+    finished = advance_pe(tmp_path, ak, "2024-01-05", flush_every=1, busy=lambda: False)
+    assert pages == [1, 2]
+    assert singles == ["300750", "600519"]
+    assert finished["complete"] is True
     assert read_frame(tmp_path, "pe_ttm").filter(pl.col("symbol") == "600519.SH")["pe_ttm"][0] == 20
-    assert read_frame(tmp_path, "pe_ttm").filter(pl.col("symbol") == "000001.SZ")["pe_ttm"][0] == 18
+    assert read_frame(tmp_path, "pe_ttm").filter(pl.col("symbol") == "300750.SZ").height == 0
 
     save_checkpoint(tmp_path, {
         "trade_date": "2024-01-08",
         "done": ["600519.SH"],
         "skipped": [],
-        "attempts": {},
         "total": 3,
+        "batch_done": True,
     })
     result = annotate_result({
         "as_of": "2024-01-08",
@@ -428,7 +450,43 @@ def test_one_index_failure_still_writes_the_others(tmp_path) -> None:
     assert any(note == "指数成分未完成：中证500" for note in result["field_notes"])
 
 
-def test_timed_out_index_is_recorded_and_later_tasks_still_run(monkeypatch, tmp_path) -> None:
+def test_pe_market_page_uses_ttm_field_and_request_timeout(monkeypatch) -> None:
+    seen: list[dict] = []
+
+    def fake(_url, *, params, headers=None, timeout=None):
+        seen.append({"params": params, "timeout": timeout, "referer": (headers or {}).get("Referer")})
+        if params.get("pageSize") == "1":
+            return _json_response({
+                "success": True,
+                "result": {"pages": 1, "data": [{"TRADE_DATE": "2026-10-09 00:00:00"}]},
+            })
+        if "2024-01-05" in str(params.get("filter")):
+            return _json_response({"success": False, "code": 9201, "message": "返回数据为空"})
+        return _json_response({
+            "success": True,
+            "result": {
+                "pages": 12,
+                "data": [{"SECURITY_CODE": "000001", "TRADE_DATE": "2026-10-09", "PE_TTM": 5.17532828}],
+            },
+        })
+
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake)
+    from app.selection_fields.jobs import fetch_pe_market_page
+
+    empty = fetch_pe_market_page("2024-01-05", 1)
+    assert empty["empty"] is True
+    assert empty["latest"] == "2026-10-09"
+    page = fetch_pe_market_page("2026-10-09", 1)
+    assert page["pages"] == 12
+    assert page["rows"][0]["PE_TTM"] == 5.17532828
+    assert seen[0]["timeout"] == (10.0, 30.0)
+    assert seen[0]["params"]["reportName"] == "RPT_VALUEANALYSIS_DET"
+    assert "PE_TTM" in seen[0]["params"]["columns"]
+    assert "f9" not in seen[0]["params"]["columns"]
+    assert "gzfx" in seen[0]["referer"]
+
+
+def test_timed_out_task_does_not_start_another_while_the_old_thread_runs(monkeypatch, tmp_path) -> None:
     for name in (
         "SELECTION_FIELDS_ENABLED",
         "SELECTION_NORTHBOUND",
@@ -459,16 +517,30 @@ def test_timed_out_index_is_recorded_and_later_tasks_still_run(monkeypatch, tmp_
         return []
 
     worker = SelectionWorker(tmp_path, ak=ak)
-    try:
-        assert worker.run_once(now) == "index"
-    finally:
-        blocked.set()
+    assert worker.run_once(now) == "index"
+    assert calls == ["index_stock_cons_csindex"]
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved.get("index_date") != day
+    assert saved.get("unlock_date") != day
+    assert saved.get("last_error") == "指数成分任务超时"
+
+    assert worker.run_once(now) is None
+    assert calls == ["index_stock_cons_csindex"]
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved.get("last_error") == "上一个补充字段任务仍在运行"
+
+    blocked.set()
+    inflight = worker._inflight
+    assert inflight is not None
+    inflight.join(2)
+    assert not inflight.is_alive()
+    assert calls == ["index_stock_cons_csindex"]
+
+    assert worker.run_once(now) == "unlock"
     assert "stock_restricted_release_detail_em" in calls
     assert "stock_value_em" not in calls
     saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert saved.get("index_date") != day
     assert saved.get("unlock_date") == day
-    assert saved.get("last_error") == "指数成分任务超时"
 
 
 def test_northbound_request_sets_connect_and_read_timeout(monkeypatch) -> None:

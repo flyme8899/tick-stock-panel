@@ -91,6 +91,8 @@ class SelectionWorker:
         self._data_dir = data_dir
         self._ak = ak
         self._stop = threading.Event()
+        self._cancel = threading.Event()
+        self._inflight: threading.Thread | None = None
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -137,20 +139,22 @@ class SelectionWorker:
         day = session_day(now, trading=trading)
         started: list[str] = []
         for name in tasks:
-            if name == "pe":
-                outcome = _run_bounded(name, lambda: _advance(self, data_dir, day))
-            else:
+            if _still_running(self):
+                state["last_error"] = "上一个补充字段任务仍在运行"
+                break
+            if name != "pe":
                 state[f"{name}_at"] = now.isoformat(timespec="seconds")
-                outcome = _run_bounded(
-                    name,
-                    lambda name=name: _execute(name, self._call, data_dir, now.date(), day),
-                )
+            outcome = _run_bounded(
+                self,
+                name,
+                lambda name=name: _execute(name, self, data_dir, now.date(), day),
+            )
             started.append(name)
+            if outcome.get("error"):
+                state["last_error"] = str(outcome["error"])[:300]
+            if outcome.get("timed_out") or outcome.get("busy") or outcome.get("stopped"):
+                break
             if name == "pe":
-                if outcome.get("error"):
-                    state["last_error"] = str(outcome["error"])[:300]
-                if outcome.get("timed_out"):
-                    continue
                 if outcome.get("complete"):
                     state["pe_date"] = day
                 elif outcome.get("note"):
@@ -158,11 +162,6 @@ class SelectionWorker:
                 break
             if outcome.get("ok"):
                 state[f"{name}_date"] = day
-                break
-            if outcome.get("error"):
-                state["last_error"] = str(outcome["error"])[:300]
-            if outcome.get("timed_out"):
-                continue
             break
         _save_state(data_dir, state)
         return started[0] if started else None
@@ -180,6 +179,15 @@ class SelectionWorker:
         return Path(settings.data_dir)
 
 
+def _stopped(worker: SelectionWorker) -> bool:
+    return worker._stop.is_set() or worker._cancel.is_set()
+
+
+def _still_running(worker: SelectionWorker) -> bool:
+    thread = worker._inflight
+    return thread is not None and thread.is_alive()
+
+
 def _advance(worker: SelectionWorker, data_dir: Path, day: str) -> dict:
     from app.fund_flow.scheduler import tickflow_sync_busy
 
@@ -189,20 +197,28 @@ def _advance(worker: SelectionWorker, data_dir: Path, day: str) -> dict:
         day,
         flush_every=config.pe_flush_every(),
         busy=tickflow_sync_busy,
-        stop=worker._stop.is_set,
+        stop=lambda: _stopped(worker),
     )
 
 
-def _execute(name: str, ak, data_dir: Path, today: date, day: str) -> dict:
+def _execute(name: str, worker: SelectionWorker, data_dir: Path, today: date, day: str) -> dict:
+    def stop() -> bool:
+        return _stopped(worker)
+
+    if name == "pe":
+        return _advance(worker, data_dir, day)
     if name == "index":
-        return jobs.sync_indexes(ak, data_dir, day=day)
-    return _run_named(name, ak, data_dir, today)
+        return jobs.sync_indexes(worker._call, data_dir, day=day, stop=stop)
+    return _run_named(name, worker._call, data_dir, today, stop)
 
 
-def _run_bounded(name: str, fn) -> dict:
-    """到点还没返回就记超时。调用方接着跑后面的任务，不再干等这个子任务。"""
+def _run_bounded(worker: SelectionWorker, name: str, fn) -> dict:
+    """到点还没返回就通知线程停下。线程还活着时调用方不再开新线程。"""
     from app.selection_fields.timeouts import task_timeout
 
+    if _still_running(worker):
+        return {"ok": False, "busy": True, "error": "上一个补充字段任务仍在运行"}
+    worker._cancel.clear()
     timeout_s = task_timeout(name)
     holder: dict = {}
 
@@ -213,25 +229,30 @@ def _run_bounded(name: str, fn) -> dict:
             holder["value"] = {"ok": False, "error": str(exc)[:300]}
 
     thread = threading.Thread(target=target, name=f"selection-{name}", daemon=True)
+    worker._inflight = thread
     thread.start()
     thread.join(timeout_s)
     if thread.is_alive():
+        worker._cancel.set()
         label = _TASK_LABELS.get(name, name)
         logger.warning("选股补充字段%s超时（%.0f 秒）", label, timeout_s)
         return {"ok": False, "error": f"{label}任务超时", "timed_out": True}
+    if worker._inflight is thread:
+        worker._inflight = None
+    worker._cancel.clear()
     value = holder.get("value")
     if isinstance(value, dict):
         return value
     return {"ok": False, "error": "任务没有结果"}
 
 
-def _run_named(name: str, ak, data_dir: Path, today: date) -> dict:
+def _run_named(name: str, ak, data_dir: Path, today: date, stop) -> dict:
     if name == "northbound":
-        return jobs.sync_northbound(ak, data_dir)
+        return jobs.sync_northbound(ak, data_dir, stop=stop)
     if name == "holders":
         return jobs.sync_holders(ak, data_dir)
     if name == "index":
-        return jobs.sync_indexes(ak, data_dir)
+        return jobs.sync_indexes(ak, data_dir, stop=stop)
     if name == "unlock":
         return jobs.sync_unlock(ak, data_dir, today)
     return {"ok": False, "error": f"未知任务 {name}"}

@@ -2,6 +2,7 @@
 
 东财函数经 ``call_akshare`` 进共用限流，而且只包住当前线程。
 北向持股改拉季度口径，不再调用已经停更的逐日排行。
+PE(TTM) 先按交易日分页拉全市场，缺的代码才逐只补历史。
 中证指数走中证指数公司，创业板50 走国证，都不是东财。
 每个指数单独落盘。测试传入假的 ``ak``，这里不在模块导入时加载 akshare。
 """
@@ -22,6 +23,7 @@ from app.selection_fields.parse import (
     parse_holders,
     parse_index_members,
     parse_northbound,
+    parse_pe_market,
     parse_pe_ttm,
     parse_unlock_schedule,
 )
@@ -60,7 +62,9 @@ def as_records(frame: Any) -> list[dict]:
 
 def live_ak(name: str, /, **kwargs: Any) -> Any:
     if name == "northbound_quarter":
-        return fetch_northbound_quarter()
+        return fetch_northbound_quarter(stop=kwargs.get("stop"))
+    if name == "pe_market":
+        return fetch_pe_market_page(str(kwargs.get("day") or ""), int(kwargs.get("page") or 1))
     from app.eastmoney.akshare_gate import call_akshare
 
     return call_akshare(name, **kwargs)
@@ -79,26 +83,41 @@ _NORTHBOUND_REFERER = "https://data.eastmoney.com/hsgtV2/hsgtDetail/bkzj.html"
 _NORTHBOUND_PAGE_SIZE = 500
 _NORTHBOUND_MAX_PAGES = 20
 _EMPTY_CODE = 9201
+_PE_REPORT = "RPT_VALUEANALYSIS_DET"
+_PE_PAGE_SIZE = 500
+_PE_MAX_PAGES = 40
+_PE_REFERER = "https://data.eastmoney.com/gzfx/detail/600519.html"
 
 
-def fetch_northbound_quarter() -> list[dict]:
+class SelectionStoppedError(Exception):
+    """当前子任务被要求停下来。不把半截结果写成失败。"""
+
+
+def fetch_northbound_quarter(stop: Callable[[], bool] | None = None) -> list[dict]:
     """最近一个有数据的季度持股。逐日接口自 2024-08 起没有数据，这里不调用它。"""
     dates = _northbound_dates()
     if not dates:
         raise RuntimeError("北向季度日期为空")
     for day in dates:
-        rows = _northbound_rows(day)
+        _raise_if_stopped(stop)
+        rows = _northbound_rows(day, stop=stop)
         if rows:
             return rows
     raise RuntimeError("北向季度持股为空")
 
 
-def sync_northbound(ak: Ak, data_dir: Path | str) -> dict:
+def sync_northbound(
+    ak: Ak,
+    data_dir: Path | str,
+    stop: Callable[[], bool] | None = None,
+) -> dict:
     try:
-        raw = ak("northbound_quarter")
+        raw = ak("northbound_quarter", stop=stop)
         rows = parse_northbound(as_records(raw))
         if not rows:
             raise RuntimeError("北向季度持股为空")
+    except SelectionStoppedError:
+        return {"ok": False, "stopped": True}
     except Exception as exc:  # noqa: BLE001
         message = str(exc)[:300]
         commit(data_dir, "northbound", [], ok=False, error=message)
@@ -120,11 +139,18 @@ def sync_holders(ak: Ak, data_dir: Path | str) -> dict:
     return {"ok": True, "rows": len(rows)}
 
 
-def sync_indexes(ak: Ak, data_dir: Path | str, day: str | None = None) -> dict:
+def sync_indexes(
+    ak: Ak,
+    data_dir: Path | str,
+    day: str | None = None,
+    stop: Callable[[], bool] | None = None,
+) -> dict:
     """每个指数单独落盘。一只失败只保留它自己的上次快照，其它指数照常写入。"""
     failed: list[str] = []
     written = 0
     for code, label, source in INDEXES:
+        if stop is not None and stop():
+            return {"ok": False, "stopped": True, "rows": written}
         meta = read_index_meta(data_dir, code)
         if day and meta.get("status") == "ok" and str(meta.get("as_of") or "") == day:
             written += 1
@@ -175,7 +201,9 @@ def advance_pe(
     busy: Callable[[], bool],
     stop: Callable[[], bool] | None = None,
 ) -> dict:
-    """续跑当天 PE。已完成的代码跳过。一次失败就停，避免熔断时把全市场记成失败。"""
+    """先按交易日分页拉全市场 PE(TTM)，缺的代码再逐只补。单只失败直接跳过。"""
+    from app.eastmoney.client import CircuitOpenError
+
     symbols = listed_symbols(data_dir)
     if not symbols:
         note = "没有股票列表"
@@ -185,19 +213,19 @@ def advance_pe(
 
     checkpoint = load_checkpoint(data_dir)
     if str(checkpoint.get("trade_date") or "") != day:
-        checkpoint = {
-            "trade_date": day,
-            "done": [],
-            "skipped": [],
-            "attempts": {},
-            "total": len(symbols),
-        }
+        checkpoint = {}
     done = {str(item) for item in (checkpoint.get("done") or [])}
     skipped = {str(item) for item in (checkpoint.get("skipped") or [])}
-    attempts = {str(key): int(value) for key, value in (checkpoint.get("attempts") or {}).items()}
-    remaining = [symbol for symbol in symbols if symbol not in done and symbol not in skipped]
+    batch_done = bool(checkpoint.get("batch_done"))
+    batch_page = max(1, int(checkpoint.get("batch_page") or 1))
+    batch_date = str(checkpoint.get("batch_date") or "") or day
+    tried_fallback = bool(checkpoint.get("batch_fallback"))
+    wanted = set(symbols)
     buffer: list[dict] = []
     every = max(1, flush_every)
+
+    def halted() -> bool:
+        return busy() or (stop is not None and stop())
 
     def persist() -> None:
         if buffer:
@@ -209,69 +237,193 @@ def advance_pe(
                 "trade_date": day,
                 "done": sorted(done),
                 "skipped": sorted(skipped),
-                "attempts": attempts,
                 "total": len(symbols),
+                "batch_done": batch_done,
+                "batch_page": batch_page,
+                "batch_date": batch_date,
+                "batch_fallback": tried_fallback,
             },
         )
 
-    for symbol in remaining:
-        if busy() or (stop is not None and stop()):
+    def finish(note: str = "", error: str = "") -> dict:
+        persist()
+        payload = _pe_status(done, skipped, symbols, note)
+        if error:
+            payload["error"] = error
+        elif payload["complete"] and batch_date and batch_date != day:
+            payload["note"] = f"PE(TTM) 截至 {batch_date}"
+            update_meta(data_dir, "pe_ttm", status="ok", note=payload["note"])
+        return payload
+
+    if not batch_done:
+        while not batch_done:
+            if halted():
+                return finish()
+            try:
+                page = ak("pe_market", day=batch_date, page=batch_page)
+            except CircuitOpenError:
+                return finish(error="eastmoney 熔断冷却中")
+            except Exception as exc:  # noqa: BLE001
+                return finish(error=str(exc)[:300])
+            if not isinstance(page, dict):
+                return finish(error="PE(TTM) 全市场分页返回异常")
+            rows = page.get("rows") or []
+            pages = int(page.get("pages") or 0)
+            if page.get("empty") or pages <= 0 or not isinstance(rows, list) or not rows:
+                latest = str(page.get("latest") or "")
+                if batch_page == 1 and not tried_fallback and latest and latest != batch_date:
+                    tried_fallback = True
+                    batch_date = latest
+                    batch_page = 1
+                    persist()
+                    continue
+                return finish(error="PE(TTM) 全市场分页为空")
+            if pages > _PE_MAX_PAGES:
+                return finish(error="PE(TTM) 全市场页数异常")
+            for item in parse_pe_market(rows):
+                symbol = str(item["symbol"])
+                if symbol not in wanted or symbol in done or symbol in skipped:
+                    continue
+                pe = item.get("pe_ttm")
+                if pe is None:
+                    skipped.add(symbol)
+                    continue
+                buffer.append({"symbol": symbol, "pe_ttm": pe, "as_of": batch_date})
+                done.add(symbol)
+            if batch_page >= pages:
+                batch_done = True
+            else:
+                batch_page += 1
             persist()
-            break
+
+    for symbol in symbols:
+        if symbol in done or symbol in skipped:
+            continue
+        if halted():
+            return finish()
         try:
             pe = sync_pe_symbol(ak, symbol)
+        except CircuitOpenError:
+            return finish(error="eastmoney 熔断冷却中")
         except Exception:  # noqa: BLE001
-            attempts[symbol] = attempts.get(symbol, 0) + 1
-            if attempts[symbol] >= 2:
-                skipped.add(symbol)
-                attempts.pop(symbol, None)
+            skipped.add(symbol)
             persist()
-            break
-        buffer.append({"symbol": symbol, "pe_ttm": pe, "as_of": day})
+            continue
+        if pe is None:
+            skipped.add(symbol)
+            persist()
+            continue
+        buffer.append({"symbol": symbol, "pe_ttm": pe, "as_of": batch_date or day})
         done.add(symbol)
-        attempts.pop(symbol, None)
         if len(buffer) >= every:
             persist()
-    else:
-        persist()
+    return finish()
 
-    finished = len(done) + len(skipped)
+
+def fetch_pe_market_page(day: str, page: int) -> dict:
+    """估值分析按交易日分页。字段是 PE_TTM，不拉每只股票的历史。"""
+    if page < 1 or page > _PE_MAX_PAGES:
+        raise RuntimeError("PE(TTM) 全市场页数异常")
+    payload = _em_json(
+        {
+            "reportName": _PE_REPORT,
+            "columns": "SECURITY_CODE,TRADE_DATE,PE_TTM",
+            "pageNumber": str(page),
+            "pageSize": str(_PE_PAGE_SIZE),
+            "sortColumns": "SECURITY_CODE",
+            "sortTypes": "1",
+            "source": "WEB",
+            "client": "WEB",
+            "filter": f"(TRADE_DATE='{day}')",
+        },
+        what="PE(TTM)",
+        referer=_PE_REFERER,
+    )
+    if not payload.get("success"):
+        if int(payload.get("code") or 0) == _EMPTY_CODE:
+            latest = _latest_pe_day() if page == 1 else ""
+            return {"rows": [], "pages": 0, "empty": True, "latest": latest}
+        raise RuntimeError(str(payload.get("message") or "PE(TTM) 全市场分页失败")[:300])
+    result = payload.get("result") or {}
+    rows = result.get("data") or []
+    if not isinstance(rows, list):
+        raise RuntimeError("PE(TTM) 全市场分页返回异常")
+    pages = int(result.get("pages") or 0)
+    if pages > _PE_MAX_PAGES:
+        raise RuntimeError("PE(TTM) 全市场页数异常")
+    return {"rows": rows, "pages": pages, "empty": pages <= 0, "latest": ""}
+
+
+def _latest_pe_day() -> str:
+    """会话日还没有估值时，用一只长期有数据的代码看最近交易日。"""
+    payload = _em_json(
+        {
+            "reportName": _PE_REPORT,
+            "columns": "TRADE_DATE",
+            "pageNumber": "1",
+            "pageSize": "1",
+            "sortColumns": "TRADE_DATE",
+            "sortTypes": "-1",
+            "source": "WEB",
+            "client": "WEB",
+            "filter": '(SECURITY_CODE="000001")',
+        },
+        what="PE(TTM)",
+        referer=_PE_REFERER,
+    )
+    if not payload.get("success"):
+        return ""
+    data = (payload.get("result") or {}).get("data") or []
+    if not data or not isinstance(data[0], dict):
+        return ""
+    return _day_text(data[0].get("TRADE_DATE"))
+
+
+def _pe_status(done: set[str], skipped: set[str], symbols: list[str], note: str) -> dict:
     return {
-        "complete": finished >= len(symbols),
+        "complete": len(done) + len(skipped) >= len(symbols),
         "done": len(done),
         "total": len(symbols),
-        "note": "",
+        "note": note,
     }
 
 
-def _em_json(params: dict) -> dict:
+def _raise_if_stopped(stop: Callable[[], bool] | None) -> None:
+    if stop is not None and stop():
+        raise SelectionStoppedError
+
+
+def _em_json(params: dict, *, what: str, referer: str | None = None) -> dict:
     from app.eastmoney.client import em_get
     from app.selection_fields.timeouts import REQUEST_TIMEOUT
 
     response = em_get(
         _NORTHBOUND_URL,
         params=params,
-        headers={"Referer": _NORTHBOUND_REFERER},
+        headers={"Referer": referer or _NORTHBOUND_REFERER},
         timeout=REQUEST_TIMEOUT,
     )
     reader = getattr(response, "json", None)
     payload = reader() if callable(reader) else None
     if not isinstance(payload, dict):
-        raise RuntimeError("北向季度接口返回异常")
+        raise RuntimeError(f"{what}返回异常")
     return payload
 
 
 def _northbound_dates() -> list[str]:
-    payload = _em_json({
-        "reportName": "RPT_MUTUAL_BOARD_HOLDRANKDATE",
-        "columns": "TRADE_DATE,DATE_TYPE",
-        "pageNumber": "1",
-        "pageSize": "10",
-        "sortColumns": "TRADE_DATE",
-        "sortTypes": "-1",
-        "source": "WEB",
-        "client": "WEB",
-    })
+    payload = _em_json(
+        {
+            "reportName": "RPT_MUTUAL_BOARD_HOLDRANKDATE",
+            "columns": "TRADE_DATE,DATE_TYPE",
+            "pageNumber": "1",
+            "pageSize": "10",
+            "sortColumns": "TRADE_DATE",
+            "sortTypes": "-1",
+            "source": "WEB",
+            "client": "WEB",
+        },
+        what="北向季度接口",
+    )
     if not payload.get("success"):
         if int(payload.get("code") or 0) == _EMPTY_CODE:
             return []
@@ -286,24 +438,28 @@ def _northbound_dates() -> list[str]:
     return days
 
 
-def _northbound_rows(day: str) -> list[dict]:
+def _northbound_rows(day: str, stop: Callable[[], bool] | None = None) -> list[dict]:
     rows: list[dict] = []
     page = 1
     pages = 1
     while page <= pages:
+        _raise_if_stopped(stop)
         if page > _NORTHBOUND_MAX_PAGES:
             raise RuntimeError("北向季度持股页数异常")
-        payload = _em_json({
-            "reportName": "RPT_MUTUAL_HOLDRANK_NEW",
-            "columns": "SECURITY_CODE,SECUCODE,HOLD_DATE,FREE_SHARES_RATIO",
-            "pageNumber": str(page),
-            "pageSize": str(_NORTHBOUND_PAGE_SIZE),
-            "sortColumns": "HOLD_MARKET_CAP",
-            "sortTypes": "-1",
-            "source": "WEB",
-            "client": "WEB",
-            "filter": f"(HOLD_DATE='{day}')",
-        })
+        payload = _em_json(
+            {
+                "reportName": "RPT_MUTUAL_HOLDRANK_NEW",
+                "columns": "SECURITY_CODE,SECUCODE,HOLD_DATE,FREE_SHARES_RATIO",
+                "pageNumber": str(page),
+                "pageSize": str(_NORTHBOUND_PAGE_SIZE),
+                "sortColumns": "HOLD_MARKET_CAP",
+                "sortTypes": "-1",
+                "source": "WEB",
+                "client": "WEB",
+                "filter": f"(HOLD_DATE='{day}')",
+            },
+            what="北向季度接口",
+        )
         if not payload.get("success"):
             if page == 1 and int(payload.get("code") or 0) == _EMPTY_CODE:
                 return []
