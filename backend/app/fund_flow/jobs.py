@@ -572,18 +572,42 @@ def etf_share_history_dates(
     return days
 
 
+def local_trading_days(data_dir: Path) -> list[date]:
+    """本地日 K 分区（kline_daily/date=YYYY-MM-DD）即交易日历。"""
+    root = Path(data_dir) / "kline_daily"
+    if not root.exists():
+        return []
+    found: list[date] = []
+    for path in root.glob("date=*"):
+        try:
+            found.append(date.fromisoformat(path.name.removeprefix("date=")))
+        except ValueError:
+            continue
+    return sorted(found)
+
+
+def _is_empty_table_error(exc: BaseException) -> bool:
+    """akshare 在休市日拿到空表时会抛「None of [Index(...)] are in the [columns]」。"""
+    return isinstance(exc, KeyError) and "are in the [columns]" in str(exc)
+
+
 def _compact(day: str) -> str:
     return day.replace("-", "")
 
 
 def _load_sse_shares(clients, trade_date: str, breaker: CircuitBreaker, sleeper) -> list[dict]:
     compact = _compact(trade_date)
-    raw = call_with_retry(
-        "akshare",
-        lambda: clients.ak("fund_etf_scale_sse", date=compact),
-        breaker,
-        sleeper=sleeper,
-    )
+
+    def fetch() -> list[dict]:
+        try:
+            return clients.ak("fund_etf_scale_sse", date=compact)
+        except KeyError as exc:
+            # 休市日空表不是源故障，不能算进熔断。
+            if _is_empty_table_error(exc):
+                return []
+            raise
+
+    raw = call_with_retry("akshare", fetch, breaker, sleeper=sleeper)
     return [
         row for row in normalize.normalize_etf_shares(raw)
         if row["trade_date"] == trade_date
@@ -632,7 +656,15 @@ def backfill_etf_share_history(
     known_days: list[date] | None = None,
     today: date | None = None,
 ) -> RunResult:
-    """回补 ``start``（默认 2025-10-10）到 ``end`` 的沪深 ETF 份额。"""
+    """回补 ``start``（默认 2025-10-10）到 ``end`` 的沪深 ETF 份额。
+
+    没传 ``known_days`` 时先用本地日 K 分区当交易日历，避开节假日；
+    日历覆盖不到起点时才退回工作日（节假日空表由 ``_load_sse_shares`` 兜住）。
+    """
+    if known_days is None:
+        calendar = local_trading_days(data_dir)
+        if calendar and min(calendar) <= date.fromisoformat(start):
+            known_days = calendar
     return backfill_etf_shares(
         data_dir,
         clients,

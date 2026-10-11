@@ -1283,3 +1283,85 @@ def test_board_gap_note_labels_are_human_readable() -> None:
     assert query.board_gap_note([]) is None
     assert query.board_gap_note(["sz_main"]) == "上游个股资金榜未覆盖：深市主板"
     assert "深市主板" in query.board_gap_note(["sz_main", "bj"])
+
+
+def test_etf_share_history_skips_holidays_without_tripping_breaker(tmp_path):
+    calls: list[str] = []
+
+    class _Clients:
+        def ak(self, name, **kwargs):
+            if name == "fund_etf_scale_sse":
+                day = kwargs["date"]
+                calls.append(day)
+                if day in {"20260101", "20260102"}:
+                    raise KeyError("None of [Index(['基金代码'], dtype='str')] are in the [columns]")
+                iso = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+                return [{"基金代码": "510300", "基金简称": "300ETF", "统计日期": iso, "基金份额": 100.0}]
+            return []
+
+    breaker = CircuitBreaker("akshare", failure_limit=2)
+    res = jobs.backfill_etf_shares(
+        tmp_path, _Clients(), trade_dates=["2026-01-01", "2026-01-02", "2026-01-05"],
+        breaker=breaker, sleeper=lambda _s: None,
+    )
+    assert breaker.allow()
+    assert not any("fund_etf_scale_sse" in e for e in res.errors)
+    assert "20260105" in calls
+
+
+def test_etf_share_history_uses_local_calendar(tmp_path):
+    for day in ("2025-12-31", "2026-01-05"):
+        (tmp_path / "kline_daily" / f"date={day}").mkdir(parents=True)
+    seen: list[str] = []
+    orig = jobs.backfill_etf_shares
+    try:
+        jobs.backfill_etf_shares = (
+            lambda *a, trade_dates, **k: seen.extend(trade_dates) or jobs.RunResult(kind="etf_shares")
+        )
+        jobs.backfill_etf_share_history(
+            tmp_path, None, breaker=None, start="2025-12-31", end="2026-01-05",
+        )
+    finally:
+        jobs.backfill_etf_shares = orig
+    assert seen == ["2025-12-31", "2026-01-05"]
+
+
+def test_etf_share_history_falls_back_to_weekdays_when_calendar_misses_start(tmp_path):
+    """本地日 K 盖不住回补起点时，仍按工作日请求，节假日交给空表兜底。"""
+    (tmp_path / "kline_daily" / "date=2026-01-05").mkdir(parents=True)
+    seen: list[str] = []
+    orig = jobs.backfill_etf_shares
+
+    def _capture(*_args, trade_dates, **_kwargs):
+        seen.extend(trade_dates)
+        return jobs.RunResult(kind="etf_shares")
+
+    try:
+        jobs.backfill_etf_shares = _capture
+        jobs.backfill_etf_share_history(
+            tmp_path, None, breaker=None, start="2026-01-01", end="2026-01-05",
+        )
+    finally:
+        jobs.backfill_etf_shares = orig
+    assert seen == ["2026-01-01", "2026-01-02", "2026-01-05"]
+
+
+def test_etf_share_sse_other_keyerror_still_opens_breaker(tmp_path):
+    """不是休市空表的 KeyError 仍算源故障，该计入熔断。"""
+
+    class _Clients:
+        def ak(self, name, **kwargs):
+            if name == "fund_etf_scale_sse":
+                raise KeyError("基金代码")
+            return []
+
+    breaker = CircuitBreaker("akshare", failure_limit=2)
+    res = jobs.backfill_etf_shares(
+        tmp_path,
+        _Clients(),
+        trade_dates=["2026-01-05"],
+        breaker=breaker,
+        sleeper=lambda _s: None,
+    )
+    assert not breaker.allow()
+    assert any("fund_etf_scale_sse" in item for item in res.errors)
