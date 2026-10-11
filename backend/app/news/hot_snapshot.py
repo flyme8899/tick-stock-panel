@@ -16,8 +16,16 @@ from app.market_time import cn_now, current_trading_day
 
 logger = logging.getLogger(__name__)
 
-# 和调度间隔一致。超过这个时间的快照仍可返回，同时触发一次重算。
+# 后台循环的基础间隔。计算本身远比这慢时（冷算含两批模型调用，实测 ~282 秒），
+# 用它当「多旧算过期」会把刚发布的快照立刻判成 stale，请求路径于是每次都触发
+# 重算。真正的过期阈值由 _stale_seconds() 按上一轮耗时抬高，这里只作下限。
 HOT_REFRESH_SECONDS = 300
+# 过期阈值上限：再慢也不把快照「保鲜」到 20 分钟以上，否则盘中数据会明显滞后。
+HOT_REFRESH_MAX_SECONDS = 1200
+# 过期阈值至少给「上一轮耗时」的这么多倍，避免刚算完就判过期。1.5 倍留出余量。
+_STALE_COST_FACTOR = 1.5
+
+_LAST_COST_S = 0.0
 
 _LOCK = threading.Lock()
 _COMPUTE = threading.Lock()
@@ -132,7 +140,12 @@ def _compute_once() -> None:
     from app.news.hot_events import build_top_hot_events
     from app.news.service import get_store
 
+    import time
+
+    global _LAST_COST_S
+    started = time.monotonic()
     snapshot = build_top_hot_events(cn_now(), get_store(), refresh=True)
+    _LAST_COST_S = time.monotonic() - started
     publish_hot_snapshot(snapshot, persist=True)
 
 
@@ -155,7 +168,17 @@ def _is_stale(snapshot: dict) -> bool:
     if parsed is None:
         return True
     age = (cn_now() - parsed).total_seconds()
-    return age >= HOT_REFRESH_SECONDS
+    return age >= _stale_seconds()
+
+
+def _stale_seconds() -> float:
+    """过期阈值：取「基础间隔」和「上一轮耗时 ×1.5」的较大者，封顶 20 分钟。
+
+    冷算 282 秒时固定 300 秒阈值会让快照刚发布就被判过期，请求路径每次触发重算。
+    按实际耗时抬高阈值后，快照在下一次算完之前保持 ready。
+    """
+    floor = max(HOT_REFRESH_SECONDS, _LAST_COST_S * _STALE_COST_FACTOR)
+    return min(floor, HOT_REFRESH_MAX_SECONDS)
 
 
 def _parse_stamp(value) -> datetime | None:

@@ -316,7 +316,10 @@ def test_build_overview_cache_date_today_no_double_count() -> None:
 
     class _TodayRepo(_FakeRepo):
         def get_enriched_latest(self):
-            return self._df, date.today()
+            # 必须与实现同用 cn_today(): 实现按北京日切「今天」, 用宿主
+            # date.today() 在 UTC 16-24 点窗口会与北京日错开一天, 断言随
+            # runner 时区/时刻摇摆。
+            return self._df, cn_today()
 
     df = pl.DataFrame(
         {
@@ -341,7 +344,8 @@ def test_build_overview_negative_side_stricter_threshold() -> None:
 
     class _TodayRepo(_FakeRepo):
         def get_enriched_latest(self):
-            return self._df, date.today()
+            # 同上: 与 cn_today() 对齐, 避免 UTC runner 上跨日误叠加实时涨跌。
+            return self._df, cn_today()
 
     df = pl.DataFrame(
         {

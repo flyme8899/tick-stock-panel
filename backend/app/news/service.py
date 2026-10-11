@@ -88,6 +88,23 @@ _LEXICON: tuple[float, Lexicon] | None = None
 _LLM_TIMES: list[float] = []
 _LLM_LOCK = threading.Lock()
 _LLM_PER_HOUR = 10
+# 热门要点（副标题）和个股抽取共用同一个进程，但用途不同：热门要点一轮就要问
+# 最多 20 条（分两批），个股抽取是一次外文轮询可能几十条。挤在一个小时额度里，
+# 热门要点经常轮不到 —— 线上表现为「有要点的 0 条」，日志里也没有拒绝记录。
+# 给它单独开一份额度，两个用途互不抢占。
+_HOT_TITLE_TIMES: list[float] = []
+_HOT_TITLE_LOCK = threading.Lock()
+# 一次 _compute 里事件常上百条，按 20 条一批要问 5~6 批，每批没通过还要重试一轮，
+# 一轮下来最少 10~12 次。额度设 16 时，同小时内再算一次就轮不到后面的批次 ——
+# 线上表现为「排在前面的批次有要点，靠后的整批 0 条」。留出两轮完整算量
+# （2 × 12 = 24），让快照重算不至于把后面的批次饿死。热门要点是低频后台任务
+# （5 分钟一次、结果还会缓存），不至于打爆上游。
+#
+# 早先这里是 16，是按「40 条一批、一轮 8 次」估的；批大小后来缩到 20（40 条一批
+# 时后半段条目会集中留空），基础用量翻倍，16 就不够两轮了。加上上游偶发返回
+# 整批空 title 需要原地重发/拆半兜底，更吃额度 —— 实测额度一旦打光，后面的批次
+# 全部「未询问」，展示前 20 的覆盖率直接掉到 5/20。
+_HOT_TITLE_PER_HOUR = 28
 # 一次外文轮询可能带上几十条新稿。模型只处理前几条，避免单轮把额度打光。
 _FOREIGN_LLM_PER_POLL = 10
 # 本地维表里的 ETF / 股票集合。请求线程不扫盘，大约 10 分钟复用一次。
@@ -442,6 +459,7 @@ def public_hot_event(event: dict) -> dict:
         "mapping": mapping,
         "headline": headline or (headlines[0] if headlines else ""),
         "headlines": headlines[:3],
+        "subtitle": str(event.get("subtitle") or ""),
         "mentions": int(event.get("mentions") or 0),
         "red_count": int(event.get("red_count") or 0),
         "source_count": int(event.get("source_count") or 0),
@@ -1326,7 +1344,38 @@ def _reserve_llm_call() -> bool:
         return True
 
 
-def _llm_text(prompt: str, *, max_tokens: int = 400) -> str:
+def reserve_hot_title_call() -> bool:
+    """热门要点单独占一份小时额度，不和个股抽取抢。"""
+    now = time.monotonic()
+    with _HOT_TITLE_LOCK:
+        while _HOT_TITLE_TIMES and now - _HOT_TITLE_TIMES[0] > 3600:
+            _HOT_TITLE_TIMES.pop(0)
+        if len(_HOT_TITLE_TIMES) >= _HOT_TITLE_PER_HOUR:
+            return False
+        _HOT_TITLE_TIMES.append(now)
+        return True
+
+
+def hot_title_calls_left() -> int:
+    """本小时热门要点还剩几次调用额度（只读，不占额度）。
+
+    给上游调度的「预算守卫」用：一批要点在遇到脏响应时想做兜底重发，得先知道
+    还剩多少额度，别把后面批次的首轮额度吃光。
+    """
+    now = time.monotonic()
+    with _HOT_TITLE_LOCK:
+        while _HOT_TITLE_TIMES and now - _HOT_TITLE_TIMES[0] > 3600:
+            _HOT_TITLE_TIMES.pop(0)
+        return max(0, _HOT_TITLE_PER_HOUR - len(_HOT_TITLE_TIMES))
+
+
+def _llm_text(
+    prompt: str,
+    *,
+    max_tokens: int = 400,
+    prefer_final_answer: bool = False,
+    timeout: float = 30,
+) -> str:
     try:
         import asyncio
 
@@ -1336,7 +1385,8 @@ def _llm_text(prompt: str, *, max_tokens: int = 400) -> str:
             [{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=max_tokens,
-            timeout=30,
+            timeout=timeout,
+            prefer_final_answer=prefer_final_answer,
         ))
     except Exception as exc:  # noqa: BLE001
         logger.info("资讯 LLM 抽取失败: %s", exc)

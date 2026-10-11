@@ -306,6 +306,7 @@ async def generate_ai_text(
     temperature: float | None = 0.3,
     max_tokens: int | None = 3000,
     timeout: float = 180.0,
+    prefer_final_answer: bool = False,
 ) -> str:
     """Return a complete AI response from the currently configured provider.
 
@@ -323,6 +324,7 @@ async def generate_ai_text(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        prefer_final_answer=prefer_final_answer,
     )
 
 
@@ -462,12 +464,14 @@ async def _run_openai_once(
     temperature: float | None,
     max_tokens: int | None,
     timeout: float,
+    prefer_final_answer: bool = False,
 ) -> str:
     message = await _run_openai_message_once(
         messages,
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        prefer_final_answer=prefer_final_answer,
     )
     if message is None:
         return ""
@@ -481,6 +485,7 @@ async def _run_openai_message_once(
     max_tokens: int | None,
     timeout: float,
     tools: Sequence[dict] | None = None,
+    prefer_final_answer: bool = False,
 ):
     """一次 OpenAI create() 调用, 返回完整 message (含 tool_calls, 而非仅 content)。
 
@@ -493,24 +498,35 @@ async def _run_openai_message_once(
 
     client = _openai_client(ai_key, timeout)
     model = current_ai_model()
+    base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
     req_messages = list(messages)
-    kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens, tools=tools)
-    while True:
-        try:
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=req_messages,
-                **kwargs,
-            )
-            break
-        except Exception as exc:
-            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
-            if retry_kwargs is not None:
-                kwargs = retry_kwargs
-                continue
-            if _is_openai_transport_error(exc):
-                raise RuntimeError(_format_openai_error(exc)) from exc
-            raise
+    kwargs = _openai_kwargs(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model=model,
+        base_url=base_url,
+        prefer_final_answer=prefer_final_answer,
+        tools=tools,
+    )
+    try:
+        while True:
+            try:
+                resp = await client.chat.completions.create(
+                    model=model,
+                    messages=req_messages,
+                    **kwargs,
+                )
+                break
+            except Exception as exc:
+                retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+                if retry_kwargs is not None:
+                    kwargs = retry_kwargs
+                    continue
+                if _is_openai_transport_error(exc):
+                    raise RuntimeError(_format_openai_error(exc)) from exc
+                raise
+    finally:
+        await _close_client(client)
     if not resp.choices:
         return None
     return resp.choices[0].message
@@ -540,32 +556,35 @@ async def _stream_openai(
         base_url=base_url,
         prefer_final_answer=prefer_final_answer,
     )
-    while True:
+    try:
+        while True:
+            try:
+                stream = await client.chat.completions.create(
+                    model=model,
+                    messages=req_messages,
+                    **kwargs,
+                    stream=True,
+                )
+                break
+            except Exception as exc:
+                # 流尚未开始 yield, 可安全移除被拒绝的可选参数后重建。
+                retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+                if retry_kwargs is not None:
+                    kwargs = retry_kwargs
+                    continue
+                if _is_openai_transport_error(exc):
+                    raise RuntimeError(_format_openai_error(exc)) from exc
+                raise
+
         try:
-            stream = await client.chat.completions.create(
-                model=model,
-                messages=req_messages,
-                **kwargs,
-                stream=True,
-            )
-            break
+            async for piece in _iter_openai_text(stream):
+                yield piece
         except Exception as exc:
-            # 流尚未开始 yield, 可安全移除被拒绝的可选参数后重建。
-            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
-            if retry_kwargs is not None:
-                kwargs = retry_kwargs
-                continue
             if _is_openai_transport_error(exc):
                 raise RuntimeError(_format_openai_error(exc)) from exc
             raise
-
-    try:
-        async for piece in _iter_openai_text(stream):
-            yield piece
-    except Exception as exc:
-        if _is_openai_transport_error(exc):
-            raise RuntimeError(_format_openai_error(exc)) from exc
-        raise
+    finally:
+        await _close_client(client)
 
 
 _LENGTH_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
@@ -629,6 +648,20 @@ def _openai_client(api_key: str, timeout: float):
         max_retries=2,
         default_headers={"User-Agent": user_agent},
     )
+
+
+async def _close_client(client) -> None:
+    """关闭 AsyncOpenAI/httpx 连接池。
+
+    后台线程用 asyncio.run() 跑一次性调用时，客户端若不显式关闭，靠 __del__ 回收
+    会在事件循环已经关闭之后才去 aclose()，抛 "Event loop is closed" 刷日志（实测
+    热门要点后台刷新反复出现）。在循环还活着时主动关掉就干净了。关闭失败不能影响
+    主流程（结果已经拿到），只忽略。
+    """
+    try:
+        await client.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # 不同模型可能拒绝 temperature 或 reasoning_effort。这里不靠模型名猜测,
@@ -695,7 +728,12 @@ def _openai_retry_kwargs(exc: Exception, kwargs: dict) -> dict | None:
     return None
 
 
-_DEEPSEEK_V4_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+# DeepSeek V4 系列默认开思考模式。模型名的版本后缀会变（deepseek-v4-flash、
+# deepseek-v4.1-flash、后续的 v4.2…），中转服务也不会用官方主机名，所以按前缀
+# 匹配模型、不限定 base_url。判定过窄会让 extra_body 永远注不进去：线上跑的是
+# deepseek-v4.1-flash @ tokenhub.tencentmaas.com，两个旧条件都不满足，思考把
+# max_tokens 全吃掉、正文返回空串。参数被上游拒时仍由 _is_thinking_body_rejected 兜底。
+_DEEPSEEK_V4_PREFIX = "deepseek-v4"
 
 
 def _openai_kwargs(
@@ -721,11 +759,7 @@ def _openai_kwargs(
         reasoning_effort = current_openai_reasoning_effort()
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
-    if (
-        prefer_final_answer
-        and model.strip().lower() in _DEEPSEEK_V4_MODELS
-        and urlsplit(base_url.strip()).hostname == "api.deepseek.com"
-    ):
+    if prefer_final_answer and model.strip().lower().startswith(_DEEPSEEK_V4_PREFIX):
         # DeepSeek V4 defaults to thinking mode. For report-style tasks the
         # hidden reasoning shares max_tokens with the final answer and can
         # exhaust the budget before any visible content is emitted.
@@ -802,7 +836,7 @@ def _openai_error_detail(exc: Exception) -> str:
         content_type = response.headers.get("content-type", "").lower()
         try:
             text = response.text
-        except Exception:
+        except Exception:  # noqa: BLE001
             text = ""
     if not text and isinstance(body, str):
         text = body

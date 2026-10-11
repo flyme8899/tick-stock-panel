@@ -393,7 +393,7 @@ async def test_generate_ai_text_clamps_max_tokens_to_config_cap(monkeypatch):
     monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 3000)
     monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 64000)
 
-    async def fake_run(messages, *, temperature, max_tokens, timeout):
+    async def fake_run(messages, *, temperature, max_tokens, timeout, prefer_final_answer=False):
         captured["max_tokens"] = max_tokens
         return "ok"
 
@@ -413,7 +413,7 @@ async def test_generate_ai_text_default_cap_and_none_passthrough(monkeypatch):
     monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 4000)
     monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 64000)
 
-    async def fake_run(messages, *, temperature, max_tokens, timeout):
+    async def fake_run(messages, *, temperature, max_tokens, timeout, prefer_final_answer=False):
         captured["max_tokens"] = max_tokens
         return "ok"
 
@@ -718,3 +718,23 @@ async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
     assert "--ephemeral" not in args
     assert "exec" in args and "--skip-git-repo-check" in args
     assert args[args.index("--model") + 1] == "gpt-5.6-sol"
+
+
+@pytest.mark.asyncio
+async def test_close_client_closes_and_swallows_errors():
+    """后台线程 asyncio.run 结束后要主动关连接池，关失败也不能影响结果。"""
+    closed = {"n": 0}
+
+    class FakeClient:
+        async def close(self):
+            closed["n"] += 1
+
+    await ai_provider._close_client(FakeClient())
+    assert closed["n"] == 1
+
+    class BrokenClient:
+        async def close(self):
+            raise RuntimeError("Event loop is closed")
+
+    # 关闭失败只忽略，不向上抛（结果已经拿到，不该因清理失败而报错）。
+    await ai_provider._close_client(BrokenClient())

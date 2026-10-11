@@ -15,10 +15,13 @@ from app.news.hot_events import (
     _ensure_shown_name,
     _fallback_title_ok,
     _first_credible_title,
+    _first_original_title,
     _headline_tier,
     _keyword_title,
     _llm_title_ok,
     _llm_title_reject_reason,
+    _original_reject_reason,
+    _parse_title_batch,
     _subtitle_reject_reason,
 )
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
@@ -234,14 +237,14 @@ def _publish(hour: int, minute: int) -> datetime:
     return datetime(2026, 10, 9, hour, minute, tzinfo=CN_TZ)
 
 
-def _insert(source_id: str, title: str, hour: int, minute: int, source: str = "cls", level: str = "") -> None:
+def _insert(source_id: str, title: str, hour: int, minute: int, source: str = "cls", level: str = "", clean: str = "") -> None:
     status = get_store().insert_item(
         source=source,
         source_id=source_id,
         published_at=_publish(hour, minute),
         author="",
         title=title,
-        clean_text=title,
+        clean_text=clean or title,
         raw=None,
         content_hash=source_id,
         url="",
@@ -470,26 +473,32 @@ def test_realistic_batch_keeps_subtitles(tmp_path, monkeypatch):
     from app.news import service as news_service
 
     reset_store_for_tests(tmp_path / "subtitle-batch.sqlite")
+    # (source_id, 主标题, 期望要点, 正文)。线上 clean_text 里有正文，要点引用的
+    # 数字（11月、0.36 美元、30%）都来自正文。这里必须带上正文，否则「要点事实
+    # 必须出自素材」这道核对会把正确要点判成编造 —— 那正是要防的误杀。
     samples = (
         (
             "wti",
             "WTI原油期货上涨报91.85美元",
             "WTI11月原油期货收涨0.36美元报91.85美元/桶",
+            "WTI11月原油期货收涨0.36美元报91.85美元/桶，市场关注供需变化。",
         ),
         (
             "apple",
             "苹果宣布追加iPhone订单",
             "苹果iPhoneDuo加单30%，iPhone18Pro系列总订单量未变",
+            "苹果iPhoneDuo加单30%，iPhone18Pro系列总订单量未变。",
         ),
         (
             "diesel",
             "财政部宣布柴油协议触发制裁",
             "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法",
+            "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法。",
         ),
     )
-    for index, (source_id, title, _subtitle) in enumerate(samples):
-        _insert(source_id, title, 9, 10 + index)
-        _insert(source_id + "-b", title, 9, 20 + index, source="wscn")
+    for index, (source_id, title, _subtitle, body) in enumerate(samples):
+        _insert(source_id, title, 9, 10 + index, clean=body)
+        _insert(source_id + "-b", title, 9, 20 + index, source="wscn", clean=body)
 
     def fake(prompt: str, **_kwargs: object) -> str:
         rows = []
@@ -509,14 +518,172 @@ def test_realistic_batch_keeps_subtitles(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", fake)
-    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     events = top_hot_events(NOW)["events"]
     subtitles = [str(event.get("subtitle") or "") for event in events]
     assert events
     assert all(subtitles)
-    for _source_id, _title, subtitle in samples:
+    for _source_id, _title, subtitle, _body in samples:
         assert subtitle in subtitles
+
+
+def test_subjectless_media_headline_uses_the_next_source():
+    """去掉报名后没有主体的口号，改用下一条来源，不把「经济日报评论」留在主标题上。"""
+    slogan = "经济日报评论：培育赛事经济新增长极"
+    nxt = "财政部出台赛事经济扶持政策"
+    assert _display_original("经济日报：培育赛事经济新增长极") == "培育赛事经济新增长极"
+    assert _original_reject_reason("培育赛事经济新增长极") == "缺少主体或动作"
+    assert _first_original_title([("cls", slogan), ("wscn", nxt)]) == nxt
+    assert _first_original_title([("cls", slogan)]) == ""
+
+
+def test_subtitle_is_keyed_by_event_id_not_list_order():
+    """模型把 WTI 写在数组前面时，仍按 id 对上，不能安到纳斯达克那条上。"""
+    nasdaq = "纳斯达克金龙中国指数上涨"
+    oil = "WTI原油期货上涨报91.85美元"
+    events = [
+        {"_batch_id": "1", "name": nasdaq, "headline": nasdaq, "headlines": [nasdaq]},
+        {"_batch_id": "2", "name": oil, "headline": oil, "headlines": [oil]},
+    ]
+    swapped = (
+        '{"events":['
+        '{"id":"2","title":"WTI原油期货收涨至91.85美元"},'
+        '{"id":"1","title":"纳斯达克金龙中国指数收涨"}'
+        ']}'
+    )
+    parsed = _parse_title_batch(swapped, events)
+    assert parsed["1"]["title"] == "纳斯达克金龙中国指数收涨"
+    assert parsed["2"]["title"] == "WTI原油期货收涨至91.85美元"
+    assert "WTI" not in parsed["1"]["title"]
+    shifted = (
+        '{"events":['
+        '{"title":"WTI原油期货收涨至91.85美元"},'
+        '{"title":"纳斯达克金龙中国指数收涨"}'
+        ']}'
+    )
+    assert _parse_title_batch(shifted, events) == {}
+
+
+def test_subtitle_repeats_are_dropped_and_listing_keeps_the_field(tmp_path, monkeypatch):
+    """要点和主标题重复就留空。页面接口要把剩下的要点带出去。漏掉的编号不要记成永久未采用。"""
+    import json
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+    from app.news.service import hot_event_listing
+
+    same = {
+        "name": "航运公司上调运价",
+        "headline": "航运公司上调运价",
+        "headlines": ["航运公司上调运价"],
+        "_candidates": [{"source": "cls", "title": "航运公司上调运价"}],
+        "subtitle": "上调运价",
+    }
+    _ensure_shown_name(same)
+    assert same["name"] == "航运公司上调运价"
+    assert same["subtitle"] == ""
+    distinct = {
+        "name": "旧",
+        "headline": "航运公司上调运价",
+        "headlines": ["航运公司上调运价"],
+        "_candidates": [{"source": "cls", "title": "航运公司上调运价"}],
+        "subtitle": "运价上调影响集运公司",
+    }
+    _ensure_shown_name(distinct)
+    assert distinct["subtitle"] == "运价上调影响集运公司"
+
+    reset_store_for_tests(tmp_path / "subtitle-id.sqlite")
+    oil = "WTI原油期货上涨报91.85美元"
+    nasdaq = "纳斯达克金龙中国指数上涨"
+    _insert("oil", oil, 9, 10)
+    _insert("oil-b", oil, 9, 12, source="wscn")
+    _insert("nasdaq", nasdaq, 9, 11)
+    _insert("nasdaq-b", nasdaq, 9, 13, source="wscn")
+    prompts: list[str] = []
+    flags: list[bool] = []
+
+    def first(prompt: str, **kwargs: object) -> str:
+        prompts.append(prompt)
+        flags.append(bool(kwargs.get("prefer_final_answer")))
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            if "原油" in rest:
+                rows.append({"id": head, "title": "WTI原油期货收涨至91.85美元"})
+            elif "纳斯达克" in rest:
+                rows.append({"id": head, "title": "纳斯达克金龙中国指数收涨"})
+        rows.reverse()
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", first)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    listed = hot_event_listing(NOW)
+    by_name = {event["name"]: event for event in listed["events"]}
+    assert by_name[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
+    assert by_name[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
+    assert "WTI" not in by_name[nasdaq]["subtitle"]
+    assert flags and all(flags)
+    assert hot_mod._LLM_TITLE_TOKENS >= 4096
+    assert not any(item.get("_miss") for item in hot_mod._LLM_CACHE.values() if isinstance(item, dict))
+
+
+def test_omitted_subtitle_row_is_not_cached_as_miss(tmp_path, monkeypatch):
+    """模型没返回某个编号时，不要记成未采用，下一轮还能补上要点。"""
+    import json
+    from datetime import timedelta
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    reset_store_for_tests(tmp_path / "subtitle-miss.sqlite")
+    oil = "WTI原油期货上涨报91.85美元"
+    nasdaq = "纳斯达克金龙中国指数上涨"
+    _insert("oil", oil, 9, 10)
+    _insert("oil-b", oil, 9, 12, source="wscn")
+    _insert("nasdaq", nasdaq, 9, 11)
+    _insert("nasdaq-b", nasdaq, 9, 13, source="wscn")
+
+    def partial(prompt: str, **_kwargs: object) -> str:
+        if "上一轮" in prompt:
+            return "{}"
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or "原油" not in rest:
+                continue
+            rows.append({"id": head, "title": "WTI原油期货收涨至91.85美元"})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", partial)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    first = {event["name"]: event for event in top_hot_events(NOW)["events"]}
+    assert first[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
+    assert first[nasdaq]["subtitle"] == ""
+    assert not any(item.get("_miss") for item in hot_mod._LLM_CACHE.values() if isinstance(item, dict))
+
+    def complete(prompt: str, **_kwargs: object) -> str:
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            if "纳斯达克" in rest:
+                rows.append({"id": head, "title": "纳斯达克金龙中国指数收涨"})
+            elif "原油" in rest:
+                rows.append({"id": head, "title": "WTI原油期货收涨至91.85美元"})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr(news_service, "_llm_text", complete)
+    hot_mod.clear_hot_event_cache(llm=False)
+    second = {event["name"]: event for event in top_hot_events(NOW + timedelta(minutes=11))["events"]}
+    assert second[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
 
 
 def test_same_company_earnings_notes_are_one_event(tmp_path):
@@ -531,3 +698,399 @@ def test_same_company_earnings_notes_are_one_event(tmp_path):
     assert len(events) == 1
     assert events[0]["mentions"] == 2
     assert events[0]["name"] == raw
+
+
+def test_event_body_uses_article_text_and_skips_title_repeat():
+    """正文取事件里的文章正文；和主标题重复的当没有正文。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "粤芯半导体将于10月13日在创业板上市",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "粤芯半导体：将于10月13日在创业板上市",
+                "text": (
+                    "粤芯半导体：将于10月13日在创业板上市\n"
+                    "发行价12.01元/股，发行后总股本28.78亿股，公开发行5.13亿股。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    assert "12.01元/股" in body
+    assert "28.78亿股" in body
+    # 正文行首的标题行要剥掉。
+    assert not body.startswith("粤芯半导体：")
+
+    # 正文只是把主标题重复一遍（带省略号），等于没有正文。
+    repeated = {
+        "name": "IEA下调原油供需预期",
+        "_candidates": [{"source": "cls", "title": "IEA下调原油供需预期", "text": "IEA下调原油供需预期\nIEA下调原油供需预期..."}],
+    }
+    assert _event_body(repeated) == ""
+
+
+def test_event_body_strips_leading_sentence_that_repeats_title():
+    """正文首句是主标题的扩写时摘掉，避免模型拿它当要点复述。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "财政部表示有力有效实施更加积极的财政政策",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "财政部表示有力有效实施更加积极的财政政策",
+                "text": (
+                    "财政部表示有力有效实施更加积极的财政政策\n"
+                    "财政部表示有力有效实施更加积极的财政政策并谋划出台增量政策。\n"
+                    "上半年新增减税降费及退税缓费 1.6 万亿元。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    # 与主标题重合的首句被摘掉，剩下的是真正的新事实。
+    assert "1.6 万亿元" in body
+    assert body.count("有力有效") == 0
+
+
+def test_event_body_ignores_candidate_that_talks_about_something_else():
+    """主标题有值时，簇里混进别条新闻不能取它的正文 —— 会把要点带偏成别人的事实。
+
+    实测错配：「中信证券：用景气和供给出清来应对高利率…」的要点写成了
+    「沃勒预计还需加息两次」，那句来自同簇另一条「美联储理事沃勒表示…」的正文。
+    主标题有值、却和所有候选标题都对不上时，宁可返回空（要点留空），
+    也不要拿别人的正文编。
+    """
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "中信证券：用景气和供给出清来应对高利率",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "中信证券：用景气和供给出清来应对高利率",
+                # 只有标题行，没有正文。
+                "text": "中信证券：用景气和供给出清来应对高利率",
+            },
+            {
+                "source": "wscn",
+                "title": "美联储理事沃勒表示仍需加息两次",
+                # 同簇另一条新闻，正文里有「沃勒」这个不属于主标题的事实。
+                "text": (
+                    "美联储理事沃勒表示仍需加息两次\n"
+                    "沃勒预计还需加息两次至 4.25-4.50% 区间，以压制通胀。"
+                ),
+            },
+        ],
+    }
+    # 有正文的那条标题讲的是沃勒，与中信这条主标题对不上，不取。
+    assert _event_body(event) == ""
+
+
+def test_event_body_falls_back_to_longest_when_no_main_title():
+    """主标题为空时不套标题匹配，退回取最长正文 —— 这类事件整簇就是一件事。
+
+    钉钉作文、研报、周末汇总在生成标题前 `name` 是空的。早先一并要求标题匹配，
+    导致这些事件全部拿不到正文（实测 42 条，前 20 条覆盖率从 10/20 掉到 5/20）。
+    """
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "",
+        "_candidates": [
+            {
+                "source": "zsxq",
+                "title": "【华源公用】山东核电机制电价比例提升",
+                "text": "【华源公用】山东核电机制电价比例提升\n事件：据了解，从9月份起机制电价比例提升。",
+            },
+            {
+                "source": "zsxq",
+                "title": "【华源公用】山东核电机制电价比例提升，建议对核电保持乐观",
+                "text": (
+                    "【华源公用】山东核电机制电价比例提升，建议对核电保持乐观\n"
+                    "事件：据了解，从9月份起机制电价比例提升，建议对核电保持乐观。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    assert body  # 拿得到正文
+    assert "机制电价" in body
+
+
+def test_event_body_accepts_candidate_whose_title_matches_main():
+    """候选标题和主标题对得上时照常取正文（别把正确候选也挡掉）。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "贵州茅台宣布回购",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "贵州茅台宣布回购并注销股份",
+                "text": (
+                    "贵州茅台宣布回购并注销股份\n"
+                    "拟回购金额不低于 30 亿元，回购价上限 1800 元/股。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    assert "30 亿元" in body
+
+
+def test_subtitle_length_is_capped():
+    """补充要点是「一行挑 1~2 个事实」，超长直接丢，不做截断。"""
+    from app.news.hot_events import _SUBTITLE_MAX, _subtitle_reject_reason
+
+    long_text = "拟以3.16亿元收购光探测芯片公司52.67%股权，标的去年营收8.2亿元净利润0.6亿元主营光模块封装测试业务"
+    assert len(long_text) > _SUBTITLE_MAX
+    assert "过长" in _subtitle_reject_reason(long_text, long_text)
+    short = "拟3.16亿元收购快灵光电52.67%股权"
+    assert _subtitle_reject_reason(short, short) == ""
+
+
+def test_subtitle_facts_must_come_from_source():
+    """要点里的数字和机构名必须能在正文/标题里找到，编造的丢掉。"""
+    from app.news.hot_events import _subtitle_reject_reason
+
+    source = "公司发布业绩公告\n公司上半年归母净利润12.3亿元，同比增长40%。"
+    # 数字来自正文 → 通过。
+    assert _subtitle_reject_reason("上半年归母净利润12.3亿元", source) == ""
+    # 编造的数字（正文里没有）→ 丢。
+    assert "数字" in _subtitle_reject_reason("上半年归母净利润15.8亿元", source)
+    # 没有来源可核对时不拦（缓存路径拿不到 source）。
+    assert _subtitle_reject_reason("上半年归母净利润15.8亿元") == ""
+
+
+def test_subtitle_entity_check_is_case_insensitive():
+    """拉丁实体大小写不同不算编造（iPhone/Pro 不能被拆成碎片误杀）。"""
+    from app.news.hot_events import _subtitle_reject_reason
+
+    source = "苹果宣布追加iPhone订单\niPhone18Pro系列总订单量未变，Duo加单30%。"
+    subtitle = "iPhoneDuo加单30%，iPhone18Pro系列总订单量未变"
+    assert _subtitle_reject_reason(subtitle, source) == ""
+
+
+def test_title_prompt_feeds_article_body_and_asks_for_gap_filling():
+    """提示词里带上各事件的正文，并要求只写主标题没有的事实。"""
+    from app.news.hot_events import _title_prompt
+
+    events = [
+        {
+            "_batch_id": "1",
+            "name": "宁德时代与赛力斯签署长期战略合作协议",
+            "_candidates": [
+                {
+                    "source": "cls",
+                    "title": "宁德时代与赛力斯签署长期战略合作协议",
+                    "text": (
+                        "宁德时代与赛力斯签署长期战略合作协议\n"
+                        "签约地点为重庆，问界全系车型累计交付已突破120万台。"
+                    ),
+                },
+            ],
+        },
+    ]
+    prompt = _title_prompt(events, retry=False)
+    assert "补充要点" in prompt
+    # 已有标题这一行**不能**叫「主标题」——那会诱导模型把它抄进输出 title 字段，
+    # 随后被判为复读清掉（展示前 20 覆盖率因此掉到个位数）。
+    assert "1. 已有标题（已定稿，不要重复、不要回填）：宁德时代与赛力斯签署长期战略合作协议" in prompt
+    assert "正文：签约地点为重庆" in prompt
+    assert "120万台" in prompt
+    # 明确禁止把已有标题换个说法当要点。
+    assert "不要复述标题" in prompt
+    # 长度约束写进 prompt（要点是一行，不超过 40 字）。
+    assert "不超过 40 个字" in prompt
+    # 「找到任意一个新事实就写出来」的正向指令必须在（评审要求：留空是下策）。
+    assert "找到任意一个就写出来" in prompt
+    # 没有正文的事件退回只给已有标题，并标注「（无）」。
+    bare = _title_prompt([{"_batch_id": "1", "name": "某公司公告"}], retry=False)
+    assert "1. 已有标题（已定稿，不要重复、不要回填）：某公司公告" in bare
+    assert "正文：（无）" in bare
+
+
+def test_label_stats_logs_zero_because_of_what(caplog):
+    """分类统计要能把「为什么没要点」拆开：额度用满时记未询问、无正文单列。"""
+    import logging
+
+    from app.news.hot_events import _label_batch_with_llm
+
+    batch = [
+        {"name": "有正文", "_fp": "a", "_candidates": [
+            {"source": "cls", "title": "有正文", "text": "有正文\n正文里有 12.3 亿元这个事实。"},
+        ]},
+        {"name": "无正文", "_fp": "b", "_candidates": [
+            {"source": "cls", "title": "无正文", "text": "无正文"},
+        ]},
+    ]
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        # 额度用满：不该问模型，日志里要区分「未询问」和「无正文」。
+        _label_batch_with_llm(batch, reserve_call=lambda: False)
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "未询问" in text
+    assert "无正文 1 条" in text
+
+
+def test_event_body_keeps_text_after_bracketed_title_on_same_line():
+    """「【标题】正文…」挤在同一行时，只剥方括号、保留后面的正文。
+
+    财联社/新浪快讯常见这种排版：标题和正文之间没有换行。早先整行删掉，等于把
+    正文一起删了 —— 「联合国秘书长谴责美方制裁国际刑事法院」这类事件明明有一
+    整段事实（古特雷斯声明、八国外长联合声明），取文却成空串，要点永远写不出。
+    """
+    from app.news.hot_events import _event_body
+
+    name = "联合国秘书长谴责美方制裁国际刑事法院"
+    event = {
+        "name": name,
+        "_candidates": [{
+            "source": "cls",
+            "title": name,
+            "text": (
+                f"{name}\n"
+                f"【{name}】财联社10月10日电，联合国秘书长古特雷斯9日通过发言人"
+                "发表声明，谴责美国宣布“对国际刑事法院整个机构实施制裁”。"
+            ),
+        }],
+    }
+    body = _event_body(event)
+    assert body
+    assert "古特雷斯" in body
+    # 方括号（含标题）被剥掉，不会再出现在正文开头。
+    assert not body.startswith(f"【{name}】")
+
+
+def test_event_body_drops_bracket_only_when_title_repeats_without_content():
+    """方括号里是标题、括号外没有实义内容时，仍按重复处理返回空串。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "某公司发布公告",
+        "_candidates": [{
+            "source": "cls",
+            "title": "某公司发布公告",
+            "text": "某公司发布公告\n【某公司发布公告】",
+        }],
+    }
+    assert _event_body(event) == ""
+
+
+def test_blank_sweep_detector_flags_all_empty_with_bodies():
+    """整批 title 全空、且多数条目有正文 —— 判定为上游脏响应，值得重发。"""
+    from app.news.hot_events import _looks_like_blank_sweep
+
+    batch = [{"name": f"事件{i}", "_candidates": [
+        {"source": "cls", "title": f"事件{i}", "text": f"事件{i}\n正文有事实 {i}"},
+    ]} for i in range(1, 21)]
+    parsed = {str(i): {"title": ""} for i in range(1, 21)}
+    assert _looks_like_blank_sweep(batch, parsed, set()) is True
+
+
+def test_blank_sweep_detector_ignores_genuine_blanks_and_partial_titles():
+    """真有正文的条目不到六成、或已经写出一部分标题，都不算脏响应。"""
+    from app.news.hot_events import _looks_like_blank_sweep
+
+    # 有 title 就不算整批空。
+    batch = [{"name": f"事件{i}"} for i in range(1, 21)]
+    parsed = {str(i): {"title": ""} for i in range(1, 21)}
+    parsed["1"] = {"title": "写出了一条"}
+    assert _looks_like_blank_sweep(batch, parsed, set()) is False
+
+    # 多数条目没有正文（素材本身就无话可说），不算脏响应。
+    parsed = {str(i): {"title": ""} for i in range(1, 21)}
+    no_body = {str(i) for i in range(1, 13)}  # 12/20 无正文
+    assert _looks_like_blank_sweep(batch, parsed, no_body) is False
+
+    # 没解析到响应走「整批无返回」，不在此列。
+    assert _looks_like_blank_sweep(batch, {}, set()) is False
+
+
+def test_blank_sweep_resends_same_batch_instead_of_splitting(monkeypatch):
+    """整批空 title 时原地重发同一批，不拆半 —— 拆半更贵更差（实测）。"""
+    import json
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    events = [
+        {
+            "_batch_id": str(i),
+            "_fp": f"fp{i}",
+            "name": f"事件{i}",
+            "_candidates": [
+                {"source": "cls", "title": f"事件{i}", "text": f"事件{i}\n正文有事实 {i}"},
+            ],
+        }
+        for i in range(1, 21)
+    ]
+    sizes: list[int] = []
+    state = {"first": True}
+
+    def fake_request(batch, *, retry):
+        sizes.append(len(batch))
+        if state["first"]:
+            state["first"] = False
+            # 首轮整批空 title（脏响应）。
+            return json.dumps(
+                {"events": [{"id": e["_batch_id"], "title": ""} for e in batch]},
+                ensure_ascii=False,
+            )
+        # 重发恢复，全都写出要点。
+        return json.dumps(
+            {"events": [{"id": e["_batch_id"], "title": f"事实{i}"} for i, e in enumerate(batch, 1)]},
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(hot_mod, "_request_titles", fake_request)
+    calls = {"n": 0}
+
+    def reserve():
+        calls["n"] += 1
+        return True
+
+    hot_mod._label_batch_with_llm(events, reserve_call=reserve)
+    # 首轮 + 重发各一次，且两次都是完整 20 条（没有拆半）。
+    assert sizes[:2] == [20, 20]
+    assert all(size == 20 for size in sizes)
+
+
+def test_budget_guard_keeps_quota_for_later_batches(monkeypatch):
+    """预算守卫：剩余额度只够后面批次的首轮时，本批兜底不再放行。"""
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    spent = {"n": 0}
+    monkeypatch.setattr(news_service, "hot_title_calls_left", lambda: 4)
+    guard = hot_mod._budget_guard(lambda: (spent.__setitem__("n", spent["n"] + 1) or True), 5)
+    # 剩余 4 < 需保留 5，拒绝兜底（不消耗真正额度）。
+    assert guard() is False
+    assert spent["n"] == 0
+
+    monkeypatch.setattr(news_service, "hot_title_calls_left", lambda: 9)
+    guard = hot_mod._budget_guard(lambda: (spent.__setitem__("n", spent["n"] + 1) or True), 5)
+    assert guard() is True
+    assert spent["n"] == 1
+
+
+def test_retry_round_prompt_asks_to_fill_from_body():
+    """重写轮的提示词要单独强调「正文有事实就写出来，不要留空」。"""
+    from app.news.hot_events import _title_prompt
+
+    events = [{
+        "_batch_id": "1",
+        "name": "某公司拟收购某标的股权",
+        "_candidates": [{
+            "source": "cls",
+            "title": "某公司拟收购某标的股权",
+            "text": "某公司拟收购某标的股权\n转让对价3.16亿元，完成后纳入合并报表。",
+        }],
+    }]
+    retry = _title_prompt(events, retry=True)
+    assert "上一轮要点不合格" in retry
+    assert "一定要写出来，不要留空" in retry
+    fresh = _title_prompt(events, retry=False)
+    assert "上一轮要点不合格" not in fresh
