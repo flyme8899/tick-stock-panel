@@ -1,11 +1,10 @@
 """市场环境(regime) API — 时序查询 + 手动重算。
 
-装配逻辑在 app.services.regime_builder(纯函数), API 层薄壳 + TTL 缓存。
+装配逻辑在 app.services.regime_builder(纯函数)。
+latest / history 读的是按 parquet mtime 物化好的行，请求路径不调用 polars。
 """
 from __future__ import annotations
 
-import threading
-import time
 from datetime import date
 from typing import Annotated, Any
 
@@ -16,18 +15,10 @@ from app.services import regime_builder
 
 router = APIRouter(prefix="/api/regime", tags=["regime"])
 
-_CACHE_TTL = 5.0
-_cache: dict[str, Any] | None = None
-_cache_ts: float = 0.0
-_cache_lock = threading.Lock()
-
 
 def invalidate_regime_cache() -> None:
     """清空 regime 查询缓存。批算/重算后调用。"""
-    global _cache, _cache_ts
-    with _cache_lock:
-        _cache = None
-        _cache_ts = 0.0
+    regime_builder.clear_regime_rows_cache()
 
 
 def _data_dir(request: Request) -> Any:
@@ -46,6 +37,27 @@ def _df_to_records(df) -> list[dict]:
     return records
 
 
+def _select_regime_rows(
+    rows: list[dict],
+    *,
+    start: date | None,
+    end: date | None,
+    limit: int,
+) -> list[dict]:
+    """在已按日期升序的现成行上过滤。不碰 polars。"""
+    if start is not None:
+        start_text = start.isoformat()
+        rows = [row for row in rows if (row.get("date") or "") >= start_text]
+    if end is not None:
+        end_text = end.isoformat()
+        rows = [row for row in rows if (row.get("date") or "") <= end_text]
+    # limit 仅在"最近 N 天"模式(未传 start/end)生效;
+    # 日期范围模式(传了 start/end, 如"全部")应返回完整范围, 不截断。
+    if start is None and end is None:
+        rows = rows[-limit:]
+    return rows
+
+
 @router.get("/history")
 def regime_history(
     request: Request,
@@ -54,36 +66,13 @@ def regime_history(
     limit: int = Query(120, ge=1, le=1000),
 ):
     """历史环境时序(含状态/指标)。默认最近 N 天。"""
-    global _cache, _cache_ts
-    cache_key = f"hist|{start}|{end}|{limit}"
-    with _cache_lock:
-        if (
-            _cache is not None
-            and _cache.get("key") == cache_key
-            and (time.time() - _cache_ts) < _CACHE_TTL
-        ):
-            return _cache["data"]
-
-    df = regime_builder.load_regime_history(_data_dir(request))
-    if df.is_empty():
-        result: dict = {"rows": [], "total": 0}
-    else:
-        if start:
-            df = df.filter(pl_col_date(df, ">=", start))
-        if end:
-            df = df.filter(pl_col_date(df, "<=", end))
-        # limit 仅在"最近 N 天"模式(未传 start/end)生效;
-        # 日期范围模式(传了 start/end, 如"全部")应返回完整范围, 不截断。
-        if start is None and end is None:
-            df = df.sort("date", descending=True).head(limit)
-        df = df.sort("date")
-        rows = _df_to_records(df)
-        result = {"rows": rows, "total": len(rows)}
-
-    with _cache_lock:
-        _cache = {"key": cache_key, "data": result}
-        _cache_ts = time.time()
-    return result
+    rows = _select_regime_rows(
+        regime_builder.load_regime_rows(_data_dir(request)),
+        start=start,
+        end=end,
+        limit=limit,
+    )
+    return {"rows": rows, "total": len(rows)}
 
 
 def pl_col_date(df, op: str, value: date):
@@ -96,13 +85,11 @@ def pl_col_date(df, op: str, value: date):
 
 @router.get("/latest")
 def regime_latest(request: Request):
-    """最新一日环境(轻量)。"""
-    df = regime_builder.load_regime_history(_data_dir(request))
-    if df.is_empty():
+    """最新一日环境(轻量)。命中 mtime 缓存时不调用 polars。"""
+    rows = regime_builder.load_regime_rows(_data_dir(request))
+    if not rows:
         return {"row": None}
-    latest = df.sort("date", descending=True).head(1)
-    rows = _df_to_records(latest)
-    return {"row": rows[0] if rows else None}
+    return {"row": rows[-1]}
 
 
 @router.get("/states")

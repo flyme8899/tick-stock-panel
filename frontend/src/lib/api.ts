@@ -44,6 +44,9 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 const HOT_EVENTS_TIMEOUT_MS = 90_000
 /** 同步计算型接口 (回测/筛选等) 的放宽超时: 合法耗时可能远超轮询类接口。 */
 const COMPUTE_REQUEST_TIMEOUT_MS = 300_000
+/** 因子回测在子进程里算，全市场批量可能超过通用 5 分钟。
+ *  后端同时只跑一个，这里留出「等上一个结束 + 自己跑完」的余量，避免浏览器先 abort。 */
+const FACTOR_BACKTEST_TIMEOUT_MS = 30 * 60 * 1000
 /** 扩展数据拉取类长请求: 跟随后端配置的单次超时 (timeoutSeconds, 默认 30s) + 10s 解析/写盘缓冲。
  *  浏览器端 fetch 默认 30s abort 会先于后端超时触发, 大响应接口 (如全量集合竞价
  *  /day, 后端超时 120s) 必须把这层同步放宽。 */
@@ -3477,7 +3480,7 @@ export const api = {
   }) =>
     request<FactorBacktestResult>('/api/backtest/factor/run', {
       method: 'POST',
-      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+      timeoutMs: FACTOR_BACKTEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
     }),
 
@@ -3495,7 +3498,7 @@ export const api = {
   }) =>
     request<FactorBatchResult>('/api/backtest/factor/batch', {
       method: 'POST',
-      timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+      timeoutMs: FACTOR_BACKTEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
     }),
 

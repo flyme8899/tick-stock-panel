@@ -35,7 +35,10 @@ BACKTEST_SERVER_GUARD_MESSAGE = (
 
 
 def _get_engine(request: Request):
-    """获取或创建 BacktestEngine (单例，PanelCache 跨请求生效)。"""
+    """获取或创建 BacktestEngine (单例，PanelCache 跨请求生效)。
+
+    因子试算仍在进程内读面板。因子回测本身走子进程，不再借用这个引擎。
+    """
     from app.backtest.engine import BacktestEngine
     engine = getattr(request.app.state, "backtest_engine", None)
     if engine is None:
@@ -60,6 +63,21 @@ def _guard_server_backtest_range(start: date, end: date):
     days = (end - start).days + 1
     if days > BACKTEST_MAX_SERVER_DAYS:
         raise HTTPException(status_code=400, detail=BACKTEST_SERVER_GUARD_MESSAGE)
+
+
+def _run_factor_worker(kind: str, config) -> dict:
+    """因子回测放到子进程，父进程同时只放行一个。
+
+    计算留在子进程里，用的是子进程自己的 polars 线程池，不会把 API 进程的
+    线程池占满。exclusive 槽占满整个重任务预算，所以第二个因子回测会等到
+    第一个结束，不会并行再起一个进程。
+    """
+    from app.backtest.worker import make_worker_task, run_worker_task
+    from app.services.heavy_job_limiter import shared_heavy_job_limiter
+
+    task = make_worker_task(kind, settings.data_dir, config)
+    with shared_heavy_job_limiter.slot("exclusive"):
+        return run_worker_task(task)
 
 
 # ================================================================
@@ -152,15 +170,12 @@ class FactorBacktestRequest(BaseModel):
 @router.post("/factor/run")
 def factor_run(req: FactorBacktestRequest, request: Request):
     """因子回测 — IC/IR 分析 + 分层回测。"""
-    from app.backtest.factor import FactorBacktestService, FactorConfig
+    from app.backtest.factor import FactorConfig
     from app.factors.registry import factor_columns_view
 
     allowed = {item["id"] for item in factor_columns_view(include_experimental=True)}
     if req.factor_name not in allowed:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {req.factor_name}")
-
-    engine = _get_engine(request)
-    svc = FactorBacktestService(engine)
 
     end = req.end or date.today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
@@ -184,8 +199,7 @@ def factor_run(req: FactorBacktestRequest, request: Request):
         slippage_bps=req.slippage_bps,
         asset_type=req.asset_type,
     )
-    result = svc.run(cfg)
-    return asdict(result)
+    return _run_factor_worker("factor", cfg)
 
 
 class FactorBatchRequest(BaseModel):
@@ -205,10 +219,7 @@ class FactorBatchRequest(BaseModel):
 @router.post("/factor/batch")
 def factor_batch(req: FactorBatchRequest, request: Request):
     """批量筛选因子, 同一批次只加载并计算一次数据面板。"""
-    from app.backtest.factor import (
-        FactorBacktestService,
-        FactorBatchConfig,
-    )
+    from app.backtest.factor import FactorBatchConfig
     from app.factors.registry import factor_columns_view
 
     factor_names = list(dict.fromkeys(req.factor_names))
@@ -227,8 +238,7 @@ def factor_batch(req: FactorBatchRequest, request: Request):
             detail=f"指定标的最多支持 {FACTOR_MAX_SYMBOLS} 只, 请缩小标的范围。",
         )
 
-    svc = FactorBacktestService(_get_engine(request))
-    result = svc.run_batch(FactorBatchConfig(
+    return _run_factor_worker("factor_batch", FactorBatchConfig(
         factor_names=factor_names,
         symbols=symbols,
         start=start,
@@ -240,7 +250,6 @@ def factor_batch(req: FactorBatchRequest, request: Request):
         slippage_bps=req.slippage_bps,
         asset_type=req.asset_type,
     ))
-    return asdict(result)
 
 
 # ================================================================
