@@ -1,10 +1,20 @@
 """DSA 个股上下文：题材、竞价、加红、资金，以及注入时的长度和失败隔离。"""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from app.custom.dsa.analysis_bridge import merge_news, sniper_payload, wrap_context_loader, wrap_history_save
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+from app.custom.dsa import stock_context
+from app.custom.dsa.analysis_bridge import (
+    merge_news,
+    sniper_payload,
+    wrap_context_loader,
+    wrap_history_save,
+)
 from app.custom.dsa.stock_context import (
     MAX_TEXT,
     market_phase,
@@ -12,7 +22,6 @@ from app.custom.dsa.stock_context import (
     quote_from_rows,
     render_context,
 )
-from app.custom.dsa import stock_context
 
 CN = timezone(timedelta(hours=8))
 NOW = datetime(2026, 10, 9, 10, 0, tzinfo=CN)
@@ -127,11 +136,16 @@ def test_red_item_linked_to_event_keeps_direction():
             "published_at": "09:18",
             "red": True,
         }],
-        flow_rows=[{"trade_date": "2026-10-09", "main_net": None}],
+        flow_rows=[
+            {"trade_date": "2026-10-08", "main_net": None},
+            {"trade_date": "2026-10-09", "main_net": 1e8},
+        ],
         quote=None,
     )
     assert "09:18 | 利好 | 固态电池中试线投产" in payload["text"]
     assert "不足5日" in payload["text"]
+    assert "10-09 +1.00亿" in payload["text"]
+    assert "10-08" not in payload["text"]
 
 
 def test_failed_section_does_not_drop_the_others(monkeypatch):
@@ -189,3 +203,37 @@ def test_bridge_prepends_context_and_posts_sniper_without_blocking_save():
     saver = wrap_history_save(Store.save, fail)
     assert saver(Store(), Result(), "q1", "full", None) == 7
     assert posted and posted[0]["analysis_id"] == "7"
+
+
+def _request(path: str, header: str = "") -> Request:
+    headers = []
+    if header:
+        headers.append((b"x-news-feed-token", header.encode()))
+    return Request({
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 1234),
+        "server": ("test", 80),
+    })
+
+
+async def _ok(_request):
+    return JSONResponse({"ok": True})
+
+
+def test_stock_context_and_sniper_routes_use_feed_token(monkeypatch):
+    monkeypatch.setattr("app.news.config.feed_token", lambda: "feed-secret")
+    from app.main import auth_middleware
+
+    for path in ("/api/dsa/stock-context", "/api/dsa/sniper-lines"):
+        allowed = asyncio.run(auth_middleware(_request(path, header="feed-secret"), _ok))
+        denied = asyncio.run(auth_middleware(_request(path, header="nope"), _ok))
+        assert allowed.status_code == 200
+        assert denied.status_code == 404

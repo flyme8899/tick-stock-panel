@@ -83,10 +83,7 @@ def sniper_payload(result: Any, *, query_id: str = "", history_id: int = 0) -> d
 
 
 def fetch_context_text(symbol: str, *, getter=None) -> str:
-    if getter is not None:
-        payload = getter(symbol)
-    else:
-        payload = _get_json(context_url(), {"symbol": symbol})
+    payload = getter(symbol) if getter is not None else _get_json(context_url(), {"symbol": symbol})
     if not isinstance(payload, dict):
         return ""
     return str(payload.get("text") or "")

@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from typing import Any
 
 from app.market_time import CN_TZ
