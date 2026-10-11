@@ -35,6 +35,12 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
         }
         ext = item.get("ext") or {}
         row["listing_date"] = ext.get("listing_date")
+        row["list_status"] = (
+            ext.get("list_status")
+            or ext.get("listing_status")
+            or ext.get("上市状态")
+            or ext.get("status")
+        )
         row["total_shares"] = ext.get("total_shares")
         row["float_shares"] = ext.get("float_shares")
         row["tick_size"] = ext.get("tick_size")
