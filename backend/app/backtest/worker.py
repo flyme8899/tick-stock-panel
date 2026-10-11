@@ -133,6 +133,35 @@ def encode_optimize_config(config) -> dict[str, Any]:
     return payload
 
 
+def _encode_dated_config(config) -> dict[str, Any]:
+    payload = asdict(config)
+    payload["start"] = config.start.isoformat()
+    payload["end"] = config.end.isoformat()
+    return payload
+
+
+def _decode_dated_config(payload: dict[str, Any], cls):
+    values = dict(payload)
+    values["start"] = date.fromisoformat(values["start"])
+    values["end"] = date.fromisoformat(values["end"])
+    return cls(**values)
+
+
+def _execute_factor_task(kind: str, task: dict[str, Any], repo) -> dict[str, Any]:
+    """在已隔离的子进程里跑因子回测。注册表由调用方事先加载。"""
+    from app.backtest.engine import BacktestEngine
+    from app.backtest.factor import FactorBacktestService, FactorBatchConfig, FactorConfig
+
+    service = FactorBacktestService(BacktestEngine(repo))
+    if kind == "factor":
+        config = _decode_dated_config(task["config"], FactorConfig)
+        return asdict(service.run(config))
+    if kind == "factor_batch":
+        config = _decode_dated_config(task["config"], FactorBatchConfig)
+        return asdict(service.run_batch(config))
+    raise ValueError(f"unsupported worker task kind: {kind}")
+
+
 def make_worker_task(kind: str, data_dir: Path, config) -> dict[str, Any]:
     if kind == "backtest":
         encoded = encode_backtest_config(config)
@@ -146,6 +175,8 @@ def make_worker_task(kind: str, data_dir: Path, config) -> dict[str, Any]:
         if not isinstance(config, dict):
             raise TypeError("mining worker config must be a dict")
         encoded = dict(config)
+    elif kind in {"factor", "factor_batch"}:
+        encoded = _encode_dated_config(config)
     else:
         raise ValueError(f"unsupported worker task kind: {kind}")
     return {
@@ -197,49 +228,53 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         from app.factors.store import load_into_registry
 
         load_into_registry(data_dir)
-        strategy_engine = StrategyEngine(
-            strategy_dirs=_strategy_dirs(data_dir),
-            override_loader=lambda sid: strategy_config.load_override(data_dir, sid),
-        )
-        service = StrategyBacktestService(BacktestEngine(repo), strategy_engine)
 
         def _progress(message: dict) -> None:
             event_queue.put({"type": "progress", "payload": message})
 
         kind = task["kind"]
-        if kind == "backtest":
-            config = _decode_backtest_config(task["config"])
-            result = asdict(service.run(config, _progress, cancel_event))
-        elif kind == "optimize":
-            config = _decode_optimize_config(task["config"])
-            optimizer = StrategyOptimizer(service, strategy_engine)
-            result = optimizer.optimize(
-                config,
-                _progress,
-                cancel_event,
-                rss_sampler=sampler,
-            )
-        elif kind == "walkforward":
-            from app.backtest.walkforward import WalkForwardService
-
-            config = _decode_walkforward_config(task["config"])
-            optimizer = StrategyOptimizer(service, strategy_engine)
-            walkforward = WalkForwardService(optimizer, service, strategy_engine)
-            result = walkforward.run(config, _progress, cancel_event)
-        elif kind == "mining":
-            from app.backtest.mining_runtime import run_mining_runtime
-
-            result = run_mining_runtime(
-                task["config"],
-                data_dir=data_dir,
-                service=service,
-                strategy_engine=strategy_engine,
-                progress_cb=_progress,
-                cancel_check=cancel_event,
-                rss_sampler=sampler,
-            )
+        if kind in {"factor", "factor_batch"}:
+            # 因子回测不需要策略引擎。单独分支，避免策略加载失败拖垮因子任务。
+            result = _execute_factor_task(kind, task, repo)
         else:
-            raise ValueError(f"unsupported worker task kind: {kind}")
+            strategy_engine = StrategyEngine(
+                strategy_dirs=_strategy_dirs(data_dir),
+                override_loader=lambda sid: strategy_config.load_override(data_dir, sid),
+            )
+            service = StrategyBacktestService(BacktestEngine(repo), strategy_engine)
+            if kind == "backtest":
+                config = _decode_backtest_config(task["config"])
+                result = asdict(service.run(config, _progress, cancel_event))
+            elif kind == "optimize":
+                config = _decode_optimize_config(task["config"])
+                optimizer = StrategyOptimizer(service, strategy_engine)
+                result = optimizer.optimize(
+                    config,
+                    _progress,
+                    cancel_event,
+                    rss_sampler=sampler,
+                )
+            elif kind == "walkforward":
+                from app.backtest.walkforward import WalkForwardService
+
+                config = _decode_walkforward_config(task["config"])
+                optimizer = StrategyOptimizer(service, strategy_engine)
+                walkforward = WalkForwardService(optimizer, service, strategy_engine)
+                result = walkforward.run(config, _progress, cancel_event)
+            elif kind == "mining":
+                from app.backtest.mining_runtime import run_mining_runtime
+
+                result = run_mining_runtime(
+                    task["config"],
+                    data_dir=data_dir,
+                    service=service,
+                    strategy_engine=strategy_engine,
+                    progress_cb=_progress,
+                    cancel_check=cancel_event,
+                    rss_sampler=sampler,
+                )
+            else:
+                raise ValueError(f"unsupported worker task kind: {kind}")
 
         serialization_started = time.perf_counter()
         serialized_bytes = len(

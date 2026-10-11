@@ -3,56 +3,42 @@
 覆盖 issue #202: `/api/backtest/factor/run` 与 `/api/backtest/factor/batch`
 在省略 `start` 时错误使用了策略默认区间(3 年)而非因子默认区间(180 天)。
 
-只关注「起始日解析」这一关注点, 用替身 Service 捕获传入配置, 不做真实数据加载。
+只关注「起始日解析」这一关注点。计算已改到 worker 子进程, 这里截住
+run_worker_task, 从任务载荷里还原配置, 不做真实数据加载。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import ClassVar
 
 import pytest
 
 from app.api import backtest as bt
+from app.backtest.factor import FactorBatchConfig, FactorConfig
+from app.backtest.worker import _decode_dated_config
 
 
-@dataclass
-class _DummyResult:
-    ok: bool = True
-
-
-class _CapturingService:
-    """替身 FactorBacktestService: 捕获配置, 不触真实引擎。"""
-
+class _Capture:
     captured: ClassVar[list] = []
-
-    def __init__(self, engine):
-        pass
-
-    def run(self, cfg):
-        _CapturingService.captured.append(cfg)
-        return _DummyResult()
-
-    def run_batch(self, cfg):
-        _CapturingService.captured.append(cfg)
-        return _DummyResult()
 
 
 class _Req:
-    """占位 request; _get_engine 已被 patch, 不会真正访问其属性。"""
+    """占位 request。起始日解析不读 app.state。"""
 
 
 @pytest.fixture
 def patched(monkeypatch):
-    _CapturingService.captured = []
-    monkeypatch.setattr(bt, "_get_engine", lambda request: object())
-    # factor_run / factor_batch 内部 `from app.backtest.factor import FactorBacktestService`
-    # 读取的是模块属性, patch 源模块即可命中。
-    import app.backtest.factor as factor_mod
-    monkeypatch.setattr(factor_mod, "FactorBacktestService", _CapturingService)
+    _Capture.captured = []
+
+    def fake_run(task, *_args, **_kwargs):
+        cls = FactorConfig if task["kind"] == "factor" else FactorBatchConfig
+        _Capture.captured.append(_decode_dated_config(task["config"], cls))
+        return {"ok": True}
+
+    monkeypatch.setattr("app.backtest.worker.run_worker_task", fake_run)
     # 隔离守卫, 单测「起始日解析」。
     monkeypatch.setattr(bt, "_guard_server_backtest_range", lambda start, end: None)
-    return _CapturingService
+    return _Capture
 
 
 def test_factor_run_omitted_start_uses_factor_default(patched):

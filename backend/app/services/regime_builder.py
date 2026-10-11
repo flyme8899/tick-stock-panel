@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -543,6 +544,51 @@ def load_regime_history(data_dir: Path) -> pl.DataFrame:
     except Exception as e:  # noqa: BLE001
         logger.warning("load_regime_history failed: %s", e)
         return pl.DataFrame()
+
+
+# latest/history 用的现成 JSON 行。签名与上面的 DataFrame 缓存相同，
+# 但命中时直接返回 list[dict]，请求路径不再进入 polars。
+_REGIME_ROWS_LOCK = threading.Lock()
+_REGIME_ROWS_CACHE: list[dict] | None = None
+_REGIME_ROWS_SIG: tuple[str, int, int] | None = None
+
+
+def clear_regime_rows_cache() -> None:
+    """丢掉已物化的 regime 行。文件重写后也可只靠 mtime 失效，这里给显式刷新用。"""
+    global _REGIME_ROWS_CACHE, _REGIME_ROWS_SIG
+    with _REGIME_ROWS_LOCK:
+        _REGIME_ROWS_CACHE = None
+        _REGIME_ROWS_SIG = None
+
+
+def load_regime_rows(data_dir: Path) -> list[dict]:
+    """按 parquet mtime 返回按日期升序排好的 JSON 行。
+
+    命中时不读文件、不调用 polars。日期已转成 ISO 字符串，调用方用普通 Python 切片即可。
+    """
+    global _REGIME_ROWS_CACHE, _REGIME_ROWS_SIG
+    path = regime_path(data_dir)
+    with _REGIME_ROWS_LOCK:
+        try:
+            stat = path.stat()
+        except OSError:
+            return []
+        signature = (str(path), stat.st_mtime_ns, stat.st_size)
+        if _REGIME_ROWS_CACHE is not None and signature == _REGIME_ROWS_SIG:
+            return _REGIME_ROWS_CACHE
+        frame = load_regime_history(data_dir)
+        # 读失败时 load_regime_history 返回空表且不更新自己的签名。不要把这次空结果钉死。
+        if frame.is_empty() and signature != _REGIME_HISTORY_SIG:
+            return []
+        rows: list[dict] = []
+        if not frame.is_empty():
+            for record in frame.sort("date").to_dicts():
+                if record.get("date") is not None:
+                    record["date"] = str(record["date"])
+                rows.append(record)
+        _REGIME_ROWS_CACHE = rows
+        _REGIME_ROWS_SIG = signature
+        return rows
 
 
 def refresh_phase_labels(data_dir: Path) -> int:

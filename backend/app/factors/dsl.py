@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+import numpy as np
 import polars as pl
 
 from app.factors.registry import factor_dependencies, get_factor
@@ -416,22 +417,58 @@ def _regression_parts(inner: pl.Expr, n: int) -> tuple[pl.Expr, pl.Expr, float, 
     return slope, sum_y, sum_x, (n - 1) / 2.0
 
 
+def _extreme_index_numpy(values: pl.Series, n: int, *, high: bool) -> pl.Series:
+    """一条序列一次算出全部窗口的极值位置。语义对齐 polars ``arg_max`` / ``arg_min``。
+
+    1-based，1 = 窗口最旧；并列取最先出现；窗口未满或含 null 则为空。
+    NaN 不计入 null，极值在有限值里找；整窗都是 NaN 时位置为 1（与 polars 一致）。
+    """
+    length = values.len()
+    if length == 0:
+        return pl.Series(values.name, [], dtype=pl.Float64)
+    casted = values if values.dtype == pl.Float64 else values.cast(pl.Float64)
+    empty = pl.Series(values.name, [None] * length, dtype=pl.Float64)
+    if n <= 0 or length < n:
+        return empty
+    array = np.ascontiguousarray(casted.to_numpy(), dtype=np.float64)
+    out = np.full(length, np.nan, dtype=np.float64)
+    windows = np.lib.stride_tricks.sliding_window_view(array, n)
+    if not np.isnan(array).any():
+        index = np.argmax(windows, axis=1) if high else np.argmin(windows, axis=1)
+    else:
+        nulls = np.ascontiguousarray(casted.is_null().to_numpy(), dtype=bool)
+        has_null = np.lib.stride_tricks.sliding_window_view(nulls, n).any(axis=1)
+        finite = ~np.isnan(windows)
+        if high:
+            filled = np.where(finite, windows, -np.inf)
+            index = np.argmax(filled, axis=1)
+        else:
+            filled = np.where(finite, windows, np.inf)
+            index = np.argmin(filled, axis=1)
+        # ±inf 哨兵和真实 ±inf 打成平局时，胜出下标可能落在 NaN 上。改取第一个有限值。
+        # 整窗都是 NaN 时 argmax(全 False) 为 0，与 polars 的全 NaN 窗口一致。
+        rows = np.arange(windows.shape[0])
+        chosen_is_nan = ~finite[rows, index]
+        if chosen_is_nan.any():
+            index = np.where(chosen_is_nan, np.argmax(finite, axis=1), index)
+        index = index.astype(np.float64, copy=False)
+        index = np.where(has_null, np.nan, index)
+    out[n - 1 :] = index.astype(np.float64, copy=False) + 1.0
+    return pl.Series(values.name, out, dtype=pl.Float64).fill_nan(None)
+
+
 def _first_extreme_index(inner: pl.Expr, n: int, *, high: bool) -> pl.Expr:
     """窗口内极值的 1-based 下标，1 = 最旧。并列取最先出现的那个。未满窗为空。
 
-    不用逐根 ``when`` 嵌套。窗口 60 时那棵表达式会按指数膨胀，小样本也会占满内存。
-    rolling_map 的窗口只含当前和过去（center 默认关闭）。
+    不用逐根 ``when`` 嵌套：窗口 60 时那棵表达式会按指数膨胀，小样本也会占满内存。
+    也不用 ``rolling_map``：每个窗口回调一次 Python，全市场会把 polars 线程池占满，
+    同进程的其他查询一起排队超时。这里每个 symbol 序列只进一次 numpy。
     """
 
-    def _reduce(values: pl.Series) -> float | None:
-        if values.len() != n or values.null_count() > 0:
-            return None
-        index = values.arg_max() if high else values.arg_min()
-        if index is None:
-            return None
-        return float(index) + 1.0
+    def _reduce(values: pl.Series) -> pl.Series:
+        return _extreme_index_numpy(values, n, high=high)
 
-    return inner.rolling_map(_reduce, window_size=n, min_samples=n)
+    return inner.map_batches(_reduce, return_dtype=pl.Float64, is_elementwise=False)
 
 
 def _pct_rank(inner: pl.Expr, n: int) -> pl.Expr:
