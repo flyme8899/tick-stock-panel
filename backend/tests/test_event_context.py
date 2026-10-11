@@ -61,6 +61,18 @@ def test_parsers_cover_lhb_margin_qa_notice_and_changes() -> None:
     }])
     assert margin[0]["margin_balance"] == 7149757278
     assert margin[0]["market"] == "sse"
+    szse = parse.parse_szse_margin_detail([{
+        "zqdm": "000001",
+        "zqjc": "平安银行",
+        "jrrzmr": "1.08",
+        "jrrzye": "44.43",
+        "jrrjye": "18,681.00",
+    }], trade_date=DAY)
+    assert szse[0]["margin_balance"] == 44.43 * 1e8
+    assert szse[0]["margin_buy"] == 1.08 * 1e8
+    assert szse[0]["short_balance"] == 18681 * 1e4
+    assert szse[0]["market"] == "szse"
+    assert szse[0]["source"] == "szse_margin"
     qa = parse.parse_qa_payload(
         'jQuery({"result":{"wenDongMiWeb":[{"questionId":"q1","securityCode":"600519",'
         '"questionContent":"分红吗","answerContent":"已披露","questionTime":"2026-10-09 10:00:00"}]}})',
@@ -210,7 +222,11 @@ def test_margin_date_error_shows_on_health(tmp_path, monkeypatch) -> None:
     assert row["auth_state"] == "unknown"
 
 
-def test_margin_sz_gap_keeps_previous_balances(tmp_path) -> None:
+def test_margin_sz_gap_keeps_previous_balances(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(jobs, "_szse_get", lambda *args, **kwargs: _Resp([{
+        "metadata": {"pagecount": 0, "recordcount": 0},
+        "data": [],
+    }]))
     store.write_rows(tmp_path, "margin", "2026-10-08", [{
         "code": "000001",
         "name": "平安银行",
@@ -251,6 +267,103 @@ def test_margin_sz_gap_keeps_previous_balances(tmp_path) -> None:
     text = " ".join(query.context_lines(tmp_path, "000001"))
     assert "111" in text or "元" in text
     assert "沿用" in text
+
+
+def test_szse_margin_fills_when_eastmoney_has_only_shanghai(tmp_path, monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def eastmoney(url, *, params, headers=None, timeout=None):
+        assert "datacenter" in url
+        return _dc([{
+            "SCODE": "600519",
+            "SECNAME": "贵州茅台",
+            "DATE": DAY,
+            "TRADE_MARKET": "上交所主板",
+            "RZYE": 100,
+            "RQYE": 1,
+            "RZMRE": 2,
+        }])
+
+    def szse(url, *, params, headers=None, timeout=None):
+        calls.append(params)
+        assert "szse.cn" in url
+        assert params["CATALOGID"] == "1837_xxpl"
+        assert params["TABKEY"] == "tab2"
+        assert params["txtDate"] == DAY
+        assert timeout == (10.0, 30.0)
+        if params["PAGENO"] == "1":
+            return _Resp([{
+                "metadata": {"pagecount": 2, "recordcount": 2},
+                "data": [{
+                    "zqdm": "000001",
+                    "zqjc": "平安银行",
+                    "jrrzmr": "1.08",
+                    "jrrzye": "44.43",
+                    "jrrjye": "18,681.00",
+                }],
+            }])
+        return _Resp([{
+            "metadata": {"pagecount": 2, "recordcount": 2},
+            "data": [{
+                "zqdm": "300750",
+                "zqjc": "宁德时代",
+                "jrrzmr": "2.00",
+                "jrrzye": "10.00",
+                "jrrjye": "1,000.00",
+            }],
+        }])
+
+    monkeypatch.setattr(jobs, "_szse_get", szse)
+    result = jobs.sync_margin(tmp_path, DAY, get=eastmoney)
+    assert result["ok"] is True
+    assert result["markets"] == ["sse", "szse"]
+    assert [item["PAGENO"] for item in calls] == ["1", "2"]
+    rows = {row["code"]: row for row in store.read_partition(tmp_path, "margin", DAY).to_dicts()}
+    assert rows["000001"]["margin_balance"] == 44.43 * 1e8
+    assert rows["000001"]["margin_buy"] == 1.08 * 1e8
+    assert rows["000001"]["short_balance"] == 18681 * 1e4
+    assert rows["000001"]["source"] == "szse_margin"
+    assert rows["300750"]["market"] == "szse"
+    assert rows["600519"]["market"] == "sse"
+    assert rows["600519"]["source"] == "eastmoney_margin"
+    assert "不可用" not in (store.load_state(tmp_path)["margin"].get("note") or "")
+
+
+def test_eastmoney_sz_rows_skip_the_exchange(tmp_path, monkeypatch) -> None:
+    def eastmoney(url, *, params, headers=None, timeout=None):
+        return _dc([
+            {
+                "SCODE": "600519",
+                "SECNAME": "贵州茅台",
+                "DATE": DAY,
+                "TRADE_MARKET": "上交所主板",
+                "RZYE": 100,
+                "RQYE": 1,
+                "RZMRE": 2,
+            },
+            {
+                "SCODE": "000001",
+                "SECNAME": "平安银行",
+                "DATE": DAY,
+                "TRADE_MARKET": "深交所主板",
+                "RZYE": 4443240036,
+                "RQYE": 10,
+                "RZMRE": 20,
+            },
+        ])
+
+    def szse(*_args, **_kwargs):
+        raise AssertionError("东财已经有深市时不再打深交所")
+
+    monkeypatch.setattr(jobs, "_szse_get", szse)
+    result = jobs.sync_margin(tmp_path, DAY, get=eastmoney)
+    assert result["markets"] == ["sse", "szse"]
+    row = next(
+        item for item in store.read_partition(tmp_path, "margin", DAY).to_dicts()
+        if item["code"] == "000001"
+    )
+    assert row["margin_balance"] == 4443240036
+    assert row["source"] == "eastmoney_margin"
 
 
 def test_qa_is_incremental_and_limited_to_given_symbols(tmp_path) -> None:

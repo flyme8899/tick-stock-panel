@@ -17,6 +17,7 @@ from app.event_context.parse import (
     parse_margin_detail,
     parse_notices,
     parse_qa_payload,
+    parse_szse_margin_detail,
 )
 from app.event_context.timeouts import REQUEST_TIMEOUT
 from app.market_time import cn_now
@@ -24,6 +25,7 @@ from app.market_time import cn_now
 logger = logging.getLogger(__name__)
 
 DC_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+SZSE_MARGIN_URL = "https://www.szse.cn/api/report/ShowReport/data"
 QA_URL = "https://mguba.eastmoney.com/interface/GetData.aspx"
 NOTICE_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann"
 CHANGES_URL = "https://push2ex.eastmoney.com/getAllStockChanges"
@@ -36,6 +38,7 @@ _MARGIN_COLUMNS = "SCODE,SECNAME,RZYE,RQYE,RZMRE,TRADE_MARKET,DATE,SECUCODE"
 # 栏目常写成「增持」「减持」，两词一起覆盖增减持。
 _MAJOR_MARKS = ("业绩预告", "重组", "回购", "增持", "减持", "立案")
 _MAJOR_NOTICE_CAP = 40
+_SZSE_PAGE_CAP = 150
 _CHANGE_TYPES = (
     (8193, "大笔买入"),
     (8194, "大笔卖出"),
@@ -179,8 +182,14 @@ def _sync_margin(data_dir: Path, day: str, get: Getter, stop) -> dict:
     markets = {row["market"] for row in rows}
     note = ""
     if "szse" not in markets:
-        prev = _previous_day(data_dir, "margin", day)
-        note = f"深市明细不可用，沿用 {prev}" if prev else "深市明细不可用"
+        sz_rows, sz_error = _load_szse_margin(day, stop, _szse_get)
+        if sz_rows:
+            rows.extend(sz_rows)
+            markets.add("szse")
+        else:
+            prev = _previous_day(data_dir, "margin", day)
+            detail = f"：{sz_error}" if sz_error else ""
+            note = f"深市明细不可用，沿用 {prev}{detail}" if prev else f"深市明细不可用{detail}"
     store.write_rows(data_dir, "margin", day, rows)
     _touch(data_dir, "margin", ok=True, note=note, items=len(rows))
     return {"ok": True, "rows": len(rows), "note": note, "markets": sorted(markets)}
@@ -454,6 +463,61 @@ def _published(day: object) -> datetime:
     text = day_text(day) or cn_now().date().isoformat()
     year, month, date = (int(part) for part in text.split("-"))
     return cn_now().replace(year=year, month=month, day=date, hour=15, minute=0, second=0, microsecond=0)
+
+
+def _load_szse_margin(day: str, stop, get: Getter) -> tuple[list[dict], str]:
+    """东财当天没有深市行时，读深交所融资融券交易明细。
+
+    东财 ``RPTA_WEB_RZRQ_GGMX`` 按 ``DATE`` 过滤后，最新交易日经常只有沪市。
+    没有额外的市场参数把深市滤掉；同一张表的上一交易日同时有深市。
+    """
+    try:
+        found: list[dict] = []
+        page = 1
+        pagecount = 1
+        while page <= pagecount and page <= _SZSE_PAGE_CAP:
+            _raise_if_stopped(stop)
+            payload = as_data(get(
+                SZSE_MARGIN_URL,
+                params={
+                    "SHOWTYPE": "JSON",
+                    "CATALOGID": "1837_xxpl",
+                    "TABKEY": "tab2",
+                    "txtDate": day,
+                    "PAGENO": str(page),
+                },
+                headers={"Referer": "https://www.szse.cn/disclosure/margin/margin/index.html"},
+                timeout=REQUEST_TIMEOUT,
+            ))
+            block = payload[0] if isinstance(payload, list) and payload else payload
+            if not isinstance(block, dict):
+                raise RuntimeError("深交所两融返回异常")
+            meta = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+            pagecount = int(meta.get("pagecount") or 0)
+            found.extend(parse_szse_margin_detail(block.get("data") or [], trade_date=day))
+            if pagecount <= 0:
+                break
+            page += 1
+        if pagecount > _SZSE_PAGE_CAP:
+            return [], "深交所明细分页超过上限"
+        return found, ""
+    except EventStoppedError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("深交所两融明细失败: %s", exc)
+        return [], str(exc).strip()[:200]
+
+
+def _szse_get(url: str, *, params=None, headers=None, timeout=None):
+    """深交所不是东财域名，不进统一限速。连接和读取超时与东财请求相同。"""
+    import httpx
+
+    from app.eastmoney.client import httpx_timeout
+
+    with httpx.Client(follow_redirects=True, timeout=httpx_timeout(timeout or REQUEST_TIMEOUT)) as client:
+        response = client.get(url, params=params, headers=headers)
+        response.raise_for_status()
+        return response
 
 
 def _http(get: Getter | None) -> Getter:

@@ -159,6 +159,41 @@ def parse_margin_detail(rows: list[dict]) -> list[dict]:
     return out
 
 
+def parse_szse_margin_detail(rows: list, *, trade_date: str) -> list[dict]:
+    """深交所页面 JSON 的展示单位。
+
+    2026-10-08 平安银行对过东财的元：融资余额、融资买入额按亿元，融券余额按万元。
+    """
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        code = code6(row.get("zqdm") or row.get("证券代码"))
+        if not code:
+            continue
+        out.append({
+            "code": code,
+            "name": str(row.get("zqjc") or row.get("证券简称") or "").replace("&nbsp;", "").strip(),
+            "trade_date": trade_date,
+            "market": "szse",
+            "margin_balance": _szse_amount(row.get("jrrzye") or row.get("融资余额"), 1e8),
+            "short_balance": _szse_amount(row.get("jrrjye") or row.get("融券余额"), 1e4),
+            "margin_buy": _szse_amount(row.get("jrrzmr") or row.get("融资买入额"), 1e8),
+            "source": "szse_margin",
+        })
+    return out
+
+
+def _szse_amount(raw: object, factor: float) -> float | None:
+    text = str(raw or "").strip().replace(",", "").replace("，", "").replace("&nbsp;", "")
+    if not text or text in {"-", "--", "None", "null"}:
+        return None
+    try:
+        return float(text) * factor
+    except ValueError:
+        return None
+
+
 def parse_qa_payload(payload: object, *, code: str = "") -> list[dict]:
     data = as_data(payload)
     if not isinstance(data, dict):
