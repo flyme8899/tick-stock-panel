@@ -36,7 +36,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "import pathlib; from efinance.config import DATA_DIR; p = pathlib.Path(DATA_DIR).resolve(); p.mkdir(parents=True, exist_ok=True); p.chmod(0o1777)"
 COPY . .
 # /root 在基础镜像里是 0700。日志和报告不挂到宿主机，避免再写出 root 属主文件。
-# /app/config 要可写，DSA 才能在 .env 旁边创建 .env.tmp，再退回原地改写挂载文件。
+# /app/config 要可写，DSA 才能在 .env 旁边创建 .env.tmp 和 .env.bak。
+# 单文件挂载不能 os.replace（EPERM），再退回 r+ 原地改写挂载文件。
 RUN mkdir -p /home/dsa/.cache/pyc /home/dsa/.config/matplotlib \
         /app/data /app/logs /app/reports /app/config \
         /var/cache/fontconfig /tmp \

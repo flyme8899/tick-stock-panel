@@ -62,7 +62,7 @@ docker compose --profile dsa up -d --build --force-recreate
 | `/app/data` | `./data/dsa` | SQLite（`stock_analysis.db` 及 `-wal`/`-shm`）、`cache/akshare_name_map.json`、`cache/stocks.index.json`、选股缓存、`.admin_password_hash`、`.session_secret` |
 | `/app/logs` | 不挂载 | `LOG_DIR`。目录在镜像里是 `1777`，日志留在容器层，不再落到宿主机变成 root 文件 |
 | `/app/reports` | 不挂载 | 研报回退文件。同样只在容器层 |
-| `/app/config/.env` | `./.env` | 可写单文件挂载。保存定时设置时先写同目录的 `.env.tmp`，挂载点不能原子替换时再原地改写。`/app/config` 是 `1777` |
+| `/app/config/.env` | `./.env` | 可写单文件挂载。观察池、定时推送和设置保存都写这份文件。见下文「为什么仍是单文件挂载」 |
 | `/opt/tsp/*.py` | 仓库里的桥接文件 | 只读。`PYTHONDONTWRITEBYTECODE=1`，不会在旁边写 `__pycache__` |
 | `/home/dsa` | 不挂载 | `HOME`。AkShare 的 `~/tk.csv`、Longbridge 的 `~/.longbridge`、fontconfig 用户缓存都在这里 |
 | `MPLCONFIGDIR=/home/dsa/.config/matplotlib` | 不挂载 | matplotlib 配置和字体缓存。`XDG_CACHE_HOME`、`XDG_CONFIG_HOME` 也指向 `/home/dsa` |
@@ -70,6 +70,16 @@ docker compose --profile dsa up -d --build --force-recreate
 | efinance 包内 `data/` | 不挂载 | `import efinance` 会创建该目录并写 `search-cache-v2.json`。镜像构建时把这个目录设成 `1777` |
 
 `/root` 保持基础镜像的 `0700`，非 root 进不去，所以上面这些缓存不放在那里。回滚方式和 app 相同：把 `APP_UID` / `APP_GID` 改成 `0`，再 `docker compose --profile dsa up -d --force-recreate`。见 [deployment.md](./deployment.md)。
+
+### 为什么仍是单文件挂载
+
+`./.env` 同时以只读单文件挂到 app 的 `/app/.env`。Docker 的文件挂载钉住的是 inode。dsa 若用 `os.replace` 把 `/app/config/.env.tmp` 换成 `/app/config/.env`，宿主机目录项会指向新 inode，app 仍读着启动时挂上的旧 inode，定时设置和 `STOCK_LIST` 对 TSP 不可见。改成目录挂载才能让原子替换成功，但要么把仓库根目录整棵交给 dsa 写，要么把 `.env` 挪出 app 现在读取的路径。两条都会破坏这份只读视图，所以挂载方式不动。
+
+单文件挂载上，`os.replace` 不能覆盖挂载点。当前内核和 Docker 返回 `EPERM`（`Operation not permitted: '/app/config/.env.tmp' -> '/app/config/.env'`）。#37 写的是「不能原子替换时再原地改写」，上游实现却只捕获 `EBUSY` 和 `EXDEV`，`PermissionError` / `EPERM` / `EACCES` 会直接变成设置保存 500。观察池加入、移出、批量移出、定时推送和系统设置都走 `ConfigManager.apply_updates`，所以全部失败。
+
+现在 `EPERM`、`EACCES`、`EBUSY`、`EXDEV`，以及 `errno` 为空的 `PermissionError`，都会先把原文复制到容器层的 `/app/config/.env.bak`（`0600`），再用 `r+` 写入同一 inode、`truncate` 掉更短内容的尾部并 `fsync`。写入中途失败会按备份把原文写回去。`.env.bak` 在容器可写层，不在宿主机仓库里；进程被强杀时，这一份备份随容器层消失，宿主机 `.env` 可能停在半截内容。正常失败路径会在返回错误前恢复原文。
+
+`/app/config` 在镜像里是 `1777`，用来创建 `.env.tmp` 和 `.env.bak`。不要把 `ENV_FILE` 指到只读的 `/app/.env`。
 
 ## ETF 轮动
 
