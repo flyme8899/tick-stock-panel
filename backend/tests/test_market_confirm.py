@@ -138,7 +138,8 @@ def test_event_after_the_session_waits_for_the_next_one():
     event["_first"] = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
     scored = score_confirmation(event, _tape(bars), NOW)
     assert scored["score"] == 0
-    assert scored["label"] == "尚无首见之后的盘面"
+    assert scored["label"] == "等待竞价"
+    assert scored["phase"] == "auction"
     assert scored["strength"] == "无"
 
 

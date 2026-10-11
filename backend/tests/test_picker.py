@@ -404,6 +404,7 @@ def _insert_news(
     sectors: list[str],
     stocks: list[str],
     title: str | None = None,
+    level: str = "",
 ) -> None:
     mentions = [("sector", name, name, "", "structured") for name in sectors]
     mentions += [("stock", symbol, symbol, symbol[:6], "structured") for symbol in stocks]
@@ -418,7 +419,7 @@ def _insert_news(
         raw=None,
         content_hash=source_id,
         url="",
-        level="",
+        level=level,
         media_ids=[],
         extra=None,
         mentions=mentions,
@@ -441,7 +442,7 @@ def _seed_friday(tmp_path) -> None:
         title="华为发布盘古新模型",
     )
     _insert_news(
-        "dws", "ai-3", _publish(friday, 15, 4),
+        "dws", "ai-3", _publish(friday, 15, 0),
         ["人工智能"], ["000001.SZ"],
         title="盘古新模型发布带动算力",
     )
@@ -541,7 +542,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert snapshot["trading_day"] == "2026-10-09"
     assert snapshot["as_of"] == "2026-10-09"
     assert snapshot["fallback"] is False
-    assert snapshot["hint"] == "交易日 10月9日 · 更新于 15:04"
+    assert snapshot["hint"] == "交易日 10月9日 · 更新于 15:00"
     names = [event["name"] for event in snapshot["events"]]
     assert names[:5] == [
         "华为发布盘古新模型",
@@ -578,7 +579,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     friday_afternoon = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
     same_day = top_hot_events(friday_afternoon)
     assert same_day["fallback"] is False
-    assert same_day["hint"] == "更新于 15:04"
+    assert same_day["hint"] == "更新于 15:00"
     assert same_day["events"][0]["first_seen"] == "14:52"
 
     scores, _labels, note = map_selected_hot_event(head, Dimensions(), {"600519.SH", "000001.SZ"})
@@ -599,7 +600,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert "601318.SH" not in {row["symbol"] for row in picked["rows"]}
     assert {row["event"] for row in picked["rows"]} == {"华为发布盘古新模型 · 3源"}
     assert picked["rows"][0]["score"] == 36.0
-    assert picked["summary"]["hot_hint"] == "交易日 10月9日 · 更新于 15:04"
+    assert picked["summary"]["hot_hint"] == "交易日 10月9日 · 更新于 15:00"
 
     robot = next(event for event in snapshot["events"] if event["name"].startswith("工信部"))
     overlapped = run_picker(
@@ -631,7 +632,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert group["items"][0]["importance"] == "重大"
     assert group["items"][0]["concepts"] == ["昇腾"]
     assert group["items"][0]["headline"] == "华为发布盘古新模型，昇腾链走强"
-    assert group["hint"] == "交易日 10月9日 · 更新于 15:04"
+    assert group["hint"] == "交易日 10月9日 · 更新于 15:00"
     assert group["fallback"] is False
     ran = client.post("/api/picker/run", json={
         "sources": [{"type": "hot_events", "id": head["key"]}],
@@ -654,14 +655,14 @@ def test_major_event_with_few_mentions_outranks_routine_heat(tmp_path):
 
     reset_store_for_tests(tmp_path / "rank.sqlite")
     friday = date(2026, 10, 9)
-    _insert_news("cls", "fed", _publish(friday, 15, 0), [], [], title="美联储宣布降息")
+    _insert_news("cls", "fed", _publish(friday, 14, 50), [], [], title="美联储宣布降息")
     for index, source in enumerate(("cls", "wscn", "dws", "reddit", "cls")):
         _insert_news(
-            source, f"chip-{index}", _publish(friday, 15, index),
+            source, f"chip-{index}", _publish(friday, 14, index),
             ["存储芯片"], [],
             title="存储芯片厂宣布涨价",
         )
-    _insert_news("cls", "pv", _publish(friday, 15, 20), [], [], title="光伏组件厂下调报价")
+    _insert_news("cls", "pv", _publish(friday, 14, 20), [], [], title="光伏组件厂下调报价")
     events = top_hot_events(NOW)["events"]
     names = [event["name"] for event in events]
     assert names[0] == "美联储宣布降息"
@@ -724,6 +725,111 @@ def test_hot_events_classify_market_news_and_drop_noise(tmp_path):
         assert events[name]["headlines"]
 
 
+def test_weekend_news_waits_on_the_next_session_and_keeps_red(tmp_path):
+    """周六、周日的稿归入下周一，休市日就能看到，并带着加红。"""
+    from app.news.hot_events import _news_session_day
+    from app.news.market_confirm import _confirm_day
+
+    saturday_news = datetime(2026, 10, 10, 11, 30, tzinfo=CN_TZ)
+    assert _news_session_day(saturday_news) == _confirm_day(saturday_news) == date(2026, 10, 12)
+    assert _news_session_day(_publish(date(2026, 10, 9), 15, 0)) == date(2026, 10, 9)
+    assert _news_session_day(_publish(date(2026, 10, 9), 15, 1)) == date(2026, 10, 12)
+    assert _news_session_day(_publish(date(2026, 10, 12), 9, 25)) == date(2026, 10, 12)
+    assert _news_session_day(_publish(date(2026, 10, 12), 9, 26)) == date(2026, 10, 12)
+
+    reset_store_for_tests(tmp_path / "overnight.sqlite")
+    friday = date(2026, 10, 9)
+    _insert_news(
+        "cls", "session", _publish(friday, 11, 0), [], [],
+        title="工信部出台算力补贴",
+    )
+    _insert_news(
+        "cls", "close", _publish(friday, 15, 0), [], [],
+        title="平安银行回购股份",
+    )
+    _insert_news(
+        "cls", "after", _publish(friday, 15, 1), [], [],
+        title="碳酸锂报价继续上涨", level="B",
+    )
+    _insert_news(
+        "cls", "sat-red", datetime(2026, 10, 10, 11, 30, tzinfo=CN_TZ), [], [],
+        title="橡胶价格大涨超预期", level="B",
+    )
+    _insert_news(
+        "wscn", "sun-red", datetime(2026, 10, 11, 9, 20, tzinfo=CN_TZ), [], [],
+        title="原油期货报价上调", level="2",
+    )
+    _insert_news(
+        "cls", "monday-open", _publish(date(2026, 10, 12), 10, 20), [], [],
+        title="存储芯片厂宣布涨价",
+    )
+
+    friday_evening = top_hot_events(datetime(2026, 10, 9, 18, 0, tzinfo=CN_TZ))
+    friday_names = [event["name"] for event in friday_evening["events"]]
+    assert "工信部出台算力补贴" in friday_names
+    assert "平安银行回购股份" in friday_names
+    assert "碳酸锂报价继续上涨" not in friday_names
+    assert "橡胶价格大涨超预期" not in friday_names
+    assert friday_evening["as_of"] == "2026-10-09"
+    assert friday_evening["events"][0]["confirmation"]["phase"] in {"intraday", "session", "auction"}
+
+    saturday = top_hot_events(datetime(2026, 10, 10, 18, 0, tzinfo=CN_TZ))
+    saturday_names = [event["name"] for event in saturday["events"]]
+    assert "碳酸锂报价继续上涨" in saturday_names
+    assert "橡胶价格大涨超预期" in saturday_names
+    assert "原油期货报价上调" not in saturday_names
+    assert "工信部出台算力补贴" not in saturday_names
+    assert "平安银行回购股份" not in saturday_names
+    assert saturday["as_of"] == "2026-10-12"
+    assert saturday["trading_day"] == "2026-10-12"
+    assert saturday["fallback"] is False
+    assert "等待竞价" in saturday["hint"]
+    for event in saturday["events"]:
+        assert event["confirmation"]["label"] == "等待竞价"
+        assert event["confirmation"]["phase"] == "auction"
+        assert event["confirmation"]["score"] == 0
+    rubber = next(event for event in saturday["events"] if "橡胶" in event["name"])
+    lithium = next(event for event in saturday["events"] if "碳酸锂" in event["name"])
+    assert rubber["red_count"] > 0
+    assert lithium["red_count"] > 0
+
+    sunday = top_hot_events(datetime(2026, 10, 11, 15, 0, tzinfo=CN_TZ))
+    sunday_by_name = {event["name"]: event for event in sunday["events"]}
+    assert "橡胶价格大涨超预期" in sunday_by_name
+    assert "原油期货报价上调" in sunday_by_name
+    assert "碳酸锂报价继续上涨" in sunday_by_name
+    assert "工信部出台算力补贴" not in sunday_by_name
+    assert sunday["as_of"] == "2026-10-12"
+    assert sunday["fallback"] is False
+    assert "等待竞价" in sunday["hint"]
+    assert sunday_by_name["原油期货报价上调"]["red_count"] > 0
+    assert sunday_by_name["橡胶价格大涨超预期"]["red_count"] > 0
+    assert all(event["confirmation"]["label"] == "等待竞价" for event in sunday["events"])
+
+    monday_wait = top_hot_events(datetime(2026, 10, 12, 9, 10, tzinfo=CN_TZ))
+    assert monday_wait["as_of"] == "2026-10-12"
+    assert "等待竞价" in monday_wait["hint"]
+    assert {event["name"] for event in monday_wait["events"]} >= {
+        "橡胶价格大涨超预期", "原油期货报价上调", "碳酸锂报价继续上涨",
+    }
+    assert all(event["confirmation"]["label"] == "等待竞价" for event in monday_wait["events"])
+
+    monday = top_hot_events(datetime(2026, 10, 12, 10, 40, tzinfo=CN_TZ))
+    monday_by_name = {event["name"]: event for event in monday["events"]}
+    assert "橡胶价格大涨超预期" in monday_by_name
+    assert "原油期货报价上调" in monday_by_name
+    assert "存储芯片厂宣布涨价" in monday_by_name
+    assert "工信部出台算力补贴" not in monday_by_name
+    assert monday["as_of"] == "2026-10-12"
+    chip = monday_by_name["存储芯片厂宣布涨价"]
+    assert chip["confirmation"]["phase"] == "intraday"
+    assert chip["confirmation"]["label"] != "等待竞价"
+    weekend_left = monday_by_name["橡胶价格大涨超预期"]
+    assert weekend_left["confirmation"]["phase"] != "intraday"
+    assert weekend_left["confirmation"]["label"] != "等待竞价"
+    assert weekend_left["red_count"] > 0
+
+
 def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
     reset_store_for_tests(tmp_path / "news.sqlite")
     _insert_news(
@@ -731,13 +837,15 @@ def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
         title="茅台批价上调",
     )
     snapshot = top_hot_events(NOW)
-    assert snapshot["fallback"] is True
-    assert snapshot["as_of"] == "2026-10-08"
+    assert snapshot["fallback"] is False
+    assert snapshot["as_of"] == "2026-10-09"
     assert snapshot["trading_day"] == "2026-10-09"
-    assert snapshot["hint"] == "暂无10月9日数据，显示10月8日 · 更新于 18:12"
+    assert snapshot["hint"] == "交易日 10月9日 · 更新于 18:12"
     assert snapshot["events"][0]["first_seen"] == "10-08 18:12"
     assert snapshot["events"][0]["name"] == "茅台批价上调"
     assert snapshot["events"][0]["concepts"] == []
+    # 周四收盘后的稿属于周五这场开盘，周六再看时竞价已经过去。
+    assert snapshot["events"][0]["confirmation"]["label"] != "等待竞价"
 
     reset_store_for_tests(tmp_path / "weekend.sqlite")
     _insert_news(
@@ -749,9 +857,12 @@ def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
         title="茅台宣布回购",
     )
     crossed = top_hot_events(NOW)
-    assert crossed["as_of"] == "2026-10-10"
-    assert crossed["fallback"] is True
-    assert crossed["hint"].startswith("暂无10月9日数据，显示10月10日")
+    assert crossed["as_of"] == "2026-10-12"
+    assert crossed["trading_day"] == "2026-10-12"
+    assert crossed["fallback"] is False
+    assert crossed["hint"].startswith("交易日 10月12日 · 等待竞价")
+    assert crossed["events"][0]["confirmation"]["label"] == "等待竞价"
+    assert crossed["events"][0]["confirmation"]["phase"] == "auction"
 
     reset_store_for_tests(tmp_path / "empty.sqlite")
     empty = top_hot_events(NOW)
@@ -899,6 +1010,7 @@ def test_picker_hot_event_keeps_funds_out_of_the_stock_list(monkeypatch):
 
 
 def test_hot_events_do_not_merge_across_the_time_window(tmp_path):
+    """收盘后的同题快讯归下一交易日，不和上午那条并成一件事。"""
     reset_store_for_tests(tmp_path / "window.sqlite")
     friday = date(2026, 10, 9)
     _insert_news(
@@ -909,8 +1021,14 @@ def test_hot_events_do_not_merge_across_the_time_window(tmp_path):
         "wscn", "late", _publish(friday, 17, 30), ["昇腾"], [],
         title="华为发布盘古新模型",
     )
-    names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert names.count("华为发布盘古新模型") == 2
+    morning = top_hot_events(datetime(2026, 10, 9, 12, 0, tzinfo=CN_TZ))
+    assert [event["name"] for event in morning["events"]].count("华为发布盘古新模型") == 1
+    assert morning["as_of"] == "2026-10-09"
+    overnight = top_hot_events(NOW)
+    assert [event["name"] for event in overnight["events"]].count("华为发布盘古新模型") == 1
+    assert overnight["as_of"] == "2026-10-12"
+    assert overnight["events"][0]["first_seen"] == "10-09 17:30"
+    assert overnight["events"][0]["confirmation"]["label"] == "等待竞价"
 
 
 def test_hot_event_recency_breaks_equal_item_source_products(tmp_path):
@@ -922,11 +1040,11 @@ def test_hot_event_recency_breaks_equal_item_source_products(tmp_path):
             title="创新药临床获批",
         )
     _insert_news(
-        "cls", "new-1", _publish(friday, 15, 30), ["存储芯片"], [],
+        "cls", "new-1", _publish(friday, 14, 30), ["存储芯片"], [],
         title="存储芯片厂宣布涨价",
     )
     _insert_news(
-        "wscn", "new-2", _publish(friday, 15, 40), ["存储芯片"], [],
+        "wscn", "new-2", _publish(friday, 14, 40), ["存储芯片"], [],
         title="存储芯片厂宣布涨价",
     )
     noon = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
@@ -1032,7 +1150,7 @@ def test_hot_event_llm_labels_top_twenty_in_one_batch(tmp_path, monkeypatch):
     titles = [f"{marks[index]}厂宣布涨价" for index in range(21)]
     for index, title in enumerate(titles):
         _insert_news(
-            "cls", f"cap-{index}", _publish(friday, 15, index), [], [],
+            "cls", f"cap-{index}", _publish(friday, 10, index), [], [],
             title=title,
         )
     prompts: list[str] = []

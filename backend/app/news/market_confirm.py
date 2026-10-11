@@ -67,7 +67,11 @@ def score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[di
     live = bool(tape.get("live")) and in_continuous_session(now)
     if first is None:
         return _result(0, False, "无", "无", _session_text(session, live, waited=False), session, live, {})
-    if session is not None and first.date() > session and not live:
+    # 竞价时点还没到时，周末稿的日期会晚于最近一个交易日。先标等待竞价，
+    # 不要被「首见晚于最近交易日」这条短路走掉。
+    deadline = _auction_deadline(first)
+    waiting = deadline is not None and now.astimezone(CN_TZ) < deadline
+    if not waiting and session is not None and first.date() > session and not live:
         return _result(
             0, False, "无", "无", "尚无首见之后的盘面", session, False, {},
         )
