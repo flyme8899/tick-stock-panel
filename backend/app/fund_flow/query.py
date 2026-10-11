@@ -326,6 +326,13 @@ def _stock_sides(
     frame: pl.DataFrame,
     column: str,
 ) -> tuple[list[dict], list[dict]] | None:
+    """按总数判定样本够不够，再返回涨/跌两侧。
+
+    这里**只看总数**，不看板块缺口：上游同花顺个股榜本来就缺深主板
+    （线上 3723 只，缺 sz_main），板块缺口是数据源的已知局限，不是这一次
+    拉取失败。若把板块覆盖也算进来，全市场个股榜会永久变空、DSA 的
+    「主力净流入居前」也一起消失。缺口改由 :func:`board_gaps` 作为提示透出。
+    """
     if frame.is_empty() or column not in frame.columns or "code" not in frame.columns:
         return None
     usable = frame.filter(pl.col(column).is_not_null()).unique(subset=["code"], keep="last")
@@ -342,6 +349,29 @@ def _stock_sides(
         names,
     )
     return inflow, outflow
+
+
+def board_gaps(root: Path, frame: pl.DataFrame) -> list[str]:
+    """这一份分区相对维表整段缺失的板块名。只作展示提示，不参与「够不够」判定。"""
+    expected, full = store.board_coverage(root)
+    return store.missing_boards(frame, expected=expected, full=full)
+
+
+_BOARD_GAP_LABEL = {
+    "sh_main": "沪市主板",
+    "star": "科创板",
+    "sz_main": "深市主板",
+    "sz_gem": "创业板",
+    "bj": "北交所",
+}
+
+
+def board_gap_note(gaps: list[str]) -> str | None:
+    """把缺失板块拼成一句人话，给页面上标注用。没有缺口返回 None。"""
+    names = [_BOARD_GAP_LABEL.get(gap, gap) for gap in gaps]
+    if not names:
+        return None
+    return f"上游个股资金榜未覆盖：{'、'.join(names)}"
 
 
 def _empty_stock(day: str | None, *, partial: bool = False, note: str | None = None) -> dict:
@@ -412,7 +442,7 @@ def _stocks_today(root: Path) -> dict:
     return {
         "trade_date": day,
         "partial": False,
-        "note": None,
+        "note": board_gap_note(board_gaps(root, frame)),
         "items": inflow,
         "inflow": inflow,
         "outflow": outflow,
@@ -455,7 +485,7 @@ def _stocks_5d(root: Path) -> dict:
     return {
         "trade_date": day,
         "partial": False,
-        "note": None,
+        "note": board_gap_note(board_gaps(root, frame)),
         "items": inflow,
         "inflow": inflow,
         "outflow": outflow,

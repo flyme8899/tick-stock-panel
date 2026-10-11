@@ -907,6 +907,13 @@ def test_weekend_catchup_fills_missing_stock_partition(tmp_path, monkeypatch) ->
 def test_catchup_skips_complete_partition_and_respects_retry_gap(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
     monkeypatch.setenv("FUND_FLOW_STOCK", "true")
+    # 覆盖判定现在会读 instruments 维表算各板块应有只数（深主板整段缺失才判不完整）。
+    # 测试库的"全市场"就是这一只沪市主板股，维表必须同步写上。
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({"symbol": ["600519.SH"], "code": ["600519"]}).write_parquet(
+        inst / "instruments.parquet"
+    )
     store.write_rows(tmp_path, "stock", "2026-10-09", [{
         "symbol": "600519.SH", "code": "600519", "trade_date": "2026-10-09",
         "main_net": 8.0, "large_net": 1.0, "super_net": 2.0, "source": "efinance",
@@ -1109,3 +1116,170 @@ def test_szse_margin_summary_converts_yi_and_repairs_old_partitions(tmp_path) ->
     assert day["label"] == "沪深合计"
     assert day["szse_margin_balance"] == pytest.approx(1_238_027_000_000)
     assert day["margin_balance"] == pytest.approx(1_291_437_000_000 + 1_238_027_000_000)
+
+
+def test_industry_by_code_uses_level2_to_match_fund_rank_names(tmp_path) -> None:
+    """同花顺行业是三级串，资金榜 name 是二级名。取末段会 0 命中。"""
+    ext = tmp_path / "ext_data" / "ext_hy_ths"
+    ext.mkdir(parents=True)
+    pl.DataFrame({
+        "code": ["000001", "600519", "300835"],
+        "所属同花顺行业": ["银行-银行-股份制银行", "食品饮料-白酒-白酒Ⅲ", "电子-半导体-半导体材料"],
+    }).write_parquet(ext / "part.parquet")
+    by_code = factors._industry_by_code(tmp_path)
+    got = {row["code"]: row["industry"] for row in by_code.to_dicts()}
+    assert got == {"000001": "银行", "600519": "白酒", "300835": "半导体"}
+    # 二级名必须与资金榜 name 同口径（东财/同花顺行业榜用的就是二级）
+    assert "银行" in got.values()
+    assert not any("-" in name for name in got.values())
+
+
+def test_ths_industry_level2_handles_short_and_empty() -> None:
+    assert factors.ths_industry_level2("银行-银行-股份制银行") == "银行"
+    assert factors.ths_industry_level2("电子-半导体-半导体材料") == "半导体"
+    # 只有一级时原样返回，不要抛
+    assert factors.ths_industry_level2("银行") == "银行"
+    assert factors.ths_industry_level2("") is None
+    assert factors.ths_industry_level2(None) is None
+
+
+def test_sector_rank_attaches_when_industry_is_level2(tmp_path) -> None:
+    """attach_columns 的 ff_sector_net_inflow_rank 必须能贴上（此前恒为 null）。"""
+    d = tmp_path
+    (d / "fund_flow").mkdir()
+    ext = d / "ext_data" / "ext_hy_ths"
+    ext.mkdir(parents=True)
+    pl.DataFrame({
+        "code": ["000001"],
+        "所属同花顺行业": ["银行-银行-股份制银行"],
+    }).write_parquet(ext / "part.parquet")
+    store.write_rows(d, "industry", "2026-10-09", [
+        {"name": "银行", "trade_date": "2026-10-09", "captured_at": "2026-10-09T15:05:00",
+         "snapshot": "close", "net_inflow": 1.2e9, "rank": 7, "source": "akshare_ths"},
+    ])
+    frame = pl.DataFrame({"symbol": ["000001.SZ"], "date": ["2026-10-09"]})
+    out = factors.attach_columns(frame, include_rank=True, data_dir=d)
+    assert "ff_sector_net_inflow_rank" in out.columns
+    assert out["ff_sector_net_inflow_rank"][0] == 7
+
+
+def test_missing_boards_flags_absent_deep_main_board() -> None:
+    """3723 只全是创业板/科创板/沪主板时，深主板整段缺失必须被识别。"""
+    codes = (
+        [f"300{i:03d}" for i in range(900)]      # 创业板 900
+        + [f"688{i:03d}" for i in range(600)]    # 科创板 600
+        + [f"600{i:03d}" for i in range(700)]    # 沪主板 700
+    )
+    frame = pl.DataFrame({"code": codes})
+    gaps = store.missing_boards(frame)
+    assert "sz_main" in gaps  # 000/001/002/003 一只都没有
+    assert "sz_gem" not in gaps
+    assert "sh_main" not in gaps
+    assert "star" not in gaps
+
+
+def test_partial_ranking_detects_board_gap_despite_large_count() -> None:
+    """总数远超 FULL_MARKET_MIN，但缺深主板 → 仍判不完整，否则永不重拉。"""
+    codes = [f"300{i:03d}" for i in range(900)] + [f"600{i:03d}" for i in range(700)]
+    frame = pl.DataFrame({"code": codes})
+    count = store.code_count(frame)
+    assert count > store.FULL_MARKET_MIN
+    assert store.is_partial_ranking(count, len(codes), frame) is True
+    # 传 None 时退化成只看总数，保持旧行为
+    assert store.is_partial_ranking(count, None) is False
+
+
+def test_partial_ranking_respects_small_universe_from_instruments(tmp_path) -> None:
+    """小库只有沪市主板时不该因为「缺深主板」被反复判不完整。"""
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({"symbol": ["600519.SH", "601398.SH"], "code": ["600519", "601398"]}).write_parquet(
+        inst / "instruments.parquet"
+    )
+    expected, full = store.board_coverage(tmp_path)
+    assert expected == {"sh_main"}
+    frame = pl.DataFrame({"code": ["600519", "601398"]})
+    assert store.is_partial_ranking(2, 2, frame, expected=expected, full=full) is False
+    # 少了其中一只 → 板块覆盖不足 20% 应有只数 → 判不完整
+    assert store.is_partial_ranking(1, 2, pl.DataFrame({"code": ["600519"]}),
+                                    expected=expected, full=full) is True
+
+
+def test_board_coverage_reports_each_board_size(tmp_path) -> None:
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({
+        "symbol": ["600519.SH", "000001.SZ", "000002.SZ", "300001.SZ", "688981.SH"],
+        "code": ["600519", "000001", "000002", "300001", "688981"],
+    }).write_parquet(inst / "instruments.parquet")
+    expected, full = store.board_coverage(tmp_path)
+    assert expected == {"sh_main", "sz_main", "sz_gem", "star"}
+    assert full == {"sh_main": 1, "sz_main": 2, "sz_gem": 1, "star": 1}
+
+
+def test_listed_boards_returns_none_without_instruments(tmp_path) -> None:
+    assert store.listed_boards(tmp_path) is None
+    assert store.board_coverage(tmp_path) == (None, None)
+
+
+def test_board_side_keeps_ranking_when_upstream_misses_a_board(tmp_path) -> None:
+    """上游缺整段板块时，个股榜必须照常展示，不能整块变空（线上回归）。
+
+    同花顺个股榜不覆盖深主板，分区 3723 只但 missing_boards=['sz_main']。
+    若展示层把板块缺口也当成"样本不够"，个股主力净流入榜和 DSA
+    「主力净流入居前」会永久消失 —— 板块缺口只该决定要不要重拉。
+    """
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    rows = ([f"300{i:03d}" for i in range(900)] + [f"600{i:03d}" for i in range(700)]
+            + [f"000{i:03d}" for i in range(200)])  # 深主板应有 200 只，实际一只没有
+    pl.DataFrame({
+        "symbol": [f"{c}.SZ" if c[0] in "03" else f"{c}.SH" for c in rows],
+        "code": rows,
+    }).write_parquet(inst / "instruments.parquet")
+    store.write_rows(tmp_path, "stock", "2026-10-09", [
+        {"code": c, "trade_date": "2026-10-09", "main_net": float(i + 1), "source": "akshare_ths"}
+        for i, c in enumerate(r for r in rows if not r.startswith("000"))
+    ])
+
+    today = query._stocks_today(tmp_path)
+    assert today["partial"] is False          # 不能因板块缺口变 partial
+    assert len(today["inflow"]) > 0           # 榜单必须有内容
+    assert today["note"] and "深市主板" in today["note"]   # 缺口要以 note 提示
+    context = query.dsa_context(tmp_path)
+    assert any("主力净流入居前" in item["summary"] for item in context["items"])
+
+
+def test_refresh_scoped_to_missing_board_only() -> None:
+    """缺口重拉只碰缺失板块的代码，已拉到的照常 skip。"""
+    existing = ["300001", "600519", "688981"]     # 已有：创业板/沪主板/科创板
+    refresh_boards = {"sz_main"}                  # 只有深主板缺
+    for code in existing:
+        assert store.board_of(code) not in refresh_boards   # → keep skip
+    for code in ("000001", "002415", "001979", "003816"):
+        assert store.board_of(code) in refresh_boards       # → 才重拉
+
+
+def test_board_gap_tries_are_capped_per_day() -> None:
+    """同一交易日板块缺口补拉次数封顶，避免每 30 分钟全量重打东财。"""
+    from app.fund_flow import scheduler as ff_scheduler
+
+    assert ff_scheduler.BOARD_GAP_MAX_TRIES >= 1
+    st = {"board_gap_date": "2026-10-09", "board_gap_tries": ff_scheduler.BOARD_GAP_MAX_TRIES}
+    assert ff_scheduler._board_gap_exhausted(st, "2026-10-09") is True
+    # 换一天重新计数
+    assert ff_scheduler._board_gap_exhausted(st, "2026-10-10") is False
+    # 没记过就是不限
+    assert ff_scheduler._board_gap_exhausted({}, "2026-10-09") is False
+
+
+def test_bj_board_includes_920_segment() -> None:
+    """北交所新段 920xxx 必须归到 bj，不能算 unknown 被忽略。"""
+    for code in ("920001", "920999", "830799", "430047"):
+        assert store.board_of(code) == "bj"
+
+
+def test_board_gap_note_labels_are_human_readable() -> None:
+    assert query.board_gap_note([]) is None
+    assert query.board_gap_note(["sz_main"]) == "上游个股资金榜未覆盖：深市主板"
+    assert "深市主板" in query.board_gap_note(["sz_main", "bj"])

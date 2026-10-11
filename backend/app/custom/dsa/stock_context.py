@@ -402,7 +402,14 @@ def _industry_rank(root, code: str, industry_by_code, latest_ranks) -> dict | No
     hit = industry.filter(industry["code"] == code)
     if hit.is_empty():
         return None
-    name = str(hit["industry"][0])
+    # industry_by_code 已按资金榜口径取二级名；再跑一次 ths_industry_level2 兜底，
+    # 防止上游换成三级串或只有一级时与榜名对不上（原来直接拿三级名全等比较，
+    # 90 个榜名一个都命中不了，所有股票的「行业资金排名」恒为缺失）。
+    from app.fund_flow.factors import ths_industry_level2
+
+    name = ths_industry_level2(hit["industry"][0])
+    if not name:
+        return None
     ranks = latest_ranks(root, "industry")
     if ranks.is_empty():
         return {"name": name, "rank": None, "net_inflow": None, "trade_date": None}

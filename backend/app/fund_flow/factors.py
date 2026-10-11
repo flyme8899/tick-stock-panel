@@ -4,8 +4,12 @@
 null，不用 0 填。按交易日对齐，不用未来日期。
 
 ``ff_sector_net_inflow_rank`` 是行业净流入排名（1 为净流入最大）。行业归属用
-扩展表「所属同花顺行业」的最后一段，对不上就是 null。这个排名只贴在单日帧上：
+扩展表「所属同花顺行业」的**二级**名称，对不上就是 null。这个排名只贴在单日帧上：
 行业归属是最新快照，贴进历史多日帧会把今天的行业当成过去的行业。
+
+扩展表里的行业是「一级-二级-三级」三级串（如 ``银行-银行-股份制银行``），
+而资金榜（``stock_fund_flow_industry``）的 ``name`` 用的是**二级**名（``银行``）。
+取末段（三级）会和榜名全等匹配失败，实测 90 个榜名一个都对不上 —— 必须取二级。
 """
 from __future__ import annotations
 
@@ -140,6 +144,24 @@ def latest_sector_ranks(data_dir: Path, kind: str, trade_date: str | None = None
     return chosen.select("name", "rank", "net_inflow", "trade_date")
 
 
+def ths_industry_level2(name: object) -> str | None:
+    """把「一级-二级-三级」的同花顺行业串取成二级名，与资金榜 ``name`` 同口径。
+
+    资金榜（``stock_fund_flow_industry``）的 name 是二级名（``银行``），扩展表
+    「所属同花顺行业」是三级串（``银行-银行-股份制银行``）。取末段会全等匹配失败。
+
+    只有两侧都用这个函数换算，匹配率才是实测的 90/90。单段串（没有连字符）原样
+    返回，保证上游只有一级时还能对上；空值返回 None。
+    """
+    text = str(name or "").strip()
+    if not text:
+        return None
+    parts = [part for part in text.split("-") if part]
+    if not parts:
+        return None
+    return parts[1] if len(parts) > 1 else parts[0]
+
+
 def _industry_by_code(data_dir: Path) -> pl.DataFrame:
     path = Path(data_dir) / "ext_data" / "ext_hy_ths" / "part.parquet"
     empty = pl.DataFrame(schema={"code": pl.Utf8, "industry": pl.Utf8})
@@ -152,9 +174,18 @@ def _industry_by_code(data_dir: Path) -> pl.DataFrame:
     code_col = next((name for name in ("code", "symbol", "股票代码") if name in frame.columns), None)
     if code_col is None or "所属同花顺行业" not in frame.columns:
         return empty
-    return frame.select(
+    raw = frame.select(
         _codes(frame[code_col]).alias("code"),
-        pl.col("所属同花顺行业").cast(pl.Utf8).str.split("-").list.last().alias("industry"),
+        pl.col("所属同花顺行业").cast(pl.Utf8),
+    )
+    # 取二级: 先 split, 命中 2 段以上取第 2 段, 否则退回第 1 段(上游只给一级时)。
+    split = pl.col("所属同花顺行业").str.split("-")
+    return raw.select(
+        "code",
+        pl.when(split.list.len() >= 2)
+        .then(split.list.get(1))
+        .otherwise(split.list.get(0))
+        .alias("industry"),
     ).drop_nulls(["code", "industry"])
 
 

@@ -69,7 +69,7 @@ def sync_symbol(
     seen_now = list(known) + [row["info_code"] for row in fresh]
     _seen_map(state, "seen_stock")[code] = seen_now[-_SEEN_CAP:]
     store.save_state(data_dir, state)
-    inserted = _ingest(fresh, today=today or cn_today()) if ingest else 0
+    inserted = _ingest(fresh, data_dir=data_dir, today=today or cn_today()) if ingest else 0
     return {"symbol": symbol, "fetched_pages": pages, "new": len(fresh), "ingested": inserted}
 
 
@@ -112,7 +112,7 @@ def sync_industry(
     _remember(state, "seen_industry", [row["info_code"] for row in fresh], cap=800)
     state["industry_begin"] = begin
     store.save_state(data_dir, state)
-    inserted = _ingest(fresh, today=day) if ingest else 0
+    inserted = _ingest(fresh, data_dir=data_dir, today=day) if ingest else 0
     return {"industry_code": code, "fetched_pages": pages, "new": len(fresh), "ingested": inserted}
 
 
@@ -165,7 +165,23 @@ def _write_grouped(data_dir: Path, kind: str, rows: list[dict]) -> None:
         store.write_rows(data_dir, kind, day, chunk)
 
 
-def _ingest(rows: list[dict], *, today: date) -> int:
+def _mark_health(*, ok: bool, note: str = "", items: int = 0) -> None:
+    """记录研报抓取健康度。
+
+    写的是 ``research`` —— 与 news.config.SOURCE_ORDER / SOURCE_LABELS 里的 id
+    一致，健康页才读得到。抓取成功但一条都没抓到（无新研报 / 该股本来就没研报）
+    时记 ok=False 并带上说明：否则会把「拉取链路断了」和「确实没内容」混成同一个
+    绿点。auth_state 沿用 ``ok``，保持与其它网络源一致。
+    """
+    try:
+        from app.news.service import get_store
+
+        get_store().mark_health("research", ok=ok, error="" if ok else note[:200], auth_state="ok")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("研报健康状态未写入: %s", exc)
+
+
+def _ingest(rows: list[dict], *, data_dir: Path, today: date) -> int:
     cutoff = (today - timedelta(days=_NEWS_DAYS)).isoformat()
     recent = [row for row in rows if str(row.get("publish_date") or "") >= cutoff]
     if not recent:
@@ -207,12 +223,7 @@ def _ingest(rows: list[dict], *, today: date) -> int:
             raw={"kind": row.get("kind"), "rating": rating},
         ))
     result = ingest_items(items, Lexicon([]))
-    try:
-        from app.news.service import get_store
-
-        get_store().mark_health("research", ok=True, auth_state="ok")
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("研报健康状态未写入: %s", exc)
+    _mark_health(ok=True, items=int(result.get("inserted") or 0))
     return int(result.get("inserted") or 0)
 
 

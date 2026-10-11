@@ -255,6 +255,108 @@ def read_range(data_dir: Path, kind: str, *, start: str | None = None, end: str 
     return pl.concat(frames, how="vertical_relaxed")
 
 
+# 各板块的代码前缀。用来分桶校验覆盖：同花顺的个股资金榜只给创业板/科创板/
+# 沪主板，深主板（000/001/002/003）整段缺失，总数 3723 仍高于 FULL_MARKET_MIN，
+# 只看总数会把「缺了 1612 只深主板」误判成「已齐」，从此永不重拉。
+_BOARD_PREFIXES: dict[str, tuple[str, ...]] = {
+    "sh_main": ("600", "601", "603", "605"),
+    "star": ("688", "689"),
+    "sz_main": ("000", "001", "002", "003"),
+    "sz_gem": ("300", "301", "302"),
+    # 北交所：430/830 等老代码用 43x/83x，「8」兜住 82x/83x/87x/88x/889；
+    # 920 是新段（线上 348 只），不能漏。
+    "bj": ("430", "8", "920"),
+}
+
+# 单桶「有拉到」的判定比例。分区里某个板块的只数低于 该板块在维表里的应有只数 ×
+# 这个比例，视为该板块整段缺失。用比例而不是固定只数：1 只的小库不该因为
+# 「深主板不足 20 只」被判不完整。
+_BOARD_MIN_RATIO = 0.2
+
+# 没有维表时的固定门槛：一个板块至少要有这么多只才算「拉到过」。
+_BOARD_MIN = 20
+
+
+def _board_counts(codes) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for code in codes:
+        board = board_of(str(code or ""))
+        if board == "unknown":
+            continue
+        counts[board] = counts.get(board, 0) + 1
+    return counts
+
+
+def board_of(code: str | None) -> str:
+    """代码落到哪个板块桶。认不出返回 ``unknown``，不参与覆盖判定。"""
+    text = str(code or "").strip()
+    if len(text) < 3:
+        return "unknown"
+    head = text[:3]
+    for board, prefixes in _BOARD_PREFIXES.items():
+        if any(head.startswith(prefix) for prefix in prefixes):
+            return board
+    return "unknown"
+
+
+def _instrument_frame(data_dir: Path) -> pl.DataFrame | None:
+    path = Path(data_dir) / "instruments" / "instruments.parquet"
+    if not path.exists():
+        return None
+    try:
+        frame = pl.read_parquet(path)
+    except Exception:  # noqa: BLE001
+        return None
+    return frame if not frame.is_empty() else None
+
+
+def listed_boards(data_dir: Path) -> set[str] | None:
+    """本地 instruments 里实际存在的板块集合。没有维表时返回 None（退化成固定全集）。
+
+    有维表就用它当期望全集：小库里只有沪市时，就不会因为「深主板为空」反复判不完整。
+    """
+    frame = _instrument_frame(data_dir)
+    if frame is None:
+        return None
+    found = set(_board_counts(frame.get_column("code").drop_nulls().to_list()))
+    return found or None
+
+
+def missing_boards(frame: pl.DataFrame, *, expected: set[str] | None = None,
+                   full: dict[str, int] | None = None) -> list[str]:
+    """分区里整段缺失的板块。
+
+    ``expected``/``full`` 由本地维表推导时按「该板块应有只数的比例」判定，小库不误判；
+    都没有时按固定全集 + 固定门槛检查。空表返回空列表，交给总数判定。
+    """
+    if frame.is_empty() or "code" not in frame.columns:
+        return []
+    counts = _board_counts(frame.get_column("code").drop_nulls().to_list())
+    scope = expected if expected is not None else set(_BOARD_PREFIXES)
+    gaps = []
+    for board in scope:
+        have = counts.get(board, 0)
+        if full is not None:
+            need = full.get(board, 0)
+            if have >= max(1, int(need * _BOARD_MIN_RATIO)):
+                continue
+        elif have >= _BOARD_MIN:
+            continue
+        gaps.append(board)
+    return sorted(gaps)
+
+
+def board_coverage(data_dir: Path) -> tuple[set[str] | None, dict[str, int] | None]:
+    """从维表推出 (期望板块集合, 各板块应有只数)。无维表时 (None, None)。"""
+    frame = _instrument_frame(data_dir)
+    if frame is None:
+        return None, None
+    counts = _board_counts(frame.get_column("code").drop_nulls().to_list())
+    if not counts:
+        return None, None
+    return set(counts), counts
+
+
 def ranking_limit(universe: int | None) -> int:
     """全市场门槛。已知股票池更小时，池子本身就是全集。"""
     if universe is None or universe <= 0:
@@ -262,8 +364,25 @@ def ranking_limit(universe: int | None) -> int:
     return min(FULL_MARKET_MIN, universe)
 
 
-def is_partial_ranking(count: int, universe: int | None) -> bool:
-    return count < ranking_limit(universe)
+def is_partial_ranking(
+    count: int,
+    universe: int | None,
+    frame: pl.DataFrame | None = None,
+    *,
+    expected: set[str] | None = None,
+    full: dict[str, int] | None = None,
+) -> bool:
+    """分区够不够当「全市场排名」。
+
+    总数不足门槛 → 不完整。总数够了但某个板块整段缺失（深主板被上游漏掉时
+    就是这种）也要判不完整，否则会永远跳过重拉。frame 省略时退化成只看总数。
+    ``expected``/``full`` 传入时按维表限定板块范围与门槛（小库不误判）。
+    """
+    if count < ranking_limit(universe):
+        return True
+    if frame is None:
+        return False
+    return bool(missing_boards(frame, expected=expected, full=full))
 
 
 def code_count(frame: pl.DataFrame) -> int:

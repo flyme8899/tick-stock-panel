@@ -211,10 +211,40 @@ def _partition_missing(data_dir: Path, kind: str, day: str) -> bool:
 
 
 def _stock_incomplete(data_dir: Path, day: str, universe: int) -> bool:
-    count = 0 if _partition_missing(data_dir, "stock", day) else store.code_count(
-        store.read_partition(data_dir, "stock", day),
+    if _partition_missing(data_dir, "stock", day):
+        return True
+    frame = store.read_partition(data_dir, "stock", day)
+    expected, full = store.board_coverage(data_dir)
+    return store.is_partial_ranking(
+        store.code_count(frame), universe, frame, expected=expected, full=full,
     )
-    return store.is_partial_ranking(count, universe)
+
+
+# 同一交易日的板块缺口最多补几次。上游同花顺个股榜长期不覆盖深主板，
+# 缺口不是「这次拉失败」而是数据源的已知局限；不设上限就会每 30 分钟
+# 全量重跑一轮。达到上限后只记 WARNING，等次日新分区再看。
+BOARD_GAP_MAX_TRIES = 2
+
+
+def _board_gap_exhausted(kind_state: dict, day: str) -> bool:
+    """这一交易日的板块缺口补拉是否已经用满次数。"""
+    if str(kind_state.get("board_gap_date") or "") != day:
+        return False
+    try:
+        return int(kind_state.get("board_gap_tries") or 0) >= BOARD_GAP_MAX_TRIES
+    except (TypeError, ValueError):
+        return False
+
+
+def _stock_gap_only(data_dir: Path, day: str) -> bool:
+    """分区存在、总数够，只是缺整段板块 —— 这种要受补拉次数限制。"""
+    if _partition_missing(data_dir, "stock", day):
+        return False
+    frame = store.read_partition(data_dir, "stock", day)
+    if frame.is_empty():
+        return False
+    expected, full = store.board_coverage(data_dir)
+    return bool(store.missing_boards(frame, expected=expected, full=full))
 
 
 def _sector_close_missing(data_dir: Path, day: str) -> bool:
@@ -258,6 +288,10 @@ def catchup_tasks(
         and "efinance" not in breakers_open
         and not cooled("stock")
         and _stock_incomplete(data_dir, stock_day, universe)
+        and not (
+            _stock_gap_only(data_dir, stock_day)
+            and _board_gap_exhausted(kind_state("stock"), stock_day)
+        )
     ):
         due.append("stock")
     margin_day = task_day("margin", now, trading=trading, known_days=known_days)
@@ -530,7 +564,24 @@ class FundFlowWorker:
         return RunResult(kind=name, skipped="unknown")
 
     def _mark_attempt(self, data_dir: Path, name: str, now: datetime) -> None:
-        store.update_kind_state(data_dir, name, last_attempt_at=now.isoformat(timespec="seconds"))
+        fields: dict[str, object] = {"last_attempt_at": now.isoformat(timespec="seconds")}
+        if name == "stock":
+            # 板块缺口重拉要计数，避免上游长期不覆盖时无限全量重跑。
+            # 每次尝试前就把计数写下去 —— 中途崩了也算用过一次，宁可少拉不可多拉。
+            day = task_day("stock", now, trading=_default_trading(now),
+                           known_days=known_trading_days(data_dir))
+            if _stock_gap_only(data_dir, day):
+                tried = store.load_state(data_dir)
+                state = ((tried.get("kinds") or {}).get("stock") or {})
+                prev = 0
+                if str(state.get("board_gap_date") or "") == day:
+                    try:
+                        prev = int(state.get("board_gap_tries") or 0)
+                    except (TypeError, ValueError):
+                        prev = 0
+                fields["board_gap_date"] = day
+                fields["board_gap_tries"] = prev + 1
+        store.update_kind_state(data_dir, name, **fields)
 
     def _restore_breakers(self, data_dir: Path) -> None:
         saved = (store.load_state(data_dir).get("sources") or {})
