@@ -910,28 +910,251 @@ function Alerts({ sample, reachable }: { sample: boolean; reachable: boolean }) 
   )
 }
 
+const SIGNAL_ACTIONS: Record<string, string> = {
+  buy: '买入',
+  add: '加仓',
+  hold: '持有',
+  reduce: '减仓',
+  sell: '卖出',
+  watch: '观望',
+  avoid: '回避',
+  alert: '预警',
+}
+const SIGNAL_HORIZONS: Record<string, string> = {
+  intraday: '日内',
+  '1d': '1 日',
+  '3d': '3 日',
+  '5d': '5 日',
+  '10d': '10 日',
+  swing: '波段',
+  long: '长期',
+}
+const SIGNAL_STATUSES: Record<string, string> = {
+  active: '生效中',
+  expired: '已过期',
+  invalidated: '已失效',
+  closed: '已结束',
+  archived: '已归档',
+}
+const SIGNAL_OUTCOMES: Record<string, string> = {
+  hit: '命中',
+  miss: '未中',
+  neutral: '中性',
+}
+
+export interface DecisionSignalRow {
+  id: string
+  direction: string
+  directionTone: string
+  horizon: string
+  status: string
+  createdAt: string
+  outcome: string
+  outcomeTone: string
+}
+
+function signalLabel(map: Record<string, string>, value: unknown, fallback = '—') {
+  const text = textOf(value, '')
+  if (!text) return fallback
+  return map[text] ?? text
+}
+
+function signalDirectionTone(action: string) {
+  if (action === 'buy' || action === 'add') return 'text-bull'
+  if (action === 'sell' || action === 'reduce' || action === 'avoid') return 'text-bear'
+  if (action === 'hold' || action === 'watch' || action === 'alert') return 'text-warning'
+  return 'text-secondary'
+}
+
+function signalOutcomeTone(outcome: string) {
+  if (outcome === 'hit') return 'text-bull'
+  if (outcome === 'miss') return 'text-bear'
+  if (outcome === 'unable') return 'text-warning'
+  return 'text-muted'
+}
+
+function signalTime(value: unknown) {
+  const text = textOf(value, '')
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/)
+  return match ? `${match[1]} ${match[2]}` : (text || '—')
+}
+
+function outcomePagesBySignal(pages: readonly unknown[]) {
+  const grouped = new Map<string, Record<string, unknown>[]>()
+  for (const page of pages) {
+    for (const row of asRecords(page)) {
+      const id = textOf(row.signal_id, '')
+      if (!id) continue
+      const bucket = grouped.get(id) ?? []
+      bucket.push(row)
+      grouped.set(id, bucket)
+    }
+  }
+  return grouped
+}
+
+function outcomeSummary(rows: Record<string, unknown>[], horizon: string) {
+  if (rows.length === 0) return { text: '尚未复盘', tone: 'text-muted' }
+  const matched = rows.filter(row => textOf(row.horizon, '') === horizon)
+  const chosen = matched.length > 0 ? matched : rows
+  const describe = (row: Record<string, unknown>) => {
+    const outcome = textOf(row.outcome, '')
+    if (outcome) return { text: signalLabel(SIGNAL_OUTCOMES, outcome, outcome), tone: signalOutcomeTone(outcome) }
+    if (textOf(row.eval_status, '') === 'unable') return { text: '无法评估', tone: 'text-warning' }
+    return { text: '尚未复盘', tone: 'text-muted' }
+  }
+  if (chosen.length === 1) return describe(chosen[0])
+  return {
+    text: chosen.map(row => `${signalLabel(SIGNAL_HORIZONS, row.horizon, textOf(row.horizon, '周期'))} ${describe(row).text}`).join('；'),
+    tone: 'text-secondary',
+  }
+}
+
+export function readDecisionSignalList(list: unknown, outcomePages: readonly unknown[] = []) {
+  const items = asRecords(list)
+  const total = isRecord(list) && typeof list.total === 'number' ? list.total : items.length
+  const outcomes = outcomePagesBySignal(outcomePages)
+  const rows: DecisionSignalRow[] = items.map(item => {
+    const action = textOf(item.action, '')
+    const label = textOf(item.action_label, '')
+    const direction = /[\u4e00-\u9fff]/.test(label) ? label : signalLabel(SIGNAL_ACTIONS, action, action || '—')
+    const horizonKey = textOf(item.horizon, '')
+    const id = textOf(item.id, '')
+    const outcome = outcomeSummary(id ? outcomes.get(id) ?? [] : [], horizonKey)
+    return {
+      id: id || `${action}-${horizonKey}-${textOf(item.created_at, '')}`,
+      direction,
+      directionTone: signalDirectionTone(action),
+      horizon: signalLabel(SIGNAL_HORIZONS, horizonKey),
+      status: signalLabel(SIGNAL_STATUSES, item.status),
+      createdAt: signalTime(item.created_at),
+      outcome: outcome.text,
+      outcomeTone: outcome.tone,
+    }
+  })
+  return { total, rows }
+}
+
+async function loadDecisionSignals(code: string) {
+  const list = await dsaUpstream<unknown>(`decision-signals?stock_code=${encodeURIComponent(code)}&page_size=20`)
+  const outcomePages = await Promise.all(asRecords(list).slice(0, 20).map(async item => {
+    const id = textOf(item.id, '')
+    if (!/^\d+$/.test(id)) return null
+    try {
+      return await dsaUpstream<unknown>(`decision-signals/${id}/outcomes`)
+    } catch {
+      return null
+    }
+  }))
+  return { list, outcomePages: outcomePages.filter((page): page is unknown => page != null) }
+}
+
+export function DecisionSignalsPanel({
+  code,
+  onCodeChange,
+  onSubmit,
+  reachable,
+  pending,
+  error,
+  onRetry,
+  stats,
+  list,
+  outcomePages,
+}: {
+  code: string
+  onCodeChange: (value: string) => void
+  onSubmit: () => void
+  reachable: boolean
+  pending: boolean
+  error: unknown
+  onRetry?: () => void
+  stats: unknown
+  list: unknown
+  outcomePages: readonly unknown[]
+}) {
+  const parsed = list == null ? null : readDecisionSignalList(list, outcomePages)
+  const raw = stats != null || list != null ? { stats, signals: list } : null
+  return (
+    <Panel title="决策信号" hint="对照事后走势看当时的建议。开启 DSA 管理登录后，这部分需要上游会话。">
+      <form className="mb-3 flex gap-2" onSubmit={event => { event.preventDefault(); onSubmit() }}>
+        <input className={cn(fieldCls, 'w-36 font-mono')} value={code} onChange={event => onCodeChange(event.target.value)} aria-label="信号代码" />
+        <button className={primaryBtn} type="submit" disabled={!reachable || pending}>查看</button>
+      </form>
+      {error != null && <div className="mb-2"><Failure error={error} onRetry={onRetry} /></div>}
+      {!reachable && <EmptyState icon={Sparkles} title="决策服务未连接" />}
+      {reachable && pending && list == null && <p className="text-xs text-muted">加载中…</p>}
+      {reachable && parsed?.total === 0 && parsed.rows.length === 0 && (
+        <EmptyState icon={Sparkles} title="该股暂无决策信号" hint="分析生成后会自动记录。" />
+      )}
+      {reachable && parsed != null && parsed.rows.length > 0 && (
+        <ul className="space-y-2">
+          {parsed.rows.map(row => (
+            <li key={row.id} data-signal-row className="rounded-lg border border-border bg-base px-3 py-2">
+              <div className="flex items-baseline justify-between gap-3">
+                <span data-signal-direction className={cn('text-sm font-semibold', row.directionTone)}>{row.direction}</span>
+                <span data-signal-status className="shrink-0 text-[11px] text-secondary">{row.status}</span>
+              </div>
+              <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                <div>
+                  <dt className="text-muted">周期</dt>
+                  <dd data-signal-horizon className="text-foreground">{row.horizon}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted">记录时间</dt>
+                  <dd data-signal-created className="text-foreground">{row.createdAt}</dd>
+                </div>
+                <div className="col-span-2">
+                  <dt className="text-muted">后验</dt>
+                  <dd data-signal-outcome className={row.outcomeTone}>{row.outcome}</dd>
+                </div>
+              </dl>
+            </li>
+          ))}
+        </ul>
+      )}
+      {raw != null && (
+        <details data-signal-raw className="mt-3">
+          <summary className="cursor-pointer text-xs text-secondary">原始数据</summary>
+          <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-secondary">{JSON.stringify(raw, null, 2)}</pre>
+        </details>
+      )}
+    </Panel>
+  )
+}
+
 function Signals({ reachable, initialCode }: { reachable: boolean; initialCode: string }) {
-  const [code, setCode] = useState(initialCode || '600519')
+  const [draft, setDraft] = useState(initialCode || '600519')
+  const [code, setCode] = useState((initialCode || '600519').trim())
   const stats = useQuery({
     queryKey: QK.dsaUpstream('signal-stats'),
     queryFn: () => dsaUpstream<unknown>('decision-signals/outcomes/stats'),
     enabled: reachable,
     retry: false,
   })
-  const latest = useMutation({
-    mutationFn: () => dsaUpstream(`decision-signals/latest/${encodeURIComponent(code.trim())}`),
+  const signals = useQuery({
+    queryKey: QK.dsaUpstream(`decision-signals:${code}`),
+    queryFn: () => loadDecisionSignals(code),
+    enabled: reachable && code.length > 0,
+    retry: false,
   })
   return (
-    <Panel title="决策信号" hint="对照事后走势看当时的建议。开启 DSA 管理登录后，这部分需要上游会话。">
-      <form className="mb-3 flex gap-2" onSubmit={event => { event.preventDefault(); latest.mutate() }}>
-        <input className={cn(fieldCls, 'w-36 font-mono')} value={code} onChange={event => setCode(event.target.value)} aria-label="信号代码" />
-        <button className={primaryBtn} type="submit" disabled={!reachable || latest.isPending}>查看最新</button>
-      </form>
-      {stats.isError && <Failure error={stats.error} onRetry={() => stats.refetch()} />}
-      {latest.isError && <div className="mb-2"><Failure error={latest.error} /></div>}
-      {stats.data != null && <pre className="mb-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-secondary">{JSON.stringify(stats.data, null, 2)}</pre>}
-      {latest.data != null && <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-secondary">{JSON.stringify(latest.data, null, 2)}</pre>}
-    </Panel>
+    <DecisionSignalsPanel
+      code={draft}
+      onCodeChange={setDraft}
+      onSubmit={() => {
+        const next = draft.trim()
+        if (!next) return
+        if (next === code) void signals.refetch()
+        else setCode(next)
+      }}
+      reachable={reachable}
+      pending={signals.isFetching}
+      error={signals.error ?? null}
+      onRetry={() => { void signals.refetch() }}
+      stats={stats.data}
+      list={signals.data?.list}
+      outcomePages={signals.data?.outcomePages ?? []}
+    />
   )
 }
 
