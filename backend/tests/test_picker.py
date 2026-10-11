@@ -545,7 +545,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert snapshot["hint"] == "交易日 10月9日 · 更新于 15:00"
     names = [event["name"] for event in snapshot["events"]]
     assert names[:5] == [
-        "华为发布盘古新模型",
+        "华为发布盘古新模型，昇腾链走强",
         "工信部出台机器人补贴政策",
         "碳酸锂报价继续上涨",
         "平安银行回购股份",
@@ -598,7 +598,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     }
     assert "999999.SZ" not in {row["symbol"] for row in picked["rows"]}
     assert "601318.SH" not in {row["symbol"] for row in picked["rows"]}
-    assert {row["event"] for row in picked["rows"]} == {"华为发布盘古新模型 · 3源"}
+    assert {row["event"] for row in picked["rows"]} == {"华为发布盘古新模型，昇腾链走强 · 3源"}
     assert picked["rows"][0]["score"] == 36.0
     assert picked["summary"]["hot_hint"] == "交易日 10月9日 · 更新于 15:00"
 
@@ -1102,7 +1102,8 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     named = top_hot_events(NOW)
-    assert named["events"][0]["name"] == "华为发布新模型"
+    assert named["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
+    assert named["events"][0]["subtitle"] == "华为发布新模型"
     assert named["events"][0]["concepts"] == ["昇腾"]
     assert named["events"][0]["category"] == "地缘政治"
     assert named["events"][0]["direction"] == "利空"
@@ -1110,18 +1111,19 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert named["events"][0]["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利空"}]
     assert named["events"][0]["mentioned_stocks"] == []
     assert len(prompts) == 1
-    assert "不超过28个字" in prompts[0]
+    assert "一句话要点" in prompts[0]
     assert "国内政策/宏观" in prompts[0]
 
     hot_mod.clear_hot_event_cache(llm=False)
     again = top_hot_events(NOW + timedelta(minutes=11))
-    assert again["events"][0]["name"] == "华为发布新模型"
+    assert again["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
+    assert again["events"][0]["subtitle"] == "华为发布新模型"
     assert len(prompts) == 1
 
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: False)
     hot_mod.clear_hot_event_cache()
     fallback = top_hot_events(NOW + timedelta(minutes=22))
-    assert fallback["events"][0]["name"] == "华为发布盘古新模型"
+    assert fallback["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
     assert fallback["events"][0]["category"] == "科技与产业"
     assert fallback["events"][0]["direction"] == "利好"
     assert fallback["events"][0]["importance"] == "重大"
@@ -1135,7 +1137,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     kept = top_hot_events(NOW + timedelta(minutes=33))
-    assert kept["events"][0]["name"] == "华为发布新模型"
+    assert kept["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
     assert kept["events"][0]["importance"] == "一般"
 
 
@@ -1165,7 +1167,7 @@ def test_hot_event_llm_labels_top_twenty_in_one_batch(tmp_path, monkeypatch):
     snapshot = top_hot_events(NOW)
     assert len(snapshot["events"]) == 21
     assert len(prompts) == 2
-    assert "不超过28个字" in prompts[0]
+    assert "一句话要点" in prompts[0]
     assert "上一轮标题不合格" in prompts[1]
     in_first = [title for title in titles if title in prompts[0]]
     assert len(in_first) == 20

@@ -2346,6 +2346,7 @@ export interface NewsHotEvent {
   mapping?: NewsHotMapping[]
   headline: string
   headlines?: string[]
+  subtitle?: string
   mentions: number
   red_count?: number
   source_count: number
@@ -2435,6 +2436,7 @@ export interface PickerSourceItem {
   first_seen?: string | null
   concepts?: string[]
   headline?: string | null
+  subtitle?: string
   category?: string
   direction?: string
   importance?: string

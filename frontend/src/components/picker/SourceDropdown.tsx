@@ -13,6 +13,7 @@ export interface SourceOption {
   updatedAt?: string
   concepts?: string[]
   headline?: string | null
+  subtitle?: string
   category?: string
   direction?: string
   importance?: string
@@ -124,6 +125,9 @@ export function SourceDropdown({
                     <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
                   )}
                 </span>
+                {item.subtitle && (
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">{item.subtitle}</span>
+                )}
                 {(item.importance || item.category || item.direction) && (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">
                     {[item.importance, item.confirmationLabel, item.category, item.direction, ...(item.mappedStocks ?? []).slice(0, 2)].filter(Boolean).join(' · ')}

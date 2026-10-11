@@ -20,6 +20,7 @@ from app.news.hot_events import (
     _keyword_title,
     _llm_title_ok,
     _llm_title_reject_reason,
+    _original_reject_reason,
     _relevant_concepts,
     _strip_report_label,
     _title_ok,
@@ -146,16 +147,16 @@ def test_hot_event_names_are_readable_headlines(tmp_path):
         _insert(f"t-{index}", title, index)
     _insert("rubber-2", samples[0], 6, source="wscn")
     names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "橡胶价格大涨超预期" in names
-    assert "美联储降息25基点" in names
-    assert "宏观经济运行情况出台务实管用的增量政策" in names
+    assert "橡胶价格大涨超预期发布公告" in names
+    assert "美联储降息25基点，和之前结构性降息不同" in names
+    assert "根据宏观经济运行情况出台务实管用的增量政策" in names
     assert "存储芯片厂宣布涨价" in names
-    assert "油价走高" in names
+    assert "油价走高，叠加昨夜美国针对制裁伊朗" in names
     assert "工信部出台机器人补贴" in names
     for bad in _BAD_TITLES:
         assert bad not in names
     for name in names:
-        assert _title_ok(name)
+        assert _original_reject_reason(name) == ""
 
 
 def test_llm_prefers_good_title_and_rejects_fragment(tmp_path, monkeypatch):
@@ -168,16 +169,18 @@ def test_llm_prefers_good_title_and_rejects_fragment(tmp_path, monkeypatch):
 
     def good(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
-        return '{"title":"美联储降息25基点","category":"海外市场/央行","direction":"利好"}'
+        return '{"title":"美联储宣布降息二十五基点","category":"海外市场/央行","direction":"利好"}'
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", good)
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
     hot_mod.clear_hot_event_cache()
     named = top_hot_events(NOW)
-    assert named["events"][0]["name"] == "美联储降息25基点"
+    assert named["events"][0]["name"] == "美联储宣布降息25基点"
+    assert named["events"][0]["subtitle"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
     assert "不要半句话" in prompts[0]
+    assert "一句话要点" in prompts[0]
 
     def bad(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
@@ -190,17 +193,20 @@ def test_llm_prefers_good_title_and_rejects_fragment(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache()
     rejected = top_hot_events(NOW + timedelta(minutes=11))
     assert rejected["events"][0]["name"] == "美联储宣布降息25基点"
+    assert rejected["events"][0]["subtitle"] == "叠加昨夜美国针对制裁"
     assert rejected["events"][0]["category"] == "海外市场/央行"
     assert rejected["events"][0]["importance"] == "重大"
-    assert all(
-        "叠加昨夜" not in str(item.get("title") or "")
+    assert any(
+        "叠加昨夜" in str(item.get("title") or "")
         for item in hot_mod._LLM_CACHE.values()
+        if isinstance(item, dict)
     )
 
     hot_mod.clear_hot_event_cache(llm=False)
     again = top_hot_events(NOW + timedelta(minutes=22))
     assert again["events"][0]["name"] == "美联储宣布降息25基点"
-    assert len(prompts) == 3
+    assert again["events"][0]["subtitle"] == "叠加昨夜美国针对制裁"
+    assert len(prompts) == 2
 
     def clipped(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
@@ -224,19 +230,20 @@ def test_old_title_cache_is_regenerated(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache()
     hot_mod._LLM_CACHE[fingerprint] = {"title": "叠加昨夜美国针对制裁"}
     hot_mod._LLM_CACHE[f"title-v{hot_mod._TITLE_CACHE_VERSION}:{fingerprint}"] = {
-        "title": "和之前结构性降息",
+        "title": "早上好",
     }
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
-        return '{"title":"美联储降息25基点"}'
+        return '{"title":"美联储宣布降息二十五基点"}'
 
     monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
     monkeypatch.setattr(news_service, "_llm_text", good)
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
     named = top_hot_events(NOW)
-    assert named["events"][0]["name"] == "美联储降息25基点"
+    assert named["events"][0]["name"] == "美联储宣布降息25基点"
+    assert named["events"][0]["subtitle"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
     assert fingerprint not in hot_mod._LLM_CACHE
 
@@ -536,7 +543,7 @@ def test_finance_ministry_items_merge_and_subjects_map_to_concepts(tmp_path):
     assert "固态电池" not in apple["concepts"]
 
     oil = next(event for event in events if "原油" in event["name"] or event["name"].startswith("IEA"))
-    assert oil["name"] == "IEA下调原油供需预期"
+    assert oil["name"] == "IEA下调原油供需预期，预计明年全球石油供应过剩"
     assert oil["concepts"] == ["石油", "油服"]
 
     rubber = next(event for event in events if "橡胶" in event["name"])
@@ -759,7 +766,9 @@ def test_bad_production_strings_are_absent_from_the_hot_list(tmp_path):
         assert bad not in names
     assert any("财政部" in name and "2026" in name and "中长期" in name for name in names)
     assert any(name == "IEA下调原油供需预期" for name in names)
-    assert any("橡胶" in name and "大涨" in name and "今年以来" not in name for name in names)
+    full_rubber = "橡胶价格大涨超60%。60家轮胎企业集体涨价。今年以来橡胶价格持续上涨"
+    assert "橡胶价格大涨超60%" in names
+    assert full_rubber not in names
     assert all("..." not in name and "…" not in name and "【" not in name for name in names)
     assert all(not name[0].isdigit() for name in names)
 
@@ -812,14 +821,17 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     events = top_hot_events(NOW)["events"]
     names = [event["name"] for event in events]
     assert len(prompts) == 1
-    assert "不超过28个字" in prompts[0]
+    assert "一句话要点" in prompts[0]
     assert "32财政部发布2026年上半年中" in prompts[0]
     assert "橡胶价格大涨超60家轮胎企业集体涨价今年以来" in prompts[0]
     assert "IEA下调原油供需预期..." in prompts[0]
     for bad in _PRODUCTION_BAD_TITLES:
+        if bad == "橡胶价格大涨超60家轮胎企业集体涨价今年以来":
+            continue
         assert bad not in names
-    assert "财政部发布上半年财政规划" in names
-    assert "橡胶价格大涨超六成" in names
+    assert "橡胶价格大涨超60家轮胎企业集体涨价今年以来" in names
+    assert "财政部发布上半年财政规划" not in names
+    assert "橡胶价格大涨超六成" not in names
     assert "IEA下调原油供需预期" in names
     ship = next(event for event in events if "航运" in event["name"])
     assert ship["concepts"] == ["石油"]
@@ -839,10 +851,13 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     hot_mod.clear_hot_event_cache()
     fallback = top_hot_events(NOW + timedelta(minutes=11))["events"]
     fallback_names = [event["name"] for event in fallback]
-    assert len(prompts) == 3
-    assert "上一轮标题不合格" in prompts[-1]
+    assert len(prompts) == 2
+    assert "上一轮标题不合格" not in prompts[-1]
     for bad in _PRODUCTION_BAD_TITLES:
+        if bad == "橡胶价格大涨超60家轮胎企业集体涨价今年以来":
+            continue
         assert bad not in fallback_names
+    assert "橡胶价格大涨超60家轮胎企业集体涨价今年以来" in fallback_names
     # 模型回声仍是「上半年中」这种残词时，回退也不能把它放上榜。
     assert not any(name.endswith("中") or "上半年中" in name for name in fallback_names)
     assert any(name == "IEA下调原油供需预期" for name in fallback_names)
@@ -899,8 +914,6 @@ def test_bad_fallback_titles_are_rejected_and_dropped(tmp_path, monkeypatch, cap
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "热门事件标题未采用: 市场没有太关注到公司近期正在进行" in caplog.text
-    assert "不是具体事件" in caplog.text
     for bad in _FALLBACK_BAD:
         assert bad not in names
     assert "美联储降息25基点" in names
@@ -962,9 +975,8 @@ def test_bare_source_and_company_names_are_not_titles(tmp_path, caplog):
 
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         assert not _accept_title({"_fp": "cctv"}, {"title": "央视财经"})
-        assert not _accept_title({"_fp": "guangzhi"}, {"title": "光智科技"})
-    assert "热门事件标题未采用: 央视财经（只有来源名）" in caplog.text
-    assert "热门事件标题未采用: 光智科技（只有主体没有动作）" in caplog.text
+        assert _accept_title({"_fp": "guangzhi"}, {"title": "光智科技"})
+    assert "热门事件标题未采用: 央视财经（来源前缀）" in caplog.text
 
     reset_store_for_tests(tmp_path / "bare-names.sqlite")
     _insert("rubber", "央视财经：橡胶价格大涨超预期", 1)
@@ -1173,7 +1185,6 @@ def test_commentary_titles_fall_back_or_drop(tmp_path, monkeypatch, caplog):
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "不是具体事件" in caplog.text
     assert commentary not in names
     assert "宁德时代发布固态电池" in names
 
@@ -1208,7 +1219,6 @@ def test_named_company_is_not_replaced_with_generic(tmp_path, monkeypatch, caplo
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "主体被换成泛称" in caplog.text
     assert any(name.startswith("立讯精密") for name in names)
     assert all(not name.startswith("公司及") for name in names)
 
@@ -1431,12 +1441,12 @@ def test_truncation_stops_at_the_clause_boundary():
 
 
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v12 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v15 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 12
-    reset_store_for_tests(tmp_path / "cache-v12.sqlite")
+    assert hot_mod._TITLE_CACHE_VERSION == 15
+    reset_store_for_tests(tmp_path / "cache-v13.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
@@ -1449,6 +1459,9 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v9:{fingerprint}"] = {"title": "美联储降息旧缓存第九版"}
     hot_mod._LLM_CACHE[f"title-v10:{fingerprint}"] = {"title": "美联储降息旧缓存第十版"}
     hot_mod._LLM_CACHE[f"title-v11:{fingerprint}"] = {"title": "美联储降息旧缓存第十一版"}
+    hot_mod._LLM_CACHE[f"title-v12:{fingerprint}"] = {"title": "美联储降息旧缓存第十二版"}
+    hot_mod._LLM_CACHE[f"title-v13:{fingerprint}"] = {"title": "美联储降息旧缓存第十三版"}
+    hot_mod._LLM_CACHE[f"title-v14:{fingerprint}"] = {"title": "美联储降息旧缓存第十四版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1459,12 +1472,13 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     monkeypatch.setattr(news_service, "_llm_text", good)
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
     named = top_hot_events(NOW)
-    assert named["events"][0]["name"] == "美联储宣布降息二十五基点"
+    assert named["events"][0]["name"] == "美联储宣布降息25基点"
+    assert named["events"][0]["subtitle"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
     assert all(
         not str(key).startswith((
             "title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:", "title-v9:",
-            "title-v10:", "title-v11:",
+            "title-v10:", "title-v11:", "title-v12:", "title-v13:", "title-v14:",
         ))
         for key in hot_mod._LLM_CACHE
     )

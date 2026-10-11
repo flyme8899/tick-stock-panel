@@ -269,6 +269,7 @@ export function StockPicker() {
               updatedAt: item.first_seen ?? item.updated_at ?? undefined,
               concepts: item.concepts,
               headline: item.headline ?? undefined,
+              subtitle: item.subtitle || undefined,
               category: item.category,
               direction: item.direction,
               importance: item.importance,

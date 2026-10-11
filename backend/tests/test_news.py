@@ -944,7 +944,7 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     ], lexicon)
     listing = hot_event_listing(cn_now(), limit=20)
     names = [item["name"] for item in listing["events"]]
-    assert names[0] == "华为发布盘古新模型"
+    assert names[0] == "华为发布盘古新模型，昇腾链走强"
     assert "人工智能" not in names
     head = listing["events"][0]
     assert head["concepts"] == ["昇腾"]
@@ -969,7 +969,7 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
 
     feed = feed_for_source("hot", limit=10)
     assert feed["source"] == "hot"
-    assert feed["items"][0]["title"] == "华为发布盘古新模型"
+    assert feed["items"][0]["title"] == "华为发布盘古新模型，昇腾链走强"
     assert feed["items"][0]["symbols"] == ["600519.SH"]
     assert feed["items"][0]["sectors"] == ["昇腾"]
 
@@ -999,14 +999,14 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     assert packed is not None
     text = packed[1]
     assert text.index("具体事件") < text.index("热门板块")
-    assert "华为发布盘古新模型" in text
+    assert "华为发布盘古新模型，昇腾链走强" in text
     assert "重大" in text
     assert "首见" in text
     assert "相对基线 1.5 倍" in text
 
     listed = news_api.hot(kind="event", window_hours=24, baseline_days=4, limit=20)
     assert listed["candidates"] == []
-    assert listed["events"][0]["name"] == "华为发布盘古新模型"
+    assert listed["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
     sectors = news_api.hot(kind="sector", window_hours=24, baseline_days=1, limit=20)
     assert "events" not in sectors
     assert any(item["key"] == "人工智能" for item in sectors["candidates"])
