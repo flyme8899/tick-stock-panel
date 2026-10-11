@@ -13,7 +13,8 @@
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
 清理会去掉开头的钟点、【】标签、末尾省略号、「央视财经：」这类来源前缀，以及研报文件名里的日期戳和 #，并停在句号前。
 栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
-侧面佐证、印证、看好、地位、逻辑、关注、建议、推荐、布局、把握这类没有主体和动作的点评不是事件。
+侧面佐证、印证、看好、地位、逻辑、关注、把握这类没有主体和动作的点评不是事件。
+国务院、证监会、工信部、发改委、国资委、央行或点名的公司后面，布局、建议、推荐是动作，不是点评。
 增长、新增、追加这类业绩和回购动作算事件，但同比、数据显示这种没有具体主体的不算。
 已经点名的公司不能换成「公司」。叠加、接续粘成的长标题收成不超过 20 字的核心事件。
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
@@ -92,7 +93,7 @@ CATEGORY_NAMES = (
 _CATEGORY_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("地缘政治", ("制裁", "关税", "冲突", "战争", "停火", "出口管制", "配额", "地缘")),
     ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "加息", "降息", "美股", "纳指", "标普", "欧股", "日经")),
-    ("国内政策/宏观", ("出台", "补贴", "降准", "国务院", "发改委", "工信部", "证监会", "财政部", "央行", "宏观", "政策")),
+    ("国内政策/宏观", ("出台", "补贴", "降准", "国务院", "发改委", "工信部", "证监会", "财政部", "国资委", "央行", "宏观", "政策")),
     ("大宗商品/期货价格异动", ("碳酸锂", "原油", "期货", "黄金", "铜价", "铁矿", "煤炭", "稀土", "豆粕", "螺纹", "报价", "橡胶")),
     ("公司重大事项", ("收购", "回购", "上市", "立案", "停产", "召回", "签约", "中标", "停牌", "退市")),
     ("科技与产业", ("发布", "订单", "追加", "获批", "涨价", "降价", "提价", "上调", "下调", "量产", "芯片", "模型")),
@@ -145,7 +146,7 @@ _LEADERS = (
 # 标题里点名的机构。缺主体时从代表标题里补这些，而不是留下「可能还会」「运行情况」。
 _ORG_SUBJECTS = (
     "美联储", "欧洲央行", "欧央行", "日本央行", "英格兰银行", "英央行",
-    "国务院", "政治局", "发改委", "工信部", "证监会", "财政部",
+    "国务院", "政治局", "发改委", "工信部", "证监会", "财政部", "国资委",
     "商务部", "外交部", "住建部", "国家能源局", "能源局", "国常会",
     "央行",
 )
@@ -322,6 +323,13 @@ _COMMENTARY_CUES = (
     "侧面佐证", "印证", "利好", "看好", "地位", "逻辑",
     "关注", "建议", "推荐", "布局", "把握",
 )
+# 机构或公司名后面，这三个词是政策或公司动作，不是点评。
+_DIRECTIVE_VERBS = ("布局", "建议", "推荐")
+_VAGUE_ACTORS = frozenset({
+    "机构", "研报", "分析", "分析师", "券商", "行业", "板块", "市场",
+    "资金", "投资者", "业内", "人士", "专家", "报告", "点评", "策略",
+    "继续", "建议", "推荐", "布局", "关注", "把握",
+})
 # 模型若把「立讯精密」写成「公司」，标题不能用。
 _GENERIC_SUBJECT_HEADS = ("公司", "企业", "厂商", "集团")
 # 叠加、接续把原因和事件粘成一句时，只留后面的核心事件。
@@ -577,6 +585,13 @@ def _parse_phrase(text: str) -> tuple[str, str, str]:
                 break
         if action:
             break
+    if not action:
+        for clause in clauses or [body]:
+            index, verb = _directive_action(clause)
+            if index >= 0 and verb:
+                chosen = clause
+                action = verb
+                break
     if not action:
         for clause in clauses or [body]:
             index, verb = _narrative_action(clause)
@@ -1583,6 +1598,37 @@ def _normalize_subject(before: str) -> str:
     return lead
 
 
+def _qualified_directive_subject(before: str) -> bool:
+    """布局、建议、推荐只有跟在监管机构或公司名后面才算动作。"""
+    text = _subject_text(before)
+    if not text or not _subject_ok(text):
+        return False
+    if any(org in text for org in _ORG_SUBJECTS) or any(name in text for name in _LEADERS):
+        return True
+    if text in BROAD_SECTORS or any(word in text for word in _VAGUE_ACTORS):
+        return False
+    if text in _NOT_SUBJECT or text in _GENERIC_TOKENS:
+        return False
+    return len(text) >= 3 and bool(re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9]+", text))
+
+
+def _directive_action(text: str) -> tuple[int, str]:
+    """机构或公司名后面的布局、建议、推荐。句首的建议关注、推荐布局不是。"""
+    found: tuple[int, str] | None = None
+    for verb in _DIRECTIVE_VERBS:
+        start = 0
+        while True:
+            index = text.find(verb, start)
+            if index < 0:
+                break
+            if index >= 2 and _qualified_directive_subject(text[:index]):
+                if found is None or index < found[0] or (index == found[0] and len(verb) > len(found[1])):
+                    found = (index, verb)
+                break
+            start = index + len(verb)
+    return found if found else (-1, "")
+
+
 def _tuple_action(text: str) -> tuple[int, str]:
     """取最靠前的动作。追加回购要落在追加上，宾语才是回购，而不是空的。"""
     found: tuple[int, str] | None = None
@@ -1609,7 +1655,7 @@ def _narrative_action(text: str) -> tuple[int, str]:
 def _split_headline(text: str) -> tuple[str, str, str]:
     """选出主体说得通的谓语。叙述后面再接发布、出台这类动作时，宾语停在那之前。"""
     options: list[tuple[int, int, str, str]] = []
-    for index, verb in (_tuple_action(text), _narrative_action(text)):
+    for index, verb in (_tuple_action(text), _narrative_action(text), _directive_action(text)):
         if index < 0 or not verb or not _subject_ok(text[:index]):
             continue
         options.append((index, -len(verb), verb, text[:index]))
@@ -2051,7 +2097,8 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "不要用「事件」当标题。不要输出重点、点评或栏目标签。"
         "不要只写媒体名或公司名，标题里要有动作。"
         "不要把已经点名的公司换成「公司」，立讯精密仍写立讯精密。"
-        "不要写侧面佐证、印证、看好、关注、建议、推荐、布局或把握这类没有具体动作的点评。"
+        "不要写侧面佐证、印证、看好、关注或把握这类没有具体动作的点评。"
+        "国务院、工信部、发改委、国资委、央行或公司名后面的布局、建议、推荐是事件，要保留。"
         "主体必须写明，例如美联储、国务院、财政部。不要只写同比或数据显示。"
         f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
         "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"

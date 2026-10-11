@@ -1232,6 +1232,46 @@ def test_watch_and_advice_commentary_is_not_an_event(tmp_path):
     assert "美联储降息25基点" in names
 
 
+_POLICY_DIRECTIVES = (
+    "国务院布局未来产业",
+    "工信部建议加快5G部署",
+    "发改委布局算力枢纽",
+    "国资委推荐央企试点",
+)
+_COMMENTARY_DIRECTIVES = (
+    "继续关注AI视频板块",
+    "建议关注算力",
+    "推荐布局低空经济",
+)
+
+
+def test_directive_verbs_keep_policy_events_and_drop_commentary(tmp_path):
+    """机构或公司名后面的布局、建议、推荐是事件；没有主体的仍是点评。"""
+    for title in _POLICY_DIRECTIVES:
+        assert _llm_title_reject_reason(title) == ""
+        assert _llm_title_ok(title)
+        assert _keyword_title([{"title": title}]) == title
+        assert _fallback_title_ok(title)
+    for title in _COMMENTARY_DIRECTIVES:
+        assert _llm_title_reject_reason(title) == "不是具体事件"
+        assert not _llm_title_ok(title)
+        assert not _fallback_title_ok(title)
+        assert _keyword_title([{"title": title}]) == ""
+    assert _llm_title_ok("宁德时代布局固态电池")
+    assert _llm_title_reject_reason("机构建议继续布局") == "不是具体事件"
+
+    reset_store_for_tests(tmp_path / "directive-verbs.sqlite")
+    for index, title in enumerate(_POLICY_DIRECTIVES):
+        _insert(f"policy-{index}", title, index + 1)
+    for index, title in enumerate(_COMMENTARY_DIRECTIVES):
+        _insert_rich(f"note-{index}", title, 11, index + 1, level="A")
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    for title in _POLICY_DIRECTIVES:
+        assert title in names
+    for title in _COMMENTARY_DIRECTIVES:
+        assert title not in names
+
+
 def test_runon_titles_shorten_to_the_core_event():
     """叠加、接续粘成的长标题收成不超过 20 字的核心事件。"""
     raw = "赎回接续叠加资本补充需求前三季度银行二永债发行显著放量"
