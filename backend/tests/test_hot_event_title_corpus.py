@@ -219,6 +219,17 @@ def test_failed_title_walks_headlines_by_source_credibility():
     assert empty["name"] == ""
 
 
+def _quote_open_for_test(text: str) -> bool:
+    stack: list[str] = []
+    for char in text:
+        if char == '"':
+            if stack and stack[-1] == '"':
+                stack.pop()
+            else:
+                stack.append('"')
+    return bool(stack)
+
+
 def _publish(hour: int, minute: int) -> datetime:
     return datetime(2026, 10, 9, hour, minute, tzinfo=CN_TZ)
 
@@ -368,7 +379,39 @@ def test_live_sentences_subtitles_and_research_chatter():
     assert _subtitle_reject_reason("早上好") == "寒暄"
     assert _subtitle_reject_reason("各位投资者请看") == "寒暄"
     assert _subtitle_reject_reason("财联社：美联储降息") == "来源前缀"
-    assert _subtitle_reject_reason("叠加昨夜美国针对制裁") == "乱码"
+    assert _subtitle_reject_reason("叠加昨夜美国针对制裁") == ""
+    live_subtitles = (
+        "WTI11月原油期货收涨0.36美元报91.85美元/桶",
+        "苹果iPhoneDuo加单30%，iPhone18Pro系列总订单量未变",
+        "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法",
+    )
+    for line in live_subtitles:
+        assert _subtitle_reject_reason(line) == "", line
+    assert _subtitle_reject_reason("\ufffd") == "乱码"
+    assert _subtitle_reject_reason("锟斤拷") == "乱码"
+    assert _subtitle_reject_reason("Ã¤Â¸Â­文") == "乱码"
+    assert _subtitle_reject_reason("!!!@@@###") == "乱码"
+
+    price = "统一涨价10%！光刻机巨头ASML将上调服务价格"
+    shown_price = _display_original(price)
+    assert "统一涨价10%" in shown_price
+    assert "ASML将上调" in shown_price
+    assert shown_price != "统一涨价10%"
+    assert _display_original("华为发布盘古新模型！昇腾链走强") == "华为发布盘古新模型"
+
+    quoted = '深圳公积金拟新增"装修住房提取。额度上调"'
+    shown_quote = _display_original(quoted)
+    assert "额度上调" in shown_quote
+    assert shown_quote != '深圳公积金拟新增"装修住房提取'
+    assert not _quote_open_for_test(shown_quote)
+    closed = '深圳公积金拟新增"装修住房提取"'
+    assert _display_original(closed) == closed
+
+    broker = "招商电新锂电行业更新称十五五政策定调固态电池产业化进入关键期"
+    assert _display_original(broker) == "十五五政策定调固态电池产业化进入关键期"
+    assert _display_original("经济日报深圳公积金拟新增装修住房提取额度") == "深圳公积金拟新增装修住房提取额度"
+    assert _display_original("经济日报：深圳公积金拟新增装修住房提取额度") == "深圳公积金拟新增装修住房提取额度"
+    assert _display_original("经济日报") == ""
 
     demand = "国家发改委出台一揽子增量政策更好鼓励居民消费、撬动社会投资并扩大有效需求持续释放内需潜力"
     industry = "国家把十五五政策定调固态电池产业化进入关键期并带动上下游设备与材料订单集中释放落地"
@@ -417,6 +460,63 @@ def test_live_sentences_subtitles_and_research_chatter():
     }
     _ensure_shown_name(weak)
     assert weak["name"] == ""
+
+
+def test_realistic_batch_keeps_subtitles(tmp_path, monkeypatch):
+    """线上这三条要点含数字、拉丁、百分号和斜杠，一批下来不能是空的。"""
+    import json
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    reset_store_for_tests(tmp_path / "subtitle-batch.sqlite")
+    samples = (
+        (
+            "wti",
+            "WTI原油期货上涨报91.85美元",
+            "WTI11月原油期货收涨0.36美元报91.85美元/桶",
+        ),
+        (
+            "apple",
+            "苹果宣布追加iPhone订单",
+            "苹果iPhoneDuo加单30%，iPhone18Pro系列总订单量未变",
+        ),
+        (
+            "diesel",
+            "财政部宣布柴油协议触发制裁",
+            "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法",
+        ),
+    )
+    for index, (source_id, title, _subtitle) in enumerate(samples):
+        _insert(source_id, title, 9, 10 + index)
+        _insert(source_id + "-b", title, 9, 20 + index, source="wscn")
+
+    def fake(prompt: str, **_kwargs: object) -> str:
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            title = ""
+            if "原油" in rest:
+                title = samples[0][2]
+            elif "苹果" in rest or "iPhone" in rest:
+                title = samples[1][2]
+            elif "制裁" in rest or "柴油" in rest:
+                title = samples[2][2]
+            rows.append({"id": head, "title": title, "importance": "重要"})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", fake)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    events = top_hot_events(NOW)["events"]
+    subtitles = [str(event.get("subtitle") or "") for event in events]
+    assert events
+    assert all(subtitles)
+    for _source_id, _title, subtitle in samples:
+        assert subtitle in subtitles
 
 
 def test_same_company_earnings_notes_are_one_event(tmp_path):

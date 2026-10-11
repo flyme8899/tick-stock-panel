@@ -11,14 +11,14 @@
 宽行业名不参与聚类，也不拿去扩成分股。
 
 展示主标题是簇里最可信的新闻原标题，只去掉来源前缀、括号、券商组名，以及开头的「报道」「据报道」「消息称」。
-保留完整的第一句，只在句号、分号、叹号、问号或全文结束处停下，不在 40 字或逗号处截开。公司名后面的冒号留下公司名，后面的顿号按原文保留。
-模型写一句话要点放在副标题。要点只丢掉空的、乱的、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。
+第一句完整时停在句号、分号、叹号、问号或全文结束处，不在 40 字或逗号处截开。第一句太短或没有主体时，把下一句留下。引号没合上时不在引号里截断。公司名后面的冒号留下公司名，后面的顿号按原文保留。
+模型写一句话要点放在副标题。要点只丢掉空的、替换符或乱码、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。数字、百分号和斜杠不算乱码。
 来源优先：公司公告和交易所，然后新华社、央视、证监会这类官方稿，再是财联社和华尔街见闻，然后外媒。
 知识星球、ima、钉钉，以及带「更新」「建议」「把握机会」「1e+」或编号列表的研报标题，不当主标题。
 有新闻源标题就用那条；没有就用过了严格门槛的模型标题；再没有就丢掉。
-寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。缓存版本是 v14。
+寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。缓存版本是 v15。
 半截标题并回完整事件，提及次数跟着走。
-清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社），券商「电新/计算机/研究称」，以及研报文件名里的日期戳和 #，并停在句号前。
+清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社、经济日报），券商「招商电新…称」，以及研报文件名里的日期戳和 #。第一句太短或没有主体时，把叹号后面的下一句留下。引号没合上时不在引号里截断。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
 栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
 侧面佐证、印证、看好、地位、逻辑、关注、把握这类没有主体和动作的点评不是事件。持续关注开头，以及 1）、① 这类列表残句，也不是事件。
@@ -77,8 +77,8 @@ _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
 # 半截标题对照用。第一句通常到不了这么长；再长仍整句保留，页面两行截断。
 _TITLE_DISPLAY_MAX = 80
-# 标题缓存按这个版本取。要点门槛放宽后，v13 里记成未采用的结果不再套用。
-_TITLE_CACHE_VERSION = 14
+# 标题缓存按这个版本取。乱码判定收窄后，v14 里记成未采用的结果不再套用。
+_TITLE_CACHE_VERSION = 15
 # 钉钉作文、知识星球、ima。这些研究聊天不当主标题。
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
@@ -278,7 +278,7 @@ _CLOSED_TAILS = {
 _SOURCE_HEADS = (
     "财联社", "华尔街见闻", "证券时报", "上海证券报", "中国证券报",
     "第一财经", "澎湃新闻", "新浪财经", "新华社", "界面新闻",
-    "央视财经", "格隆汇", "金十数据", "金十",
+    "央视财经", "格隆汇", "金十数据", "金十", "经济日报",
     "路透社", "路透", "彭博社", "彭博", "南华早报",
 )
 _SOURCE_NAMES = frozenset(_SOURCE_HEADS)
@@ -332,11 +332,13 @@ _SOURCE_DATELINE = re.compile(
 _SOURCE_LABEL = re.compile(
     r"^(?:(?:" + _SOURCE_ALT + r")(?:报道|快讯|讯|电)?|快讯|突发|独家|刚刚)[：:|｜]"
 )
-# 招商电新称、中信计算机称、华泰研究称。监管机构研究称不是券商前缀。
+# 招商电新称、招商电新锂电行业更新称。监管机构研究称不是券商前缀。
 _BROKER_NOTE = re.compile(
     r"^(?!(?:国务院|发改委|工信部|证监会|财政部|央行|国资委|商务部|美联储|政治局|欧央行))"
-    r"[\u4e00-\u9fff]{2,8}(?:电新|计算机|研究)称"
+    r"[\u4e00-\u9fff]{2,8}(?:电新|计算机|研究)[\u4e00-\u9fffA-Za-z0-9]{0,16}称"
 )
+# 经济日报有时直接粘在标题前面，没有冒号。
+_LEADING_ECONOMIC_DAILY = re.compile(r"^经济日报")
 # 末尾或冒号前的组名。天风计算机、招商电新。没有这些券商名时，不因为句子里有「计算机」就删。
 _BROKER_HOUSES = (
     "天风", "招商", "中信", "华泰", "中金", "国泰君安", "海通", "广发", "兴业",
@@ -1787,9 +1789,12 @@ def _mode(values: list[str]) -> str:
     return Counter(values).most_common(1)[0][0]
 
 
-def _compact(text: str) -> str:
+def _compact(text: str, *, keep_quotes: bool = False) -> str:
     body = re.sub(r"\s+", "", (text or "").strip())
-    return body.strip("，。！？、；：\"'“”")
+    marks = "，。！？、；："
+    if not keep_quotes:
+        marks += "\"'“”"
+    return body.strip(marks)
 
 
 def _title_incoherent(text: str) -> bool:
@@ -1839,27 +1844,30 @@ def _looks_like_report_file(text: str) -> bool:
     return any(body.endswith(kind) for kind in _REPORT_KINDS)
 
 
-def _strip_report_label(text: str) -> str:
+def _strip_report_label(text: str, *, keep_quotes: bool = False) -> str:
     """去掉研报文件名。只删连字符后或 # 前的日期，正文里的央行日期留下。"""
-    body = _FILE_EXT.sub("", _compact(text))
+    body = _FILE_EXT.sub("", _compact(text, keep_quotes=keep_quotes))
     parts = re.split(r"[#＃]", body)
     if len(parts) >= 2 and _looks_like_report_file(parts[0]):
-        body = _compact("".join(parts[1:]))
+        body = _compact("".join(parts[1:]), keep_quotes=keep_quotes)
     elif len(parts) >= 2:
-        body = _compact("".join(parts))
+        body = _compact("".join(parts), keep_quotes=keep_quotes)
     body = _REPORT_PREFIX.sub("", body)
     body = _FILE_DATE.sub("", body)
     return body.strip("-_—–#＃")
 
 
-def _strip_source_prefix(text: str) -> str:
-    body = _compact(text)
+def _strip_source_prefix(text: str, *, keep_quotes: bool = False) -> str:
+    body = _compact(text, keep_quotes=keep_quotes)
     body = _CLOCK_PREFIX.sub("", body)
     body = _MINUTE_BEFORE_BRACKET.sub("", body)
     changed = True
     while body and changed:
         changed = False
-        for pattern in (_SOURCE_BRACKET, _SOURCE_DATELINE, _SOURCE_LABEL, _BROKER_NOTE, _BROKER_TEAM_LEAD):
+        for pattern in (
+            _SOURCE_BRACKET, _SOURCE_DATELINE, _SOURCE_LABEL,
+            _BROKER_NOTE, _BROKER_TEAM_LEAD, _LEADING_ECONOMIC_DAILY,
+        ):
             updated = pattern.sub("", body, count=1)
             if updated != body:
                 body = updated.lstrip("，。！？、；：")
@@ -1871,8 +1879,11 @@ def _strip_source_prefix(text: str) -> str:
     body = _STRAY_BRACKET.sub("", body)
     body = _LEFTOVER_MINUTE.sub("", body)
     body = _TRAILING_ELLIPSIS.sub("", body)
-    body = _strip_report_label(body)
-    return body.strip("，。！？、；：")
+    body = _strip_report_label(body, keep_quotes=keep_quotes)
+    marks = "，。！？、；："
+    if not keep_quotes:
+        marks += "\"'“”"
+    return body.strip(marks)
 
 
 def _first_sentence(text: str) -> str:
@@ -2658,18 +2669,84 @@ def _strip_lead_attribution(text: str) -> str:
     return body
 
 
+def _quote_delta(stack: list[str], char: str) -> None:
+    """直引号成对开合。弯引号和直角引号按成对括号。撇号不当引号。"""
+    if char == '"':
+        if stack and stack[-1] == '"':
+            stack.pop()
+        else:
+            stack.append('"')
+        return
+    if char in "“「『":
+        stack.append(char)
+        return
+    opener = {"”": "“", "」": "「", "』": "『"}.get(char)
+    if opener and stack and stack[-1] == opener:
+        stack.pop()
+
+
+def _quote_open(text: str) -> bool:
+    stack: list[str] = []
+    for char in text:
+        if char == '"' or char in "“「『”」』":
+            _quote_delta(stack, char)
+    return bool(stack)
+
+
+def _sentence_end_index(text: str, start: int = 0) -> int:
+    """引号外面的下一个。；！？。没有就返回 -1。"""
+    stack: list[str] = []
+    for index, char in enumerate(text):
+        if char == '"' or char in "“「『”」』":
+            _quote_delta(stack, char)
+        if index < start:
+            continue
+        if char in "。；！？" and not stack:
+            return index
+    return -1
+
+
+def _weak_first_clause(text: str) -> bool:
+    """「统一涨价10%」这种太短，或还没有主体和动作。"""
+    if not text or len(text) < 8:
+        return True
+    return not _has_gate_subject_action(text)
+
+
+def _close_open_quotes(shown: str, original: str) -> str:
+    """截完以后引号还开着，就沿原文补到合上。对不上原文时保持原样。"""
+    if not shown or not _quote_open(shown):
+        return shown
+    source = re.sub(r"\s+", "", original or "")
+    index = source.find(shown)
+    if index < 0:
+        return shown
+    end = index + len(shown)
+    while end < len(source) and _quote_open(source[index:end]):
+        end += 1
+    extended = source[index:end].strip("，。！？、；：")
+    return extended or shown
+
+
 def _clip_original_length(text: str) -> str:
-    """保留第一句。只在。；！？或全文结束处停下，不在逗号或 40 字处截开。"""
-    body = _compact(text)
-    for index, char in enumerate(body):
-        if char in "。；！？":
-            return body[:index].strip("，。！？、；：")
-    return body.strip("，。！？、；：")
+    """第一句完整就停在。；！？。太短或没有主体时带上下一句。引号里不截。"""
+    body = _compact(text, keep_quotes=True)
+    cut = _sentence_end_index(body)
+    if cut < 0:
+        shown = body
+    else:
+        first = body[:cut]
+        if _weak_first_clause(first):
+            nxt = _sentence_end_index(body, cut + 1)
+            shown = body if nxt < 0 else body[:nxt]
+        else:
+            shown = first
+    return _close_open_quotes(shown.strip("，。！？、；："), body)
 
 
 def _display_original(text: str) -> str:
     """只去来源前缀、括号标签、券商组名和句首转述。不改写成短标题。"""
-    body = _strip_lead_attribution(_strip_source_prefix(text))
+    body = _strip_lead_attribution(_strip_source_prefix(text, keep_quotes=True))
     if not body or body == "事件":
         return ""
     body = _display_stitch(body)
@@ -3126,16 +3203,19 @@ def _subtitle_has_source_prefix(text: str) -> bool:
     return bool(_BROKER_NOTE.match(text) or _BROKER_TEAM_LEAD.match(text))
 
 
+# 替换符，以及 UTF-8 被当成 Latin-1 之后的典型字节。ASML、iPhone 对不上。
+_REPLACEMENT_MARK = re.compile("[\ufffd\ufffe]|锟斤拷")
+_MOJIBAKE_MARK = re.compile("(?:Ã[\u0080-\u00ff]|Â[\u0080-\u00ff]|â€)")
+
+
 def _subtitle_garbled(text: str) -> bool:
-    if "..." in text or "…" in text or _has_emoji(text):
+    """只有替换符、错位编码，或汉字和字母数字加起来不到三成。"""
+    if _REPLACEMENT_MARK.search(text) or _MOJIBAKE_MARK.search(text):
         return True
-    if _starts_fragment(text) or _title_incoherent(text) or _has_file_debris(text):
-        return True
-    if text[0].isdigit() or any(char in text for char in "【】[]"):
-        return True
-    if _ends_split_verb(text) or _ends_mid_number(text):
-        return True
-    return bool(_boundary_reason(text, []) or _surface_block_reason(text))
+    if not text:
+        return False
+    readable = sum(1 for char in text if char.isalnum())
+    return readable / len(text) < 0.30
 
 
 def _subtitle_reject_reason(title: str, source: str = "") -> str:

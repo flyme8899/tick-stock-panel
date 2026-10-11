@@ -193,17 +193,20 @@ def test_llm_prefers_good_title_and_rejects_fragment(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache()
     rejected = top_hot_events(NOW + timedelta(minutes=11))
     assert rejected["events"][0]["name"] == "美联储宣布降息25基点"
+    assert rejected["events"][0]["subtitle"] == "叠加昨夜美国针对制裁"
     assert rejected["events"][0]["category"] == "海外市场/央行"
     assert rejected["events"][0]["importance"] == "重大"
-    assert all(
-        "叠加昨夜" not in str(item.get("title") or "")
+    assert any(
+        "叠加昨夜" in str(item.get("title") or "")
         for item in hot_mod._LLM_CACHE.values()
+        if isinstance(item, dict)
     )
 
     hot_mod.clear_hot_event_cache(llm=False)
     again = top_hot_events(NOW + timedelta(minutes=22))
     assert again["events"][0]["name"] == "美联储宣布降息25基点"
-    assert len(prompts) == 3
+    assert again["events"][0]["subtitle"] == "叠加昨夜美国针对制裁"
+    assert len(prompts) == 2
 
     def clipped(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)
@@ -227,7 +230,7 @@ def test_old_title_cache_is_regenerated(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache()
     hot_mod._LLM_CACHE[fingerprint] = {"title": "叠加昨夜美国针对制裁"}
     hot_mod._LLM_CACHE[f"title-v{hot_mod._TITLE_CACHE_VERSION}:{fingerprint}"] = {
-        "title": "和之前结构性降息",
+        "title": "早上好",
     }
     prompts: list[str] = []
 
@@ -848,8 +851,8 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     hot_mod.clear_hot_event_cache()
     fallback = top_hot_events(NOW + timedelta(minutes=11))["events"]
     fallback_names = [event["name"] for event in fallback]
-    assert len(prompts) == 3
-    assert "上一轮标题不合格" in prompts[-1]
+    assert len(prompts) == 2
+    assert "上一轮标题不合格" not in prompts[-1]
     for bad in _PRODUCTION_BAD_TITLES:
         if bad == "橡胶价格大涨超60家轮胎企业集体涨价今年以来":
             continue
@@ -911,7 +914,6 @@ def test_bad_fallback_titles_are_rejected_and_dropped(tmp_path, monkeypatch, cap
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "热门事件标题未采用: 市场没有太关注到公司近期正在进行（乱码）" in caplog.text
     for bad in _FALLBACK_BAD:
         assert bad not in names
     assert "美联储降息25基点" in names
@@ -1183,7 +1185,6 @@ def test_commentary_titles_fall_back_or_drop(tmp_path, monkeypatch, caplog):
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "乱码" in caplog.text
     assert commentary not in names
     assert "宁德时代发布固态电池" in names
 
@@ -1440,11 +1441,11 @@ def test_truncation_stops_at_the_clause_boundary():
 
 
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v14 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v15 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 14
+    assert hot_mod._TITLE_CACHE_VERSION == 15
     reset_store_for_tests(tmp_path / "cache-v13.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
@@ -1460,6 +1461,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v11:{fingerprint}"] = {"title": "美联储降息旧缓存第十一版"}
     hot_mod._LLM_CACHE[f"title-v12:{fingerprint}"] = {"title": "美联储降息旧缓存第十二版"}
     hot_mod._LLM_CACHE[f"title-v13:{fingerprint}"] = {"title": "美联储降息旧缓存第十三版"}
+    hot_mod._LLM_CACHE[f"title-v14:{fingerprint}"] = {"title": "美联储降息旧缓存第十四版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1476,7 +1478,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     assert all(
         not str(key).startswith((
             "title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:", "title-v9:",
-            "title-v10:", "title-v11:", "title-v12:", "title-v13:",
+            "title-v10:", "title-v11:", "title-v12:", "title-v13:", "title-v14:",
         ))
         for key in hot_mod._LLM_CACHE
     )
