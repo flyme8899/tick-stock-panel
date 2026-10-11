@@ -827,7 +827,7 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     # 每条事件各带自己的正文，不把簇内其他候选标题拼进同一行。
     # 早前只喂主标题，模型只能把主标题换个说法；正文才是要点的素材。
     assert "IEA下调原油供需预期..." not in prompts[0]
-    assert "1. 主标题：IEA下调原油供需预期" in prompts[0]
+    assert "1. 已有标题（已定稿，不要重复、不要回填）：IEA下调原油供需预期" in prompts[0]
     for bad in _PRODUCTION_BAD_TITLES:
         if bad == "橡胶价格大涨超60家轮胎企业集体涨价今年以来":
             continue
@@ -847,6 +847,10 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
             head, sep, rest = line.partition(". ")
             if not sep or not head.isdigit() or not rest.strip():
                 continue
+            # 输入行是「N. 已有标题（已定稿，不要重复、不要回填）：<标题>」，
+            # 回声只取冒号后的标题本体。
+            if "：" in rest:
+                rest = rest.split("：", 1)[1]
             rows.append({"id": head, "title": rest.strip(), "concepts": ["半导体"]})
         return json.dumps({"events": rows}, ensure_ascii=False)
 

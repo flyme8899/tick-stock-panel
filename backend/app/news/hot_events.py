@@ -81,6 +81,12 @@ _TITLE_LIMIT = 20
 # 所以切片只要盖住「正式展示的前 _TITLE_LIMIT 条」即可；留 4 倍余量是给
 # 过滤/重排一点缓冲（实测最终前 20 的名次落在切片前 80 名以内）。
 _TITLE_SLICE = _TITLE_LIMIT * 4
+# 一批要点整批 title 全空时，原地重发的次数上限。
+# 上游 content 网关偶发返回整批空 title（正文都在、只回骨架 JSON，或回满长度但
+# title 字段全空），实测同一批原文重发就能恢复，单次恢复率约 50%。重发 3 次后
+# 累计成功率 >93%，平均只花 1.5~2 次调用。**不拆半**：拆半后每半各自只有 50%
+# 成功率，实测花 3~4 次调用才拿到 8~9/20，比原地重发（1~2 次拿 20/20）更贵更差。
+_BLANK_RESEND = 3
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
 _TITLE_HARD = 28
 # 一句话要点仍用这道完整句检查。超过 48 字或短于 6 字直接丢掉。
@@ -3707,23 +3713,53 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
                 headlines = [fallback] if fallback else []
             primary = " / ".join(headlines)
         body = _event_body(event)[:_BODY_IN_PROMPT_CHARS]
+        # 输入里**不要**把已有的展示标题叫「主标题」——那会诱导模型把它原样抄进
+        # 输出的 title 字段（实测「主标题：中信证券：用景气…」进去、title 出来
+        # 还是「中信证券：用景气…」，随后被 _drop_repeated_subtitle 判为复读清掉，
+        # 展示前 20 的覆盖率因此掉到个位数）。改叫「已有标题（已定稿，不要重复、
+        # 不要回填）」，并单独说明 title 字段填的是补充要点。
         if body:
-            blocks.append(f"{event.get('_batch_id')}. 主标题：{primary}\n正文：{body}")
+            blocks.append(
+                f"{event.get('_batch_id')}. 已有标题（已定稿，不要重复、不要回填）："
+                f"{primary}\n正文：{body}"
+            )
         else:
-            blocks.append(f"{event.get('_batch_id')}. 主标题：{primary}")
-    retry_line = "上一轮要点不合格，请重写。\n" if retry else ""
+            blocks.append(
+                f"{event.get('_batch_id')}. 已有标题（已定稿，不要重复、不要回填）："
+                f"{primary}\n正文：（无）"
+            )
+    retry_line = ""
+    if retry:
+        # 重写轮单独强调：这批是上一轮没通过的，多半是模型把主标题复读了、或直接
+        # 留空。只要正文里还有主标题没提到的事实，就必须挑一个写出来。
+        retry_line = (
+            "上一轮要点不合格，请重写。注意：下面每条的主标题都已经定稿，你写的"
+            "要点**必须**是主标题里没有的新事实（数字、金额、比例、日期、地点、"
+            "原因、影响对象）。**正文里有这类事实就一定要写出来，不要留空，也不要"
+            "把主标题换个说法充数**；正文确实只是重复主标题时才留空。\n"
+        )
     names = "、".join(_dictionary_names())
     return (
-        "下面每条是一件与资本市场有关的资讯，给出主标题和正文。"
-        "你只为每一条写一句话**补充要点**：要点只能包含主标题里没有的具体事实，"
+        "下面每条是一件与资本市场有关的资讯，给出「已有标题」和正文。"
+        "「已有标题」是已经定稿、要原样展示的标题，你**不要**把它抄进输出、"
+        "也不要改一个字。"
+        "你只为每一条写一句话**补充要点**，填在 JSON 的 title 字段里："
+        "要点只能包含「已有标题」里没有的具体事实，"
         "也就是正文里的数字、金额、比例、日期、地点、原因、影响对象。"
         "一句话，不超过 40 个字，只挑 1~2 个最关键的新事实；"
         "不要把正文缩写一遍，不要罗列全部数字、全部出席人员或全部业务。"
         "主标题本身已经说清楚的，一个字都不要重复。"
-        "如果正文里没有主标题之外的事实，title 必须留空字符串，不要硬凑。"
-        "绝对不要把主标题换个说法当作要点：不要复述主标题，不要给主标题加「称」"
-        "「表示」「建议」「将」「并」，也不要去掉主标题的标点另写一句。"
-        "不要直接抄正文的第一句话——那句话通常就是主标题的扩写。"
+        "**判断标准：先在正文里找「已有标题」没提到的数字、金额、比例、日期、地点、"
+        "原因、影响对象，找到任意一个就写出来**——哪怕它看起来不够重磅，只要"
+        "「已有标题」没有，就是该写的新事实。"
+        "例：「已有标题」是「某公司拟收购某标的股权」，正文是「转让对价 3.16 亿元、"
+        "标的主营光探测芯片、完成后纳入合并报表」，正文里的 3.16 亿元就是标题没有的"
+        "事实，要点写「转让对价 3.16 亿元」；不能因为标题已经说了「收购」就留空。"
+        "只有翻遍正文、确实找不出「已有标题」之外的任何事实（正文就是把标题重复"
+        "一遍）时才留空。留空是下策，不是「没把握就留空」。"
+        "绝对不要把「已有标题」换个说法当作要点：不要复述标题，不要给标题加「称」"
+        "「表示」「建议」「将」「并」，也不要去掉标题的标点另写一句。"
+        "不要直接抄正文的第一句话——那句话通常就是标题的扩写。"
         "只输出 JSON："
         '{"events":[{"id":"与输入编号相同","title":"","concepts":[],"category":"",'
         '"direction":"利好或利空","importance":"重大或重要或一般或琐碎"}]}。'
@@ -3740,7 +3776,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "对不上就留空。不要新造概念。不要用来源栏目，栏目名里的快报不是概念。"
         "概念要和标题里的国家地区一致，不要把伊朗或中东标成俄乌。"
         "direction 表示对 A 股相关方向是利好还是利空。"
-        "没有把握就留空，不要编造正文里没出现的事实。\n"
+        "不要编造正文里没出现的事实。\n"
         f"{retry_line}\n"
         + "\n".join(blocks)
     )
@@ -3786,9 +3822,36 @@ def _label_with_llm(events: list[dict]) -> None:
         return
     # 事件数经常上百条，一个批次装不下。按批循环问，每批各自编号，
     # 否则只有前一批有点要、后面的永远轮不到（实测 104 条只问了 20 条）。
-    for start in range(0, len(pending), _LLM_TITLE_BATCH):
-        batch = pending[start:start + _LLM_TITLE_BATCH]
-        _label_batch_with_llm(batch, reserve_call=reserve_hot_title_call)
+    batches = [
+        pending[start:start + _LLM_TITLE_BATCH]
+        for start in range(0, len(pending), _LLM_TITLE_BATCH)
+    ]
+    for index, batch in enumerate(batches):
+        # 额度要留给后面的批次：每批至少 1 次「首轮」调用，剩下的余量才允许本批
+        # 做整批空 title 时的原地重发。否则前几批把额度吃光，后几批全成「未询问」
+        # ——正是这一点让展示前 20 的覆盖率一度掉到 5/20。
+        remaining = len(batches) - index - 1
+        reserve = reserve_hot_title_call
+        if remaining:
+            reserve = _budget_guard(reserve_hot_title_call, remaining)
+        _label_batch_with_llm(batch, reserve_call=reserve)
+
+
+def _budget_guard(reserve_call, keep_for_later: int):
+    """包一层额度函数：把后面 ``keep_for_later`` 批的首轮额度预留下来。
+
+    本批的兜底（整批空 title 时的原地重发）只有在「发完这次，剩余额度仍够后面
+    每批至少发一轮」时才放行。额度不够就返回 False，让本批走完首轮 + 重写轮了事。
+    """
+
+    def guarded() -> bool:
+        from app.news.service import hot_title_calls_left
+
+        if hot_title_calls_left() <= keep_for_later:
+            return False
+        return reserve_call()
+
+    return guarded
 
 
 def _looks_like_blank_sweep(
@@ -3817,7 +3880,11 @@ def _looks_like_blank_sweep(
     return with_body * 5 >= len(batch) * 3
 
 
-def _label_batch_with_llm(batch: list[dict], *, reserve_call) -> None:
+def _label_batch_with_llm(
+    batch: list[dict],
+    *,
+    reserve_call,
+) -> None:
     """问一批要点，没通过的再问一轮。batch 内的编号从 1 起。
 
     每批结束落一行分类统计，把「为什么这条没有要点」拆成四类：
@@ -3848,32 +3915,30 @@ def _label_batch_with_llm(batch: list[dict], *, reserve_call) -> None:
             "热门事件要点整批无返回: %d 条，响应 %d 字符（疑似超时/截断）",
             len(batch), len(first_raw or ""),
         )
-    # 「整批 title 全空、但大半条目是有正文的」几乎不可能是模型的本意 ——
-    # 实测同一批原文重发就有 14~18 条能写出要点（上游约每两批偶发一次返回
-    # 一批空 title，同一次重发常常还是空、隔一两秒再发就恢复）。这种脏响应
-    # 重发最多 3 次，不占用后面的「不合格重写」那一轮，否则重写轮也会踩到
-    # 同一次脏响应。短休眠是给上游换一次调度机会，不是节流。
-    attempts = 0
-    while attempts < 3 and _looks_like_blank_sweep(batch, first, no_body_ids):
-        attempts += 1
-        logger.info(
-            "热门事件要点整批空 title，重发第 %d 次: %d 条", attempts, len(batch),
-        )
-        time.sleep(1.0)
+    # 上游 content 网关会偶发地把整批 title 都返成空 —— 正文都在，模型只回一个
+    # 空 title 的骨架 JSON（或回满长度但 title 字段全空）。实测**同一批原文重发**
+    # 就能恢复：固定一批 20 条连发 6 次，3 次拿到 20/20、3 次 0/20（成功率约 50%），
+    # 且恢复与响应长度无关（3000 字符的长响应也可能是空 title）。
+    #
+    # 所以脏响应的正解是**原地重发**，最多 3 次：50% → 75% → 87.5% → >93%，平均
+    # 只花 1.5~2 次调用。**不要拆半**：拆半后每一半各自只有 50% 成功率，实测花
+    # 3~4 次调用才拿到 8~9/20（原地重发只用 1~2 次就 20/20）—— 既更贵又更差。
+    # 唯一的例外是批本身就小（<8 条），重发几次还不行就认了。
+    resend = 0
+    while resend < _BLANK_RESEND and _looks_like_blank_sweep(batch, first, no_body_ids):
+        if not reserve_call():
+            logger.info("热门事件要点整批空 title，重发未进行: 额度已用满 (%d 条)", len(batch))
+            break
+        resend += 1
+        logger.info("热门事件要点整批空 title，原地重发第 %d 次: %d 条", resend, len(batch))
+        time.sleep(0.8)
         first_raw = _request_titles(batch, retry=False)
         first = _parse_title_batch(first_raw, batch)
-    # 重发还是整批空：这批对上游来说「太大」或踩到持续降级。拆成两半各走一遍
-    # 完整流程（各自重发/重写），小批更稳（实测 20 条整批空时，10 条半批能正常
-    # 拿到要点）。递归调用会在半数上重复本函数，自然带上它们的重试与统计。
-    if _looks_like_blank_sweep(batch, first, no_body_ids) and len(batch) >= 8:
-        logger.info("热门事件要点整批空 title，改拆半重问: %d 条", len(batch))
-        half = len(batch) // 2
-        for chunk in (batch[:half], batch[half:]):
-            if reserve_call():
-                _label_batch_with_llm(chunk, reserve_call=reserve_call)
-            else:
-                logger.info("热门事件要点拆半重问未进行: 额度已用满 (%d 条)", len(chunk))
-        return
+    if _looks_like_blank_sweep(batch, first, no_body_ids):
+        logger.info(
+            "热门事件要点整批空 title，重发 %d 次仍未恢复: %d 条（上游持续降级）",
+            resend, len(batch),
+        )
     failed: list[dict] = []
     for event in batch:
         parsed = first.get(str(event.get("_batch_id")))

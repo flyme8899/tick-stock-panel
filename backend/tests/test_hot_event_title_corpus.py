@@ -896,17 +896,21 @@ def test_title_prompt_feeds_article_body_and_asks_for_gap_filling():
     ]
     prompt = _title_prompt(events, retry=False)
     assert "补充要点" in prompt
-    assert "1. 主标题：宁德时代与赛力斯签署长期战略合作协议" in prompt
+    # 已有标题这一行**不能**叫「主标题」——那会诱导模型把它抄进输出 title 字段，
+    # 随后被判为复读清掉（展示前 20 覆盖率因此掉到个位数）。
+    assert "1. 已有标题（已定稿，不要重复、不要回填）：宁德时代与赛力斯签署长期战略合作协议" in prompt
     assert "正文：签约地点为重庆" in prompt
     assert "120万台" in prompt
-    # 明确禁止把主标题换个说法当要点。
-    assert "不要复述主标题" in prompt
+    # 明确禁止把已有标题换个说法当要点。
+    assert "不要复述标题" in prompt
     # 长度约束写进 prompt（要点是一行，不超过 40 字）。
     assert "不超过 40 个字" in prompt
-    # 没有正文的事件退回只给主标题。
+    # 「找到任意一个新事实就写出来」的正向指令必须在（评审要求：留空是下策）。
+    assert "找到任意一个就写出来" in prompt
+    # 没有正文的事件退回只给已有标题，并标注「（无）」。
     bare = _title_prompt([{"_batch_id": "1", "name": "某公司公告"}], retry=False)
-    assert "1. 主标题：某公司公告" in bare
-    assert "正文：" not in bare
+    assert "1. 已有标题（已定稿，不要重复、不要回填）：某公司公告" in bare
+    assert "正文：（无）" in bare
 
 
 def test_label_stats_logs_zero_because_of_what(caplog):
@@ -1003,3 +1007,90 @@ def test_blank_sweep_detector_ignores_genuine_blanks_and_partial_titles():
 
     # 没解析到响应走「整批无返回」，不在此列。
     assert _looks_like_blank_sweep(batch, {}, set()) is False
+
+
+def test_blank_sweep_resends_same_batch_instead_of_splitting(monkeypatch):
+    """整批空 title 时原地重发同一批，不拆半 —— 拆半更贵更差（实测）。"""
+    import json
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    events = [
+        {
+            "_batch_id": str(i),
+            "_fp": f"fp{i}",
+            "name": f"事件{i}",
+            "_candidates": [
+                {"source": "cls", "title": f"事件{i}", "text": f"事件{i}\n正文有事实 {i}"},
+            ],
+        }
+        for i in range(1, 21)
+    ]
+    sizes: list[int] = []
+    state = {"first": True}
+
+    def fake_request(batch, *, retry):
+        sizes.append(len(batch))
+        if state["first"]:
+            state["first"] = False
+            # 首轮整批空 title（脏响应）。
+            return json.dumps(
+                {"events": [{"id": e["_batch_id"], "title": ""} for e in batch]},
+                ensure_ascii=False,
+            )
+        # 重发恢复，全都写出要点。
+        return json.dumps(
+            {"events": [{"id": e["_batch_id"], "title": f"事实{i}"} for i, e in enumerate(batch, 1)]},
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(hot_mod, "_request_titles", fake_request)
+    calls = {"n": 0}
+
+    def reserve():
+        calls["n"] += 1
+        return True
+
+    hot_mod._label_batch_with_llm(events, reserve_call=reserve)
+    # 首轮 + 重发各一次，且两次都是完整 20 条（没有拆半）。
+    assert sizes[:2] == [20, 20]
+    assert all(size == 20 for size in sizes)
+
+
+def test_budget_guard_keeps_quota_for_later_batches(monkeypatch):
+    """预算守卫：剩余额度只够后面批次的首轮时，本批兜底不再放行。"""
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    spent = {"n": 0}
+    monkeypatch.setattr(news_service, "hot_title_calls_left", lambda: 4)
+    guard = hot_mod._budget_guard(lambda: (spent.__setitem__("n", spent["n"] + 1) or True), 5)
+    # 剩余 4 < 需保留 5，拒绝兜底（不消耗真正额度）。
+    assert guard() is False
+    assert spent["n"] == 0
+
+    monkeypatch.setattr(news_service, "hot_title_calls_left", lambda: 9)
+    guard = hot_mod._budget_guard(lambda: (spent.__setitem__("n", spent["n"] + 1) or True), 5)
+    assert guard() is True
+    assert spent["n"] == 1
+
+
+def test_retry_round_prompt_asks_to_fill_from_body():
+    """重写轮的提示词要单独强调「正文有事实就写出来，不要留空」。"""
+    from app.news.hot_events import _title_prompt
+
+    events = [{
+        "_batch_id": "1",
+        "name": "某公司拟收购某标的股权",
+        "_candidates": [{
+            "source": "cls",
+            "title": "某公司拟收购某标的股权",
+            "text": "某公司拟收购某标的股权\n转让对价3.16亿元，完成后纳入合并报表。",
+        }],
+    }]
+    retry = _title_prompt(events, retry=True)
+    assert "上一轮要点不合格" in retry
+    assert "一定要写出来，不要留空" in retry
+    fresh = _title_prompt(events, retry=False)
+    assert "上一轮要点不合格" not in fresh
