@@ -410,7 +410,7 @@ def test_dropdown_examples_keep_subject_drop_bare_event_and_unrelated_maps(tmp_p
     assert "政治局" in policy["name"]
     assert policy["first_seen"] == "10-09 14:27"
 
-    assert "结构性降息" in names
+    assert "结构性降息" not in names
     assert rubber["key"].startswith("ev_")
     assert len(rubber["key"]) == 15
 
@@ -1427,12 +1427,12 @@ def test_truncation_stops_at_the_clause_boundary():
 
 
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v10 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v11 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 10
-    reset_store_for_tests(tmp_path / "cache-v10.sqlite")
+    assert hot_mod._TITLE_CACHE_VERSION == 11
+    reset_store_for_tests(tmp_path / "cache-v11.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
@@ -1443,6 +1443,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v7:{fingerprint}"] = {"title": "美联储降息旧缓存第七版"}
     hot_mod._LLM_CACHE[f"title-v8:{fingerprint}"] = {"title": "美联储降息旧缓存第八版"}
     hot_mod._LLM_CACHE[f"title-v9:{fingerprint}"] = {"title": "美联储降息旧缓存第九版"}
+    hot_mod._LLM_CACHE[f"title-v10:{fingerprint}"] = {"title": "美联储降息旧缓存第十版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1458,6 +1459,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     assert all(
         not str(key).startswith((
             "title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:", "title-v9:",
+            "title-v10:",
         ))
         for key in hot_mod._LLM_CACHE
     )

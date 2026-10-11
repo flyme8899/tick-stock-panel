@@ -10,9 +10,10 @@
 不再卡 6 小时。摘要只在标题没有主体时参与，避免各条资讯共用的页脚把整天粘成一件事。
 宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v10。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v11。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
-规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
+规则只做校验：模型和回退标题走同一道展示门槛。不合格就记下原因再问一次，仍不行就按来源可信度
+试簇里清理后的原标题，再不行就丢掉。半截标题并回完整事件，提及次数跟着走。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社），券商「电新/计算机/研究称」，以及研报文件名里的日期戳和 #，并停在句号前。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
 栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
@@ -71,8 +72,28 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。截断、交易日合并和研报残句的判定变了，旧键不再套用。
-_TITLE_CACHE_VERSION = 10
+# 标题缓存按这个版本取。展示门槛和半截簇合并的判定变了，旧键不再套用。
+_TITLE_CACHE_VERSION = 11
+# 回退标题按来源可信度从高到低试。没写在这里的来源排在最后。
+_SOURCE_CREDIBILITY = (
+    "cls", "wscn", "reuters", "bloomberg", "wsj", "sec",
+    "cnbc", "marketwatch", "scmp", "etf_flow",
+    "zsxq", "ima", "dws", "reddit",
+)
+_GATE_EXTRA_VERBS = ("发起", "宣布")
+_CHATTER_MARKS = ("早上好", "早安", "中午好", "下午好", "晚上好", "晚安", "大家好", "各位")
+_NARRATIVE_MARKS = ("利空叙事", "利好叙事", "叙事在")
+# 这些词当主语时还不是机构、公司或商品。美联储可能降息仍算有主体。
+_GATE_HEDGES = ("可能", "或许", "还会", "几次", "多次", "预计", "有望", "或将", "料将")
+# 数字后面的单字量词是写完了，不是把词切断。例如 13.1元。
+_MEASURE_TAILS = frozenset("元吨点股成倍")
+_CN_NUMERALS = frozenset("一二三四五六七八九十百千万两")
+# 词典词性里能当主体的标记。普通名词不算，避免「数据」混进去。
+_POS_ENTITY_FLAGS = frozenset({"ns", "nr", "nt", "nz", "j"})
+_POS_ENTITY_MARKS = ("价格", "股价", "公司", "股份", "集团", "指数", "电网", "机场", "银行")
+_TRAILING_LATIN = re.compile(r"[A-Za-z][A-Za-z0-9]*$")
+_LATIN_WORD = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+_JIEBA = None
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -458,8 +479,8 @@ def _compute(now: datetime, store: NewsStore) -> dict:
     _label_with_llm(events)
     for event in events:
         _ensure_shown_name(event)
+    events = _absorb_cutoff_events(events)
     events = [event for event in events if _keep_shown_event(event)]
-    events = _drop_cutoff_duplicates(events)
     if not events:
         return {
             "as_of": None,
@@ -476,6 +497,7 @@ def _compute(now: datetime, store: NewsStore) -> dict:
         event.pop("_first", None)
         event.pop("_batch_id", None)
         event.pop("_llm_title_applied", None)
+        event.pop("_candidates", None)
     updated_hm = latest.astimezone(CN_TZ).strftime("%H:%M")
     return {
         "as_of": chosen.isoformat(),
@@ -547,8 +569,11 @@ def _doc(row: dict) -> dict | None:
     shown = title or summary[:80]
     relevance = _relevance(shown, lead, action, concepts, stocks)
     # 加红不依赖涨价、发布这类动词。普通稿仍要主体和动作都在，才不会把闲聊收进榜。
+    # 停在单个拉丁字母上的半截标题先留下，好并回完整事件，提及次数才不会丢。
     if relevance < _RELEVANCE_MIN and not red:
-        return None
+        if not _latin_cutoff_fragment(title):
+            return None
+        relevance = _RELEVANCE_MIN
     entity_text = title
     if summary and not _explicit_entities(title):
         entity_text = f"{title}\n{summary[:160]}"
@@ -632,6 +657,15 @@ def _parse_phrase(text: str) -> tuple[str, str, str]:
             if verb and _subject_ok(clause[:index]):
                 chosen = clause
                 action = verb
+                break
+    if not action:
+        for clause in clauses or [body]:
+            for verb in _GATE_EXTRA_VERBS:
+                if verb in clause and _subject_ok(clause[:clause.find(verb)]):
+                    chosen = clause
+                    action = verb
+                    break
+            if action:
                 break
     if not action:
         return _clean_lead(chosen[:8]), "", ""
@@ -764,6 +798,11 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         "heat": round(weighted_mentions * source_count * decay, 4),
         "mentioned_stocks": mentioned,
         "item_ids": item_ids,
+        "_candidates": [
+            {"source": str(item.get("source") or ""), "title": str(item.get("title") or "")}
+            for item in members
+            if str(item.get("title") or "").strip()
+        ],
         "_latest": latest,
         "_first": first,
         "_fp": hashlib.sha1("\n".join(item["title"] for item in members).encode("utf-8")).hexdigest(),
@@ -1066,7 +1105,7 @@ def _same_policy_subject(left: dict, right: dict) -> bool:
 def _can_merge(left: dict, right: dict) -> bool:
     # 同一组双方做同一件事时，合并这一交易日里的全部稿，00:13 和 08:39 也算一件。
     # 其他合并仍看 6 小时。聚类按交易日分桶，不会把上一场收盘后的稿并进上午。
-    if _same_party_action(left, right):
+    if _same_party_action(left, right) or _cutoff_pair(left, right):
         return True
     gap = abs(left["published"] - right["published"])
     if gap > _CLUSTER_WINDOW:
@@ -2355,10 +2394,14 @@ def _llm_title_reject_reason(title: str, source: str = "") -> str:
         return "缺少合作方"
     if source and _cuts_any(text, [line for line in source.split("\n") if line.strip()]):
         return "截断过短"
+    gate = _display_gate_reason(text, [line for line in source.split("\n") if line.strip()])
+    # 门槛里的「缺少主体或动作」继续走原来的宾语检查，原因文案保持不变。
+    if gate and gate != "缺少主体或动作":
+        return gate
     lead, action, obj = _split_headline(text)
     if not (action and obj and _subject_ok(lead) and _concrete_subject(lead)):
         return "缺少主体、动作或宾语"
-    return ""
+    return gate
 
 
 def _llm_title_ok(title: str) -> bool:
@@ -2390,7 +2433,9 @@ def _fallback_title_ok(name: object) -> bool:
     if any(text.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
         return False
     lead, action, _obj = _split_headline(text)
-    return not action or _concrete_subject(lead)
+    if action and not _concrete_subject(lead):
+        return False
+    return _display_gate_reason(text) == ""
 
 
 def _cleaned_display_ok(name: object) -> bool:
@@ -2459,48 +2504,297 @@ def _cuts_any(name: str, sources: list[str]) -> bool:
     return False
 
 
-def _fallback_cleaned_name(event: dict) -> str:
-    sources = _event_title_sources(event)
-    found: list[str] = []
-    for text in sources:
-        cleaned = _cleaned_headline(text)
-        if cleaned and _fallback_title_ok(cleaned) and cleaned not in found:
-            found.append(cleaned)
-    if not found:
+def _source_rank(source: str) -> int:
+    try:
+        return _SOURCE_CREDIBILITY.index(str(source or "").strip().lower())
+    except ValueError:
+        return len(_SOURCE_CREDIBILITY)
+
+
+def _jieba():
+    """词典只初始化一次。jieba 源码里的正则会报 SyntaxWarning，这里吞掉。"""
+    global _JIEBA
+    if _JIEBA is None:
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            import jieba
+            import jieba.posseg as posseg
+
+            jieba.setLogLevel(logging.ERROR)
+            jieba.initialize()
+        _JIEBA = (jieba, posseg)
+    return _JIEBA
+
+
+def _segment(text: str) -> list[str]:
+    """用词典切词。只看最后一个词是否完整，避免把「从容应」当成写完了。"""
+    jieba = _jieba()[0]
+    return [word for word in jieba.cut(_compact(text), HMM=False) if str(word).strip()]
+
+
+def _pos_cut(text: str):
+    posseg = _jieba()[1]
+    return [word for word in posseg.cut(_compact(text), HMM=False) if str(word.word).strip()]
+
+
+def _latin_cutoff_fragment(text: str) -> bool:
+    """Vicor对V 这种：前面有完整英文词，结尾只剩一个字母。"""
+    body = _compact(text)
+    if len(body) < 4:
+        return False
+    words = _LATIN_WORD.findall(body)
+    if len(words) < 2 or len(words[-1]) != 1:
+        return False
+    return any(len(word) >= 3 for word in words[:-1])
+
+
+def _cutoff_pair(left: dict, right: dict) -> bool:
+    """半截标题和完整标题是同一件事，不受 6 小时限制。"""
+    left_title = str(left.get("title") or "")
+    right_title = str(right.get("title") or "")
+    return _is_harmful_cutoff(left_title, right_title) or _is_harmful_cutoff(right_title, left_title)
+
+
+def _trailing_latin_fragment(text: str, blobs: list[str]) -> bool:
+    body = _compact(text)
+    match = _TRAILING_LATIN.search(body)
+    if not match:
+        return False
+    token = match.group(0)
+    if token.isdigit():
+        return False
+    if len(token) < 2:
+        return True
+    for blob in blobs:
+        for word in _LATIN_WORD.findall(_compact(blob)):
+            if len(word) > len(token) and word.startswith(token):
+                return True
+    return False
+
+
+def _boundary_reason(text: str, blobs: list[str]) -> str:
+    body = _compact(text)
+    if not body:
+        return "空标题"
+    if (
+        _ends_split_verb(body)
+        or _ends_mid_number(body)
+        or any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS)
+    ):
+        return "词中间截断"
+    if _trailing_latin_fragment(body, blobs):
+        return "外文被截断"
+    words = _segment(body)
+    if not words:
         return ""
-    found.sort(key=len, reverse=True)
-    for candidate in found:
-        if any(candidate != other and _is_harmful_cutoff(candidate, other) for other in found):
+    last = words[-1]
+    # 「从容应对」是完整词，末字「对」不是截断。「从容应」的最后一个字才是。
+    if len(last) < 2 and _ends_abruptly(body):
+        return "词中间截断"
+    if len(last) == 1 and "\u4e00" <= last <= "\u9fff":
+        prev = words[-2] if len(words) >= 2 else ""
+        pair = prev + last
+        if pair in _PRICE_NARRATIVE or pair in _ACTIONS or pair in _GATE_EXTRA_VERBS:
+            return ""
+        # 13.1元、六成：量词跟在数字后面，不是把「从容应对」切成「应」。
+        if last in _MEASURE_TAILS and prev and (prev[-1].isdigit() or prev[-1] in _CN_NUMERALS):
+            return ""
+        return "词中间截断"
+    return ""
+
+
+def _hedged_subject(lead: str) -> bool:
+    """可能、还会、几次不是主体。句里已经点了美联储这类机构时仍算有主体。"""
+    text = _compact(lead)
+    if not text or _explicit_entities(text):
+        return False
+    return any(cue in text for cue in _GATE_HEDGES)
+
+
+def _pos_entity(lead: str) -> bool:
+    """词性或价格、公司、电网这类标记。用来认出动词表里没有的熄灯、遭袭。"""
+    if _explicit_entities(lead):
+        return True
+    if any(mark in lead for mark in _POS_ENTITY_MARKS):
+        return True
+    for word in _pos_cut(lead):
+        if word.flag in _POS_ENTITY_FLAGS and len(word.word) >= 2:
+            return True
+        if word.flag == "eng" and len(word.word) >= 3 and not word.word.isdigit():
+            return True
+    return False
+
+
+def _pos_subject_action(text: str) -> bool:
+    """动词表没覆盖时，用词性看有没有主体和至少两个字的动词。"""
+    words = _pos_cut(text)
+    for index, word in enumerate(words):
+        if not str(word.flag).startswith("v") or len(word.word) < 2:
+            continue
+        lead = "".join(item.word for item in words[:index])
+        if not (_subject_ok(lead) and _concrete_subject(lead) and not _hedged_subject(lead)):
+            continue
+        if _pos_entity(lead):
+            return True
+    return False
+
+
+def _has_gate_subject_action(text: str) -> bool:
+    body = _compact(text)
+    lead, verb, _obj = _split_headline(body)
+    if verb:
+        return _subject_ok(lead) and _concrete_subject(lead) and not _hedged_subject(lead)
+    for extra in _GATE_EXTRA_VERBS:
+        index = body.find(extra)
+        if index < 2:
+            continue
+        head = body[:index]
+        if _subject_ok(head) and _concrete_subject(head):
+            return not _hedged_subject(head)
+    # 动词表里有这个词，但主体不合格。不要再改用词性把「结构性降息」放行。
+    if (
+        _tuple_action(body)[0] >= 0
+        or _narrative_action(body)[0] >= 0
+        or _directive_action(body)[0] >= 0
+    ):
+        return False
+    return _pos_subject_action(body)
+
+
+def _display_gate_reason(title: str, sources: list[str] | None = None) -> str:
+    """展示门槛。模型标题和回退标题都走这里。空字符串表示可以上屏。"""
+    text = _compact(str(title or ""))
+    blobs = [str(item) for item in (sources or []) if str(item).strip()]
+    if not text or text == "事件":
+        return "空标题"
+    if any(mark in text for mark in _CHATTER_MARKS) or any(mark in text for mark in _NARRATIVE_MARKS):
+        return "不是具体事件"
+    if "..." in text or "…" in text:
+        return "省略号"
+    if any(char in text for char in "【】[]"):
+        return "含括号"
+    if text[0].isdigit():
+        return "以数字开头"
+    if _cut_glued_sentence(text) != text:
+        return "粘连了下一句"
+    if _is_commentary(text) or _watch_or_list_fragment(text) or _misordered_title(text):
+        return "不是具体事件"
+    blocked = _surface_block_reason(text)
+    if blocked:
+        return blocked
+    if _title_incoherent(text) or _has_file_debris(text) or _is_section_label(text):
+        return "不是具体事件"
+    if _has_emoji(text) or _CJK_SLASH.search(text):
+        return "不是具体事件"
+    boundary = _boundary_reason(text, blobs)
+    if boundary:
+        return boundary
+    if blobs and _dropped_signing_party(text, "\n".join(blobs)):
+        return "缺少合作方"
+    if not _has_gate_subject_action(text):
+        return "缺少主体或动作"
+    return ""
+
+
+def _candidate_rows(event: dict) -> list[tuple[str, str]]:
+    rows = event.get("_candidates")
+    found: list[tuple[str, str]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            if title:
+                found.append((str(row.get("source") or ""), title))
+    if found:
+        return found
+    return [("", text) for text in _event_title_sources(event)]
+
+
+def _first_credible_title(rows: list[tuple[str, str]]) -> str:
+    """按来源可信度试清理后的原标题。半截的跳过。"""
+    ordered = sorted(enumerate(rows), key=lambda item: (_source_rank(item[1][0]), item[0]))
+    blobs = [title for _source, title in rows]
+    passing: list[str] = []
+    for _index, (_source, title) in ordered:
+        cleaned = _cleaned_headline(title)
+        if not cleaned or cleaned in passing:
+            continue
+        if _display_gate_reason(cleaned, blobs) or not _fallback_title_ok(cleaned):
+            continue
+        passing.append(cleaned)
+    for candidate in passing:
+        if any(candidate != other and _is_harmful_cutoff(candidate, other) for other in passing):
             continue
         return candidate
-    return found[0]
+    return ""
+
+
+def _fallback_cleaned_name(event: dict) -> str:
+    return _first_credible_title(_candidate_rows(event))
 
 
 def _ensure_shown_name(event: dict) -> None:
-    sources = _event_title_sources(event)
+    rows = _candidate_rows(event)
+    blobs = [title for _source, title in rows]
     name = str(event.get("name") or "")
-    if event.get("_llm_title_applied") and _llm_title_ok(name) and not _cuts_any(name, sources):
+    if (
+        event.get("_llm_title_applied")
+        and _llm_title_ok(name)
+        and _display_gate_reason(name, blobs) == ""
+        and not _cuts_any(name, blobs)
+    ):
         return
-    if _fallback_title_ok(name) and not _cuts_any(name, sources):
+    if _fallback_title_ok(name) and _display_gate_reason(name, blobs) == "" and not _cuts_any(name, blobs):
         return
-    event["name"] = _fallback_cleaned_name(event)
+    event["name"] = _first_credible_title(rows)
     event.pop("_llm_title_applied", None)
 
 
-def _drop_cutoff_duplicates(events: list[dict]) -> list[dict]:
-    """半截标题如果已经有完整的那一条，就不再单列。"""
-    texts = [_event_title_sources(event) for event in events]
-    names = [_compact(str(event.get("name") or "")) for event in events]
+def _event_is_cutoff_of(short: dict, host: dict) -> bool:
+    short_texts = [str(short.get("name") or "")]
+    short_texts.extend(title for _source, title in _candidate_rows(short))
+    host_texts = [str(host.get("name") or "")]
+    host_texts.extend(title for _source, title in _candidate_rows(host))
+    for left in short_texts:
+        for right in host_texts:
+            if _is_harmful_cutoff(left, right):
+                return True
+    return False
+
+
+def _absorb_cutoff_events(events: list[dict]) -> list[dict]:
+    """半截簇并进完整事件。提及次数留在完整那条上，不随半截标题一起丢掉。"""
     drop: set[int] = set()
-    for index, name in enumerate(names):
-        if not name:
-            continue
-        for other, blobs in enumerate(texts):
-            if other == index:
+    for index, event in enumerate(events):
+        host_index = None
+        for other, host in enumerate(events):
+            if other == index or other in drop:
                 continue
-            if names[other] and (_is_harmful_cutoff(name, names[other]) or _cuts_any(name, blobs)):
-                drop.add(index)
+            if _event_is_cutoff_of(event, host):
+                host_index = other
                 break
+        if host_index is None:
+            continue
+        host = events[host_index]
+        host["mentions"] = int(host.get("mentions") or 0) + int(event.get("mentions") or 0)
+        host["red_count"] = int(host.get("red_count") or 0) + int(event.get("red_count") or 0)
+        host["source_count"] = int(host.get("source_count") or 0) + int(event.get("source_count") or 0)
+        item_ids = list(host.get("item_ids") or [])
+        item_ids.extend(str(item) for item in (event.get("item_ids") or []))
+        host["item_ids"] = item_ids
+        headlines = list(host.get("headlines") or [])
+        for title in event.get("headlines") or []:
+            if title and title not in headlines:
+                headlines.append(title)
+        host["headlines"] = headlines
+        candidates = list(host.get("_candidates") or [])
+        candidates.extend(event.get("_candidates") or [])
+        host["_candidates"] = candidates
+        host["heat"] = round(float(host.get("heat") or 0) + float(event.get("heat") or 0), 4)
+        drop.add(index)
     return [event for index, event in enumerate(events) if index not in drop]
 
 
@@ -2535,6 +2829,9 @@ def _keep_shown_event(event: dict) -> bool:
     if _non_market_unmapped(event):
         return False
     name = str(event.get("name") or "")
+    blobs = [title for _source, title in _candidate_rows(event)]
+    if _display_gate_reason(name, blobs):
+        return False
     if event.get("_llm_title_applied"):
         return _llm_title_ok(name)
     return _fallback_title_ok(name)
@@ -2584,6 +2881,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "不要把动词放在主体前面，例如不要写成「重申…白宫…签署」。"
         "标题写不下时停在分句边界，不要把动词从句子中间切掉。"
         "不要在英文字母或数字中间截断。没超过28个字的标题不要截短，不要只留下动作、把宾语丢掉。"
+        "标题必须在词的边界结束，要有明确主体和动作，不要写早上好、各位或利空叙事。"
         "不要在标题末尾写天风计算机这类券商组名，不要写观点更新这类研报标签。"
         "冒号前面如果是公司名，要保留公司名。公司名后面接着「公司」或「本公司」时，用公司名替换，不要写成「公司」。"
         "不要以持续关注开头，不要写1）或①这样的列表序号。"
