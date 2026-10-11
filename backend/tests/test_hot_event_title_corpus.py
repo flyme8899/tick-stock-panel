@@ -755,6 +755,92 @@ def test_event_body_strips_leading_sentence_that_repeats_title():
     assert body.count("有力有效") == 0
 
 
+def test_event_body_ignores_candidate_that_talks_about_something_else():
+    """主标题有值时，簇里混进别条新闻不能取它的正文 —— 会把要点带偏成别人的事实。
+
+    实测错配：「中信证券：用景气和供给出清来应对高利率…」的要点写成了
+    「沃勒预计还需加息两次」，那句来自同簇另一条「美联储理事沃勒表示…」的正文。
+    主标题有值、却和所有候选标题都对不上时，宁可返回空（要点留空），
+    也不要拿别人的正文编。
+    """
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "中信证券：用景气和供给出清来应对高利率",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "中信证券：用景气和供给出清来应对高利率",
+                # 只有标题行，没有正文。
+                "text": "中信证券：用景气和供给出清来应对高利率",
+            },
+            {
+                "source": "wscn",
+                "title": "美联储理事沃勒表示仍需加息两次",
+                # 同簇另一条新闻，正文里有「沃勒」这个不属于主标题的事实。
+                "text": (
+                    "美联储理事沃勒表示仍需加息两次\n"
+                    "沃勒预计还需加息两次至 4.25-4.50% 区间，以压制通胀。"
+                ),
+            },
+        ],
+    }
+    # 有正文的那条标题讲的是沃勒，与中信这条主标题对不上，不取。
+    assert _event_body(event) == ""
+
+
+def test_event_body_falls_back_to_longest_when_no_main_title():
+    """主标题为空时不套标题匹配，退回取最长正文 —— 这类事件整簇就是一件事。
+
+    钉钉作文、研报、周末汇总在生成标题前 `name` 是空的。早先一并要求标题匹配，
+    导致这些事件全部拿不到正文（实测 42 条，前 20 条覆盖率从 10/20 掉到 5/20）。
+    """
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "",
+        "_candidates": [
+            {
+                "source": "zsxq",
+                "title": "【华源公用】山东核电机制电价比例提升",
+                "text": "【华源公用】山东核电机制电价比例提升\n事件：据了解，从9月份起机制电价比例提升。",
+            },
+            {
+                "source": "zsxq",
+                "title": "【华源公用】山东核电机制电价比例提升，建议对核电保持乐观",
+                "text": (
+                    "【华源公用】山东核电机制电价比例提升，建议对核电保持乐观\n"
+                    "事件：据了解，从9月份起机制电价比例提升，建议对核电保持乐观。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    assert body  # 拿得到正文
+    assert "机制电价" in body
+
+
+def test_event_body_accepts_candidate_whose_title_matches_main():
+    """候选标题和主标题对得上时照常取正文（别把正确候选也挡掉）。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "贵州茅台宣布回购",
+        "_candidates": [
+            {
+                "source": "cls",
+                "title": "贵州茅台宣布回购并注销股份",
+                "text": (
+                    "贵州茅台宣布回购并注销股份\n"
+                    "拟回购金额不低于 30 亿元，回购价上限 1800 元/股。"
+                ),
+            },
+        ],
+    }
+    body = _event_body(event)
+    assert "30 亿元" in body
+
+
 def test_subtitle_length_is_capped():
     """补充要点是「一行挑 1~2 个事实」，超长直接丢，不做截断。"""
     from app.news.hot_events import _SUBTITLE_MAX, _subtitle_reject_reason
@@ -843,3 +929,77 @@ def test_label_stats_logs_zero_because_of_what(caplog):
     text = "\n".join(record.getMessage() for record in caplog.records)
     assert "未询问" in text
     assert "无正文 1 条" in text
+
+
+def test_event_body_keeps_text_after_bracketed_title_on_same_line():
+    """「【标题】正文…」挤在同一行时，只剥方括号、保留后面的正文。
+
+    财联社/新浪快讯常见这种排版：标题和正文之间没有换行。早先整行删掉，等于把
+    正文一起删了 —— 「联合国秘书长谴责美方制裁国际刑事法院」这类事件明明有一
+    整段事实（古特雷斯声明、八国外长联合声明），取文却成空串，要点永远写不出。
+    """
+    from app.news.hot_events import _event_body
+
+    name = "联合国秘书长谴责美方制裁国际刑事法院"
+    event = {
+        "name": name,
+        "_candidates": [{
+            "source": "cls",
+            "title": name,
+            "text": (
+                f"{name}\n"
+                f"【{name}】财联社10月10日电，联合国秘书长古特雷斯9日通过发言人"
+                "发表声明，谴责美国宣布“对国际刑事法院整个机构实施制裁”。"
+            ),
+        }],
+    }
+    body = _event_body(event)
+    assert body
+    assert "古特雷斯" in body
+    # 方括号（含标题）被剥掉，不会再出现在正文开头。
+    assert not body.startswith(f"【{name}】")
+
+
+def test_event_body_drops_bracket_only_when_title_repeats_without_content():
+    """方括号里是标题、括号外没有实义内容时，仍按重复处理返回空串。"""
+    from app.news.hot_events import _event_body
+
+    event = {
+        "name": "某公司发布公告",
+        "_candidates": [{
+            "source": "cls",
+            "title": "某公司发布公告",
+            "text": "某公司发布公告\n【某公司发布公告】",
+        }],
+    }
+    assert _event_body(event) == ""
+
+
+def test_blank_sweep_detector_flags_all_empty_with_bodies():
+    """整批 title 全空、且多数条目有正文 —— 判定为上游脏响应，值得重发。"""
+    from app.news.hot_events import _looks_like_blank_sweep
+
+    batch = [{"name": f"事件{i}", "_candidates": [
+        {"source": "cls", "title": f"事件{i}", "text": f"事件{i}\n正文有事实 {i}"},
+    ]} for i in range(1, 21)]
+    parsed = {str(i): {"title": ""} for i in range(1, 21)}
+    assert _looks_like_blank_sweep(batch, parsed, set()) is True
+
+
+def test_blank_sweep_detector_ignores_genuine_blanks_and_partial_titles():
+    """真有正文的条目不到六成、或已经写出一部分标题，都不算脏响应。"""
+    from app.news.hot_events import _looks_like_blank_sweep
+
+    # 有 title 就不算整批空。
+    batch = [{"name": f"事件{i}"} for i in range(1, 21)]
+    parsed = {str(i): {"title": ""} for i in range(1, 21)}
+    parsed["1"] = {"title": "写出了一条"}
+    assert _looks_like_blank_sweep(batch, parsed, set()) is False
+
+    # 多数条目没有正文（素材本身就无话可说），不算脏响应。
+    parsed = {str(i): {"title": ""} for i in range(1, 21)}
+    no_body = {str(i) for i in range(1, 13)}  # 12/20 无正文
+    assert _looks_like_blank_sweep(batch, parsed, no_body) is False
+
+    # 没解析到响应走「整批无返回」，不在此列。
+    assert _looks_like_blank_sweep(batch, {}, set()) is False

@@ -45,6 +45,7 @@ import hashlib
 import logging
 import math
 import re
+import time
 import unicodedata
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
@@ -65,16 +66,21 @@ _HEAT_HALF_LIFE_HOURS = 12
 # 加红稿在热度里按 2.5 条计，普通稿仍按 1 条。
 _RED_MENTION_WEIGHT = 2.5
 # 要展示的事件一次批量起标题，不再逐条各问一次。
-# 20 条覆盖不了一个交易日的事件数（实测 104 条），改成 40 条一批、最多问两批。
-_LLM_TITLE_BATCH = 40
+# 20 条一批（实测 40 条一批时，同一批里后段的条目模型会集中留空 —— 批太大反而
+# 拉低覆盖率；20 条一批稳定在 17~20/20）。
+_LLM_TITLE_BATCH = 20
 # 40 条要点的 JSON 加正文输入放得下。正文进 prompt 后输入变长，4096 不够。
 _LLM_TITLE_TOKENS = 8192
-# 一批 40 条要点 + 正文，默认 30 秒不够，实测有整批返回空（疑似超时被截）。
+# 一批要点 + 正文，默认 30 秒不够，实测有整批返回空（疑似超时被截）。
 # 放宽到 90 秒；单条调用仍用默认，不受影响。
 _LLM_TITLE_TIMEOUT = 90.0
 # 一条正文在 prompt 里最多带这么多字符，够放下数字和原因，又不至于把预算吃光。
 _BODY_IN_PROMPT_CHARS = 800
 _TITLE_LIMIT = 20
+# 起标题的切片长度。展示顺序**先于**写要点定下来（见 _compute 注释），
+# 所以切片只要盖住「正式展示的前 _TITLE_LIMIT 条」即可；留 4 倍余量是给
+# 过滤/重排一点缓冲（实测最终前 20 的名次落在切片前 80 名以内）。
+_TITLE_SLICE = _TITLE_LIMIT * 4
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
 _TITLE_HARD = 28
 # 一句话要点仍用这道完整句检查。超过 48 字或短于 6 字直接丢掉。
@@ -563,16 +569,23 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
             "updated_at": None,
             "events": [],
         }
-    # 只给**实际会展示的前若干条**写要点。这里若不截断，_keep_shown_event 会放行
-    # 几百条（线上实测 343 条），模型按 40 条一批要问近十批，小时额度（16 次）
-    # 远不够 —— 排在前面的榜单条目反而可能落在没问到的批次里，线上表现为
-    # 「前 20 条大部分没要点」。页面只显示 _TITLE_LIMIT 条，多留一批做缓冲即可
-    # （重排后顺序可能微调，故不正好卡 _TITLE_LIMIT）。
-    _label_with_llm(events[: _TITLE_LIMIT + _LLM_TITLE_BATCH])
+    # 先定展示顺序，再写要点 —— 顺序必须是**写要点之前**就定下来的那一份。
+    # 原因：写要点会给事件补 concepts/stocks/direction，_score_event 里这些进
+    # mapping 分，分数一变名次就变。若先写要点再排序，写过的条目会集体涨分、
+    # 把没写过的挤到后面去；而「谁该写要点」又是按排序切的前 80 名决定的，
+    # 两者互为因果 —— 实测最终前 20 名里有 12 条的名次落在切片之外，永远拿
+    # 不到要点（点开是空白）。改成一个方向的流程：排序 → 切片 → 写要点 →
+    # 只做过滤不再重排，前 20 名一定在切片内。
+    #
+    # 切片前先重排一次：_absorb_cutoff_events 把半截簇并进宿主后 heat/mentions
+    # 变了，沿用合并前的顺序会让个别该进前 20 的事件沉下去。
+    events = _rank_events(events, now, grade=False)
+    _label_with_llm(events[: _TITLE_SLICE])
     for event in events:
         _ensure_shown_name(event)
-    events = [event for event in events if _keep_shown_event(event)]
-    if not events:
+    # 过滤会改变成员但不重排：名次以上一步为准，保证「前 20 有要点」成立。
+    kept = [event for event in events if _keep_shown_event(event)]
+    if not kept:
         return {
             "as_of": None,
             "trading_day": trading.isoformat(),
@@ -581,9 +594,8 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
             "updated_at": None,
             "events": [],
         }
-    events = _rank_events(events, now, grade=False)
-    latest = max(event.pop("_latest") for event in events)
-    for event in events:
+    latest = max(event.pop("_latest") for event in kept)
+    for event in kept:
         event.pop("_fp", None)
         event.pop("_first", None)
         event.pop("_batch_id", None)
@@ -596,7 +608,7 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
         "fallback": fallback,
         "hint": _hint(now, trading, chosen, fallback, updated_hm),
         "updated_at": updated_hm,
-        "events": events,
+        "events": kept,
     }
 
 
@@ -3351,6 +3363,11 @@ def _drop_repeated_subtitle(event: dict) -> None:
 # 要点与主标题的 bigram 重合率到这一档就算「只是换个说法」。0.7 是评审给的
 # 参考值；实测「被立案」→「被立案并实施留置」这类改写落在 0.6~0.75。
 _SUBTITLE_SAME_TOPIC = 0.7
+# 候选正文的标题要和主标题重合到这一档，才认这条正文属于本事件。
+# 比 _SUBTITLE_SAME_TOPIC 松一档：候选标题是原始新闻标题，措辞和聚类后的
+# 主标题常有差异（主标题取的是「最完整原标题」，可能是另一条候选的），
+# 卡太死会把正确候选也挡掉。0.5 只拦「肉眼可见讲的是别的事」那种。
+_BODY_TITLE_MIN = 0.5
 
 
 def _subtitle_entities(text: str) -> set[str]:
@@ -3570,8 +3587,20 @@ def _event_body(event: dict) -> str:
 
     要点要写「主标题没提到的事实」，素材必须来自正文。只给标题的话，模型手里
     没有任何新信息，只能把主标题换个说法（实测 20 条要点 20 条都是同义改写）。
-    正文优先取和主标题对得上的那条候选，再退而取最长的一条。正文和主标题
-    重合（只是把标题重复一遍）的，当没有正文处理，免得白占 token。
+
+    **只用和主标题对得上的那条候选**：候选标题要与主标题重合度达标才认。早先
+    在匹配不到时退而取簇里最长的一条，簇里混进别的新闻时就把要点带偏 ——
+    实测「中信证券：用景气和供给出清来应对高利率…」的要点写成了「沃勒预计还需
+    加息两次」，那句来自同簇另一条「美联储理事沃勒表示…」的正文，中信这条正文
+    里根本没有沃勒，`_unbacked_facts` 对着同一份错正文校验自然放行。
+
+    对不上就返回空串（不喂正文、要点留空），宁缺勿错。正文和主标题重合
+    （只是把标题重复一遍）的也当没有正文处理，免得白占 token。
+
+    **主标题为空时不套标题匹配**：这类事件（钉钉作文、研报、周末汇总）本来就没有
+    原标题，整簇就是这一件事，不存在「混进别条」的问题 —— 退回取最长的一条正文。
+    早先这里一并要求标题匹配，导致 42 条待生成标题的事件全部拿不到正文，
+    前 20 条覆盖率从 10/20 掉到 5/20。
     """
     name = _compact(str(event.get("name") or ""))
     rows = event.get("_candidates")
@@ -3591,11 +3620,19 @@ def _event_body(event: dict) -> str:
         body = _strip_repeated_lead(name, body)
         if not body:
             continue
+        if not name:
+            # 没有主标题可对齐：取最长的一条当代表（簇已按主体聚合）。
+            if len(body) > len(best):
+                best = body
+            continue
         title = _compact(str(row.get("title") or ""))
-        if name and title and name in title:
+        # 候选标题要和主标题对得上（整句包含，或重合度过门槛），否则这条正文
+        # 讲的很可能不是主标题这件事，不认。
+        if not title:
+            continue
+        if name in title or _headline_similarity(title, name) >= _BODY_TITLE_MIN:
             return body
-        if len(body) > len(best):
-            best = body
+    # 有正文但标题都对不上：宁可不喂，也不要拿别人的正文编要点。
     return best
 
 
@@ -3605,6 +3642,12 @@ def _strip_repeated_lead(name: str, body: str) -> str:
     正文首句常常是标题的扩写（「财政部发布2026年上半年中…」），模型容易直接
     抄它当要点，产出等于标题+第一句的复述。把重合的首句摘掉，模型手里剩下的
     才是真正的新事实。只剥开头第一句，不动后面的句子。
+
+    **首行开头是【标题】方括号时只剥方括号，不整行删掉**：财联社/新浪这类
+    快讯正文常常是「【标题】正文……」挤在同一行（没有换行）。早先整行删，
+    等于把正文一起删了 —— 结果「联合国秘书长谴责美方制裁国际刑事法院」
+    这类事件正文取成空串，明明有一整段事实却写不出要点。方括号里就是标题的
+    话，剥掉方括号，后面那段才是正文。
     """
     if not name:
         return body
@@ -3612,6 +3655,19 @@ def _strip_repeated_lead(name: str, body: str) -> str:
     if not lines:
         return body
     first = _compact(lines[0])
+    # 先处理「【标题】正文」同在一行的情况：方括号内容与主标题重合就只去括号。
+    bracket = re.match(r"^\s*[【\[](?P<head>[^】\]]*)[】\]]\s*", lines[0])
+    if bracket:
+        head = _compact(bracket.group("head"))
+        if head and (
+            head == name
+            or name in head
+            or _headline_similarity(name, head) >= _SUBTITLE_SAME_TOPIC
+        ):
+            rest = _compact(lines[0][bracket.end():])
+            # 括号后还有实打实的内容才认；只剩标点/空白就按整行重复处理。
+            if rest and len(rest) >= 8:
+                return "\n".join([lines[0][bracket.end():].strip(), *lines[1:]])
     # 首句和主标题高度重合（标题整句在里面，或字符重合率高）就整句摘掉。
     if name in first or _headline_similarity(name, first) >= _SUBTITLE_SAME_TOPIC:
         return "\n".join(lines[1:])
@@ -3735,6 +3791,32 @@ def _label_with_llm(events: list[dict]) -> None:
         _label_batch_with_llm(batch, reserve_call=reserve_hot_title_call)
 
 
+def _looks_like_blank_sweep(
+    batch: list[dict],
+    parsed: dict[str, dict],
+    no_body_ids: set[str],
+) -> bool:
+    """判断这一批是不是「整批 title 全空」的脏响应。
+
+    成立条件：解析到了响应（不是超时/空响应），但**没有任何一条拿到非空 title**，
+    且批内**有正文的条目占多数**（>=60%）。模型在正常工作时，对有正文的条目
+    至少会写出几条要点（实测同批重发能拿到 14~18/20）；一条都写不出、而素材
+    又都在，只能是上游偶发返回了一批空 title。
+
+    注意别把「素材确实没话说」误判成脏响应：那种情况下 no_body_ids 会占多数，
+    这里要求「有正文的是多数」，正好把这类真实留空排除在外。
+    """
+    if len(batch) < 4:
+        return False  # 小批可能真的都没要点，不值得重发
+    if not parsed:
+        return False  # 没解析到响应走「整批无返回」那条路
+    has_title = any(str(item.get("title") or "").strip() for item in parsed.values())
+    if has_title:
+        return False
+    with_body = len(batch) - len(no_body_ids)
+    return with_body * 5 >= len(batch) * 3
+
+
 def _label_batch_with_llm(batch: list[dict], *, reserve_call) -> None:
     """问一批要点，没通过的再问一轮。batch 内的编号从 1 起。
 
@@ -3766,6 +3848,32 @@ def _label_batch_with_llm(batch: list[dict], *, reserve_call) -> None:
             "热门事件要点整批无返回: %d 条，响应 %d 字符（疑似超时/截断）",
             len(batch), len(first_raw or ""),
         )
+    # 「整批 title 全空、但大半条目是有正文的」几乎不可能是模型的本意 ——
+    # 实测同一批原文重发就有 14~18 条能写出要点（上游约每两批偶发一次返回
+    # 一批空 title，同一次重发常常还是空、隔一两秒再发就恢复）。这种脏响应
+    # 重发最多 3 次，不占用后面的「不合格重写」那一轮，否则重写轮也会踩到
+    # 同一次脏响应。短休眠是给上游换一次调度机会，不是节流。
+    attempts = 0
+    while attempts < 3 and _looks_like_blank_sweep(batch, first, no_body_ids):
+        attempts += 1
+        logger.info(
+            "热门事件要点整批空 title，重发第 %d 次: %d 条", attempts, len(batch),
+        )
+        time.sleep(1.0)
+        first_raw = _request_titles(batch, retry=False)
+        first = _parse_title_batch(first_raw, batch)
+    # 重发还是整批空：这批对上游来说「太大」或踩到持续降级。拆成两半各走一遍
+    # 完整流程（各自重发/重写），小批更稳（实测 20 条整批空时，10 条半批能正常
+    # 拿到要点）。递归调用会在半数上重复本函数，自然带上它们的重试与统计。
+    if _looks_like_blank_sweep(batch, first, no_body_ids) and len(batch) >= 8:
+        logger.info("热门事件要点整批空 title，改拆半重问: %d 条", len(batch))
+        half = len(batch) // 2
+        for chunk in (batch[:half], batch[half:]):
+            if reserve_call():
+                _label_batch_with_llm(chunk, reserve_call=reserve_call)
+            else:
+                logger.info("热门事件要点拆半重问未进行: 额度已用满 (%d 条)", len(chunk))
+        return
     failed: list[dict] = []
     for event in batch:
         parsed = first.get(str(event.get("_batch_id")))
@@ -3787,6 +3895,10 @@ def _label_batch_with_llm(batch: list[dict], *, reserve_call) -> None:
     # 第二轮仍没拿到的条目，以及拿到但没过门槛的条目，各自记下最终去向。
     settled: list[str] = []  # 最终没要点的条目（留空或被丢）
     reasons: dict[str, str] = {}
+    # 模型**主动返回空**的条目单独记 body 长度：评审要看「无正文模型留空」和
+    # 「有正文模型仍留空」各多少 —— 前者是设计如此（没有新事实就不该硬写），
+    # 后者才是提示词或素材取用有问题，需要继续查。
+    blank_with_body: list[str] = []
     for event in failed:
         batch_id = str(event.get("_batch_id"))
         parsed = second.get(batch_id)
@@ -3800,10 +3912,22 @@ def _label_batch_with_llm(batch: list[dict], *, reserve_call) -> None:
             blank["title"] = ""
             _apply_llm(event, blank)
             _LLM_CACHE[_title_cache_key(str(event.get("_fp") or ""))] = {"_miss": True}
-            settled.append("blank" if not str(parsed.get("title") or "").strip() else "dropped")
+            if not str(parsed.get("title") or "").strip():
+                # 模型主动留空。记一行带 body 长度，方便区分两类空。
+                body = _event_body(event)
+                settled.append("blank")
+                if body:
+                    blank_with_body.append(f"{batch_id}({len(body)}字)")
+            else:
+                settled.append("dropped")
             reasons[batch_id] = _subtitle_reject_reason(
                 str(parsed.get("title") or ""), _event_source_text(event),
             )
+    if blank_with_body:
+        logger.info(
+            "热门事件要点有正文仍留空: %d 条 %s（素材够但模型没写，需查提示词/取文）",
+            len(blank_with_body), " ".join(blank_with_body[:10]),
+        )
     _log_label_stats(len(batch), settled, no_body_ids, reasons)
 
 
@@ -3926,6 +4050,9 @@ def _parse_llm_payload(payload: dict, text: str) -> dict | None:
 
 
 def _apply_llm(event: dict, parsed: dict) -> None:
+    # 记一笔「这条已经问过模型」。补问切片外条目时靠它区分「还没问过」和
+    # 「问过但模型留空」——后者不该再问一遍（重问也是同样结果，白耗额度）。
+    event["_llm_title_applied"] = True
     title = _compact(str(parsed.get("title") or ""))
     if _subtitle_reject_reason(title) == "":
         event["subtitle"] = title
