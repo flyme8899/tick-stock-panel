@@ -146,7 +146,7 @@ it('买卖点用三角、菱形和圆点，旧箭头标记保持不变', async (
   const sell = points.find((point: any) => point.markerId === 's1')
   expect(sell.symbol).toBe('triangle')
   expect(sell.symbolRotate).toBe(180)
-  expect(sell.itemStyle.color).toBe('#F04438')
+  expect(sell.itemStyle.color).toBe('#12B76A')
   expect(sell.coord[1]).toBe(rows(10)[13].high)
   const fill = points.find((point: any) => point.markerId === 'f1')
   expect(fill.symbol).toBe('circle')

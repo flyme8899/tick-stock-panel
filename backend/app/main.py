@@ -508,6 +508,14 @@ async def auth_middleware(request: Request, call_next):
             return await call_next(request)
         return JSONResponse(status_code=404, content={"detail": "未启用"})
 
+    # DSA 拉取个股上下文，并回写分析价位。令牌不对时 404。
+    if path in {"/api/dsa/stock-context", "/api/dsa/sniper-lines"}:
+        from app.news.config import feed_matches
+
+        if feed_matches(request.headers.get("x-news-feed-token", "")):
+            return await call_next(request)
+        return JSONResponse(status_code=404, content={"detail": "未启用"})
+
     # ── API Token 通道 (外部调用方; 与密码会话并行, 见 open-platform-plan §4) ──
     authz = request.headers.get("authorization", "")
     if authz.startswith("Bearer "):

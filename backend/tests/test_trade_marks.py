@@ -220,6 +220,8 @@ def test_parse_dsa_levels_and_hide_when_absent():
         },
     }
     levels = {row["kind"]: row for row in parse_dsa_levels(report)}
+    assert levels["buy"]["price"] == pytest.approx(1800)
+    assert levels["buy"]["label"] == "理想买入"
     assert levels["support"]["price"] == pytest.approx(1680)
     assert levels["resistance"]["label"] == "压力"
     assert levels["stop"]["price"] == pytest.approx(1700)

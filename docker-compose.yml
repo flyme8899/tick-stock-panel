@@ -90,6 +90,7 @@ services:
       # 与 bootstrap 一起挂进容器。app 镜像没有 vendor 源码，轮动命令在这里执行。
       - ./backend/app/custom/dsa/etf_job.py:/opt/tsp/etf_job.py:ro
       - ./backend/app/custom/dsa/news_bridge.py:/opt/tsp/news_bridge.py:ro
+      - ./backend/app/custom/dsa/analysis_bridge.py:/opt/tsp/analysis_bridge.py:ro
       - ./backend/app/custom/dsa/quant_evidence.py:/opt/tsp/quant_evidence.py:ro
       - ./backend/app/custom/dsa/quant_evidence.yaml:/opt/tsp/quant_evidence.yaml:ro
     # 探针是 sidecar 自己的 /api/v1/health（免登录）。不要用恒成功的兜底命令。

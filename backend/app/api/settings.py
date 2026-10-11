@@ -568,6 +568,7 @@ def get_preferences() -> dict:
         "strategy_monitor_enabled": preferences.get_strategy_monitor_enabled(),
         "strategy_monitor_ids": preferences.get_strategy_monitor_ids(),
         "system_notify_enabled": preferences.get_system_notify_enabled(),
+        "dsa_sniper_alerts_enabled": preferences.get_dsa_sniper_alerts_enabled(),
         "feishu_webhook_url": preferences.get_feishu_webhook_url(),
         "feishu_webhook_secret": preferences.get_feishu_webhook_secret(),
         "wecom_webhook_url": preferences.get_wecom_webhook_url(),
@@ -1223,6 +1224,19 @@ class QuoteIntervalIn(BaseModel):
 
 class SystemNotifyPrefsIn(BaseModel):
     enabled: bool
+
+
+class DsaSniperAlertsIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/preferences/dsa-sniper-alerts")
+def update_dsa_sniper_alerts(req: DsaSniperAlertsIn) -> dict:
+    """DSA 价位钉钉提醒。关闭后不再推送，K 线买卖点仍可读已登记的价位。"""
+    from app.services import preferences
+
+    saved = preferences.set_dsa_sniper_alerts_enabled(req.enabled)
+    return {"dsa_sniper_alerts_enabled": saved}
 
 
 @router.put("/preferences/system-notify")

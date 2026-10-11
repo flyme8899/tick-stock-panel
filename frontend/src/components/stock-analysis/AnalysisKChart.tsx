@@ -3,6 +3,7 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
+import { TRADE_BUY, TRADE_SELL } from '@/lib/trade-marks'
 
 /**
  * 个股分析专用日 K 图表。
@@ -220,7 +221,7 @@ export function AnalysisKChart({
         if (m.kind === 'buy' || m.kind === 'sell') {
           const below = m.kind === 'buy'
           const symbol = m.style === 'breakout' ? 'diamond' : m.style === 'circle' ? 'circle' : 'triangle'
-          const color = m.color ?? (below ? '#12B76A' : '#F04438')
+          const color = m.color ?? (below ? TRADE_BUY : TRADE_SELL)
           return {
             name: m.date,
             markerId: m.markerId,

@@ -1,11 +1,13 @@
 import type { ChartMarker, ChartPriceLine } from '@/components/EChartsCandlestick'
 import { fmtPct } from '@/lib/format'
 
-/** 买卖点颜色按语义固定：买绿、卖红，不跟随 A 股涨跌色。 */
-export const TRADE_BUY = '#12B76A'
-export const TRADE_SELL = '#F04438'
+/** 买卖点跟随站点涨跌色：买用红涨 --bull，卖用绿跌 --bear。 */
+export const TRADE_BUY = '#F04438'
+export const TRADE_SELL = '#12B76A'
 
 const DSA_COLOR: Record<TradeLevelKind, string> = {
+  buy: TRADE_BUY,
+  target: '#A855F7',
   support: '#3B82F6',
   resistance: '#F97316',
   stop: TRADE_SELL,
@@ -30,7 +32,7 @@ export interface TradeSignalMarker {
   fwd20: number | null
 }
 
-export type TradeLevelKind = 'support' | 'resistance' | 'stop'
+export type TradeLevelKind = 'buy' | 'stop' | 'target' | 'support' | 'resistance'
 
 export interface TradeLevel {
   kind: TradeLevelKind

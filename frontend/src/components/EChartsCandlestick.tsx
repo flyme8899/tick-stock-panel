@@ -474,8 +474,8 @@ function buildSubInfoGraphics(
   return graphics
 }
 
-const TRADE_BUY = '#12B76A'
-const TRADE_SELL = '#F04438'
+const TRADE_BUY = '#F04438'
+const TRADE_SELL = '#12B76A'
 
 /** 主图 markPoint。无 style 的标记保持原箭头 / 涨停标签，供回测与异动继续使用。 */
 function buildMarkPointData(

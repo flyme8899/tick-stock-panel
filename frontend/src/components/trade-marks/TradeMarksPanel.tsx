@@ -11,6 +11,8 @@ import {
   formatForward,
   markerDetails,
   strategyMarkers,
+  TRADE_BUY,
+  TRADE_SELL,
   type TradeMarkDetail,
   type TradeTMark,
 } from '@/lib/trade-marks'
@@ -262,7 +264,7 @@ export function TradeMarksOverlay({
                           className={`cursor-pointer border-t border-border/40 ${activeId === row.id ? 'bg-accent/10' : 'hover:bg-elevated'}`}
                         >
                           <td className="py-1 pr-1 font-mono">{row.date.slice(5)}</td>
-                          <td className="py-1 pr-1" style={{ color: row.side === 'buy' ? '#12B76A' : '#F04438' }}>
+                          <td className="py-1 pr-1" style={{ color: row.side === 'buy' ? TRADE_BUY : TRADE_SELL }}>
                             {row.side === 'buy' ? '买' : '卖'}
                           </td>
                           <td className="py-1 pr-1 font-mono">{fmtPrice(row.price)}</td>
