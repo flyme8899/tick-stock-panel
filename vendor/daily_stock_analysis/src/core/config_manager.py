@@ -16,7 +16,13 @@ from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
 from dotenv import dotenv_values
 
 _ASSIGNMENT_PATTERN = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
-_FALLBACK_REWRITE_ERRNOS = {errno.EBUSY, errno.EXDEV}
+# os.replace over a single-file bind mount cannot retarget the mount point.
+# Current Docker/kernel builds return EPERM ("Operation not permitted").
+# Older mounts return EBUSY. EXDEV is a cross-device rename. EACCES is the
+# errno PermissionError uses on Windows (WinError 5). #37 documented an
+# in-place fallback, but the previous set omitted EPERM/EACCES so the
+# production failure never entered it.
+_FALLBACK_REWRITE_ERRNOS = {errno.EPERM, errno.EACCES, errno.EBUSY, errno.EXDEV}
 _COMPOSE_ESCAPED_ENV_VALUE_KEYS = frozenset({"CUSTOM_WEBHOOK_BODY_TEMPLATE"})
 _APPLICATION_TEMPLATE_PLACEHOLDER_PATTERN = re.compile(
     r"(?<!\$)\$(?:"
@@ -180,7 +186,12 @@ class ConfigManager:
         sensitive_keys: Set[str],
         mask_token: str,
     ) -> Tuple[List[str], List[str], str]:
-        """Apply updates into `.env` file using atomic replace when possible."""
+        """Apply updates into `.env` file using atomic replace when possible.
+
+        Every DSA settings write ends here: system config save, `.env` import,
+        the auth toggle, the schedule page, and watchlist add/remove/remove-batch
+        (`_write_watchlist_codes` -> `SystemConfigService.update`).
+        """
         with self._lock:
             current_values = self.read_config_map()
             stored_values = self._read_config_map(normalize_values=False)
@@ -243,22 +254,96 @@ class ConfigManager:
         try:
             os.replace(temp_path, self._env_path)
         except OSError as exc:
-            if exc.errno not in _FALLBACK_REWRITE_ERRNOS:
+            if not self._should_rewrite_in_place(exc):
                 raise
 
-            logger.warning(
+            logger.info(
                 "Atomic replace for .env failed with errno=%s, falling back to in-place rewrite",
                 exc.errno,
             )
             self._rewrite_in_place(content)
         finally:
             if temp_path.exists():
-                temp_path.unlink()
+                try:
+                    temp_path.unlink()
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to remove temporary .env file %s: errno=%s",
+                        temp_path,
+                        exc.errno,
+                    )
+
+    @staticmethod
+    def _should_rewrite_in_place(exc: OSError) -> bool:
+        """Return whether this replace failure is a mount/permission rename refusal.
+
+        PermissionError is an OSError subclass raised for EPERM and EACCES.
+        Checking the type as well covers a PermissionError whose errno is unset.
+        """
+        if isinstance(exc, PermissionError):
+            return True
+        return exc.errno in _FALLBACK_REWRITE_ERRNOS
+
+    def _backup_path(self) -> Path:
+        return self._env_path.with_name(self._env_path.name + ".bak")
 
     def _rewrite_in_place(self, content: str) -> None:
-        """Rewrite `.env` content in place when rename is unsupported by mount type."""
-        with self._env_path.open("w", encoding="utf-8", newline="\n") as file_obj:
-            file_obj.write(content)
+        """Rewrite the existing inode when rename cannot replace a bind mount.
+
+        The TSP app container bind-mounts the same host file read-only. A
+        successful os.replace would swing the host directory entry onto a new
+        inode and leave that read-only mount on the previous bytes. r+ writes
+        through the shared inode. The previous bytes are copied to `.env.bak`
+        first so a failed rewrite can be restored.
+        """
+        payload = content.encode("utf-8")
+        original = self._env_path.read_bytes() if self._env_path.exists() else None
+        if original is not None:
+            self._write_backup(original)
+        try:
+            self._write_through_inode(payload)
+        except OSError:
+            if original is not None:
+                try:
+                    self._write_through_inode(original)
+                except OSError:
+                    logger.error(
+                        "In-place .env rewrite failed and the previous bytes could not "
+                        "be restored; backup is %s",
+                        self._backup_path(),
+                    )
+            raise
+
+    def _write_backup(self, payload: bytes) -> None:
+        backup_path = self._backup_path()
+        with backup_path.open("wb") as file_obj:
+            file_obj.write(payload)
+            file_obj.flush()
+            os.fsync(file_obj.fileno())
+        try:
+            os.chmod(backup_path, 0o600)
+        except OSError as exc:
+            logger.warning(
+                "Could not restrict .env backup permissions: errno=%s path=%s",
+                exc.errno,
+                backup_path,
+            )
+
+    def _write_through_inode(self, payload: bytes) -> None:
+        """Write bytes without replacing the directory entry.
+
+        ``r+b`` does not truncate on open. ``truncate()`` after the write
+        drops a leftover tail when the new content is shorter.
+        """
+        if not self._env_path.exists():
+            with self._env_path.open("wb") as file_obj:
+                file_obj.write(payload)
+                file_obj.flush()
+                os.fsync(file_obj.fileno())
+            return
+        with self._env_path.open("r+b") as file_obj:
+            file_obj.write(payload)
+            file_obj.truncate()
             file_obj.flush()
             os.fsync(file_obj.fileno())
 

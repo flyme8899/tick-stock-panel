@@ -53,6 +53,7 @@ data/**
 
 # ===== Secrets =====
 .env
+.env.bak
 .env.local
 .env.*.local
 backend/.env

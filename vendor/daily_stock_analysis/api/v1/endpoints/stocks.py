@@ -77,6 +77,18 @@ def _write_watchlist_codes(service: SystemConfigService, codes: list) -> None:
     )
 
 
+def _drop_watchlist_codes(codes: list, remove_keys: set[str]) -> tuple[list, int]:
+    """按等价键移出观察池，保留其余代码的原始写法。"""
+    kept = []
+    removed = 0
+    for code in codes:
+        if _watchlist_match_key(code) in remove_keys:
+            removed += 1
+            continue
+        kept.append(code)
+    return kept, removed
+
+
 # Stock code validation patterns (aligned with frontend validateStockCode)
 _STOCK_CODE_RE = re.compile(
     r"^(?:\d{6}"                              # A-share 6-digit
@@ -387,18 +399,6 @@ def add_to_watchlist(
     summary="从自选队列删除",
     description="从 STOCK_LIST 中移除指定股票代码。",
 )
-def _drop_watchlist_codes(codes: list, remove_keys: set[str]) -> tuple[list, int]:
-    """按等价键移出观察池，保留其余代码的原始写法。"""
-    kept = []
-    removed = 0
-    for code in codes:
-        if _watchlist_match_key(code) in remove_keys:
-            removed += 1
-            continue
-        kept.append(code)
-    return kept, removed
-
-
 def remove_from_watchlist(
     request: WatchlistRequest,
     service: SystemConfigService = Depends(get_system_config_service),
