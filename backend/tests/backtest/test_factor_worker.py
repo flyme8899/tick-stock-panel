@@ -47,9 +47,10 @@ def test_factor_task_roundtrip_and_dispatch(monkeypatch, tmp_path):
     assert result["config"]["factor_name"] == "momentum_5d"
 
 
-def test_factor_batch_holds_exclusive_slot_for_one_job(monkeypatch):
+def test_factor_batch_holds_exclusive_slot_for_one_job(monkeypatch, tmp_path):
     limiter = HeavyJobLimiter(capacity=2, cancel_poll_interval=0.01)
     monkeypatch.setattr("app.services.heavy_job_limiter.shared_heavy_job_limiter", limiter)
+    monkeypatch.setattr(bt.settings, "data_dir", tmp_path)
     monkeypatch.setattr(bt, "_guard_server_backtest_range", lambda _start, _end: None)
 
     entered = []

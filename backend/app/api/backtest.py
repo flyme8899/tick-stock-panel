@@ -65,19 +65,39 @@ def _guard_server_backtest_range(start: date, end: date):
         raise HTTPException(status_code=400, detail=BACKTEST_SERVER_GUARD_MESSAGE)
 
 
-def _run_factor_worker(kind: str, config) -> dict:
-    """因子回测放到子进程，父进程同时只放行一个。
+def _factor_jobs(request: Request):
+    """优先用进程内单例；单测直接调函数时退回 data 目录上的临时管理器。"""
+    app = getattr(request, "app", None)
+    state = getattr(app, "state", None)
+    manager = getattr(state, "factor_backtest_jobs", None)
+    if manager is not None:
+        return manager
+    from app.services.factor_backtest_runs import FactorBacktestJobManager
 
-    计算留在子进程里，用的是子进程自己的 polars 线程池，不会把 API 进程的
-    线程池占满。exclusive 槽占满整个重任务预算，所以第二个因子回测会等到
-    第一个结束，不会并行再起一个进程。
-    """
-    from app.backtest.worker import make_worker_task, run_worker_task
-    from app.services.heavy_job_limiter import shared_heavy_job_limiter
+    return FactorBacktestJobManager(settings.data_dir)
 
-    task = make_worker_task(kind, settings.data_dir, config)
-    with shared_heavy_job_limiter.slot("exclusive"):
-        return run_worker_task(task)
+
+def _factor_username(request: Request) -> str | None:
+    state = getattr(request, "state", None)
+    name = getattr(state, "auth_user", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return None
+
+
+def _checked_factor_window(
+    req: BaseModel, symbols: list[str] | None,
+) -> tuple[date, date, list[str] | None]:
+    end = req.end or date.today()
+    start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
+    _guard_server_backtest_range(start, end)
+    cleaned = symbols if symbols else None
+    if cleaned is not None and len(cleaned) > FACTOR_MAX_SYMBOLS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"指定标的最多支持 {FACTOR_MAX_SYMBOLS} 只，请缩小标的范围。",
+        )
+    return start, end, cleaned
 
 
 # ================================================================
@@ -167,27 +187,15 @@ class FactorBacktestRequest(BaseModel):
     asset_type: str = "stock"
 
 
-@router.post("/factor/run")
-def factor_run(req: FactorBacktestRequest, request: Request):
-    """因子回测 — IC/IR 分析 + 分层回测。"""
+def _factor_config_from_request(req: FactorBacktestRequest):
     from app.backtest.factor import FactorConfig
     from app.factors.registry import factor_columns_view
 
     allowed = {item["id"] for item in factor_columns_view(include_experimental=True)}
     if req.factor_name not in allowed:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {req.factor_name}")
-
-    end = req.end or date.today()
-    start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
-    _guard_server_backtest_range(start, end)
-    symbols = req.symbols if req.symbols else None
-    if symbols is not None and len(symbols) > FACTOR_MAX_SYMBOLS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"指定标的最多支持 {FACTOR_MAX_SYMBOLS} 只，请缩小标的范围。",
-        )
-
-    cfg = FactorConfig(
+    start, end, symbols = _checked_factor_window(req, req.symbols)
+    return FactorConfig(
         factor_name=req.factor_name,
         symbols=symbols,
         start=start,
@@ -199,7 +207,13 @@ def factor_run(req: FactorBacktestRequest, request: Request):
         slippage_bps=req.slippage_bps,
         asset_type=req.asset_type,
     )
-    return _run_factor_worker("factor", cfg)
+
+
+@router.post("/factor/run")
+def factor_run(req: FactorBacktestRequest, request: Request):
+    """因子回测 — IC/IR 分析 + 分层回测。同步返回结果，并写入历史。"""
+    cfg = _factor_config_from_request(req)
+    return _factor_jobs(request).run_blocking("factor", cfg, _factor_username(request))
 
 
 class FactorBatchRequest(BaseModel):
@@ -216,9 +230,7 @@ class FactorBatchRequest(BaseModel):
     asset_type: str = "stock"
 
 
-@router.post("/factor/batch")
-def factor_batch(req: FactorBatchRequest, request: Request):
-    """批量筛选因子, 同一批次只加载并计算一次数据面板。"""
+def _factor_batch_config_from_request(req: FactorBatchRequest):
     from app.backtest.factor import FactorBatchConfig
     from app.factors.registry import factor_columns_view
 
@@ -227,18 +239,8 @@ def factor_batch(req: FactorBatchRequest, request: Request):
     invalid = [name for name in factor_names if name not in allowed]
     if invalid:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")
-
-    end = req.end or date.today()
-    start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
-    _guard_server_backtest_range(start, end)
-    symbols = req.symbols if req.symbols else None
-    if symbols is not None and len(symbols) > FACTOR_MAX_SYMBOLS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"指定标的最多支持 {FACTOR_MAX_SYMBOLS} 只, 请缩小标的范围。",
-        )
-
-    return _run_factor_worker("factor_batch", FactorBatchConfig(
+    start, end, symbols = _checked_factor_window(req, req.symbols)
+    return FactorBatchConfig(
         factor_names=factor_names,
         symbols=symbols,
         start=start,
@@ -249,7 +251,125 @@ def factor_batch(req: FactorBatchRequest, request: Request):
         fees_pct=req.fees_pct,
         slippage_bps=req.slippage_bps,
         asset_type=req.asset_type,
-    ))
+    )
+
+
+@router.post("/factor/batch")
+def factor_batch(req: FactorBatchRequest, request: Request):
+    """批量筛选因子, 同一批次只加载并计算一次数据面板。同步返回结果，并写入历史。"""
+    cfg = _factor_batch_config_from_request(req)
+    return _factor_jobs(request).run_blocking("batch", cfg, _factor_username(request))
+
+
+class FactorJobRequest(BaseModel):
+    """异步提交。kind=factor 用 factor_name，kind=batch 用 factor_names。"""
+
+    kind: Literal["factor", "batch"]
+    factor_name: str | None = Field(None, min_length=1, max_length=64)
+    factor_names: list[str] | None = Field(None, min_length=1, max_length=320)
+    symbols: list[str] | None = None
+    start: date | None = None
+    end: date | None = None
+    n_groups: int = Field(5, ge=2, le=10)
+    rebalance: Literal["daily", "weekly", "monthly"] = "monthly"
+    weight: Literal["equal", "factor_weight"] = "equal"
+    fees_pct: float = 0.0002
+    slippage_bps: float = 5.0
+    asset_type: str = "stock"
+
+
+def _raise_factor_run_error(exc: Exception) -> None:
+    from app.services.factor_backtest_runs import (
+        FactorRunBusyError,
+        FactorRunStoreError,
+        FactorRunValidationError,
+    )
+
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=404, detail="因子回测记录不存在") from exc
+    if isinstance(exc, FactorRunBusyError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, FactorRunValidationError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, FactorRunStoreError):
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    raise exc
+
+
+def _job_request_kwargs(req: FactorJobRequest) -> dict:
+    """省略 start 与显式 null 语义不同，转成同步请求时保留 model_fields_set。"""
+    fields = {
+        "symbols": req.symbols,
+        "end": req.end,
+        "n_groups": req.n_groups,
+        "rebalance": req.rebalance,
+        "weight": req.weight,
+        "fees_pct": req.fees_pct,
+        "slippage_bps": req.slippage_bps,
+        "asset_type": req.asset_type,
+    }
+    if "start" in req.model_fields_set:
+        fields["start"] = req.start
+    return fields
+
+
+@router.post("/factor/runs")
+def factor_runs_submit(req: FactorJobRequest, request: Request):
+    """提交因子回测后立即返回 run_id。计算在子进程里排队，同一时间只跑一个。"""
+    fields = _job_request_kwargs(req)
+    if req.kind == "factor":
+        if not req.factor_name:
+            raise HTTPException(status_code=400, detail="请指定因子")
+        cfg = _factor_config_from_request(
+            FactorBacktestRequest(factor_name=req.factor_name, **fields),
+        )
+        kind = "factor"
+    else:
+        if not req.factor_names:
+            raise HTTPException(status_code=400, detail="请指定因子列表")
+        cfg = _factor_batch_config_from_request(
+            FactorBatchRequest(factor_names=req.factor_names, **fields),
+        )
+        kind = "batch"
+    try:
+        return _factor_jobs(request).submit(kind, cfg, _factor_username(request))
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 存储错误映射为 HTTP 状态码
+        _raise_factor_run_error(exc)
+
+
+@router.get("/factor/runs")
+def factor_runs_list(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 200,
+):
+    """最近的因子回测记录，不含完整结果。"""
+    try:
+        return {"items": _factor_jobs(request).store.list_runs(limit=limit)}
+    except Exception as exc:  # noqa: BLE001
+        _raise_factor_run_error(exc)
+
+
+@router.get("/factor/runs/{run_id}")
+def factor_run_get(run_id: str, request: Request):
+    """单条记录。进行中没有 result，完成后带上 IC、分层和全部结果。"""
+    try:
+        loaded = _factor_jobs(request).store.get(run_id, include_result=True)
+    except Exception as exc:  # noqa: BLE001
+        _raise_factor_run_error(exc)
+    if loaded is None:
+        raise HTTPException(status_code=404, detail="因子回测记录不存在")
+    return loaded
+
+
+@router.delete("/factor/runs/{run_id}")
+def factor_run_delete(run_id: str, request: Request):
+    try:
+        _factor_jobs(request).store.delete(run_id)
+    except Exception as exc:  # noqa: BLE001
+        _raise_factor_run_error(exc)
+    return {"ok": True}
 
 
 # ================================================================

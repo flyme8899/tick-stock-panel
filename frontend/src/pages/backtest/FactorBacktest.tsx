@@ -1,8 +1,8 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { Play, BarChart3, BookmarkPlus, Clock } from 'lucide-react'
-import { api, type FactorColumn, type FactorBacktestResult, type GroupStat } from '@/lib/api'
+import { api, type FactorBacktestRun, type FactorColumn, type FactorBacktestResult, type GroupStat } from '@/lib/api'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
@@ -48,7 +48,7 @@ function LoadingPanel({ symbolsText }: { symbolsText: string }) {
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium text-foreground">正在计算因子分析</div>
-            <div className="mt-1 text-xs text-muted">{symbolsText} · 完成后会一次性刷新 IC、分层收益和净值曲线。</div>
+            <div className="mt-1 text-xs text-muted">{symbolsText} · 可以刷新页面，完成后会在这里显示 IC、分层收益和净值曲线。</div>
           </div>
           <div className="h-8 w-8 rounded-full border-2 border-accent/25 border-t-accent animate-spin" />
         </div>
@@ -83,8 +83,21 @@ function LoadingPanel({ symbolsText }: { symbolsText: string }) {
   )
 }
 
-export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initialFactorName?: string }) {
+const wanFromFees = (feesPct: number) => String(Math.round(feesPct * 10000 * 100) / 100)
+
+export function FactorBacktest({
+  initialFactorName = 'momentum_20d',
+  activeRun = null,
+  historyPending = false,
+  onSubmit,
+}: {
+  initialFactorName?: string
+  activeRun?: FactorBacktestRun | null
+  historyPending?: boolean
+  onSubmit?: (payload: Parameters<typeof api.factorBacktestSubmit>[0]) => Promise<void>
+}) {
   const queryClient = useQueryClient()
+  const appliedRun = useRef<string | null>(null)
   const [factorName, setFactorName] = useState(initialFactorName)
   const [symbols, setSymbols] = useState('')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
@@ -95,7 +108,33 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
   const [rebalance, setRebalance] = useState<'daily' | 'weekly' | 'monthly'>('daily')
   const [fees, setFees] = useState('2')
   const [slippage, setSlippage] = useState('5')
-  const [result, setResult] = useState<FactorBacktestResult | null>(null)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const result: FactorBacktestResult | null = activeRun?.status === 'succeeded' && activeRun.result
+    ? activeRun.result as FactorBacktestResult
+    : null
+  const running = submitting || activeRun?.status === 'queued' || activeRun?.status === 'running'
+  const runError = activeRun?.status === 'failed' || activeRun?.status === 'interrupted'
+    ? (activeRun.error || '因子回测失败')
+    : submitError
+
+  useEffect(() => {
+    if (!activeRun || appliedRun.current === activeRun.run_id) return
+    appliedRun.current = activeRun.run_id
+    const req = activeRun.request
+    if (req.factor_name) setFactorName(req.factor_name)
+    if (req.asset_type === 'stock' || req.asset_type === 'etf') setAssetType(req.asset_type)
+    setSymbols(req.symbols?.join(',') ?? '')
+    setStart(req.start && req.start > '1900-01-02' ? req.start : '')
+    setEnd(req.end ?? TODAY)
+    if (req.n_groups) setNGroups(req.n_groups)
+    if (req.weight === 'equal' || req.weight === 'factor_weight') setWeight(req.weight)
+    if (req.rebalance === 'daily' || req.rebalance === 'weekly' || req.rebalance === 'monthly') {
+      setRebalance(req.rebalance)
+    }
+    if (req.fees_pct != null) setFees(wanFromFees(req.fees_pct))
+    if (req.slippage_bps != null) setSlippage(String(req.slippage_bps))
+  }, [activeRun])
 
   const columns = useQuery({
     queryKey: QK.factorColumns,
@@ -122,28 +161,30 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
     return columns.data?.columns.find(c => c.id === resultFactorName)?.label ?? resultFactorName
   }, [columns.data, factorName, result])
 
-  const run = useMutation({
-    mutationFn: () =>
-      api.factorRun({
+  const handleRun = async () => {
+    if (!onSubmit) return
+    setSubmitError(null)
+    setSubmitting(true)
+    try {
+      await onSubmit({
+        kind: 'factor',
         factor_name: factorName,
         asset_type: assetType,
         symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
         start: start || null,
-        end: end || undefined,
+        end: end || null,
         n_groups: nGroups,
         rebalance,
         weight,
         fees_pct: Number(fees) / 10000,
         slippage_bps: Number(slippage),
-      }),
-    onSuccess: (data) => {
-      if (data.error) {
-        setResult(data)
-      } else {
-        setResult(data)
-      }
-    },
-  })
+      })
+    } catch (error) {
+      setSubmitError(String((error as Error).message || error))
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   const saveCandidate = useMutation({
     mutationFn: () => {
@@ -325,14 +366,14 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
         </div>
 
         <button
-          onClick={() => run.mutate()}
-          disabled={run.isPending}
+          onClick={() => void handleRun()}
+          disabled={running}
           className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-btn
             bg-accent text-sm font-medium text-white hover:bg-accent/90
             transition-colors duration-150 ease-smooth disabled:opacity-50"
         >
           <Play className="h-3.5 w-3.5" />
-          {run.isPending ? '分析中…' : '开始因子分析'}
+          {running ? '分析中…' : '开始因子分析'}
         </button>
       </section>
 
@@ -344,27 +385,25 @@ export function FactorBacktest({ initialFactorName = 'momentum_20d' }: { initial
           </div>
         )}
 
-        {run.isError && (
+        {runError && (
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
-            {String((run.error as any).message)}
+            {runError}
           </div>
         )}
 
-        {!result && !run.isPending && (
+        {!result && !running && historyPending && (
+          <div className="text-xs text-muted">正在读取历史记录…</div>
+        )}
+
+        {!result && !running && !historyPending && (
           <EmptyState
             icon={BarChart3}
             title="选择因子并开始分析"
-            hint="因子回测分析因子的预测能力 ( IC/IR ) 和分层收益差异。服务器建议优先使用最近3个月；长周期建议本机或 8GB 以上内存环境运行。"
+            hint="因子回测分析因子的预测能力 ( IC/IR ) 和分层收益差异。结果会记入历史记录，刷新后仍可打开。服务器建议优先使用最近3个月；长周期建议本机或 8GB 以上内存环境运行。"
           />
         )}
 
-        {run.isPending && result && (
-          <div className="rounded-card border border-accent/25 bg-accent/[0.04] px-4 py-3 text-xs text-secondary">
-            正在重新计算，当前暂时展示上一次因子分析结果，完成后会自动替换。
-          </div>
-        )}
-
-        {run.isPending && !result && (
+        {running && !result && (
           <LoadingPanel symbolsText={symbols ? `${symbols.split(',').length} 只标的` : '全市场 · 当前区间'} />
         )}
 

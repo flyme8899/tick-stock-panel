@@ -27,7 +27,7 @@ class _Req:
 
 
 @pytest.fixture
-def patched(monkeypatch):
+def patched(monkeypatch, tmp_path):
     _Capture.captured = []
 
     def fake_run(task, *_args, **_kwargs):
@@ -36,6 +36,7 @@ def patched(monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr("app.backtest.worker.run_worker_task", fake_run)
+    monkeypatch.setattr(bt.settings, "data_dir", tmp_path)
     # 隔离守卫, 单测「起始日解析」。
     monkeypatch.setattr(bt, "_guard_server_backtest_range", lambda start, end: None)
     return _Capture
