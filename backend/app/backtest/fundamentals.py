@@ -36,9 +36,40 @@ FUNDAMENTAL_FACTORS: dict[str, dict[str, Any]] = {
     "revenue_yoy_latest": {"column": "revenue_yoy", "price_ratio": False},
     "net_income_yoy_latest": {"column": "net_income_yoy", "price_ratio": False},
     "debt_ratio_latest": {"column": "debt_to_asset_ratio", "price_ratio": False},
+    "bps_latest": {"column": "bps", "price_ratio": False},
+    # 下面几项的源列不是每份财务快照都有。缺列时因子为空，不能让整张快照加载失败。
+    "eps_latest": {"columns": ("basic_eps", "eps", "eps_basic"), "price_ratio": False, "optional": True},
+    "pe_latest": {"columns": ("basic_eps", "eps", "eps_basic"), "price_ratio": True, "optional": True},
+    "roa_latest": {"column": "roa", "price_ratio": False, "optional": True},
+    "ocf_to_revenue_latest": {
+        "column": "operating_cash_to_revenue", "price_ratio": False, "optional": True,
+    },
 }
 
 FUNDAMENTAL_FACTOR_NAMES = frozenset(FUNDAMENTAL_FACTORS)
+
+
+def _source_columns(spec: dict[str, Any]) -> tuple[str, ...]:
+    raw = spec.get("columns")
+    if raw:
+        return tuple(raw)
+    return (spec["column"],)
+
+
+def _required_metric_columns() -> set[str]:
+    columns: set[str] = set()
+    for spec in FUNDAMENTAL_FACTORS.values():
+        if spec.get("optional"):
+            continue
+        columns.add(spec["column"])
+    return columns
+
+
+def _resolve_source_column(spec: dict[str, Any], columns: set[str]) -> str | None:
+    for name in _source_columns(spec):
+        if name in columns:
+            return name
+    return None
 
 
 def load_fundamental_snapshot(data_dir: Path | None) -> pl.DataFrame | None:
@@ -56,14 +87,19 @@ def load_fundamental_snapshot(data_dir: Path | None) -> pl.DataFrame | None:
     except Exception as exc:
         logger.warning("读取财务指标快照失败: %s", exc)
         return None
-    needed = {"symbol", "announce_date"} | {
-        spec["column"] for spec in FUNDAMENTAL_FACTORS.values()
-    }
+    needed = {"symbol", "announce_date"} | _required_metric_columns()
     if not needed.issubset(frame.columns):
         logger.warning("财务指标快照缺少列: %s", sorted(needed - set(frame.columns)))
         return None
+    optional = {
+        column
+        for spec in FUNDAMENTAL_FACTORS.values()
+        if spec.get("optional")
+        for column in _source_columns(spec)
+        if column in frame.columns
+    }
     snapshot = (
-        frame.select(sorted(needed))
+        frame.select(sorted(needed | optional))
         .filter(
             pl.col("symbol").is_not_null()
             & pl.col("announce_date").is_not_null()
@@ -100,9 +136,21 @@ def attach_fundamental_factors(
             for name in missing_columns
         ])
 
-    columns = sorted(
-        {FUNDAMENTAL_FACTORS[name]["column"] for name in missing_columns}
-    )
+    resolved: list[tuple[str, str]] = []
+    absent: list[str] = []
+    for name in missing_columns:
+        source = _resolve_source_column(FUNDAMENTAL_FACTORS[name], set(snapshot.columns))
+        if source is None:
+            absent.append(name)
+        else:
+            resolved.append((name, source))
+    if absent:
+        panel = panel.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias(name) for name in absent
+        ])
+    if not resolved:
+        return panel
+    columns = sorted({source for _, source in resolved})
     # asof 键取生效日 (公告日次日) 而非公告日: 直接用公告日回看会在换报告期的
     # 公告当日取到「尚未生效」的新一期并被门控置 null, 打断上一期的前向填充,
     # 与矩阵路径 (searchsorted side="right") 不一致。
@@ -121,9 +169,9 @@ def attach_fundamental_factors(
     )
     announced = pl.col("_announce").is_not_null() & (pl.col("date") > pl.col("_announce"))
     expressions = []
-    for name in missing_columns:
+    for name, source_name in resolved:
         spec = FUNDAMENTAL_FACTORS[name]
-        source = pl.col(spec["column"])
+        source = pl.col(source_name)
         if spec["price_ratio"]:
             value = (
                 pl.when(source > 0)
@@ -163,9 +211,14 @@ def build_fundamental_matrices(
     labels = market.timestamp_labels
     label_dates = np.array([label[:10] for label in labels], dtype="datetime64[D]")
 
+    resolved_names: dict[str, str] = {}
+    for name in requested:
+        source = _resolve_source_column(FUNDAMENTAL_FACTORS[name], set(snapshot.columns))
+        if source is not None:
+            resolved_names[name] = source
     raw_columns = {
-        FUNDAMENTAL_FACTORS[name]["column"]: np.full(shape, np.nan, dtype=np.float32)
-        for name in requested
+        source: np.full(shape, np.nan, dtype=np.float32)
+        for source in set(resolved_names.values())
     }
     announce_text = snapshot["announce_date"].str.slice(0, 10)
     for row_index, symbol in enumerate(snapshot["symbol"].to_list()):
@@ -189,7 +242,11 @@ def build_fundamental_matrices(
 
     for name in requested:
         spec = FUNDAMENTAL_FACTORS[name]
-        source = raw_columns[spec["column"]]
+        source_name = resolved_names.get(name)
+        if source_name is None:
+            result[name] = np.full(shape, np.nan, dtype=np.float32)
+            continue
+        source = raw_columns[source_name]
         if spec["price_ratio"]:
             with np.errstate(divide="ignore", invalid="ignore"):
                 matrix = (market.close / source).astype(np.float32)

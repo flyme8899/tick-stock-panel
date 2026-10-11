@@ -144,9 +144,19 @@ export function Screener() {
 
   // 对原始结果应用过滤 (memo: 否则每次渲染都对全部结果行过滤,
   // 且新数组身份会击穿下游 displayRows 的 memo)
+  const patternWithin = Math.min(30, Math.max(1, Number(filter.patternWithin) || 1))
+  const patternQuery = useQuery({
+    queryKey: QK.screenerCandleMatch(filter.patternId, filter.patternSide, String(patternWithin)),
+    queryFn: () => api.screenerCandleMatch(filter.patternId, filter.patternSide, patternWithin),
+    enabled: !!filter.patternId && !!filter.patternSide,
+  })
+  const patternSymbols = filter.patternId
+    ? (patternQuery.data ? new Set(patternQuery.data.symbols) : null)
+    : undefined
+
   const filteredRows = useMemo(
-    () => (result ? applyFilter(result.rows, filter) : []),
-    [result, filter],
+    () => (result ? applyFilter(result.rows, filter, patternSymbols) : []),
+    [result, filter, patternSymbols],
   )
 
   const { data: prefs } = usePreferences()
@@ -476,7 +486,7 @@ export function Screener() {
   // 当前显示的行数据 (全部模式 或 单策略模式) + 失效行
   const displayRows = useMemo(() => {
     let rows = showAll
-      ? applyFilter(allRows, filter)
+      ? applyFilter(allRows, filter, patternSymbols)
       : filteredRows
     // 排序：用户点了表头则按该列，否则默认评分降序
     rows = sort
@@ -494,7 +504,7 @@ export function Screener() {
       }
     }
     return mainRows
-  }, [showAll, allRows, filteredRows, filter, activeStrategy, strategyLimits, expiredRows, sort, sortRows, columns])
+  }, [showAll, allRows, filteredRows, filter, patternSymbols, activeStrategy, strategyLimits, expiredRows, sort, sortRows, columns])
 
   // 日k列是否启用 → 决定是否加载批量 kline 数据
   const candleColumn = useMemo(() =>

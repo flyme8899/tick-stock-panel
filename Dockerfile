@@ -116,6 +116,8 @@ RUN if [ "$USE_CN_MIRROR" = "1" ]; then \
       set -- "$@" --extra "$extra"; \
     done; \
     uv sync --frozen "$@" || uv sync "$@"
+# TA-Lib 装得上就用它算 CDL*；C 库或轮子缺失时跳过，运行时改走 Polars 内置形态。
+RUN uv pip install TA-Lib || echo "TA-Lib optional install skipped"
 # efinance 在 import 时创建包内 data/，并把 search-cache-v2.json 写进去。
 # 目录默认属主是 root。运行 uid 由 compose 的 APP_UID 决定，构建时不能 chown 给固定用户。
 RUN .venv/bin/python -c "import pathlib; from efinance.config import DATA_DIR; p = pathlib.Path(DATA_DIR).resolve(); p.mkdir(parents=True, exist_ok=True); p.chmod(0o1777)"

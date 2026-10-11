@@ -446,7 +446,7 @@ def get_daily(
         resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
         return _gzip_payload(
             request,
-            _attach_ext(resp, repo, symbol, ext_columns),
+            _attach_candle_markers(_attach_ext(resp, repo, symbol, ext_columns)),
             pref_key="daily_batch_compress",
         )
 
@@ -458,9 +458,23 @@ def get_daily(
     resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "enriched"}
     return _gzip_payload(
         request,
-        _attach_ext(resp, repo, symbol, ext_columns),
+        _attach_candle_markers(_attach_ext(resp, repo, symbol, ext_columns)),
         pref_key="daily_batch_compress",
     )
+
+
+def _attach_candle_markers(resp: dict) -> dict:
+    """单只股票的形态标记。算失败就给空列表，日 K 接口本身不能 500。"""
+    try:
+        from app.indicators.candles import markers_for_rows
+
+        markers = markers_for_rows(resp.get("rows") or [])
+    except Exception:  # noqa: BLE001 — 标记失败时日 K 仍返回
+        logger.debug("candle markers failed", exc_info=True)
+        markers = []
+    out = dict(resp)
+    out["candle_markers"] = markers
+    return out
 
 
 def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> dict:

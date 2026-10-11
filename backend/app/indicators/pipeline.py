@@ -169,6 +169,8 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "ma20":                    "20日简单均线",
     "ma30":                    "30日简单均线",
     "ma60":                    "60日简单均线(季线)",
+    "ma_bull_align":           "均线多头排列(MA5>MA10>MA20>MA60)",
+    "ma_bear_align":           "均线空头排列(MA5<MA10<MA20<MA60)",
     # ── 指数均线 EMA ─────────────────────────────────────
     "ema5":                    "5日指数均线",
     "ema10":                   "10日指数均线",
@@ -223,6 +225,12 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "signal_ma5_breakdown":    "收盘跌破MA5下方",
     "signal_ma10_breakout":    "收盘突破MA10上方",
     "signal_ma10_breakdown":   "收盘跌破MA10下方",
+    "signal_ma30_breakout":    "收盘突破MA30上方",
+    "signal_ma30_breakdown":   "收盘跌破MA30下方",
+    "signal_ma60_breakout":    "收盘突破MA60上方",
+    "signal_ma60_breakdown":   "收盘跌破MA60下方",
+    "signal_kdj_golden":       "KDJ金叉(K上穿D)",
+    "signal_kdj_dead":         "KDJ死叉(K下穿D)",
     "signal_n_day_high":       "创60日新高",
     "signal_n_day_low":        "创60日新低",
     "signal_boll_breakout_upper": "突破布林上轨",
@@ -242,7 +250,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
 ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
     "storage":  [k for k in ENRICHED_COLUMNS if k in ENRICHED_STORAGE_COLS],
     "basic":    ["prev_close", "change_pct", "change_amount", "amplitude"],
-    "ma":       ["ma5", "ma10", "ma20", "ma30", "ma60"],
+    "ma":       ["ma5", "ma10", "ma20", "ma30", "ma60", "ma_bull_align", "ma_bear_align"],
     "ema":      ["ema5", "ema10", "ema20", "ema30", "ema60"],
     "macd":     ["macd_dif", "macd_dea", "macd_hist"],
     "boll":     ["boll_upper", "boll_lower"],
@@ -363,6 +371,8 @@ _INDICATOR_DEPS: dict[str, set[str]] = {
     "rsi_6": {"_delta", "_gain", "_loss"},
     "rsi_14": {"_delta", "_gain", "_loss"},
     "rsi_24": {"_delta", "_gain", "_loss"},
+    "ma_bull_align": {"ma5", "ma10", "ma20", "ma60"},
+    "ma_bear_align": {"ma5", "ma10", "ma20", "ma60"},
 }
 
 # compute_indicators 可产出的全部指标/临时列 (needed=None 时即为此全集, 行为不变)
@@ -377,6 +387,7 @@ _ALL_INDICATOR_COLS: frozenset[str] = frozenset({
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
     "change_pct", "change_amount", "amplitude", "_daily_pct", "annual_vol_20d",
     "rsi_6", "rsi_14", "rsi_24",
+    "ma_bull_align", "ma_bear_align",
 })
 
 
@@ -479,6 +490,34 @@ def compute_indicators(
         _p1.append(pl.col("close").rolling_min(60).over("symbol").alias("low_60d"))
     if _p1:
         df = df.with_columns(_p1)
+
+    align_ready = (
+        pl.col("ma5").is_not_null()
+        & pl.col("ma10").is_not_null()
+        & pl.col("ma20").is_not_null()
+        & pl.col("ma60").is_not_null()
+    )
+    _align: list[pl.Expr] = []
+    if "ma_bull_align" in want and {"ma5", "ma10", "ma20", "ma60"} <= set(df.columns):
+        _align.append(
+            pl.when(
+                align_ready
+                & (pl.col("ma5") > pl.col("ma10"))
+                & (pl.col("ma10") > pl.col("ma20"))
+                & (pl.col("ma20") > pl.col("ma60"))
+            ).then(1).when(align_ready).then(0).otherwise(None).cast(pl.Int8).alias("ma_bull_align")
+        )
+    if "ma_bear_align" in want and {"ma5", "ma10", "ma20", "ma60"} <= set(df.columns):
+        _align.append(
+            pl.when(
+                align_ready
+                & (pl.col("ma5") < pl.col("ma10"))
+                & (pl.col("ma10") < pl.col("ma20"))
+                & (pl.col("ma20") < pl.col("ma60"))
+            ).then(1).when(align_ready).then(0).otherwise(None).cast(pl.Int8).alias("ma_bear_align")
+        )
+    if _align:
+        df = df.with_columns(_align)
 
     # Pass 2: MACD + BOLL (基于 Pass 1 基础列)
     _p2: list[pl.Expr] = []
@@ -627,6 +666,12 @@ SIGNAL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "signal_boll_breakout_upper": frozenset({"close", "boll_upper"}),
     "signal_boll_breakdown_lower": frozenset({"close", "boll_lower"}),
     "signal_volume_surge": frozenset({"vol_ratio_5d"}),
+    "signal_kdj_golden": frozenset({"kdj_k", "kdj_d"}),
+    "signal_kdj_dead": frozenset({"kdj_k", "kdj_d"}),
+    "signal_ma30_breakout": frozenset({"close", "ma30"}),
+    "signal_ma30_breakdown": frozenset({"close", "ma30"}),
+    "signal_ma60_breakout": frozenset({"close", "ma60"}),
+    "signal_ma60_breakdown": frozenset({"close", "ma60"}),
 }
 
 LIMIT_SIGNAL_OUTPUTS: frozenset[str] = frozenset({
@@ -701,6 +746,24 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
         "signal_boll_breakout_upper": (pl.col("close") > pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
         "signal_boll_breakdown_lower": (pl.col("close") < pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
         "signal_volume_surge": (pl.col("vol_ratio_5d") >= 2.0).alias("signal_volume_surge"),
+        "signal_kdj_golden": ((pl.col("kdj_k") > pl.col("kdj_d")) &
+         (pl.col("kdj_k").shift(1).over("symbol") <= pl.col("kdj_d").shift(1).over("symbol")))
+            .alias("signal_kdj_golden"),
+        "signal_kdj_dead": ((pl.col("kdj_k") < pl.col("kdj_d")) &
+         (pl.col("kdj_k").shift(1).over("symbol") >= pl.col("kdj_d").shift(1).over("symbol")))
+            .alias("signal_kdj_dead"),
+        "signal_ma30_breakout": ((pl.col("close") > pl.col("ma30")) &
+         (pl.col("close").shift(1).over("symbol") <= pl.col("ma30").shift(1).over("symbol")))
+            .alias("signal_ma30_breakout"),
+        "signal_ma30_breakdown": ((pl.col("close") < pl.col("ma30")) &
+         (pl.col("close").shift(1).over("symbol") >= pl.col("ma30").shift(1).over("symbol")))
+            .alias("signal_ma30_breakdown"),
+        "signal_ma60_breakout": ((pl.col("close") > pl.col("ma60")) &
+         (pl.col("close").shift(1).over("symbol") <= pl.col("ma60").shift(1).over("symbol")))
+            .alias("signal_ma60_breakout"),
+        "signal_ma60_breakdown": ((pl.col("close") < pl.col("ma60")) &
+         (pl.col("close").shift(1).over("symbol") >= pl.col("ma60").shift(1).over("symbol")))
+            .alias("signal_ma60_breakdown"),
     }
     if want:
         df = df.with_columns([expressions[name] for name in SIGNAL_DEPENDENCIES if name in want])
@@ -716,6 +779,7 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
     from app.strategy import custom_signals
     exprs = _get_custom_signal_exprs()
     df = custom_signals.materialize_factor_columns(df, exprs, needed=needed)
+    df = _attach_referenced_extras(df, exprs, needed=needed, include_candles=True)
     df = custom_signals.inject(df, exprs, needed=needed)
 
     return df
@@ -2241,19 +2305,49 @@ def compute_enriched_today(
             if column in df.columns
         ])
 
+    align_ready = (
+        pl.col("ma5").is_not_null()
+        & pl.col("ma10").is_not_null()
+        & pl.col("ma20").is_not_null()
+        & pl.col("ma60").is_not_null()
+    )
+    df = df.with_columns([
+        pl.when(
+            align_ready
+            & (pl.col("ma5") > pl.col("ma10"))
+            & (pl.col("ma10") > pl.col("ma20"))
+            & (pl.col("ma20") > pl.col("ma60"))
+        ).then(1).when(align_ready).then(0).otherwise(None).cast(pl.Int8).alias("ma_bull_align"),
+        pl.when(
+            align_ready
+            & (pl.col("ma5") < pl.col("ma10"))
+            & (pl.col("ma10") < pl.col("ma20"))
+            & (pl.col("ma20") < pl.col("ma60"))
+        ).then(1).when(align_ready).then(0).otherwise(None).cast(pl.Int8).alias("ma_bear_align"),
+    ])
+
     # ---- 信号 (需要昨天的指标值判断交叉) ----
     if not prev_enriched.is_empty():
+        prev_aliases = {
+            "ma5": "_prev_ma5",
+            "ma10": "_prev_ma10",
+            "ma20": "_prev_ma20",
+            "ma30": "_prev_ma30",
+            "ma60": "_prev_ma60",
+            "macd_dif": "_prev_dif",
+            "macd_dea": "_prev_dea",
+            "kdj_k": "_prev_kdj_k",
+            "kdj_d": "_prev_kdj_d",
+            "boll_upper": "_prev_boll_upper",
+            "boll_lower": "_prev_boll_lower",
+            "close": "_prev_close_enriched",
+        }
         sig_prev = prev_enriched.select(
-            "symbol",
-            pl.col("ma5").alias("_prev_ma5"),
-            pl.col("ma10").alias("_prev_ma10"),
-            pl.col("ma20").alias("_prev_ma20"),
-            pl.col("ma60").alias("_prev_ma60"),
-            pl.col("macd_dif").alias("_prev_dif"),
-            pl.col("macd_dea").alias("_prev_dea"),
-            pl.col("boll_upper").alias("_prev_boll_upper"),
-            pl.col("boll_lower").alias("_prev_boll_lower"),
-            pl.col("close").alias("_prev_close_enriched"),
+            ["symbol"] + [
+                pl.col(src).alias(dst)
+                for src, dst in prev_aliases.items()
+                if src in prev_enriched.columns
+            ]
         )
         df = df.join(sig_prev, on="symbol", how="left")
 
@@ -2285,6 +2379,28 @@ def compute_enriched_today(
                 .alias("signal_ma10_breakout"),
             ((pl.col("close") < pl.col("ma10")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma10")))
                 .alias("signal_ma10_breakdown"),
+            (
+                ((pl.col("close") > pl.col("ma30")) & (pl.col("_prev_close_enriched") <= pl.col("_prev_ma30")))
+                if "_prev_ma30" in df.columns else pl.lit(None).cast(pl.Boolean)
+            ).alias("signal_ma30_breakout"),
+            (
+                ((pl.col("close") < pl.col("ma30")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma30")))
+                if "_prev_ma30" in df.columns else pl.lit(None).cast(pl.Boolean)
+            ).alias("signal_ma30_breakdown"),
+            ((pl.col("close") > pl.col("ma60")) & (pl.col("_prev_close_enriched") <= pl.col("_prev_ma60")))
+                .alias("signal_ma60_breakout"),
+            ((pl.col("close") < pl.col("ma60")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma60")))
+                .alias("signal_ma60_breakdown"),
+            (
+                ((pl.col("kdj_k") > pl.col("kdj_d")) & (pl.col("_prev_kdj_k") <= pl.col("_prev_kdj_d")))
+                if "_prev_kdj_k" in df.columns and "_prev_kdj_d" in df.columns
+                else pl.lit(None).cast(pl.Boolean)
+            ).alias("signal_kdj_golden"),
+            (
+                ((pl.col("kdj_k") < pl.col("kdj_d")) & (pl.col("_prev_kdj_k") >= pl.col("_prev_kdj_d")))
+                if "_prev_kdj_k" in df.columns and "_prev_kdj_d" in df.columns
+                else pl.lit(None).cast(pl.Boolean)
+            ).alias("signal_kdj_dead"),
             # BOLL 突破
             (pl.col("close") >= pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
             (pl.col("close") <= pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
@@ -2340,7 +2456,10 @@ def compute_enriched_today(
     # 复用模块级缓存 _custom_signal_exprs_today: 增量热路径每秒级执行,
     # 不缓存则每轮 glob + 读所有 JSON + 重编译表达式。失效由 invalidate_custom_signals 统一管理。
     from app.strategy import custom_signals
-    df = custom_signals.inject(df, _get_custom_signal_exprs_today())
+    today_exprs = _get_custom_signal_exprs_today()
+    # 盘中帧只有当天一根，蜡烛形态没有前序 K 线，不在这里算。
+    df = _attach_referenced_extras(df, today_exprs, needed=None, include_candles=False)
+    df = custom_signals.inject(df, today_exprs)
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -2537,6 +2656,55 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
             cleanup.append(c)
     df = df.drop([c for c in cleanup if c in df.columns])
 
+    return df
+
+
+def _attach_referenced_extras(
+    df: pl.DataFrame,
+    exprs: dict,
+    *,
+    needed: set[str] | None,
+    include_candles: bool,
+) -> pl.DataFrame:
+    """自定义信号点名的蜡烛列和财务列，缺了才补。
+
+    没人引用就不读财务快照、也不扫 OHLC。蜡烛形态要有前序 K 线，
+    盘中单日帧跳过。
+    """
+    if df.is_empty() or not exprs:
+        return df
+    from app.strategy.custom_signals import expression_dependencies
+
+    roots: set[str] = set()
+    for name, deps in expression_dependencies(exprs).items():
+        if needed is not None and name not in needed:
+            continue
+        roots.update(deps)
+    if not roots:
+        return df
+    if include_candles:
+        candle_ids = {name[4:] for name in roots if name.startswith("cdl_")}
+        missing = {f"cdl_{pid}" for pid in candle_ids} - set(df.columns)
+        if missing and {"symbol", "open", "high", "low", "close", "date"} <= set(df.columns):
+            try:
+                from app.indicators.candles import compute_candle_patterns
+
+                df = compute_candle_patterns(df, ids={name[4:] for name in missing})
+            except Exception:  # noqa: BLE001 — 形态列缺失时跳过该信号，不打断选股
+                logger.debug("蜡烛形态未并入信号帧", exc_info=True)
+    from app.backtest.fundamentals import (
+        FUNDAMENTAL_FACTOR_NAMES,
+        attach_fundamental_factors,
+        load_fundamental_snapshot,
+    )
+
+    financial = [name for name in roots if name in FUNDAMENTAL_FACTOR_NAMES and name not in df.columns]
+    if financial and {"symbol", "date", "close"} <= set(df.columns):
+        try:
+            snapshot = load_fundamental_snapshot(Path(settings.data_dir))
+            df = attach_fundamental_factors(df.sort(["symbol", "date"]), snapshot, financial)
+        except Exception:  # noqa: BLE001 — 财务快照读失败时该条件为空，不打断选股
+            logger.debug("财务因子未并入信号帧", exc_info=True)
     return df
 
 

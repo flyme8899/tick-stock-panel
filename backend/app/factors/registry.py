@@ -298,6 +298,21 @@ _CATALOG: tuple[FactorSpec, ...] = (
         "KDJ K值 - D值, 正值代表快线在慢线上方",
         deps=frozenset({"kdj_k", "kdj_d"}),
     ),
+    # 追加在目录末尾。挖掘调度只取前 48 个，不能插到前面。
+    _financial("bps_latest", "每股净资产(最新公告)", "最新已公告每股净资产; 公告前为空"),
+    _financial(
+        "eps_latest", "每股收益(最新公告)",
+        "最新已公告基本每股收益。按 basic_eps、eps、eps_basic 的顺序取第一列，列都没有时为空",
+    ),
+    _financial(
+        "pe_latest", "市盈率(收盘/每股收益)",
+        "收盘价 / 最新已公告基本每股收益。不是市盈率TTM；收益缺失或非正时为空",
+    ),
+    _financial("roa_latest", "ROA(最新公告)", "最新已公告总资产收益率。财务表无 roa 列时为空"),
+    _financial(
+        "ocf_to_revenue_latest", "经营现金流/营收(最新公告)",
+        "最新已公告经营现金净额/营业收入。列缺失时为空",
+    ),
 )
 
 _REGISTRY: dict[str, FactorSpec] = {}

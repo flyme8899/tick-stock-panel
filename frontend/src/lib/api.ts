@@ -292,12 +292,46 @@ export interface KlineRow {
   [key: string]: any
 }
 
+export interface CandleMarker {
+  date: string
+  side: 'bull' | 'bear' | 'neutral'
+  name: string
+  patterns: string[]
+}
+
 export interface KlineDailyResponse {
   symbol: string
   name?: string
   stock_info?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
   rows: KlineRow[]
   source?: string
+  candle_markers?: CandleMarker[]
+}
+
+export interface CandlePatternInfo {
+  id: string
+  name: string
+  talib: string
+  bias: 'bull' | 'bear' | 'both' | 'neutral'
+  sides: Array<'bull' | 'bear'>
+  builtin: boolean
+  available: boolean
+  column: string
+}
+
+export interface CandlePatternCatalog {
+  engine: string
+  patterns: CandlePatternInfo[]
+}
+
+export interface CandlePatternMatch {
+  symbols: string[]
+  as_of: string | null
+  engine: string
+  count: number
+  pattern: string
+  side: string
+  within?: number
 }
 
 export interface KlineDailyLatestResponse {
@@ -2934,6 +2968,12 @@ export const api = {
   klineDailyLatest: (symbol: string) =>
     request<KlineDailyLatestResponse>(
       `/api/kline/daily/latest?symbol=${encodeURIComponent(symbol)}`,
+    ),
+  screenerCandleCatalog: () =>
+    request<CandlePatternCatalog>('/api/screener/candle-patterns'),
+  screenerCandleMatch: (pattern: string, side: string, within: number) =>
+    request<CandlePatternMatch>(
+      `/api/screener/candle-patterns/match?pattern=${encodeURIComponent(pattern)}&side=${encodeURIComponent(side)}&within=${within}`,
     ),
   klineDailyBatch: (symbols: string[], days = 12) =>
     request<{ data: Record<string, KlineRow[]> }>('/api/kline/daily-batch', {

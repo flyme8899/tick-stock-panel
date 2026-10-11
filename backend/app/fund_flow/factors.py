@@ -20,19 +20,32 @@ from app.fund_flow.normalize import code6
 _STOCK_ONLY = frozenset({"stock"})
 _TAG = "fund_flow"
 
-SPECS: tuple[FactorSpec, ...] = (
-    FactorSpec(
-        id="ff_main_net_5d",
-        label="主力净流入5日",
+
+def _flow_spec(fid: str, label: str, formula: str, warmup: int) -> FactorSpec:
+    return FactorSpec(
+        id=fid,
+        label=label,
         group="资金",
-        formula_text="最近 5 个已落盘交易日主力净流入合计（元）。不足 5 日为空，不把缺失当成 0",
+        formula_text=formula,
         kind="base",
         unit="currency",
-        warmup_bars=5,
+        warmup_bars=warmup,
         scale_free=False,
         asset_types=_STOCK_ONLY,
         tags=(_TAG,),
+    )
+
+
+SPECS: tuple[FactorSpec, ...] = (
+    _flow_spec("ff_main_net", "主力净流入", "当日主力净流入（元）。当日无账单时为空", 1),
+    _flow_spec("ff_main_net_3d", "主力净流入3日", "最近 3 个已落盘交易日主力净流入合计（元）。不足 3 日为空", 3),
+    _flow_spec(
+        "ff_main_net_5d", "主力净流入5日",
+        "最近 5 个已落盘交易日主力净流入合计（元）。不足 5 日为空，不把缺失当成 0", 5,
     ),
+    _flow_spec("ff_main_net_10d", "主力净流入10日", "最近 10 个已落盘交易日主力净流入合计（元）。不足 10 日为空", 10),
+    _flow_spec("ff_large_net", "大单净流入", "当日大单净流入（元）。源列缺失时为空", 1),
+    _flow_spec("ff_super_net", "超大单净流入", "当日超大单净流入（元）。源列缺失时为空", 1),
     FactorSpec(
         id="ff_sector_net_inflow_rank",
         label="板块资金净流入排名",
@@ -51,7 +64,7 @@ _factor_cache: dict[tuple, tuple] = {}
 
 
 def ensure_registered() -> None:
-    """登记两个因子。挖掘用的 FACTOR_COLUMNS 视图会排除 fund_flow 标签。"""
+    """登记资金因子。挖掘用的 FACTOR_COLUMNS 视图会排除 fund_flow 标签。"""
     for spec in SPECS:
         current = get_factor(spec.id)
         if current is not None and current.version >= spec.version:
@@ -65,23 +78,40 @@ def _codes(symbols: pl.Series) -> pl.Series:
     return symbols.cast(pl.Utf8).str.extract(r"(\d{6})", 1)
 
 
+_FLOW_COLUMNS = (
+    "ff_main_net", "ff_main_net_3d", "ff_main_net_5d", "ff_main_net_10d",
+    "ff_large_net", "ff_super_net",
+)
+
+
 def main_net_frame(data_dir: Path) -> pl.DataFrame:
-    """每个代码每个交易日一行。窗口不足 5 日的 ff_main_net_5d 为 null。"""
+    """每个代码每个交易日一行。窗口不足的滚动合计为 null，不用 0 填。"""
     frame = store.read_range(data_dir, "stock")
     empty = pl.DataFrame(schema={
         "code": pl.Utf8,
         "trade_date": pl.Utf8,
-        "ff_main_net_5d": pl.Float64,
+        **{name: pl.Float64 for name in _FLOW_COLUMNS},
     })
     if frame.is_empty() or "main_net" not in frame.columns:
         return empty
     ordered = frame.sort(["code", "trade_date"])
-    return ordered.with_columns(
-        pl.col("main_net")
-        .rolling_sum(window_size=5, min_samples=5)
-        .over("code")
-        .alias("ff_main_net_5d")
-    ).select("code", "trade_date", "ff_main_net_5d")
+    exprs = [
+        pl.col("main_net").alias("ff_main_net"),
+        pl.col("main_net").rolling_sum(window_size=3, min_samples=3).over("code").alias("ff_main_net_3d"),
+        pl.col("main_net").rolling_sum(window_size=5, min_samples=5).over("code").alias("ff_main_net_5d"),
+        pl.col("main_net").rolling_sum(window_size=10, min_samples=10).over("code").alias("ff_main_net_10d"),
+        (
+            pl.col("large_net").alias("ff_large_net")
+            if "large_net" in ordered.columns
+            else pl.lit(None).cast(pl.Float64).alias("ff_large_net")
+        ),
+        (
+            pl.col("super_net").alias("ff_super_net")
+            if "super_net" in ordered.columns
+            else pl.lit(None).cast(pl.Float64).alias("ff_super_net")
+        ),
+    ]
+    return ordered.with_columns(exprs).select("code", "trade_date", *_FLOW_COLUMNS)
 
 
 def _cached_main(data_dir: Path) -> pl.DataFrame:
@@ -148,8 +178,9 @@ def attach_columns(df: pl.DataFrame, *, include_rank: bool, data_dir: Path | Non
             right_on=["code", "trade_date"],
             how="left",
         )
-    elif "ff_main_net_5d" not in work.columns:
-        work = work.with_columns(pl.lit(None).cast(pl.Float64).alias("ff_main_net_5d"))
+    missing_flow = [name for name in _FLOW_COLUMNS if name not in work.columns]
+    if missing_flow:
+        work = work.with_columns([pl.lit(None).cast(pl.Float64).alias(name) for name in missing_flow])
     if include_rank:
         day = work["_ff_date"].drop_nulls().unique().to_list()
         trade_date = day[0] if len(day) == 1 else None

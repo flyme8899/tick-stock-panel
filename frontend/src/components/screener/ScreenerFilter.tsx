@@ -1,4 +1,7 @@
+import { useQuery } from '@tanstack/react-query'
 import { X, RotateCcw, Filter } from 'lucide-react'
+import { api, type CandlePatternInfo } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
 import { BOARDS, getBoardType } from '@/lib/board'
 
 // ===== 筛选类型 =====
@@ -20,6 +23,9 @@ export interface ScreenerFilter {
   rsiMax: string
   boards: string[]       // 板块筛选: 空数组=不筛选, 否则只保留选中的板块
   excludeST: boolean     // 是否排除 ST/*ST/退市股
+  patternId: string      // 蜡烛形态 id，空=不筛
+  patternSide: 'bull' | 'bear' | ''
+  patternWithin: string  // 含最近交易日在内的交易日数
 }
 
 export const defaultFilter: ScreenerFilter = {
@@ -33,13 +39,18 @@ export const defaultFilter: ScreenerFilter = {
   rsiMin: '', rsiMax: '',
   boards: [],
   excludeST: false,
+  patternId: '',
+  patternSide: '',
+  patternWithin: '1',
 }
 
 export function filterActive(f: ScreenerFilter): boolean {
   if (f.boards.length > 0) return true
   if (f.excludeST) return true
+  if (f.patternId) return true
   return Object.entries(f).some(([k, v]) =>
-    k !== 'boards' && k !== 'excludeST' && v !== '' && v !== false,
+    k !== 'boards' && k !== 'excludeST' && k !== 'patternId' && k !== 'patternSide' && k !== 'patternWithin'
+    && v !== '' && v !== false,
   )
 }
 
@@ -55,10 +66,15 @@ export function countActiveFilters(f: ScreenerFilter): number {
   if (f.rsiMin || f.rsiMax) n++
   if (f.boards.length > 0) n++
   if (f.excludeST) n++
+  if (f.patternId) n++
   return n
 }
 
-export function applyFilter(rows: any[], f: ScreenerFilter): any[] {
+export function applyFilter(
+  rows: any[],
+  f: ScreenerFilter,
+  patternSymbols?: Set<string> | null,
+): any[] {
   if (!filterActive(f)) return rows
   const num = (v: string) => v === '' ? null : Number(v)
   return rows.filter((r) => {
@@ -70,6 +86,8 @@ export function applyFilter(rows: any[], f: ScreenerFilter): any[] {
     }
     // ST: name 含 ST/*ST/退 的排除 (对齐后端口径 (?i)ST|退)
     if (f.excludeST && /ST|退/i.test(String(r.name ?? ''))) return false
+    // 形态名单还在加载时先不按代码裁；空 Set 表示已经查完、没有命中。
+    if (f.patternId && patternSymbols != null && !patternSymbols.has(String(r.symbol))) return false
     const close = Number(r.close ?? 0)
     const v = (field: string) => num(field)
     // 现价
@@ -113,6 +131,26 @@ export function FilterPanel({ value, onChange, onClose, onReset }: {
   onReset: () => void
 }) {
   const set = (key: keyof ScreenerFilter, v: string) => onChange({ ...value, [key]: v })
+  const catalog = useQuery({
+    queryKey: QK.screenerCandleCatalog,
+    queryFn: () => api.screenerCandleCatalog(),
+    staleTime: 60_000,
+  })
+  const patterns = (catalog.data?.patterns ?? []).filter((item) => item.available)
+  const selected = patterns.find((item) => item.id === value.patternId)
+  const sideLabel = (pattern: CandlePatternInfo | undefined, side: string) => {
+    if (pattern?.bias === 'neutral') return '出现'
+    return side === 'bear' ? '看跌' : '看涨'
+  }
+  const choosePattern = (id: string) => {
+    const pattern = patterns.find((item) => item.id === id)
+    onChange({
+      ...value,
+      patternId: id,
+      patternSide: (pattern?.sides[0] ?? '') as ScreenerFilter['patternSide'],
+      patternWithin: value.patternWithin || '1',
+    })
+  }
 
   const toggleBoard = (board: string) => {
     const next = value.boards.includes(board)
@@ -203,6 +241,53 @@ export function FilterPanel({ value, onChange, onClose, onReset }: {
         >
           排除ST
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[11px] text-secondary shrink-0 w-10">形态</span>
+        <select
+          aria-label="K线形态"
+          value={value.patternId}
+          onChange={(event) => choosePattern(event.target.value)}
+          className="h-6 max-w-[10rem] rounded border border-border bg-base px-1 text-[11px] text-foreground outline-none"
+        >
+          <option value="">不限</option>
+          {patterns.map((item) => (
+            <option key={item.id} value={item.id}>{item.name}</option>
+          ))}
+        </select>
+        {selected && selected.sides.map((side) => (
+          <button
+            key={side}
+            type="button"
+            onClick={() => onChange({ ...value, patternSide: side })}
+            className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+              value.patternSide === side
+                ? 'bg-accent/15 text-accent'
+                : 'bg-elevated text-secondary hover:text-foreground'
+            }`}
+          >
+            {sideLabel(selected, side)}
+          </button>
+        ))}
+        {value.patternId && (
+          <label className="inline-flex items-center gap-1 text-[11px] text-secondary">
+            近
+            <input
+              aria-label="形态回看交易日"
+              type="number"
+              min={1}
+              max={30}
+              value={value.patternWithin}
+              onChange={(event) => {
+                const next = event.target.value.replace(/[^\d]/g, '')
+                set('patternWithin', next)
+              }}
+              className="w-12 px-1 py-0.5 rounded-btn bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+            />
+            日
+          </label>
+        )}
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-2.5">
