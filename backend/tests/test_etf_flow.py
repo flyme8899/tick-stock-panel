@@ -735,7 +735,8 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert item["sectors"][:2] == ["沪深300", "中证500"]
     assert "科技" in item["sectors"]
     assert "12.5" in item["summary"]
-    ranked = hot_candidates(kind="stock", limit=20)
+    # 510050 以 51 开头，热榜归到 ETF。
+    ranked = hot_candidates(kind="etf", limit=20)
     assert any(row.key == "510050.SH" for row in ranked)
     sectors = hot_candidates(kind="sector", limit=20)
     assert any(row.key == "科技" for row in sectors)

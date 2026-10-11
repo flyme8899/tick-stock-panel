@@ -321,6 +321,10 @@ def test_original_headline_keeps_the_long_source_line():
     assert _display_original("央视财经：橡胶价格大涨超预期发布公告") == "橡胶价格大涨超预期发布公告"
     assert _display_original("【GLMS通信】橡胶价格大涨超预期发布公告") == "橡胶价格大涨超预期发布公告"
     assert _display_original("光智科技：公司发布新品") == "光智科技发布新品"
+    battery = _display_original("宁德时代：发布固态电池、换电")
+    assert battery == "宁德时代发布固态电池、换电"
+    assert "固态电池、换电" in battery
+    assert "固态电池，换电" not in battery
     assert _display_original("某某公司发布新品天风计算机") == "某某公司发布新品"
     long = "橡胶价格大涨超60家轮胎企业集体涨价，" + "后续多家企业继续跟进并上调出厂报价以及经销商报价"
     shown = _display_original(long)

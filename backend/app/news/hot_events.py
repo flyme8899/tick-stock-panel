@@ -2610,12 +2610,23 @@ def _headline_tier(source: str, raw: str) -> int:
 
 
 def _display_stitch(body: str) -> str:
-    """公司或机构冒号接回主体。交易所抬头保持原样，不当成公司名粘上去。"""
-    parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()]
-    if len(parts) < 2:
+    """公司或机构冒号接回主体。交易所抬头保持原样，不当成公司名粘上去。
+
+    只去掉这一处冒号。后面的顿号、逗号按原文留下。
+    """
+    marks = list(_CLAUSE.finditer(body))
+    if not marks or marks[0].group(0) not in "：:":
         return body
-    head, nxt = parts[0], parts[1]
-    if _starts_mark(head, _EXCHANGE_MARKS):
+    head = body[:marks[0].start()].strip()
+    if len(marks) == 1:
+        nxt = body[marks[0].end():].strip()
+        nxt_sep = ""
+        tail = ""
+    else:
+        nxt = body[marks[0].end():marks[1].start()].strip()
+        nxt_sep = marks[1].group(0)
+        tail = body[marks[1].end():]
+    if not head or not nxt or _starts_mark(head, _EXCHANGE_MARKS):
         return body
     joined = _join_colon_head(head, nxt)
     if not joined and _colon_subject(head) and (
@@ -2624,9 +2635,9 @@ def _display_stitch(body: str) -> str:
         joined = head + nxt
     if not joined:
         return body
-    parts[0] = joined
-    del parts[1]
-    return parts[0] if len(parts) == 1 else parts[0] + "，" + "，".join(parts[1:])
+    if not nxt_sep:
+        return joined
+    return joined + nxt_sep + tail
 
 
 def _retreat_word_end(full: str, window: str) -> str:
