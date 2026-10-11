@@ -1,15 +1,18 @@
 import { cn } from '@/lib/cn'
+import { PageHelpButton } from '@/components/PageHelpButton'
 
 interface Props {
   title: string
   subtitle?: React.ReactNode
   /** 标题右侧、subtitle 之前的额外节点(如状态徽标) */
   titleExtra?: React.ReactNode
+  /** 使用说明主题 id，显示在标题旁 */
+  helpId?: string
   right?: React.ReactNode
   className?: string
 }
 
-export function PageHeader({ title, subtitle, titleExtra, right, className }: Props) {
+export function PageHeader({ title, subtitle, titleExtra, helpId, right, className }: Props) {
   return (
     <header
       className={cn(
@@ -22,6 +25,7 @@ export function PageHeader({ title, subtitle, titleExtra, right, className }: Pr
           <h1 className="shrink-0 whitespace-nowrap bg-gradient-to-b from-foreground via-foreground to-accent/80 bg-clip-text text-xl font-semibold tracking-normal text-transparent">
             {title}
           </h1>
+          {helpId ? <PageHelpButton topicId={helpId} /> : null}
           {titleExtra}
         </div>
         {subtitle && (

@@ -1333,6 +1333,7 @@ export function Watchlist() {
     <div className="flex flex-col h-full">
       <PageHeader
         title="自选股"
+        helpId="watchlist"
         titleExtra={
           <span className="inline-flex items-center gap-1.5">
             {/* 计数胶囊: 显示数/总数, mono 字体突出数字 */}

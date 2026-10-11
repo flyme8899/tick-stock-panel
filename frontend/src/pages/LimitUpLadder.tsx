@@ -1605,7 +1605,7 @@ export function LimitUpLadder() {
   if (isError) {
     return (
       <div className="flex flex-col h-full">
-        <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} />
+        <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} helpId="ladder" />
         <ErrorState
           title={direction === 'down' ? '连跌数据加载失败' : '连板数据加载失败'}
           hint="行情接口暂时不可用，请重试；多次失败可检查数据源配置与网络"
@@ -1619,7 +1619,7 @@ export function LimitUpLadder() {
   if (!data || rawTiers.length === 0) {
     return (
       <div className="flex flex-col h-full">
-        <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} />
+        <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} helpId="ladder" />
         <EmptyState icon={Flame} title={direction === 'down' ? '暂无连跌数据' : '暂无连板数据'} hint={direction === 'down' ? '该日期无跌停股或 enriched 数据未就绪' : '该日期无涨停股或 enriched 数据未就绪'} />
       </div>
     )
@@ -1629,6 +1629,7 @@ export function LimitUpLadder() {
     <div className="flex flex-col h-full">
       <PageHeader
         title={direction === 'down' ? '连跌梯队' : '连板梯队'}
+        helpId="ladder"
         titleExtra={
           <div className="flex items-center gap-2">
             <SealedBadge
