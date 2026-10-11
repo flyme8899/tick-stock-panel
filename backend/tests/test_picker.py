@@ -688,6 +688,7 @@ def test_major_event_with_few_mentions_outranks_routine_heat(tmp_path):
     listed = hot_event_listing(NOW, limit=20)
     public = listed["events"][0]
     assert public["name"] == "美联储宣布降息"
+    assert public["subtitle"] == head["subtitle"]
     assert public["importance"] == "重大"
     assert public["score"] == head["score"]
     assert public["breakdown"] == head["breakdown"]

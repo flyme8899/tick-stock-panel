@@ -393,7 +393,7 @@ async def test_generate_ai_text_clamps_max_tokens_to_config_cap(monkeypatch):
     monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 3000)
     monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 64000)
 
-    async def fake_run(messages, *, temperature, max_tokens, timeout):
+    async def fake_run(messages, *, temperature, max_tokens, timeout, prefer_final_answer=False):
         captured["max_tokens"] = max_tokens
         return "ok"
 
@@ -413,7 +413,7 @@ async def test_generate_ai_text_default_cap_and_none_passthrough(monkeypatch):
     monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 4000)
     monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 64000)
 
-    async def fake_run(messages, *, temperature, max_tokens, timeout):
+    async def fake_run(messages, *, temperature, max_tokens, timeout, prefer_final_answer=False):
         captured["max_tokens"] = max_tokens
         return "ok"
 

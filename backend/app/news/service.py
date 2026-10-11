@@ -442,6 +442,7 @@ def public_hot_event(event: dict) -> dict:
         "mapping": mapping,
         "headline": headline or (headlines[0] if headlines else ""),
         "headlines": headlines[:3],
+        "subtitle": str(event.get("subtitle") or ""),
         "mentions": int(event.get("mentions") or 0),
         "red_count": int(event.get("red_count") or 0),
         "source_count": int(event.get("source_count") or 0),
@@ -1326,7 +1327,7 @@ def _reserve_llm_call() -> bool:
         return True
 
 
-def _llm_text(prompt: str, *, max_tokens: int = 400) -> str:
+def _llm_text(prompt: str, *, max_tokens: int = 400, prefer_final_answer: bool = False) -> str:
     try:
         import asyncio
 
@@ -1337,6 +1338,7 @@ def _llm_text(prompt: str, *, max_tokens: int = 400) -> str:
             temperature=0,
             max_tokens=max_tokens,
             timeout=30,
+            prefer_final_answer=prefer_final_answer,
         ))
     except Exception as exc:  # noqa: BLE001
         logger.info("资讯 LLM 抽取失败: %s", exc)

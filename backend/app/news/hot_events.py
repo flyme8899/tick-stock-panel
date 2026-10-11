@@ -12,11 +12,11 @@
 
 展示主标题是簇里最可信的新闻原标题，只去掉来源前缀、括号、券商组名，以及开头的「报道」「据报道」「消息称」。
 第一句完整时停在句号、分号、叹号、问号或全文结束处，不在 40 字或逗号处截开。第一句太短或没有主体时，把下一句留下。引号没合上时不在引号里截断。公司名后面的冒号留下公司名，后面的顿号按原文保留。
-模型写一句话要点放在副标题。要点只丢掉空的、替换符或乱码、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。数字、百分号和斜杠不算乱码。
+模型写一句话要点放在副标题。要点只丢掉空的、替换符或乱码、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。数字、百分号和斜杠不算乱码。和主标题相同或已经包含在主标题里的要点不重复显示。
 来源优先：公司公告和交易所，然后新华社、央视、证监会这类官方稿，再是财联社和华尔街见闻，然后外媒。
 知识星球、ima、钉钉，以及带「更新」「建议」「把握机会」「1e+」或编号列表的研报标题，不当主标题。
 有新闻源标题就用那条；没有就用过了严格门槛的模型标题；再没有就丢掉。
-寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。缓存版本是 v15。
+寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。缓存版本是 v16。
 半截标题并回完整事件，提及次数跟着走。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社、经济日报），券商「招商电新…称」，以及研报文件名里的日期戳和 #。第一句太短或没有主体时，把叹号后面的下一句留下。引号没合上时不在引号里截断。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
@@ -66,7 +66,8 @@ _HEAT_HALF_LIFE_HOURS = 12
 _RED_MENTION_WEIGHT = 2.5
 # 要展示的事件一次批量起标题，不再逐条各问一次。
 _LLM_TITLE_BATCH = 20
-_LLM_TITLE_TOKENS = 1600
+# 20 条要点的 JSON 放得下。1600 在思考模式里只够写出前几条。
+_LLM_TITLE_TOKENS = 4096
 _TITLE_LIMIT = 20
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
 _TITLE_HARD = 28
@@ -78,8 +79,8 @@ _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
 # 半截标题对照用。第一句通常到不了这么长；再长仍整句保留，页面两行截断。
 _TITLE_DISPLAY_MAX = 80
-# 标题缓存按这个版本取。乱码判定收窄后，v14 里记成未采用的结果不再套用。
-_TITLE_CACHE_VERSION = 15
+# 标题缓存按这个版本取。漏编号被记成未采用的 v15 结果不再套用。
+_TITLE_CACHE_VERSION = 16
 # 钉钉作文、知识星球、ima。这些研究聊天不当主标题。
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
@@ -533,10 +534,27 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     from app.news.market_confirm import attach_confirmations
     attach_confirmations(events, now)
     events = _rank_events(events, now, grade=False)
-    _label_with_llm(events)
     for event in events:
         _ensure_shown_name(event)
     events = _absorb_cutoff_events(events)
+    # 先留下能上屏的，再给这 20 条写要点。过不了门槛的簇不再占模型名额。
+    events = [
+        event for event in events
+        if _keep_shown_event(event) or _awaiting_news_title(event)
+    ]
+    if not events:
+        return {
+            "as_of": None,
+            "trading_day": trading.isoformat(),
+            "fallback": False,
+            "hint": None,
+            "updated_at": None,
+            "events": [],
+        }
+    events = _rank_events(events, now, grade=False)
+    _label_with_llm(events)
+    for event in events:
+        _ensure_shown_name(event)
     events = [event for event in events if _keep_shown_event(event)]
     if not events:
         return {
@@ -3094,10 +3112,31 @@ def _pos_subject_action(text: str) -> bool:
     return False
 
 
+def _verb_on_token_boundary(text: str, start: int, verb: str) -> bool:
+    """动词不能从某个词的中间跨进下一个词。「新增长极」里的「新增」不算，「价格上涨」里的「上涨」算。"""
+    if start < 0 or not verb:
+        return False
+    end = start + len(verb)
+    pos = 0
+    for word in _segment(text):
+        word_end = pos + len(word)
+        if word_end <= start:
+            pos = word_end
+            continue
+        if pos <= start and word_end >= end:
+            return True
+        if pos < start or word_end > end:
+            return False
+        pos = word_end
+        if pos == end:
+            return True
+    return False
+
+
 def _has_gate_subject_action(text: str) -> bool:
     body = _compact(text)
     lead, verb, _obj = _split_headline(body)
-    if verb:
+    if verb and _verb_on_token_boundary(body, len(lead), verb):
         return _subject_ok(lead) and _concrete_subject(lead) and not _hedged_subject(lead)
     for extra in _GATE_EXTRA_VERBS:
         index = body.find(extra)
@@ -3258,7 +3297,16 @@ def _ensure_shown_name(event: dict) -> None:
     else:
         event["name"] = ""
         event["subtitle"] = subtitle
+    _drop_repeated_subtitle(event)
     event.pop("_llm_title_applied", None)
+
+
+def _drop_repeated_subtitle(event: dict) -> None:
+    """要点和主标题相同，或已经写在主标题里，就不再占一行。"""
+    name = _compact(str(event.get("name") or ""))
+    subtitle = _compact(str(event.get("subtitle") or ""))
+    if name and subtitle and (subtitle == name or subtitle in name):
+        event["subtitle"] = ""
 
 
 def _event_is_cutoff_of(short: dict, host: dict) -> bool:
@@ -3410,9 +3458,10 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "下面每条是一件与资本市场有关的资讯。主标题用原标题，不要改写。"
         "你只为每一条写一句话要点。"
         "只输出 JSON："
-        '{"events":[{"id":"1","title":"","concepts":[],"category":"",'
+        '{"events":[{"id":"与输入编号相同","title":"","concepts":[],"category":"",'
         '"direction":"利好或利空","importance":"重大或重要或一般或琐碎"}]}。'
-        "title 是一句话要点，写明发生了什么，例如WTI原油期货收涨至91.85美元。"
+        "输入有几条，events 就有几条。id 必须原样抄写下面的编号，不要漏，不要改成从 0 起，也不要按数组顺序另编。"
+        "title 是这一条的一句话要点，写明这条资讯发生了什么。不要把别的编号的内容写到这一条上。"
         "不要半句话，不要时间戳，不要【】，不要省略号，不要把词从中间截断。"
         "不要写早上好、各位或利空叙事。不要用「事件」当要点。"
         "不要带来源前缀。不要输出重点、点评或栏目标签。不要只写媒体名。"
@@ -3434,7 +3483,11 @@ def _request_titles(events: list[dict], *, retry: bool) -> str:
     from app.news.service import _llm_text
 
     try:
-        return _llm_text(_title_prompt(events, retry=retry), max_tokens=_LLM_TITLE_TOKENS)
+        return _llm_text(
+            _title_prompt(events, retry=retry),
+            max_tokens=_LLM_TITLE_TOKENS,
+            prefer_final_answer=True,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.info("热门事件标题生成失败: %s", exc)
         return ""
@@ -3463,25 +3516,32 @@ def _label_with_llm(events: list[dict]) -> None:
     if not pending or not _reserve_llm_call():
         return
     first = _parse_title_batch(_request_titles(pending, retry=False), pending)
-    failed = [
-        event for event in pending
-        if not _accept_title(event, first.get(str(event.get("_batch_id"))))
-    ]
+    failed: list[dict] = []
+    for event in pending:
+        parsed = first.get(str(event.get("_batch_id")))
+        if parsed is None:
+            failed.append(event)
+            continue
+        if not _accept_title(event, parsed):
+            failed.append(event)
     if not failed:
         return
+    for index, event in enumerate(failed, start=1):
+        event["_batch_id"] = str(index)
     second: dict[str, dict] = {}
     if _reserve_llm_call():
         second = _parse_title_batch(_request_titles(failed, retry=True), failed)
     for event in failed:
         batch_id = str(event.get("_batch_id"))
         parsed = second.get(batch_id)
+        if parsed is None:
+            logger.info("热门事件要点缺失: %s", batch_id)
+            continue
         if _accept_title(event, parsed):
             continue
-        fallback = parsed or first.get(batch_id)
-        if fallback:
-            blank = dict(fallback)
-            blank["title"] = ""
-            _apply_llm(event, blank)
+        blank = dict(parsed)
+        blank["title"] = ""
+        _apply_llm(event, blank)
         _LLM_CACHE[_title_cache_key(str(event.get("_fp") or ""))] = {"_miss": True}
 
 
@@ -3507,10 +3567,6 @@ def _parse_title_batch(raw: str, events: list[dict]) -> dict[str, dict]:
         keys = ("title", "concepts", "category", "direction", "importance", "stocks")
         rows = [payload] if len(events) == 1 and any(key in payload for key in keys) else []
     normalized = [row for row in rows if isinstance(row, dict)]
-    missing_ids = normalized and all(not str(row.get("id") or "").strip() for row in normalized)
-    if missing_ids and len(normalized) == len(events):
-        for event, row in zip(events, normalized, strict=True):
-            row["id"] = event.get("_batch_id")
     found: dict[str, dict] = {}
     by_id = {str(event.get("_batch_id")): event for event in events}
     for row in normalized:

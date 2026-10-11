@@ -306,6 +306,7 @@ async def generate_ai_text(
     temperature: float | None = 0.3,
     max_tokens: int | None = 3000,
     timeout: float = 180.0,
+    prefer_final_answer: bool = False,
 ) -> str:
     """Return a complete AI response from the currently configured provider.
 
@@ -323,6 +324,7 @@ async def generate_ai_text(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        prefer_final_answer=prefer_final_answer,
     )
 
 
@@ -462,12 +464,14 @@ async def _run_openai_once(
     temperature: float | None,
     max_tokens: int | None,
     timeout: float,
+    prefer_final_answer: bool = False,
 ) -> str:
     message = await _run_openai_message_once(
         messages,
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        prefer_final_answer=prefer_final_answer,
     )
     if message is None:
         return ""
@@ -481,6 +485,7 @@ async def _run_openai_message_once(
     max_tokens: int | None,
     timeout: float,
     tools: Sequence[dict] | None = None,
+    prefer_final_answer: bool = False,
 ):
     """一次 OpenAI create() 调用, 返回完整 message (含 tool_calls, 而非仅 content)。
 
@@ -493,8 +498,16 @@ async def _run_openai_message_once(
 
     client = _openai_client(ai_key, timeout)
     model = current_ai_model()
+    base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
     req_messages = list(messages)
-    kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens, tools=tools)
+    kwargs = _openai_kwargs(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model=model,
+        base_url=base_url,
+        prefer_final_answer=prefer_final_answer,
+        tools=tools,
+    )
     while True:
         try:
             resp = await client.chat.completions.create(
@@ -802,7 +815,7 @@ def _openai_error_detail(exc: Exception) -> str:
         content_type = response.headers.get("content-type", "").lower()
         try:
             text = response.text
-        except Exception:
+        except Exception:  # noqa: BLE001
             text = ""
     if not text and isinstance(body, str):
         text = body

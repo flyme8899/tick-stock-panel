@@ -15,10 +15,13 @@ from app.news.hot_events import (
     _ensure_shown_name,
     _fallback_title_ok,
     _first_credible_title,
+    _first_original_title,
     _headline_tier,
     _keyword_title,
     _llm_title_ok,
     _llm_title_reject_reason,
+    _original_reject_reason,
+    _parse_title_batch,
     _subtitle_reject_reason,
 )
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
@@ -517,6 +520,164 @@ def test_realistic_batch_keeps_subtitles(tmp_path, monkeypatch):
     assert all(subtitles)
     for _source_id, _title, subtitle in samples:
         assert subtitle in subtitles
+
+
+def test_subjectless_media_headline_uses_the_next_source():
+    """去掉报名后没有主体的口号，改用下一条来源，不把「经济日报评论」留在主标题上。"""
+    slogan = "经济日报评论：培育赛事经济新增长极"
+    nxt = "财政部出台赛事经济扶持政策"
+    assert _display_original("经济日报：培育赛事经济新增长极") == "培育赛事经济新增长极"
+    assert _original_reject_reason("培育赛事经济新增长极") == "缺少主体或动作"
+    assert _first_original_title([("cls", slogan), ("wscn", nxt)]) == nxt
+    assert _first_original_title([("cls", slogan)]) == ""
+
+
+def test_subtitle_is_keyed_by_event_id_not_list_order():
+    """模型把 WTI 写在数组前面时，仍按 id 对上，不能安到纳斯达克那条上。"""
+    nasdaq = "纳斯达克金龙中国指数上涨"
+    oil = "WTI原油期货上涨报91.85美元"
+    events = [
+        {"_batch_id": "1", "name": nasdaq, "headline": nasdaq, "headlines": [nasdaq]},
+        {"_batch_id": "2", "name": oil, "headline": oil, "headlines": [oil]},
+    ]
+    swapped = (
+        '{"events":['
+        '{"id":"2","title":"WTI原油期货收涨至91.85美元"},'
+        '{"id":"1","title":"纳斯达克金龙中国指数收涨"}'
+        ']}'
+    )
+    parsed = _parse_title_batch(swapped, events)
+    assert parsed["1"]["title"] == "纳斯达克金龙中国指数收涨"
+    assert parsed["2"]["title"] == "WTI原油期货收涨至91.85美元"
+    assert "WTI" not in parsed["1"]["title"]
+    shifted = (
+        '{"events":['
+        '{"title":"WTI原油期货收涨至91.85美元"},'
+        '{"title":"纳斯达克金龙中国指数收涨"}'
+        ']}'
+    )
+    assert _parse_title_batch(shifted, events) == {}
+
+
+def test_subtitle_repeats_are_dropped_and_listing_keeps_the_field(tmp_path, monkeypatch):
+    """要点和主标题重复就留空。页面接口要把剩下的要点带出去。漏掉的编号不要记成永久未采用。"""
+    import json
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+    from app.news.service import hot_event_listing
+
+    same = {
+        "name": "航运公司上调运价",
+        "headline": "航运公司上调运价",
+        "headlines": ["航运公司上调运价"],
+        "_candidates": [{"source": "cls", "title": "航运公司上调运价"}],
+        "subtitle": "上调运价",
+    }
+    _ensure_shown_name(same)
+    assert same["name"] == "航运公司上调运价"
+    assert same["subtitle"] == ""
+    distinct = {
+        "name": "旧",
+        "headline": "航运公司上调运价",
+        "headlines": ["航运公司上调运价"],
+        "_candidates": [{"source": "cls", "title": "航运公司上调运价"}],
+        "subtitle": "运价上调影响集运公司",
+    }
+    _ensure_shown_name(distinct)
+    assert distinct["subtitle"] == "运价上调影响集运公司"
+
+    reset_store_for_tests(tmp_path / "subtitle-id.sqlite")
+    oil = "WTI原油期货上涨报91.85美元"
+    nasdaq = "纳斯达克金龙中国指数上涨"
+    _insert("oil", oil, 9, 10)
+    _insert("oil-b", oil, 9, 12, source="wscn")
+    _insert("nasdaq", nasdaq, 9, 11)
+    _insert("nasdaq-b", nasdaq, 9, 13, source="wscn")
+    prompts: list[str] = []
+    flags: list[bool] = []
+
+    def first(prompt: str, **kwargs: object) -> str:
+        prompts.append(prompt)
+        flags.append(bool(kwargs.get("prefer_final_answer")))
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            if "原油" in rest:
+                rows.append({"id": head, "title": "WTI原油期货收涨至91.85美元"})
+            elif "纳斯达克" in rest:
+                rows.append({"id": head, "title": "纳斯达克金龙中国指数收涨"})
+        rows.reverse()
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", first)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    listed = hot_event_listing(NOW)
+    by_name = {event["name"]: event for event in listed["events"]}
+    assert by_name[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
+    assert by_name[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
+    assert "WTI" not in by_name[nasdaq]["subtitle"]
+    assert flags and all(flags)
+    assert hot_mod._LLM_TITLE_TOKENS >= 4096
+    assert not any(item.get("_miss") for item in hot_mod._LLM_CACHE.values() if isinstance(item, dict))
+
+
+def test_omitted_subtitle_row_is_not_cached_as_miss(tmp_path, monkeypatch):
+    """模型没返回某个编号时，不要记成未采用，下一轮还能补上要点。"""
+    import json
+    from datetime import timedelta
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    reset_store_for_tests(tmp_path / "subtitle-miss.sqlite")
+    oil = "WTI原油期货上涨报91.85美元"
+    nasdaq = "纳斯达克金龙中国指数上涨"
+    _insert("oil", oil, 9, 10)
+    _insert("oil-b", oil, 9, 12, source="wscn")
+    _insert("nasdaq", nasdaq, 9, 11)
+    _insert("nasdaq-b", nasdaq, 9, 13, source="wscn")
+
+    def partial(prompt: str, **_kwargs: object) -> str:
+        if "上一轮" in prompt:
+            return "{}"
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or "原油" not in rest:
+                continue
+            rows.append({"id": head, "title": "WTI原油期货收涨至91.85美元"})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", partial)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    first = {event["name"]: event for event in top_hot_events(NOW)["events"]}
+    assert first[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
+    assert first[nasdaq]["subtitle"] == ""
+    assert not any(item.get("_miss") for item in hot_mod._LLM_CACHE.values() if isinstance(item, dict))
+
+    def complete(prompt: str, **_kwargs: object) -> str:
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            if "纳斯达克" in rest:
+                rows.append({"id": head, "title": "纳斯达克金龙中国指数收涨"})
+            elif "原油" in rest:
+                rows.append({"id": head, "title": "WTI原油期货收涨至91.85美元"})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr(news_service, "_llm_text", complete)
+    hot_mod.clear_hot_event_cache(llm=False)
+    second = {event["name"]: event for event in top_hot_events(NOW + timedelta(minutes=11))["events"]}
+    assert second[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
 
 
 def test_same_company_earnings_notes_are_one_event(tmp_path):
