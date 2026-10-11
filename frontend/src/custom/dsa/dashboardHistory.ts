@@ -13,6 +13,10 @@ export interface DashboardCard {
   read: boolean
   reportType: string
   marketDay: string | null
+  /** 分析时股价。没有可用价格时为 null。 */
+  price: number | null
+  /** 分析时涨跌幅，百分数口径：`1.23` 表示 +1.23%。没有涨跌幅时为 null。 */
+  changePctPoints: number | null
 }
 
 const ISO_DAY = /(20\d{2})[-/](\d{2})[-/](\d{2})/
@@ -22,6 +26,40 @@ function text(value: unknown, fallback = ''): string {
   if (value == null || value === '') return fallback
   if (typeof value === 'string' || typeof value === 'number') return String(value)
   return fallback
+}
+
+function positivePrice(value: unknown): number | null {
+  const parsed = finiteNumber(value)
+  return parsed != null && parsed > 0 ? parsed : null
+}
+
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+const PLACEHOLDER_NAMES = new Set(['N/A', 'NA', 'NONE', 'NULL', '--', '-', 'UNKNOWN', 'TICKER', '未命名'])
+
+/** 名称和代码相同、或只是占位符时，不能当作股票名称展示。 */
+export function meaningfulStockName(name: string | null | undefined, code: string): string | null {
+  if (!name) return null
+  const trimmed = name.trim()
+  if (!trimmed) return null
+  const upper = trimmed.toUpperCase()
+  const codeUpper = code.trim().toUpperCase()
+  if (upper === codeUpper || upper === watchKey(code)) return null
+  if (PLACEHOLDER_NAMES.has(upper) || trimmed.startsWith('股票')) return null
+  return trimmed
+}
+
+/** 百分数口径格式化。`1.23` 显示为 `+1.23%`，不把小数制再乘 100。 */
+export function formatPercentPoints(value: number): string {
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${value.toFixed(2)}%`
 }
 
 export function recordId(value: unknown): number | null {
@@ -90,6 +128,8 @@ export function toDashboardCard(row: Record<string, unknown>): DashboardCard {
     read: text(row.read_at) !== '',
     reportType: text(row.report_type),
     marketDay: null,
+    price: positivePrice(row.current_price),
+    changePctPoints: finiteNumber(row.change_pct),
   }
   card.marketDay = marketReviewDay(card)
   return card
@@ -117,6 +157,63 @@ export function dedupeMarketReviewCards(cards: DashboardCard[]): DashboardCard[]
 
 export function poolName(code: string, cards: DashboardCard[]): string {
   const key = watchKey(code)
-  const match = cards.find(card => !isMarketReview(card) && watchKey(card.stockCode) === key && card.stockName)
-  return match?.stockName || code
+  const match = cards.find(card => {
+    if (isMarketReview(card) || watchKey(card.stockCode) !== key) return false
+    return meaningfulStockName(card.stockName, card.stockCode) != null
+      || meaningfulStockName(card.stockName, code) != null
+  })
+  if (!match) return code
+  return meaningfulStockName(match.stockName, match.stockCode)
+    ?? meaningfulStockName(match.stockName, code)
+    ?? code
+}
+
+/** 把名称表按观察池等价键索引。股票代码 `600105.SH` 与 `600105` 落到同一键。 */
+export function namesByWatchKey(names: Record<string, string | null | undefined>): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const [symbol, name] of Object.entries(names)) {
+    const meaningful = meaningfulStockName(name, symbol)
+    if (meaningful) map.set(watchKey(symbol), meaningful)
+  }
+  return map
+}
+
+/**
+ * 名称优先用标的维表 / 自选里已经解析好的名字，再用分析记录里的名称。
+ * 两边都没有可用名称时退回代码本身。
+ */
+export function resolvePoolName(
+  code: string,
+  cards: DashboardCard[],
+  nameByKey: ReadonlyMap<string, string>,
+): string {
+  return nameByKey.get(watchKey(code)) || poolName(code, cards)
+}
+
+/** 向名称接口查询时带上的 symbol。六位 A 股代码同时试沪深京，只采用命中的结果。 */
+export function nameLookupSymbols(code: string): string[] {
+  const key = watchKey(code)
+  const symbols: string[] = []
+  const trimmed = code.trim().toUpperCase()
+  if (trimmed.includes('.')) symbols.push(trimmed)
+  if (/^\d{6}$/.test(key)) {
+    symbols.push(`${key}.SH`, `${key}.SZ`, `${key}.BJ`)
+  } else if (/^HK\d{5}$/.test(key)) {
+    symbols.push(`${key.slice(2)}.HK`)
+  } else if (trimmed) {
+    symbols.push(trimmed)
+  }
+  return [...new Set(symbols)]
+}
+
+/** 同一只股票取最新一条带价格或涨跌幅的分析记录。涨跌幅保持百分数口径。 */
+export function poolSnapshot(code: string, cards: DashboardCard[]): { price: number | null; changePctPoints: number | null } {
+  const key = watchKey(code)
+  const matches = cards.filter(card => !isMarketReview(card) && watchKey(card.stockCode) === key)
+  const withQuote = matches.find(card => card.price != null || card.changePctPoints != null)
+  const card = withQuote ?? matches[0]
+  return {
+    price: card?.price ?? null,
+    changePctPoints: card?.changePctPoints ?? null,
+  }
 }

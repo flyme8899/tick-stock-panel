@@ -1,13 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type TouchEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MoreHorizontal } from 'lucide-react'
+import { FileText, Inbox, MoreHorizontal, type LucideIcon } from 'lucide-react'
+import { EmptyState } from '@/components/EmptyState'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import { priceColorClass } from '@/lib/format'
 import { QK } from '@/lib/queryKeys'
 import { dsaUpstream, isRecord } from './client'
 import {
   dedupeMarketReviewCards,
+  formatPercentPoints,
   isMarketReview,
-  poolName,
+  meaningfulStockName,
+  nameLookupSymbols,
+  namesByWatchKey,
+  poolSnapshot,
+  resolvePoolName,
   toDashboardCard,
   watchKey,
   type DashboardCard,
@@ -22,6 +30,9 @@ const fieldCls = 'h-8 rounded-btn border border-border bg-base px-2.5 text-xs te
 export interface WatchPoolItem {
   code: string
   name: string
+  price?: number | null
+  /** 百分数口径，1.23 表示 +1.23%。 */
+  changePctPoints?: number | null
 }
 
 interface ConfirmState {
@@ -29,6 +40,20 @@ interface ConfirmState {
   body: string
   confirmLabel: string
   run: () => void
+}
+
+function BoardEmpty({
+  ready,
+  icon,
+  title,
+  hint,
+}: {
+  ready: boolean
+  icon: LucideIcon
+  title: string
+  hint: string
+}) {
+  return <EmptyState icon={icon} title={ready ? title : '决策服务未连接'} hint={ready ? hint : undefined} />
 }
 
 function adviceClass(advice: string) {
@@ -49,12 +74,12 @@ export function DashboardPanel({
   sample,
   reachable,
   review,
-  middle,
+  footer,
 }: {
   sample: boolean
   reachable: boolean
   review?: ReactNode
-  middle?: ReactNode
+  footer?: ReactNode
 }) {
   const qc = useQueryClient()
   const [page, setPage] = useState(1)
@@ -117,15 +142,49 @@ export function DashboardPanel({
     ? watch.data.stock_codes.filter((code): code is string => typeof code === 'string' && code.trim() !== '')
     : []
   const poolCodes = reachable ? remotePool : sample ? localPool : []
-  const pool = poolCodes.map(code => ({ code, name: poolName(code, cards) }))
+  const lookupKey = [...new Set(poolCodes.flatMap(nameLookupSymbols))].sort().join(',')
+  const tspWatch = useQuery({
+    queryKey: QK.watchlist,
+    queryFn: api.watchlistList,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const instrumentNames = useQuery({
+    queryKey: QK.instrumentNames(lookupKey),
+    queryFn: () => api.instrumentNames(lookupKey.split(',')),
+    enabled: lookupKey !== '',
+    staleTime: 300_000,
+    retry: false,
+  })
+  const nameByKey = useMemo(() => {
+    const merged: Record<string, string | null | undefined> = {}
+    for (const entry of tspWatch.data?.symbols ?? []) {
+      if (entry.symbol && entry.name) merged[entry.symbol] = entry.name
+    }
+    Object.assign(merged, instrumentNames.data?.names ?? {})
+    return namesByWatchKey(merged)
+  }, [tspWatch.data, instrumentNames.data])
+  const namedCards = useMemo(() => cards.map(card => {
+    if (meaningfulStockName(card.stockName, card.stockCode)) return card
+    const mapped = nameByKey.get(watchKey(card.stockCode))
+    return mapped ? { ...card, stockName: mapped } : card
+  }), [cards, nameByKey])
+  const pool = poolCodes.map(code => {
+    const snapshot = poolSnapshot(code, namedCards)
+    return {
+      code,
+      name: resolvePoolName(code, namedCards, nameByKey),
+      price: snapshot.price,
+      changePctPoints: snapshot.changePctPoints,
+    }
+  })
   const error = history.error ?? watch.error ?? dismiss.error ?? markRead.error ?? removePool.error
   const busy = dismiss.isPending || markRead.isPending || removePool.isPending
 
   return (
     <div className="space-y-3">
-      {middle}
       <DashboardBoard
-        rows={cards}
+        rows={namedCards}
         total={reachable ? loaded.total : cards.length}
         page={page}
         pageSize={PAGE_SIZE}
@@ -184,6 +243,7 @@ export function DashboardPanel({
           removePool.mutate(codes)
         }}
       />
+      {footer}
     </div>
   )
 }
@@ -253,7 +313,7 @@ export function DashboardBoard({
 
   return (
     <div className="space-y-3">
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div data-decision-counts className="flex divide-x divide-border overflow-hidden rounded-lg border border-border bg-surface">
         <Stat label="买入" value={counts.buy} tone="text-bull" />
         <Stat label="观望" value={counts.hold} tone="text-warning" />
         <Stat label="卖出" value={counts.sell} tone="text-bear" />
@@ -289,38 +349,57 @@ export function DashboardBoard({
           </div>
         </header>
         <div className="px-4 py-3">
-          {pool.length === 0 && <p className="rounded-btn bg-elevated px-3 py-2 text-xs text-secondary">{reachable || sample ? '观察池是空的。到「定时推送」写入自选列表后，每日分析会回到这里。' : '决策服务未连接。'}</p>}
+          {pool.length === 0 && (
+            <BoardEmpty
+              ready={reachable || sample}
+              icon={Inbox}
+              title="观察池是空的"
+              hint="到「定时推送」写入自选列表后，每日分析会回到这里。"
+            />
+          )}
           <ul className="grid gap-2 sm:grid-cols-2">
-            {pool.map(item => (
-              <li key={item.code} className="flex items-center gap-2 rounded-lg border border-border bg-base px-3 py-2">
-                {selectingPool && (
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4"
-                    checked={selectedPool.includes(item.code)}
-                    aria-label={`选择 ${item.name}`}
-                    onChange={() => togglePool(item.code)}
+            {pool.map(item => {
+              const title = meaningfulStockName(item.name, item.code)
+              const label = title ?? item.code
+              const quoteTone = item.changePctPoints == null ? 'text-foreground' : priceColorClass(item.changePctPoints)
+              const hasQuote = item.price != null || item.changePctPoints != null
+              return (
+                <li key={item.code} className="flex items-center gap-2 rounded-lg border border-border bg-base px-3 py-2">
+                  {selectingPool && (
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 shrink-0"
+                      checked={selectedPool.includes(item.code)}
+                      aria-label={`选择 ${label}`}
+                      onChange={() => togglePool(item.code)}
+                    />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <div data-pool-name className={cn('truncate text-sm text-foreground', title ? 'font-semibold' : 'font-mono')}>{label}</div>
+                    {title && <div data-pool-code className="truncate font-mono text-[11px] text-muted">{item.code}</div>}
+                  </div>
+                  {hasQuote && (
+                    <div data-pool-quote className={cn('num shrink-0 text-right text-xs leading-4', quoteTone)}>
+                      {item.price != null && <div>{item.price.toFixed(2)}</div>}
+                      {item.changePctPoints != null && <div>{formatPercentPoints(item.changePctPoints)}</div>}
+                    </div>
+                  )}
+                  <OverflowMenu
+                    label={`${label} 更多操作`}
+                    items={[{
+                      label: '移出观察池',
+                      danger: true,
+                      onSelect: () => ask({
+                        title: '移出观察池',
+                        body: `把「${label}」移出观察池？之后的定时分析不再包含它。已有卡片不会自动删除。`,
+                        confirmLabel: '移出',
+                        run: () => onRemovePool([item.code]),
+                      }),
+                    }]}
                   />
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm text-foreground">{item.name}</div>
-                  <div className="font-mono text-[11px] text-muted">{item.code}</div>
-                </div>
-                <OverflowMenu
-                  label={`${item.name} 更多操作`}
-                  items={[{
-                    label: '移出观察池',
-                    danger: true,
-                    onSelect: () => ask({
-                      title: '移出观察池',
-                      body: `把「${item.name}」移出观察池？之后的定时分析不再包含它。已有卡片不会自动删除。`,
-                      confirmLabel: '移出',
-                      run: () => onRemovePool([item.code]),
-                    }),
-                  }]}
-                />
-              </li>
-            ))}
+                </li>
+              )
+            })}
           </ul>
         </div>
       </section>
@@ -399,9 +478,12 @@ export function DashboardBoard({
             </div>
           )}
           {rows.length === 0 && !errorText && (
-            <p className="rounded-btn bg-elevated px-3 py-2 text-xs text-secondary">
-              {reachable || sample ? '还没有分析记录。到「个股研报」提交一只股票，或等定时任务跑完。' : '决策服务未连接。'}
-            </p>
+            <BoardEmpty
+              ready={reachable || sample}
+              icon={FileText}
+              title="还没有分析记录"
+              hint="到「个股研报」提交一只股票，或等定时任务跑完。"
+            />
           )}
           <div className="grid gap-2 lg:grid-cols-2">
             {rows.map(row => {
@@ -461,9 +543,9 @@ export function DashboardBoard({
 
 function Stat({ label, value, tone }: { label: string; value: number; tone: string }) {
   return (
-    <div className="rounded-lg border border-border bg-surface px-4 py-3">
-      <div className="text-[11px] text-muted">{label}</div>
-      <div className={cn('num mt-1 text-2xl', tone)}>{value}</div>
+    <div className="flex min-w-0 flex-1 items-baseline justify-center gap-1.5 px-2 py-2">
+      <span className="truncate text-[11px] text-muted">{label}</span>
+      <span className={cn('num text-lg leading-none', tone)}>{value}</span>
     </div>
   )
 }
@@ -499,6 +581,7 @@ function AnalysisCard({
     else if (dx >= 24) setOpen(false)
     startX.current = null
   }
+  const title = meaningfulStockName(row.stockName, row.stockCode)
   const menu = [
     ...(!row.read && row.id != null ? [{ label: '标为已读', onSelect: onRead }] : []),
     ...(tracked && onUntrack ? [{ label: '移出观察池', danger: true, onSelect: onUntrack }] : []),
@@ -531,8 +614,14 @@ function AnalysisCard({
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline justify-between gap-2">
               <div className="min-w-0">
-                <span className="text-sm text-foreground">{row.stockName}</span>
-                <span className="ml-2 font-mono text-[11px] text-muted">{row.stockCode}</span>
+                {title ? (
+                  <>
+                    <span className="text-sm font-semibold text-foreground">{title}</span>
+                    <span className="ml-2 font-mono text-[11px] text-muted">{row.stockCode}</span>
+                  </>
+                ) : (
+                  <span className="font-mono text-sm text-foreground">{row.stockCode}</span>
+                )}
                 {row.read && <span className="ml-2 text-[10px] text-muted">已读</span>}
               </div>
               <span className={cn('shrink-0 text-xs font-medium', adviceClass(row.advice))}>{row.advice || '—'}</span>

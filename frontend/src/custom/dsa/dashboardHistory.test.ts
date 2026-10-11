@@ -1,5 +1,16 @@
 import { expect, it } from 'vitest'
-import { dedupeMarketReviewCards, poolName, toDashboardCard, watchKey, type DashboardCard } from './dashboardHistory'
+import {
+  dedupeMarketReviewCards,
+  formatPercentPoints,
+  nameLookupSymbols,
+  namesByWatchKey,
+  poolName,
+  poolSnapshot,
+  resolvePoolName,
+  toDashboardCard,
+  watchKey,
+  type DashboardCard,
+} from './dashboardHistory'
 
 function card(partial: Partial<DashboardCard> & Pick<DashboardCard, 'id' | 'summary' | 'createdAt'>): DashboardCard {
   return {
@@ -12,6 +23,8 @@ function card(partial: Partial<DashboardCard> & Pick<DashboardCard, 'id' | 'summ
     read: false,
     reportType: 'market_review',
     marketDay: null,
+    price: null,
+    changePctPoints: null,
     ...partial,
   }
 }
@@ -60,4 +73,50 @@ it('reads the heading date and the watchlist equivalence key', () => {
       createdAt: '2026-10-10 18:00',
     }),
   ])).toBe('科森科技')
+})
+
+it('does not treat the code as a stock name and reads percent-point quotes', () => {
+  const coded = card({
+    id: 9,
+    stockCode: '600105',
+    stockName: '600105',
+    reportType: 'detailed',
+    summary: '代码当名称',
+    createdAt: '2026-10-09 18:00',
+    price: 8.42,
+    changePctPoints: 3.25,
+  })
+  const named = card({
+    id: 10,
+    stockCode: '600105.SH',
+    stockName: '永鼎股份',
+    reportType: 'detailed',
+    summary: '有名称',
+    createdAt: '2026-10-10 18:00',
+    price: 9,
+    changePctPoints: -1.2,
+  })
+  expect(poolName('600105', [coded])).toBe('600105')
+  expect(poolName('600105', [coded, named])).toBe('永鼎股份')
+
+  const fromMap = namesByWatchKey({ '600105.SH': '永鼎股份', '000001.SZ': '000001.SZ' })
+  expect(resolvePoolName('600105', [coded], fromMap)).toBe('永鼎股份')
+  expect(resolvePoolName('688999', [coded], fromMap)).toBe('688999')
+  expect(fromMap.has('000001')).toBe(false)
+  expect(nameLookupSymbols('600105')).toEqual(['600105.SH', '600105.SZ', '600105.BJ'])
+  expect(nameLookupSymbols('hk00700')).toEqual(['00700.HK'])
+
+  const parsed = toDashboardCard({
+    stock_code: '600105',
+    stock_name: '600105',
+    current_price: 8.42,
+    change_pct: 3.25,
+  })
+  expect(parsed.price).toBe(8.42)
+  expect(parsed.changePctPoints).toBe(3.25)
+  expect(formatPercentPoints(3.25)).toBe('+3.25%')
+  expect(formatPercentPoints(-1.8)).toBe('-1.80%')
+  // 卡片按调用方顺序查找，最新且带报价的记录优先。dedupe 后的列表是新的在前。
+  expect(poolSnapshot('600105', [named, coded])).toEqual({ price: 9, changePctPoints: -1.2 })
+  expect(poolSnapshot('600105', [coded])).toEqual({ price: 8.42, changePctPoints: 3.25 })
 })
