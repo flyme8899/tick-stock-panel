@@ -487,6 +487,7 @@ export function SectorAnalysis() {
   const header = (
     <PageHeader
       title="板块分析"
+      helpId="sector"
       subtitle={asOf ? `概念与行业并排 · ${asOf}` : '概念与行业并排，点击板块查看成分、龙头和 RPS'}
       right={(
         <button

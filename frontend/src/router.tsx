@@ -39,6 +39,7 @@ const HotEvents = lazy(() => import('./pages/HotEvents').then(m => ({ default: m
 const FundFlow = lazy(() => import('./pages/FundFlow').then(m => ({ default: m.FundFlow })))
 const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
+const Help = lazy(() => import('./pages/Help').then(m => ({ default: m.Help })))
 // Onboarding 只在首次使用时进入, Auth 只在登录页用到 — 均改按需加载
 const Onboarding = lazy(() => import('./pages/Onboarding').then(m => ({ default: m.Onboarding })))
 const Auth = lazy(() => import('./pages/Auth').then(m => ({ default: m.Auth })))
@@ -76,6 +77,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/settings/keys',
   '/settings/ai',
   '/settings/queries',
+  '/help',
 ])
 
 finalizeFrontendExtensions(CORE_ROUTE_PATHS)
@@ -188,6 +190,7 @@ export const router = createBrowserRouter([
       { path: 'abnormal', element: <AbnormalMoves /> },
       { path: 'branding', element: <Branding /> },
       { path: 'settings', element: <Settings /> },
+      { path: 'help', element: <Help /> },
       // 隐藏路由：开发者工具（不暴露在菜单，仅供调试）
       { path: 'dev', element: <Dev /> },
       // 旧路由兼容重定向

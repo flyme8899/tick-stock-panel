@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowUpRight, Check, Database, Gauge, GripVertical, Info, Loader2, Play, RefreshCw, RotateCcw, Sparkles, Timer } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
+import { PageHelpButton } from '@/components/PageHelpButton'
 import { api, type AlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { DimensionMembersDialog, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
@@ -242,6 +243,7 @@ export function Dashboard() {
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-accent" />
           <h1 className="text-[16px] leading-6 font-semibold text-foreground">市场看板</h1>
+          <PageHelpButton topicId="dashboard" />
           <span
             className="rounded-full border px-2 py-0.5 text-[10px] font-medium"
             style={{

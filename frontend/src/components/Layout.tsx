@@ -40,6 +40,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Download,
+  CircleHelp,
 } from 'lucide-react'
 import {
   IconDashboard,
@@ -1011,6 +1012,32 @@ export function Layout() {
         )}
 
         <div className={cn('border-t border-border py-3 shrink-0', railMode ? 'px-2 flex flex-col items-center gap-1' : 'px-2')}>
+          <NavLink
+            to="/help"
+            title={railMode ? '使用说明' : undefined}
+            className={({ isActive }) =>
+              cn(
+                'group relative mb-1 flex items-center rounded-btn text-sm transition-all duration-150 ease-smooth',
+                railMode ? 'justify-center px-0 py-2' : 'w-full gap-3 px-3 py-2',
+                isActive
+                  ? 'bg-elevated text-foreground font-medium'
+                  : 'text-foreground/75 hover:bg-elevated/70 hover:text-foreground',
+              )
+            }
+          >
+            {({ isActive }) => (
+              <>
+                <span
+                  className={cn(
+                    'pointer-events-none absolute left-0 top-1/2 h-4 w-[2.5px] -translate-y-1/2 rounded-full bg-accent transition-opacity duration-150',
+                    isActive ? 'opacity-100 shadow-[0_0_8px_rgba(59,130,246,0.6)]' : 'opacity-0',
+                  )}
+                />
+                <CircleHelp className={cn('h-4 w-4 shrink-0 transition-colors', isActive ? 'text-accent' : 'text-foreground/60 group-hover:text-foreground/85')} />
+                {!railMode && <span className="whitespace-nowrap">使用说明</span>}
+              </>
+            )}
+          </NavLink>
           <div className={railMode ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1'}>
             <ThemeToggle />
             <NavLink

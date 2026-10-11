@@ -64,6 +64,7 @@ export function Settings() {
     <>
       <PageHeader
         title="设置"
+        helpId="settings"
         subtitle="管理账户、数据刷新策略和高级功能配置。"
       />
 

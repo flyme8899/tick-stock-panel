@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type NewsCandidate, type NewsHotEvent, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
+import { PageHelpButton } from '@/components/PageHelpButton'
 import { cn } from '@/lib/cn'
 
 const POLL_MS = 60_000
@@ -124,6 +125,7 @@ export function HotEvents() {
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="热门事件"
+        helpId="hot-events"
         subtitle="当天和资本市场有关的具体事件，按政策、海外、产业、地缘、商品和公司事项分类。板块、个股和 ETF 热度仍在后面。只展示摘录，供内部研究。"
       />
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_280px]">
@@ -388,7 +390,10 @@ export function HotEvents() {
 
         <aside className="h-fit space-y-4">
           <section className="rounded-md border border-border p-3">
-            <h2 className="mb-1 text-sm font-medium">钉钉推送</h2>
+            <div className="mb-1 flex items-center gap-1">
+              <h2 className="text-sm font-medium">钉钉推送</h2>
+              <PageHelpButton topicId="dingtalk" align="end" />
+            </div>
             <p className="mb-2 text-xs text-muted">
               发到已配置的自定义机器人。默认关闭。登录失效提醒是另一条短文本，不会和这里混用。
             </p>

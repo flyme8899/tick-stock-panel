@@ -210,6 +210,7 @@ export function FundFlow() {
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="资金流向"
+        helpId="fund-flow"
         subtitle="只读本地落盘。没有数据的块留空，不把缺失写成 0。"
       />
       <div className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">

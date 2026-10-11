@@ -355,6 +355,7 @@ export function DecisionWorkspace() {
     <div className="flex h-full min-h-0 flex-col bg-base">
       <PageHeader
         title="决策"
+        helpId="dsa"
         subtitle="多市场 AI 研报、情报、定时推送和问股。行情与策略回测仍走原来的页面。"
         titleExtra={
           <span

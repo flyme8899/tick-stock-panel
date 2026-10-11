@@ -244,6 +244,7 @@ export function StockPicker() {
     <div className="flex min-h-full flex-col bg-base">
       <PageHeader
         title="选股"
+        helpId="picker"
         subtitle="多个来源取交集或并集，结果和上一份快照对比"
         className="bg-base/95"
       />
