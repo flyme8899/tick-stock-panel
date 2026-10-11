@@ -276,6 +276,16 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("market-feeds worker init failed: %s", e)
 
+    # 选股补充字段。开关默认关，线程起来也不出网，不占重任务槽。
+    try:
+        from app.selection_fields.scheduler import get_worker as get_selection_worker
+
+        selection_worker = get_selection_worker()
+        selection_worker.start()
+        app.state.selection_worker = selection_worker
+    except Exception as e:  # noqa: BLE001
+        logger.warning("selection-fields worker init failed: %s", e)
+
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
     app.state.watchdog = start_watchdog(app.state, repo)
@@ -422,6 +432,9 @@ async def _application_lifespan(app: FastAPI):
         market_feed_worker = getattr(app.state, "market_feed_worker", None)
         if market_feed_worker:
             market_feed_worker.stop()
+        selection_worker = getattr(app.state, "selection_worker", None)
+        if selection_worker:
+            selection_worker.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()

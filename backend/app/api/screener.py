@@ -200,6 +200,27 @@ def _rows_with_ext(rows: list[dict], ext_values: dict[str, dict[str, Any]]) -> l
     return [_row_with_ext(r, ext_values) for r in rows]
 
 
+def _attach_selection_result(payload: dict, data_dir) -> dict:
+    """读时左连补充字段。失败时原样返回，避免一次缺数把结果清空。"""
+    try:
+        from app.selection_fields.query import annotate_result
+
+        return annotate_result(payload, data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("选股补充字段跳过: %s", exc)
+        return payload
+
+
+def _attach_selection_cache(payload: dict, data_dir) -> dict:
+    try:
+        from app.selection_fields.query import annotate_cache
+
+        return annotate_cache(payload, data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("选股补充字段跳过: %s", exc)
+        return payload
+
+
 def _result_with_ext(result_dict: dict, ext_values: dict[str, dict[str, Any]]) -> dict:
     if not ext_values:
         return result_dict
@@ -303,7 +324,10 @@ def run_custom(req: CustomRequest, request: Request):
     if warnings:
         safe_data["warnings"] = warnings
     ext_values = _load_ext_value_maps(repo, req.ext_columns)
-    return _result_with_ext(safe_data, ext_values)
+    payload = _result_with_ext(safe_data, ext_values)
+    if req.asset_type == "stock":
+        payload = _attach_selection_result(payload, repo.store.data_dir)
+    return payload
 
 
 @router.post("/run_preset")
@@ -361,7 +385,10 @@ def run_preset(req: PresetRequest, request: Request):
             safe_data["warnings"] = warnings
         _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
 
-    return _result_with_ext(safe_data, ext_values)
+    payload = _result_with_ext(safe_data, ext_values)
+    if req.asset_type == "stock" and req.timeframe == "1d":
+        payload = _attach_selection_result(payload, data_dir)
+    return payload
 
 
 def _cached_with_realtime(request: Request) -> dict:
@@ -406,7 +433,8 @@ def get_cached(
         return {"as_of": None, "results": {}, "updated_at": None}
 
     ext_values = _load_ext_value_maps(request.app.state.repo, ext_columns)
-    return _cache_payload_with_ext(cached, ext_values)
+    payload = _cache_payload_with_ext(cached, ext_values)
+    return _attach_selection_cache(payload, request.app.state.repo.store.data_dir)
 
 
 @router.get("/cached-summary")
@@ -483,6 +511,33 @@ def get_cached_result(
                 for symbol, row in strategy_ever_rows.items()
                 if isinstance(row, dict)
             }
+
+    data_dir = request.app.state.repo.store.data_dir
+    try:
+        from app.selection_fields.query import merge_rows, selection_overlay
+
+        symbols = [
+            str(row.get("symbol"))
+            for row in result["rows"]
+            if isinstance(row, dict) and row.get("symbol")
+        ]
+        if isinstance(ever_rows, dict):
+            symbols.extend(str(symbol) for symbol in ever_rows)
+        overlay, gaps, notes, pe_incomplete, gap_keys = selection_overlay(
+            data_dir, symbols, result.get("as_of")
+        )
+        result["rows"] = merge_rows(result["rows"], overlay)
+        result["field_gaps"] = gaps
+        result["field_notes"] = notes
+        result["pe_incomplete"] = pe_incomplete
+        result["gap_keys"] = gap_keys
+        if isinstance(ever_rows, dict):
+            ever_rows = {
+                symbol: merge_rows([row], overlay)[0] if isinstance(row, dict) else row
+                for symbol, row in ever_rows.items()
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("选股补充字段跳过: %s", exc)
 
     selected_symbols = {
         str(row["symbol"])

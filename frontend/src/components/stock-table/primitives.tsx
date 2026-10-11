@@ -40,11 +40,45 @@ function fmtMaybePrice(value: any) {
   return value != null && !Number.isNaN(value) ? fmtPrice(value) : '—'
 }
 
+export type SelectionCellGaps = { gapKeys?: string[] }
+
+function isBlankCell(value: unknown): boolean {
+  if (value == null) return true
+  if (typeof value === 'number' && Number.isNaN(value)) return true
+  if (typeof value === 'string' && value.trim() === '') return true
+  return false
+}
+
+/** 百分数原样显示：2.35 表示 2.35%，不再乘 100。 */
+function fmtPercentPoint(value: number): string {
+  return `${value.toFixed(2)}%`
+}
+
+function gapTd(col: ColumnConfig): ReactNode {
+  return <td key={col.id} className={`${alignTdClass(col.align)} text-warning`}>缺数据</td>
+}
+
+function streakBadge(col: ColumnConfig, value: number, tone: 'up' | 'down'): ReactNode {
+  if (!(value > 0)) return <td key={col.id} className="px-3 py-2 text-center"><span className="text-muted">—</span></td>
+  const color = tone === 'up' ? 'bg-danger/15 text-danger' : 'bg-bear/15 text-bear'
+  return (
+    <td key={col.id} className="px-3 py-2 text-center">
+      <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded text-xs font-bold tabular-nums ${color}`}>
+        {value}
+      </span>
+    </td>
+  )
+}
+
 /**
  * 渲染一个纯数据内置列的 <td>。
  * 返回 null 表示该列不属于纯数据列（symbol/strategies/score/signals/candle 等），由调用方处理。
  */
-export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | null {
+export function renderBuiltinDataCell(
+  r: any,
+  col: ColumnConfig,
+  gaps?: SelectionCellGaps,
+): ReactNode | null {
   if (col.source.type !== 'builtin') return null
   const key = col.source.key
 
@@ -166,7 +200,75 @@ export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | nu
     case 'eps':           return <td key={col.id} className={numCls}>{r.eps != null ? fmtPrice(r.eps) : '—'}</td>
     case 'bps':           return <td key={col.id} className={numCls}>{r.bps != null ? fmtPrice(r.bps) : '—'}</td>
     case 'roe':           return <td key={col.id} className={numCls}>{r.roe != null ? fmtPct(r.roe) : '—'}</td>
-    case 'pe_ttm':        return <td key={col.id} className={numCls}>{r.pe_ttm != null ? fmtPrice(r.pe_ttm) : '—'}</td>
+    case 'pe_ttm':
+      if (isBlankCell(r.pe_ttm) && gaps?.gapKeys?.includes('pe_ttm')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.pe_ttm != null ? fmtPrice(r.pe_ttm) : '—'}</td>
+    case 'northbound_hold_pct':
+      if (isBlankCell(r.northbound_hold_pct) && gaps?.gapKeys?.includes('northbound_hold_pct')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.northbound_hold_pct != null ? fmtPercentPoint(Number(r.northbound_hold_pct)) : '—'}</td>
+    case 'holder_num':
+      if (isBlankCell(r.holder_num) && gaps?.gapKeys?.includes('holder_num')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.holder_num != null ? Math.round(Number(r.holder_num)).toLocaleString('zh-CN') : '—'}</td>
+    case 'holder_change_pct':
+      if (isBlankCell(r.holder_change_pct) && gaps?.gapKeys?.includes('holder_change_pct')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.holder_change_pct != null ? fmtPercentPoint(Number(r.holder_change_pct)) : '—'}</td>
+    case 'index_membership':
+      if (isBlankCell(r.index_membership) && gaps?.gapKeys?.includes('index_membership')) return gapTd(col)
+      return <td key={col.id} className={`${alignTdClass(col.align)} text-secondary`}>{r.index_membership || '—'}</td>
+    case 'next_unlock_date':
+      if (isBlankCell(r.next_unlock_date) && gaps?.gapKeys?.includes('next_unlock_date')) return gapTd(col)
+      return <td key={col.id} className={`${alignTdClass(col.align)} text-secondary`}>{r.next_unlock_date || '—'}</td>
+    case 'unlock_float_ratio':
+      if (isBlankCell(r.unlock_float_ratio) && gaps?.gapKeys?.includes('unlock_float_ratio')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.unlock_float_ratio != null ? fmtPercentPoint(Number(r.unlock_float_ratio)) : '—'}</td>
+    case 'weekly_change_pct':
+      if (isBlankCell(r.weekly_change_pct) && gaps?.gapKeys?.includes('weekly_change_pct')) return gapTd(col)
+      return <td key={col.id} className={`${numCls} font-medium ${priceColorClass(r.weekly_change_pct)}`}>{fmtPct(r.weekly_change_pct)}</td>
+    case 'monthly_change_pct':
+      if (isBlankCell(r.monthly_change_pct) && gaps?.gapKeys?.includes('monthly_change_pct')) return gapTd(col)
+      return <td key={col.id} className={`${numCls} font-medium ${priceColorClass(r.monthly_change_pct)}`}>{fmtPct(r.monthly_change_pct)}</td>
+    case 'up_streak':
+      if (isBlankCell(r.up_streak) && gaps?.gapKeys?.includes('up_streak')) return gapTd(col)
+      return streakBadge(col, Number(r.up_streak), 'up')
+    case 'down_streak':
+      if (isBlankCell(r.down_streak) && gaps?.gapKeys?.includes('down_streak')) return gapTd(col)
+      return streakBadge(col, Number(r.down_streak), 'down')
+    case 'macd_dif_w':
+      if (isBlankCell(r.macd_dif_w) && gaps?.gapKeys?.includes('macd_dif_w')) return gapTd(col)
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_w)}`}>{r.macd_dif_w != null ? fmtPrice(r.macd_dif_w) : '—'}</td>
+    case 'macd_dea_w':
+      if (isBlankCell(r.macd_dea_w) && gaps?.gapKeys?.includes('macd_dea_w')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.macd_dea_w != null ? fmtPrice(r.macd_dea_w) : '—'}</td>
+    case 'macd_hist_w':
+      if (isBlankCell(r.macd_hist_w) && gaps?.gapKeys?.includes('macd_hist_w')) return gapTd(col)
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_w)}`}>{r.macd_hist_w != null ? fmtPrice(r.macd_hist_w) : '—'}</td>
+    case 'kdj_k_w':
+      if (isBlankCell(r.kdj_k_w) && gaps?.gapKeys?.includes('kdj_k_w')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.kdj_k_w != null ? Number(r.kdj_k_w).toFixed(1) : '—'}</td>
+    case 'kdj_d_w':
+      if (isBlankCell(r.kdj_d_w) && gaps?.gapKeys?.includes('kdj_d_w')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.kdj_d_w != null ? Number(r.kdj_d_w).toFixed(1) : '—'}</td>
+    case 'kdj_j_w':
+      if (isBlankCell(r.kdj_j_w) && gaps?.gapKeys?.includes('kdj_j_w')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.kdj_j_w != null ? Number(r.kdj_j_w).toFixed(1) : '—'}</td>
+    case 'macd_dif_m':
+      if (isBlankCell(r.macd_dif_m) && gaps?.gapKeys?.includes('macd_dif_m')) return gapTd(col)
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_m)}`}>{r.macd_dif_m != null ? fmtPrice(r.macd_dif_m) : '—'}</td>
+    case 'macd_dea_m':
+      if (isBlankCell(r.macd_dea_m) && gaps?.gapKeys?.includes('macd_dea_m')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.macd_dea_m != null ? fmtPrice(r.macd_dea_m) : '—'}</td>
+    case 'macd_hist_m':
+      if (isBlankCell(r.macd_hist_m) && gaps?.gapKeys?.includes('macd_hist_m')) return gapTd(col)
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_m)}`}>{r.macd_hist_m != null ? fmtPrice(r.macd_hist_m) : '—'}</td>
+    case 'kdj_k_m':
+      if (isBlankCell(r.kdj_k_m) && gaps?.gapKeys?.includes('kdj_k_m')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.kdj_k_m != null ? Number(r.kdj_k_m).toFixed(1) : '—'}</td>
+    case 'kdj_d_m':
+      if (isBlankCell(r.kdj_d_m) && gaps?.gapKeys?.includes('kdj_d_m')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.kdj_d_m != null ? Number(r.kdj_d_m).toFixed(1) : '—'}</td>
+    case 'kdj_j_m':
+      if (isBlankCell(r.kdj_j_m) && gaps?.gapKeys?.includes('kdj_j_m')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{r.kdj_j_m != null ? Number(r.kdj_j_m).toFixed(1) : '—'}</td>
     case 'pb':            return <td key={col.id} className={numCls}>{r.pb != null ? fmtPrice(r.pb) : '—'}</td>
     case 'gross_margin':  return <td key={col.id} className={numCls}>{r.gross_margin != null ? fmtPct(r.gross_margin) : '—'}</td>
     case 'net_margin':    return <td key={col.id} className={numCls}>{r.net_margin != null ? fmtPct(r.net_margin) : '—'}</td>
