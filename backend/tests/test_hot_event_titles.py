@@ -983,6 +983,15 @@ def test_garbled_and_non_market_titles_stay_off_the_hot_list(tmp_path):
 
     kept = _keyword_title([{"title": "财政部在前期出台增量政策"}])
     assert "财政部" in kept and "出台" in kept and "在前期" in kept
+    for title in (
+        "公司在前三季度净利润增长50%",
+        "宁德时代在前十大股东中新增社保基金",
+        "沪指在前一交易日大涨后回调",
+        "在前述公告基础上追加回购",
+    ):
+        assert _llm_title_reject_reason(title) != "标题不连贯"
+        assert _keyword_title([{"title": title}]) == title
+        assert _fallback_title_ok(title)
 
     reset_store_for_tests(tmp_path / "non-market.sqlite")
     _insert_rich("garbled", garbled, 8, 1, level="A")
@@ -1028,6 +1037,13 @@ def test_report_file_labels_are_stripped_from_titles(tmp_path):
     assert _llm_title_reject_reason(dated) == "含日期戳"
     fiscal = _cleaned_headline("财政部发布2026年上半年中长期财政规划")
     assert "2026" in fiscal and "20261009" not in fiscal
+    repo = "央行2026-10-09开展逆回购"
+    assert _strip_report_label(repo) == repo
+    assert _cleaned_headline(repo) == repo
+    assert _llm_title_reject_reason(repo) != "含日期戳"
+    compact_repo = "央行20261009开展逆回购"
+    assert "20261009" in _strip_report_label(compact_repo)
+    assert _llm_title_reject_reason(compact_repo) != "含日期戳"
 
     reset_store_for_tests(tmp_path / "report-label.sqlite")
     _insert("lithium", raw, 3)

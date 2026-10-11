@@ -8,8 +8,8 @@
 展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v5。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
-清理会去掉开头的钟点、【】标签、末尾省略号、「央视财经：」这类来源前缀，以及研报文件名、八位日期戳和 #，并停在句号前。
-栏目标题、只有来源名或公司名、主体被拆开的标题（例如「在前」），以及只有点评、重点、没有动作的稿，不进列表。
+清理会去掉开头的钟点、【】标签、末尾省略号、「央视财经：」这类来源前缀，以及研报文件名里的日期戳和 #，并停在句号前。
+栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
@@ -278,14 +278,26 @@ _MINUTE_BEFORE_BRACKET = re.compile(r"^\d{1,2}(?=【)")
 _LEFTOVER_MINUTE = re.compile(r"^\d{1,2}(?![年月日号点时分])(?=[\u4e00-\u9fff])")
 _TRAILING_ELLIPSIS = re.compile(r"(?:\.{2,}|…+|。{2,})+$")
 _SENTENCE_END = re.compile(r"[。；！？\n]")
-# 机器翻译把 former 拆成「在前」。后面接方、期、面才是「在前方」「在前期」。
-_BROKEN_FORMER = re.compile(r"在前(?![方期面列提沿景头排])")
-_FILE_EXT = re.compile(r"(?i)\.(?:pdf|docx?|xlsx?|pptx?|txt|csv)$")
-_DATE_STAMP = re.compile(
-    r"(?<!\d)20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)"
+# 机器翻译把 former judge 写成「在前法官」。只拦紧挨着职务的「在前」，
+# 「在前三季度」「在前述」是正常说法。
+_FORMER_OFFICES = (
+    "副董事长", "副总统", "副总理", "副部长", "董事长", "发言人",
+    "总统", "首相", "总理", "主席", "财长", "外长", "防长", "行长",
+    "部长", "法官", "局长", "省长", "市长", "州长", "议长", "院长",
+    "署长", "书记", "总裁", "董事", "首席", "大使", "国王", "女王", "元首",
+    "CEO", "CFO", "CTO", "COO",
 )
-_DASH_DATE = re.compile(
-    r"(?<!\d)20\d{2}[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01])(?!\d)"
+_BROKEN_FORMER = re.compile(
+    r"在前(?:" + "|".join(_FORMER_OFFICES) + r")",
+    re.IGNORECASE,
+)
+_FILE_EXT = re.compile(r"(?i)\.(?:pdf|docx?|xlsx?|pptx?|txt|csv)$")
+_COMPACT_DATE = r"20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"
+_DASHED_DATE = r"20\d{2}[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01])"
+# 文件名日期：前面是连字符，或后面紧跟 #。正文里的「央行2026-10-09」不在这里。
+_FILE_DATE = re.compile(
+    rf"(?:(?<=[-_—–])(?:{_COMPACT_DATE}|{_DASHED_DATE})(?!\d)"
+    rf"|(?<!\d)(?:{_COMPACT_DATE}|{_DASHED_DATE})(?=[#＃]))"
 )
 _REPORT_KINDS = ("更新", "报告", "研报", "点评", "周报", "日报", "月报", "纪要", "简报")
 _REPORT_PREFIX = re.compile(
@@ -293,9 +305,6 @@ _REPORT_PREFIX = re.compile(
     r"[-_—–]+"
     r"(?:20\d{6}|20\d{2}[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01]))"
     r"[-_—–]*"
-)
-_LEADING_STAMP = re.compile(
-    r"^(?:20\d{6}|20\d{2}[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01]))[-_—–]*"
 )
 _SECTION_MATERIAL = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,12}材料$")
 # 价格叙述后面再出现这些动作，就是下一句被粘进了标题。
@@ -1343,7 +1352,7 @@ def _compact(text: str) -> str:
 
 
 def _title_incoherent(text: str) -> bool:
-    """主体被拆开，例如把「前法官」写成「在前法官」。"""
+    """「在前」紧挨职务才是拆词，例如「在前法官」。在前三季度、在前述不是。"""
     return bool(_BROKEN_FORMER.search(_compact(text)))
 
 
@@ -1351,7 +1360,7 @@ def _file_debris_reason(text: str) -> str:
     body = _compact(text)
     if "#" in body or "＃" in body or _FILE_EXT.search(body):
         return "含文件标记"
-    if _DATE_STAMP.search(body):
+    if _FILE_DATE.search(body):
         return "含日期戳"
     return ""
 
@@ -1364,13 +1373,13 @@ def _looks_like_report_file(text: str) -> bool:
     body = _FILE_EXT.sub("", _compact(text))
     if not body:
         return False
-    if _DATE_STAMP.search(body) or _DASH_DATE.search(body):
+    if _FILE_DATE.search(body):
         return True
     return any(body.endswith(kind) for kind in _REPORT_KINDS)
 
 
 def _strip_report_label(text: str) -> str:
-    """去掉研报文件名、八位日期戳和 #。锂电行业更新-20261009#十五五政策定调 → 十五五政策定调。"""
+    """去掉研报文件名。只删连字符后或 # 前的日期，正文里的央行日期留下。"""
     body = _FILE_EXT.sub("", _compact(text))
     parts = re.split(r"[#＃]", body)
     if len(parts) >= 2 and _looks_like_report_file(parts[0]):
@@ -1378,9 +1387,7 @@ def _strip_report_label(text: str) -> str:
     elif len(parts) >= 2:
         body = _compact("".join(parts))
     body = _REPORT_PREFIX.sub("", body)
-    body = _LEADING_STAMP.sub("", body)
-    body = _DATE_STAMP.sub("", body)
-    body = _DASH_DATE.sub("", body)
+    body = _FILE_DATE.sub("", body)
     return body.strip("-_—–#＃")
 
 
@@ -1888,7 +1895,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "title 必须是完整的中文标题，尽量不超过28个字，写完整，不要为了压字数把词截断，"
         "写明主体、动作和宾语，"
         "例如美联储降息25基点。不要半句话，不要时间戳，不要【】，不要省略号，"
-        "不要把「前」拆成「在前」。不要文件名、八位日期和#。"
+        "不要把「前法官」「前总统」写成「在前法官」「在前总统」。不要文件名、连字符后的日期和#。"
         "不要以数字或钟点开头，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
         "不要把下一句粘进来。不要用「事件」当标题。不要输出重点、点评或栏目标签。"
         "不要只写媒体名或公司名，标题里要有动作。"
