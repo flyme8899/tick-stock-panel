@@ -183,6 +183,7 @@ def score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[di
         "excess_pct": round(excess, 4),
         "breadth": round(breadth, 4),
         "limit_count": limit_count,
+        "limit_reason_hits": _limit_reason_hits(event),
         "vol_ratio": round(vol_ratio, 4) if vol_ratio is not None else None,
         "main_net": round(main_net, 2) if main_net is not None else None,
         "sector_net_inflow": round(sector_net, 2) if sector_net is not None else None,
@@ -210,7 +211,7 @@ def _load_market_tape(now: datetime, events: list[dict]) -> dict:
         for name in (event.get("concepts") or [])
         if str(name).strip()
     })
-    members = _members(data_dir, concepts)
+    members = _members(data_dir, concepts, session)
     symbols = sorted(_all_symbols(events, members))
     stocks: dict[str, dict] = {}
     for symbol in symbols:
@@ -274,6 +275,7 @@ def _result(
             "excess_pct": detail.get("excess_pct"),
             "breadth": detail.get("breadth"),
             "limit_count": int(detail.get("limit_count") or 0),
+            "limit_reason_hits": int(detail.get("limit_reason_hits") or 0),
             "vol_ratio": detail.get("vol_ratio"),
             "main_net": detail.get("main_net"),
             "sector_net_inflow": detail.get("sector_net_inflow"),
@@ -616,6 +618,7 @@ def _score_auction(
         "excess_pct": round(excess, 4),
         "breadth": round(high_open, 4),
         "limit_count": limit_count,
+        "limit_reason_hits": _limit_reason_hits(event),
         "vol_ratio": round(vol_ratio, 4) if vol_ratio is not None else None,
         "main_net": None,
         "sector_net_inflow": round(sector_net, 2) if sector_net is not None else None,
@@ -770,6 +773,7 @@ def _score_intraday(
         "excess_pct": round(excess, 4),
         "breadth": round(breadth, 4),
         "limit_count": limit_count,
+        "limit_reason_hits": _limit_reason_hits(event),
         "vol_ratio": round(vol_ratio, 4) if vol_ratio is not None else None,
         "main_net": round(main_net, 2) if main_net is not None else None,
         "sector_net_inflow": None,
@@ -1064,25 +1068,65 @@ def _flow_after(item: dict, first: datetime) -> bool:
     return True
 
 
-def _members(data_dir: Path, concepts: list[str]) -> dict[str, list[str]]:
-    if not concepts or not (data_dir / "ext_data" / "ext_gn_ths").exists():
-        return {}
-    try:
-        from app.services.picker import (
-            build_label_index,
-            load_dimensions_from_dir,
-            match_sector_symbols,
-        )
-        index = build_label_index(load_dimensions_from_dir(data_dir))
-    except Exception:  # noqa: BLE001
-        logger.info("盘面验证没有读到概念成分")
-        return {}
-    found = {}
-    for name in concepts:
-        symbols = sorted(match_sector_symbols(name, name, index))[:30]
-        if symbols:
-            found[name] = symbols
+def _limit_reason_hits(event: dict) -> int:
+    """已经对上涨停题材的概念个数。没有核对结果时是 0，不另加分。"""
+    info = event.get("limit_reason")
+    if not isinstance(info, dict):
+        return 0
+    verified = info.get("verified")
+    if not isinstance(verified, list):
+        return 0
+    return len([item for item in verified if str(item).strip()])
+
+
+def _members(
+    data_dir: Path,
+    concepts: list[str],
+    session: date | None = None,
+) -> dict[str, list[str]]:
+    """概念成分。涨停原因对上的股票排在前面，最多 30 只。"""
+    found: dict[str, list[str]] = {}
+    if concepts and (data_dir / "ext_data" / "ext_gn_ths").exists():
+        try:
+            from app.services.picker import (
+                build_label_index,
+                load_dimensions_from_dir,
+                match_sector_symbols,
+            )
+            index = build_label_index(load_dimensions_from_dir(data_dir))
+        except Exception:  # noqa: BLE001
+            logger.info("盘面验证没有读到概念成分")
+        else:
+            for name in concepts:
+                symbols = sorted(match_sector_symbols(name, name, index))[:30]
+                if symbols:
+                    found[name] = symbols
+    if session is not None and concepts:
+        for name, symbols in _limit_theme_members(data_dir, session, concepts).items():
+            merged: list[str] = []
+            for symbol in [*symbols, *(found.get(name) or [])]:
+                text = str(symbol).strip()
+                if text and text not in merged:
+                    merged.append(text)
+                if len(merged) >= 30:
+                    break
+            if merged:
+                found[name] = merged
     return found
+
+
+def _limit_theme_members(
+    data_dir: Path,
+    session: date,
+    concepts: list[str],
+) -> dict[str, list[str]]:
+    try:
+        from app.limit_board.query import theme_symbols
+
+        return theme_symbols(data_dir, session.isoformat(), concepts)
+    except Exception:  # noqa: BLE001
+        logger.info("盘面验证没有读到涨停原因成分")
+        return {}
 
 
 def _fill_minutes(data_dir: Path, session: date, stocks: dict[str, dict]) -> None:

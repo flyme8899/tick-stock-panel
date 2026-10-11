@@ -1,0 +1,73 @@
+{
+  "status_code": 0,
+  "data": {
+    "page": {
+      "limit": 2,
+      "total": 69,
+      "count": 35,
+      "page": 1
+    },
+    "info": [
+      {
+        "open_num": 5,
+        "first_limit_up_time": "1791527221",
+        "last_limit_up_time": "1791528889",
+        "code": "605168",
+        "limit_up_type": "换手板",
+        "order_volume": 95200.0,
+        "is_new": 0,
+        "limit_up_suc_rate": 0.8571428571428571,
+        "currency_value": 10983565000.0,
+        "market_id": 17,
+        "is_again_limit": 1,
+        "change_rate": 10.0084,
+        "turnover_rate": 4.0975,
+        "reason_type": "数据中心+AI营销+体育营销",
+        "order_amount": 4959920.0,
+        "high_days": "首板",
+        "name": "三人行",
+        "high_days_value": 65537,
+        "change_tag": "LIMIT_BACK",
+        "market_type": "HS",
+        "latest": 52.1
+      }
+    ],
+    "limit_up_count": {
+      "today": {
+        "num": 69,
+        "history_num": 82,
+        "rate": 0.8414634146341463,
+        "open_num": 13
+      },
+      "yesterday": {
+        "num": 42,
+        "history_num": 74,
+        "rate": 0.5675675675675675,
+        "open_num": 32
+      }
+    },
+    "limit_down_count": {
+      "today": {
+        "num": 8,
+        "history_num": 31,
+        "rate": 0.25806451612903225,
+        "open_num": 23
+      },
+      "yesterday": {
+        "num": 13,
+        "history_num": 16,
+        "rate": 0.8125,
+        "open_num": 3
+      }
+    },
+    "date": "20261009",
+    "msg": null,
+    "trade_status": {
+      "id": "non_trading_day",
+      "name": "非交易日",
+      "start_time": "00:00",
+      "end_time": "23:59:59.999"
+    }
+  },
+  "status_msg": "success"
+}

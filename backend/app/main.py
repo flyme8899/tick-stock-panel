@@ -26,6 +26,7 @@ from app.api import (
     indices,
     intraday,
     kline,
+    limit_board,
     lots,
     market_recap,
     mining,
@@ -36,6 +37,7 @@ from app.api import (
     picker,
     pipeline,
     regime,
+    research,
     rps,
     screener,
     sector_rotation,
@@ -264,6 +266,16 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("fund-flow worker init failed: %s", e)
 
+    # 打板和研报。开关默认开，但测试进程里线程直接空转，不出网。
+    try:
+        from app.market_feeds.scheduler import get_worker as get_market_feed_worker
+
+        market_feed_worker = get_market_feed_worker()
+        market_feed_worker.start()
+        app.state.market_feed_worker = market_feed_worker
+    except Exception as e:  # noqa: BLE001
+        logger.warning("market-feeds worker init failed: %s", e)
+
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
     app.state.watchdog = start_watchdog(app.state, repo)
@@ -407,6 +419,9 @@ async def _application_lifespan(app: FastAPI):
         fund_flow_worker = getattr(app.state, "fund_flow_worker", None)
         if fund_flow_worker:
             fund_flow_worker.stop()
+        market_feed_worker = getattr(app.state, "market_feed_worker", None)
+        if market_feed_worker:
+            market_feed_worker.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()
@@ -583,6 +598,8 @@ app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(news.router)
 app.include_router(fund_flow.router)
+app.include_router(limit_board.router)
+app.include_router(research.router)
 app.include_router(settings_api.router)
 app.include_router(strategy.router)
 app.include_router(signals.router)
