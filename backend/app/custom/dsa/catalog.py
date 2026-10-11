@@ -201,7 +201,7 @@ ENV_VARS = (
     {"name": "EMAIL_SENDER", "required": False, "purpose": "邮件推送，需同时配置 EMAIL_PASSWORD"},
     {"name": "ETF_ROTATION_MODE", "required": False, "purpose": "blended_bucket（默认，分桶混合动量）、equal_weight（池内等权，每月再平衡）或 legacy（周频单窗口前 2）"},
     {"name": "ETF_ROTATION_LOOKBACKS", "required": False, "purpose": "混合动量窗口，默认 20,60,120。得分是这几段收益的平均排名"},
-    {"name": "ETF_ROTATION_BUCKETS", "required": False, "purpose": "分桶。默认 A股:510300|510500|159915;512890;513100;518880。冒号桶只留最强的一只"},
+    {"name": "ETF_ROTATION_BUCKETS", "required": False, "purpose": "分桶。默认 A股:510300|510500|159915;红利:512890;海外:513100;商品:518880。冒号前是桶名，桶内只留最强的一只"},
     {"name": "ETF_ROTATION_WEIGHTING", "required": False, "purpose": "blended_bucket 默认 inv_vol（60 日波动率倒数）。equal_weight 与 legacy 固定等权"},
     {"name": "ETF_ROTATION_DRAWDOWN_RISK_OFF", "required": False, "purpose": "组合回撤风控。默认 false，钩子关闭时不改变持仓"},
     {"name": "ETF_ROTATION_POOL", "required": False, "purpose": "等权和经典模式的 ETF 池，逗号分隔。分桶模式改读 ETF_ROTATION_BUCKETS"},

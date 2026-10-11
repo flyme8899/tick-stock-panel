@@ -10,9 +10,9 @@ const view: EtfRotationView = {
   mode: 'blended_bucket',
   mode_label: '分桶混合动量',
   holdings: [
-    { code: '510300', name: '沪深300', bucket: 'A股', weight: 0.4, score: 1.5 },
-    { code: '518880', name: '黄金', bucket: '518880', weight: 0.35, score: 2 },
-    { code: '511880', name: '银华日利', bucket: '防守', weight: 0.25, score: null },
+    { code: '512890', name: '红利低波ETF华泰柏瑞', bucket: '红利', weight: 0.4, score: 2 },
+    { code: '511880', name: '银华日利ETF', bucket: '防守', weight: 0.333, score: null },
+    { code: '513100', name: '纳指ETF国泰', bucket: '海外', weight: 0.267, score: 1 },
   ],
   last_rebalance: '2026-08-31',
   next_rebalance: '2026-10-09',
@@ -53,9 +53,11 @@ it('shows the rotation card and keeps the raw log collapsed', async () => {
   const text = host.textContent || ''
   expect(text).toContain('分桶混合动量')
   expect(text).toContain('信号日 2026-09-30')
-  expect(text).toContain('沪深300 510300')
+  expect(text).toContain('红利低波ETF华泰柏瑞 512890')
   expect(text).toContain('40.0%')
-  expect(text).toContain('1.50')
+  expect(text).toContain('2.00')
+  const bucketCells = [...host.querySelectorAll('tbody tr')].map(row => row.children[1]?.textContent)
+  expect(bucketCells).toEqual(['红利', '防守', '海外'])
   expect(text).toContain('上次调仓 2026-08-31')
   expect(text).toContain('下次调仓 2026-10-09')
   expect(text).toContain('不构成投资建议')

@@ -126,7 +126,7 @@ TICKFLOW_KLINE_ADJUST_VALUES = {"none", "forward", "backward", "forward_additive
 # 沪深300 / 中证500 / 创业板 / 红利低波 / 纳指 / 黄金；防守资产为货币 ETF
 DEFAULT_ETF_ROTATION_POOL = ("510300", "510500", "159915", "512890", "513100", "518880")
 DEFAULT_ETF_ROTATION_SAFE_ASSET = "511880"
-DEFAULT_ETF_ROTATION_BUCKETS = "A股:510300|510500|159915;512890;513100;518880"
+DEFAULT_ETF_ROTATION_BUCKETS = "A股:510300|510500|159915;红利:512890;海外:513100;商品:518880"
 # Fallback defaults used when ANSPIRE_API_KEYS is reused as legacy OpenAI-compatible source.
 # These are compatibility examples; actual availability should be validated by Anspire console/model entitlement.
 ANSPIRE_LLM_BASE_URL_DEFAULT = "https://open-gateway.anspire.cn/v6"

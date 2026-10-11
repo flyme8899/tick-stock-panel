@@ -52,7 +52,69 @@ DEFAULT_SWEEP_LOOKBACKS = (20, 40, 60, 90, 120, 150, 200)
 DEFAULT_LOOKBACKS = (20, 60, 120)
 VOL_LOOKBACK_DAYS = 60
 DRAWDOWN_LIMIT = 0.15
-DEFAULT_BUCKET_SPEC = "A股:510300|510500|159915;512890;513100;518880"
+# 单成员桶也要有风格名。裸代码（512890）只表示成员，不能当成「分桶」列的文案。
+DEFAULT_BUCKET_SPEC = "A股:510300|510500|159915;红利:512890;海外:513100;商品:518880"
+# 旧配置把代码写成分桶名时，按代码或名称归到这些风格。显式名字（如 A股）保持不变。
+_CODE_STYLE = {
+    "510050": "宽基",
+    "510300": "宽基",
+    "510310": "宽基",
+    "510500": "宽基",
+    "512100": "宽基",
+    "159915": "宽基",
+    "159919": "宽基",
+    "159922": "宽基",
+    "512890": "红利",
+    "515080": "红利",
+    "515180": "红利",
+    "513100": "海外",
+    "513500": "海外",
+    "513300": "海外",
+    "159941": "海外",
+    "513050": "海外",
+    "513180": "海外",
+    "518880": "商品",
+    "518800": "商品",
+    "159934": "商品",
+    "511880": "防守",
+    "511990": "防守",
+    "511010": "防守",
+}
+_NAME_STYLE = (
+    ("红利", "红利"),
+    ("股息", "红利"),
+    ("低波", "红利"),
+    ("纳斯达克", "海外"),
+    ("纳指", "海外"),
+    ("标普", "海外"),
+    ("恒生", "海外"),
+    ("恒指", "海外"),
+    ("日经", "海外"),
+    ("德国", "海外"),
+    ("法国", "海外"),
+    ("道琼", "海外"),
+    ("中概", "海外"),
+    ("海外", "海外"),
+    ("沪深300", "宽基"),
+    ("中证500", "宽基"),
+    ("中证1000", "宽基"),
+    ("中证800", "宽基"),
+    ("中证A500", "宽基"),
+    ("创业板", "宽基"),
+    ("上证50", "宽基"),
+    ("科创50", "宽基"),
+    ("宽基", "宽基"),
+    ("黄金", "商品"),
+    ("白银", "商品"),
+    ("原油", "商品"),
+    ("豆粕", "商品"),
+    ("商品", "商品"),
+    ("货币", "防守"),
+    ("日利", "防守"),
+    ("国债", "防守"),
+    ("短融", "防守"),
+    ("现金", "防守"),
+)
 RESULT_PREFIX = "TSP_ETF_RESULT "
 MODE_LABELS = {
     "blended_bucket": "分桶混合动量",
@@ -153,6 +215,36 @@ def parse_weighting(value: Optional[str], mode: str) -> str:
         return normalized
     logger.warning("ETF_ROTATION_WEIGHTING=%r is invalid; falling back to inv_vol", value)
     return "inv_vol"
+
+
+def _is_security_code(label: str, code: str) -> bool:
+    """True when a bucket label is really a ticker, not a style name."""
+    text = (label or "").strip()
+    if not text:
+        return False
+    if code and text == code.strip():
+        return True
+    return text.isdigit() and len(text) == 6
+
+
+def bucket_display_name(label: str, code: str, instrument_name: str = "") -> str:
+    """Name for the holdings table.
+
+    An explicit label such as ``A股`` or ``红利`` is kept. A bare code falls
+    back to the known style, then the instrument name, then ``行业``.
+    """
+    text = (label or "").strip()
+    symbol = (code or "").strip()
+    if text and not _is_security_code(text, symbol):
+        return text
+    known = _CODE_STYLE.get(symbol) or _CODE_STYLE.get(text)
+    if known:
+        return known
+    blob = (instrument_name or "").strip()
+    for needle, style in _NAME_STYLE:
+        if needle in blob:
+            return style
+    return "行业"
 
 
 def parse_buckets(value: Optional[str]) -> Tuple[Bucket, ...]:
@@ -460,8 +552,14 @@ def signal_weights(
         for code in rank_row.index:
             if pd.notna(rank_row[code]) and code not in score_map:
                 score_map[code] = float(rank_row[code])
-        bucket_map = {code: bucket.name for bucket in params.buckets for code in bucket.members}
-        bucket_map.update({code: name for name, code, _score in selected})
+        bucket_map = {
+            code: bucket_display_name(bucket.name, code)
+            for bucket in params.buckets
+            for code in bucket.members
+        }
+        bucket_map.update({
+            code: bucket_display_name(name, code) for name, code, _score in selected
+        })
         chosen_codes = [code for _name, code, _score in selected]
         if not chosen_codes:
             weights = {spare: 1.0}
@@ -482,7 +580,7 @@ def signal_weights(
             weights = _weights_with_spare(chosen_codes, [1.0] * len(chosen_codes), params.top_n, spare)
         for code, weight in list(weights.items()):
             if code not in bucket_map and code not in (CASH, spare):
-                bucket_map[code] = code
+                bucket_map[code] = bucket_display_name(code, code)
         if spare in weights and spare != CASH:
             bucket_map.setdefault(spare, "防守")
 
@@ -868,6 +966,27 @@ def next_rebalance_on(
     return None
 
 
+def _holding_bucket_label(
+    params: RotationParams,
+    bucket_map: Dict[str, str],
+    code: str,
+    safe_asset: Optional[str],
+    risk_off: bool,
+) -> str:
+    """Original bucket label for one holding, before style resolution."""
+    if risk_off and code in (safe_asset, CASH):
+        return "" if code == CASH else "防守"
+    for bucket in params.buckets:
+        if code in bucket.members:
+            return bucket.name
+    mapped = bucket_map.get(code)
+    if mapped:
+        return mapped
+    if code == safe_asset:
+        return "防守"
+    return ""
+
+
 def compose_snapshot(
     closes: pd.DataFrame,
     risk_assets: Sequence[str],
@@ -904,10 +1023,11 @@ def compose_snapshot(
         if weight <= 1e-8:
             continue
         score = score_map.get(code)
+        raw_bucket = _holding_bucket_label(params, bucket_map, code, safe_asset, risk_off and rebalance_day)
         holdings.append({
             "code": code,
             "name": labels.get(code, code),
-            "bucket": bucket_map.get(code, "防守" if code == safe_asset else ""),
+            "bucket": bucket_display_name(raw_bucket, code, labels.get(code, "")) if raw_bucket else "",
             "weight": _round_weight(weight),
             "score": None if score is None or (isinstance(score, float) and math.isnan(score)) else round(float(score), 4),
         })
