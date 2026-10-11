@@ -150,8 +150,12 @@ _BOARD_LABEL = {
     "sz_gem": "创业板",
     "bj": "北交所",
 }
-_SZ_MAIN_URL = "https://push2.eastmoney.com/api/qt/clist/get"
-_SZ_MAIN_FS = "m:0+t:6+f:!2,m:0+t:13+f:!2"
+# push2 行情列表在部分云服务器上一直 502。个股资金流改走数据中心，和龙虎榜、两融、PE 同一套。
+_SZ_MAIN_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_SZ_MAIN_REPORT = "RPT_DMSK_TS_FUNDFLOW"
+_SZ_MAIN_COLUMNS = "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,NET_INFLOW,BIGDEAL_NET,SUPERDEAL_NET"
+_SZ_MAIN_PAGE = 500
+_DC_EMPTY = 9201
 
 
 def _entirely_missing_labels(missing_codes: list[str], universe_codes: list[str]) -> list[str]:
@@ -177,7 +181,12 @@ def _entirely_missing_labels(missing_codes: list[str], universe_codes: list[str]
 
 
 def fetch_sz_main_rank(trade_date: str, *, get=None) -> list[dict]:
-    """深市主板个股资金流，东财行情列表按板块分页。金额是元。"""
+    """深市主板个股资金流，东财数据中心按交易日分页。
+
+    ``NET_INFLOW`` 是主力净流入，``BIGDEAL_NET`` 是大单，``SUPERDEAL_NET`` 是超大单。
+    这三个字段的单位是万元，落盘前换成元。
+    """
+    from app.fund_flow.units import BARE_WAN, money_to_yuan
     from app.selection_fields.timeouts import REQUEST_TIMEOUT
 
     if get is None:
@@ -186,48 +195,49 @@ def fetch_sz_main_rank(trade_date: str, *, get=None) -> list[dict]:
         get = em_get
     shaped: list[dict] = []
     page = 1
-    while page <= 30:
+    while page <= 20:
         response = get(
             _SZ_MAIN_URL,
             params={
-                "pn": str(page),
-                "pz": "100",
-                "po": "1",
-                "np": "1",
-                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                "fltt": "2",
-                "invt": "2",
-                "fid": "f62",
-                "fs": _SZ_MAIN_FS,
-                "fields": "f12,f14,f62,f66,f72",
+                "reportName": _SZ_MAIN_REPORT,
+                "columns": _SZ_MAIN_COLUMNS,
+                "pageNumber": str(page),
+                "pageSize": str(_SZ_MAIN_PAGE),
+                "sortColumns": "SECURITY_CODE",
+                "sortTypes": "1",
+                "source": "WEB",
+                "client": "WEB",
+                "filter": f"(TRADE_DATE='{trade_date}')",
             },
             headers={"Referer": "https://data.eastmoney.com/zjlx/detail.html"},
             timeout=REQUEST_TIMEOUT,
         )
         payload = response.json() if hasattr(response, "json") else response
         if not isinstance(payload, dict):
+            raise RuntimeError("深市主板资金流返回异常")
+        if not payload.get("success"):
+            if int(payload.get("code") or 0) == _DC_EMPTY:
+                break
+            raise RuntimeError(str(payload.get("message") or "深市主板资金流失败")[:300])
+        result = payload.get("result") or {}
+        rows = result.get("data") or []
+        if not isinstance(rows, list) or not rows:
             break
-        data = payload.get("data") or {}
-        diff = data.get("diff") or []
-        if isinstance(diff, dict):
-            diff = list(diff.values())
-        if not diff:
-            break
-        for row in diff:
+        for row in rows:
             if not isinstance(row, dict):
                 continue
-            code = normalize.code6(str(row.get("f12") or ""))
+            code = normalize.code6(str(row.get("SECURITY_CODE") or ""))
             if store.board_of(code) != "sz_main":
                 continue
             shaped.append({
                 "股票代码": code,
-                "股票简称": row.get("f14") or "",
-                "今日主力净流入-净额": row.get("f62"),
-                "今日大单净流入-净额": row.get("f72"),
-                "今日超大单净流入-净额": row.get("f66"),
+                "股票简称": row.get("SECURITY_NAME_ABBR") or "",
+                "今日主力净流入-净额": money_to_yuan(row.get("NET_INFLOW"), bare=BARE_WAN),
+                "今日大单净流入-净额": money_to_yuan(row.get("BIGDEAL_NET"), bare=BARE_WAN),
+                "今日超大单净流入-净额": money_to_yuan(row.get("SUPERDEAL_NET"), bare=BARE_WAN),
             })
-        total = int(data.get("total") or 0)
-        if page * 100 >= total or len(diff) < 100:
+        pages = int(result.get("pages") or 0)
+        if (pages and page >= pages) or len(rows) < _SZ_MAIN_PAGE:
             break
         page += 1
     return normalize.normalize_rank_rows(

@@ -12,7 +12,7 @@ HK 服务器上这些入口不可用，调用表里没有它们：
 - `ak.stock_main_fund_flow`
 - 东财 push2 板块资金流（含 `ak.stock_sector_fund_flow_rank`）
 
-个股日频账单用显式 secid 直接请求东财 push2his，不再经 efinance 搜索代码。全市场当日 / 5 日排名才用 akshare：同花顺 `stock_fund_flow_individual` 优先，东财 `stock_individual_fund_flow_rank` 作备选。同花顺个股榜缺深市主板时，用东财行情列表按板块分页补一次当日主力、大单和超大单，走统一限速，不再对深市主板逐只打历史账单。日志里的「整段缺板块」按缺失只数占该板块应有只数达到 80% 才写；只缺几只科创板不会报整段缺失。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。东财 push2 的板块资金流接口仍然不调用。
+个股日频账单用显式 secid 直接请求东财 push2his，不再经 efinance 搜索代码。全市场当日 / 5 日排名才用 akshare：同花顺 `stock_fund_flow_individual` 优先，东财 `stock_individual_fund_flow_rank` 作备选。同花顺个股榜缺深市主板时，用东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 按交易日分页补一次当日主力、大单和超大单，走统一限速。这套接口和龙虎榜、两融、PE 相同。行情列表 ``push2`` 在部分云服务器上返回 502，这里不再用它补深市主板，也不再对深市主板逐只打历史账单。数据中心这三个净额字段的单位是万元，落盘前换成元。日志里的「整段缺板块」按缺失只数占该板块应有只数达到 80% 才写；只缺几只科创板不会报整段缺失。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。东财 push2 的板块资金流接口仍然不调用。
 
 ## 来源和时刻
 

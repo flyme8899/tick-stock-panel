@@ -1394,11 +1394,29 @@ def test_sz_main_gap_uses_one_board_batch(tmp_path, monkeypatch) -> None:
         raise AssertionError(symbol)
 
     def fake(url, *, params=None, headers=None, timeout=None):
-        seen.append({"url": url, "timeout": timeout, "fs": (params or {}).get("fs")})
+        seen.append({"url": url, "timeout": timeout, "params": params or {}})
+        assert "datacenter-web.eastmoney.com" in url
+        assert params["reportName"] == "RPT_DMSK_TS_FUNDFLOW"
+        assert params["filter"] == "(TRADE_DATE='2026-10-09')"
+        assert "NET_INFLOW" in params["columns"]
         return type("Response", (), {"json": lambda self: {
-            "data": {"total": 1, "diff": [{
-                "f12": "000001", "f14": "平安银行", "f62": 5e8, "f66": 2e8, "f72": 1e8,
-            }]},
+            "success": True,
+            "result": {"pages": 1, "data": [
+                {
+                    "SECURITY_CODE": "000001",
+                    "SECURITY_NAME_ABBR": "平安银行",
+                    "NET_INFLOW": -4647.8428,
+                    "BIGDEAL_NET": -2866.7888,
+                    "SUPERDEAL_NET": -1781.054,
+                },
+                {
+                    "SECURITY_CODE": "600519",
+                    "SECURITY_NAME_ABBR": "贵州茅台",
+                    "NET_INFLOW": 1,
+                    "BIGDEAL_NET": 1,
+                    "SUPERDEAL_NET": 1,
+                },
+            ]},
         }})()
 
     monkeypatch.setattr("app.eastmoney.client.em_get", fake)
@@ -1413,13 +1431,16 @@ def test_sz_main_gap_uses_one_board_batch(tmp_path, monkeypatch) -> None:
         trade_date="2026-10-09",
     )
     assert bills == []
-    assert seen and "eastmoney.com" in seen[0]["url"]
+    assert seen and "datacenter-web.eastmoney.com" in seen[0]["url"]
+    assert "push2" not in seen[0]["url"]
     assert seen[0]["timeout"] == (10.0, 30.0)
     frame = store.read_partition(tmp_path, "stock", "2026-10-09")
-    row = {item["code"]: item for item in frame.to_dicts()}["000001"]
-    assert row["main_net"] == 5e8
-    assert row["source"] == "eastmoney_sz_main"
-    assert row["large_net"] == 1e8
+    row = {item["code"]: item for item in frame.to_dicts()}
+    assert row["000001"]["main_net"] == pytest.approx(-46478428)
+    assert row["000001"]["large_net"] == pytest.approx(-28667888)
+    assert row["000001"]["super_net"] == pytest.approx(-17810540)
+    assert row["000001"]["source"] == "eastmoney_sz_main"
+    assert row["600519"]["source"] == "efinance"
 
 
 def test_sz_main_batch_failure_does_not_fall_back_to_history_bill(tmp_path, monkeypatch) -> None:
