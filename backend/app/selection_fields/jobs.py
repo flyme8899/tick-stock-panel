@@ -78,6 +78,18 @@ def listed_symbols(data_dir: Path | str) -> list[str]:
     return _symbols_from_enriched(Path(data_dir))
 
 
+_DELISTED_STATUS = {"d", "delisted", "退市", "已退市", "终止上市", "终止"}
+_STATUS_COLUMNS = ("list_status", "listing_status", "上市状态", "status")
+
+
+def active_symbols(data_dir: Path | str) -> list[str]:
+    """PE 逐只补充用的上市代码。有股票列表时去掉退市股。"""
+    filtered = _active_from_instruments(Path(data_dir) / "instruments")
+    if filtered is not None:
+        return filtered
+    return listed_symbols(data_dir)
+
+
 _NORTHBOUND_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 _NORTHBOUND_REFERER = "https://data.eastmoney.com/hsgtV2/hsgtDetail/bkzj.html"
 _NORTHBOUND_PAGE_SIZE = 500
@@ -204,7 +216,7 @@ def advance_pe(
     """先按交易日分页拉全市场 PE(TTM)，缺的代码再逐只补。单只失败直接跳过。"""
     from app.eastmoney.client import CircuitOpenError
 
-    symbols = listed_symbols(data_dir)
+    symbols = active_symbols(data_dir)
     if not symbols:
         note = "没有股票列表"
         status = "ok" if read_frame(data_dir, "pe_ttm").height else "error"
@@ -483,6 +495,42 @@ def _day_text(value: object) -> str:
     if len(text) >= 10 and text[4] == "-" and text[7] == "-":
         return text[:10]
     return ""
+
+
+def _row_delisted(row: dict) -> bool:
+    name = str(row.get("name") or "")
+    if "退市" in name:
+        return True
+    for column in _STATUS_COLUMNS:
+        if column not in row:
+            continue
+        text = str(row.get(column) or "").strip()
+        if not text:
+            continue
+        if text.lower() in _DELISTED_STATUS or text in _DELISTED_STATUS or "退市" in text:
+            return True
+    return False
+
+
+def _active_from_instruments(directory: Path) -> list[str] | None:
+    if not directory.exists():
+        return None
+    frames: list[pl.DataFrame] = []
+    for path in sorted(directory.rglob("*.parquet")):
+        try:
+            frames.append(pl.read_parquet(path))
+        except Exception:  # noqa: BLE001
+            continue
+    if not frames:
+        return None
+    found = []
+    for row in pl.concat(frames, how="diagonal_relaxed").to_dicts():
+        if _row_delisted(row):
+            continue
+        symbol = ashare_symbol(row.get("symbol"))
+        if symbol:
+            found.append(symbol)
+    return sorted(set(found))
 
 
 def _symbols_from_parquet(directory: Path) -> list[str]:

@@ -560,6 +560,46 @@ def _json_response(payload: dict):
     return type("Response", (), {"json": lambda self: payload})()
 
 
+def test_pe_per_symbol_fill_skips_delisted_names(tmp_path) -> None:
+    directory = tmp_path / "instruments"
+    directory.mkdir()
+    pl.DataFrame({
+        "symbol": ["600519.SH", "000001.SZ", "000002.SZ", "300750.SZ"],
+        "name": ["贵州茅台", "平安银行", "退市某某", "宁德时代"],
+        "list_status": ["L", "D", "L", ""],
+    }).write_parquet(directory / "instruments.parquet")
+    singles: list[str] = []
+
+    def ak(name, **kwargs):
+        if name == "pe_market":
+            return {
+                "rows": [{"SECURITY_CODE": "600519", "PE_TTM": 20}],
+                "pages": 1,
+                "empty": False,
+            }
+        singles.append(kwargs["symbol"])
+        return [{"数据日期": "2024-01-05", "PE(TTM)": 8}]
+
+    advance_pe(tmp_path, ak, "2024-01-05", flush_every=1, busy=lambda: False)
+    assert singles == ["300750"]
+
+
+def test_instrument_flatten_keeps_list_status() -> None:
+    import sys
+    import types
+
+    sys.modules.setdefault("tickflow", types.SimpleNamespace(AsyncTickFlow=object, TickFlow=object))
+    from app.services.instrument_sync import _flatten_instruments
+
+    rows = _flatten_instruments([{
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "code": "600519",
+        "ext": {"list_status": "L", "listing_date": "2001-08-27"},
+    }])
+    assert rows[0]["list_status"] == "L"
+
+
 def _weekdays(start: date, count: int) -> list[date]:
     days: list[date] = []
     cursor = start
