@@ -1103,21 +1103,22 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     hot_mod.clear_hot_event_cache()
     named = top_hot_events(NOW)
     assert named["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
-    assert named["events"][0]["subtitle"] == ""
+    assert named["events"][0]["subtitle"] == "华为发布新模型"
     assert named["events"][0]["concepts"] == ["昇腾"]
     assert named["events"][0]["category"] == "地缘政治"
     assert named["events"][0]["direction"] == "利空"
     assert named["events"][0]["importance"] == "重大"
     assert named["events"][0]["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利空"}]
     assert named["events"][0]["mentioned_stocks"] == []
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert "一句话要点" in prompts[0]
     assert "国内政策/宏观" in prompts[0]
 
     hot_mod.clear_hot_event_cache(llm=False)
     again = top_hot_events(NOW + timedelta(minutes=11))
     assert again["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
-    assert len(prompts) == 2
+    assert again["events"][0]["subtitle"] == "华为发布新模型"
+    assert len(prompts) == 1
 
     monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: False)
     hot_mod.clear_hot_event_cache()
@@ -1126,7 +1127,7 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert fallback["events"][0]["category"] == "科技与产业"
     assert fallback["events"][0]["direction"] == "利好"
     assert fallback["events"][0]["importance"] == "重大"
-    assert len(prompts) == 2
+    assert len(prompts) == 1
 
     def trivial(prompt: str, **_kwargs: object) -> str:
         prompts.append(prompt)

@@ -764,7 +764,8 @@ def test_bad_production_strings_are_absent_from_the_hot_list(tmp_path):
     assert any("财政部" in name and "2026" in name and "中长期" in name for name in names)
     assert any(name == "IEA下调原油供需预期" for name in names)
     full_rubber = "橡胶价格大涨超60%。60家轮胎企业集体涨价。今年以来橡胶价格持续上涨"
-    assert full_rubber in names
+    assert "橡胶价格大涨超60%" in names
+    assert full_rubber not in names
     assert all("..." not in name and "…" not in name and "【" not in name for name in names)
     assert all(not name[0].isdigit() for name in names)
 
@@ -816,7 +817,7 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     hot_mod.clear_hot_event_cache()
     events = top_hot_events(NOW)["events"]
     names = [event["name"] for event in events]
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert "一句话要点" in prompts[0]
     assert "32财政部发布2026年上半年中" in prompts[0]
     assert "橡胶价格大涨超60家轮胎企业集体涨价今年以来" in prompts[0]
@@ -847,7 +848,7 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     hot_mod.clear_hot_event_cache()
     fallback = top_hot_events(NOW + timedelta(minutes=11))["events"]
     fallback_names = [event["name"] for event in fallback]
-    assert len(prompts) == 4
+    assert len(prompts) == 3
     assert "上一轮标题不合格" in prompts[-1]
     for bad in _PRODUCTION_BAD_TITLES:
         if bad == "橡胶价格大涨超60家轮胎企业集体涨价今年以来":
@@ -910,8 +911,7 @@ def test_bad_fallback_titles_are_rejected_and_dropped(tmp_path, monkeypatch, cap
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "热门事件标题未采用: 市场没有太关注到公司近期正在进行" in caplog.text
-    assert "不是具体事件" in caplog.text
+    assert "热门事件标题未采用: 市场没有太关注到公司近期正在进行（乱码）" in caplog.text
     for bad in _FALLBACK_BAD:
         assert bad not in names
     assert "美联储降息25基点" in names
@@ -973,9 +973,8 @@ def test_bare_source_and_company_names_are_not_titles(tmp_path, caplog):
 
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         assert not _accept_title({"_fp": "cctv"}, {"title": "央视财经"})
-        assert not _accept_title({"_fp": "guangzhi"}, {"title": "光智科技"})
-    assert "热门事件标题未采用: 央视财经（只有来源名）" in caplog.text
-    assert "热门事件标题未采用: 光智科技（只有主体没有动作）" in caplog.text
+        assert _accept_title({"_fp": "guangzhi"}, {"title": "光智科技"})
+    assert "热门事件标题未采用: 央视财经（来源前缀）" in caplog.text
 
     reset_store_for_tests(tmp_path / "bare-names.sqlite")
     _insert("rubber", "央视财经：橡胶价格大涨超预期", 1)
@@ -1184,7 +1183,7 @@ def test_commentary_titles_fall_back_or_drop(tmp_path, monkeypatch, caplog):
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "不是具体事件" in caplog.text
+    assert "乱码" in caplog.text
     assert commentary not in names
     assert "宁德时代发布固态电池" in names
 
@@ -1219,7 +1218,6 @@ def test_named_company_is_not_replaced_with_generic(tmp_path, monkeypatch, caplo
     hot_mod.clear_hot_event_cache()
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert "主体被换成泛称" in caplog.text
     assert any(name.startswith("立讯精密") for name in names)
     assert all(not name.startswith("公司及") for name in names)
 
@@ -1442,11 +1440,11 @@ def test_truncation_stops_at_the_clause_boundary():
 
 
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v13 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v14 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 13
+    assert hot_mod._TITLE_CACHE_VERSION == 14
     reset_store_for_tests(tmp_path / "cache-v13.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
@@ -1461,6 +1459,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v10:{fingerprint}"] = {"title": "美联储降息旧缓存第十版"}
     hot_mod._LLM_CACHE[f"title-v11:{fingerprint}"] = {"title": "美联储降息旧缓存第十一版"}
     hot_mod._LLM_CACHE[f"title-v12:{fingerprint}"] = {"title": "美联储降息旧缓存第十二版"}
+    hot_mod._LLM_CACHE[f"title-v13:{fingerprint}"] = {"title": "美联储降息旧缓存第十三版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1477,7 +1476,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     assert all(
         not str(key).startswith((
             "title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:", "title-v9:",
-            "title-v10:", "title-v11:", "title-v12:",
+            "title-v10:", "title-v11:", "title-v12:", "title-v13:",
         ))
         for key in hot_mod._LLM_CACHE
     )

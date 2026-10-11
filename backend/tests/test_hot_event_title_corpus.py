@@ -18,6 +18,8 @@ from app.news.hot_events import (
     _headline_tier,
     _keyword_title,
     _llm_title_ok,
+    _llm_title_reject_reason,
+    _subtitle_reject_reason,
 )
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
 
@@ -329,16 +331,19 @@ def test_original_headline_keeps_the_long_source_line():
     long = "橡胶价格大涨超60家轮胎企业集体涨价，" + "后续多家企业继续跟进并上调出厂报价以及经销商报价"
     shown = _display_original(long)
     assert len(long) > 40
-    assert shown == "橡胶价格大涨超60家轮胎企业集体涨价"
-    assert "后续" not in shown
+    assert shown == long
+    assert "后续" in shown
     event = {
         "name": "短改写",
         "headline": "央视财经：橡胶价格大涨超预期发布公告",
         "headlines": ["央视财经：橡胶价格大涨超预期发布公告"],
         "_candidates": [{"source": "cls", "title": "央视财经：橡胶价格大涨超预期发布公告"}],
     }
-    _apply_llm(event, {"title": "橡胶价格大涨超预期"})
+    _apply_llm(event, {"title": "早上好"})
     assert event["subtitle"] == ""
+    assert event["name"] == "短改写"
+    _apply_llm(event, {"title": "橡胶价格大涨超预期"})
+    assert event["subtitle"] == "橡胶价格大涨超预期"
     assert event["name"] == "短改写"
     _apply_llm(event, {"title": "美联储宣布降息二十五基点"})
     assert event["subtitle"] == "美联储宣布降息二十五基点"
@@ -346,6 +351,72 @@ def test_original_headline_keeps_the_long_source_line():
     _ensure_shown_name(event)
     assert event["name"] == "橡胶价格大涨超预期发布公告"
     assert event["subtitle"] == "美联储宣布降息二十五基点"
+
+
+def test_live_sentences_subtitles_and_research_chatter():
+    """线上这批：要点留下，第一句不截断，转述和研报聊天不当主标题。"""
+    kept = (
+        "WTI原油期货收涨至91.85美元",
+        "财政部实施更加积极财政政策",
+        "纽约联储称特朗普关税推高商品价格",
+        "苹果iPhoneDuo加单30%",
+        "英伟达洽谈收购AI初创Reflection",
+    )
+    for line in kept:
+        assert _subtitle_reject_reason(line) == "", line
+    assert _subtitle_reject_reason("") == "空标题"
+    assert _subtitle_reject_reason("早上好") == "寒暄"
+    assert _subtitle_reject_reason("各位投资者请看") == "寒暄"
+    assert _subtitle_reject_reason("财联社：美联储降息") == "来源前缀"
+    assert _subtitle_reject_reason("叠加昨夜美国针对制裁") == "乱码"
+
+    demand = "国家发改委出台一揽子增量政策更好鼓励居民消费、撬动社会投资并扩大有效需求持续释放内需潜力"
+    industry = "国家把十五五政策定调固态电池产业化进入关键期并带动上下游设备与材料订单集中释放落地"
+    plan = '多部门共同推动"十五五"规划落地并明确未来五年的产业支持方向、配套资金安排和年度项目清单'
+    ai4s = "AI4S产业加速从实验室走向中试并带动科研仪器与算力需求以及交叉学科平台持续建设落地"
+    for sentence in (demand, industry, plan, ai4s):
+        assert len(sentence) > 40
+        assert _display_original(sentence) == sentence
+    assert _display_original(demand).endswith("撬动") is False
+    assert "产业化进入关键期" in _display_original(industry)
+    assert _display_original(plan) != '推动"十五五"规划'
+    assert _display_original(ai4s) != "AI4S产业"
+
+    nvidia = "英伟达洽谈收购AI初创Reflection"
+    assert _display_original("报道" + nvidia) == nvidia
+    assert _display_original("据报道，" + nvidia) == nvidia
+    assert _display_original("消息称" + nvidia) == nvidia
+
+    clinical = "J26完成RCT临床验证1基本面更新"
+    pcb = "小PCB公司们的8月单月业绩崇达8月单月1e+利润，超声"
+    tip = "调整建议把握机会！"
+    assert _first_credible_title([("zsxq", clinical), ("cls", nvidia)]) == nvidia
+    assert _first_credible_title([("ima", clinical)]) == ""
+    assert _first_credible_title([("dws", pcb)]) == ""
+    assert _first_credible_title([("cls", tip), ("wscn", nvidia)]) == nvidia
+    assert _first_credible_title([("cls", tip)]) == ""
+
+    chat = {
+        "name": "旧",
+        "headline": clinical,
+        "headlines": [clinical],
+        "_candidates": [{"source": "zsxq", "title": clinical}],
+        "subtitle": nvidia,
+    }
+    _ensure_shown_name(chat)
+    assert chat["name"] == nvidia
+    assert chat["subtitle"] == ""
+    assert _llm_title_reject_reason(nvidia) == ""
+
+    weak = {
+        "name": "旧",
+        "headline": clinical,
+        "headlines": [clinical],
+        "_candidates": [{"source": "ima", "title": clinical}],
+        "subtitle": "WTI原油期货收涨至91.85美元",
+    }
+    _ensure_shown_name(weak)
+    assert weak["name"] == ""
 
 
 def test_same_company_earnings_notes_are_one_event(tmp_path):

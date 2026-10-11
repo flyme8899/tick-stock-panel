@@ -10,12 +10,13 @@
 不再卡 6 小时。摘要只在标题没有主体时参与，避免各条资讯共用的页脚把整天粘成一件事。
 宽行业名不参与聚类，也不拿去扩成分股。
 
-展示主标题是簇里最可信来源的原标题，只去掉来源前缀、括号和券商组名，不改写成短标题。
-大约 40 字以内整句保留；更长就停在句号或分句末，不从词中间切开。公司名后面的冒号留下公司名。
-模型只写 12 到 18 字的一句话要点，放在副标题。要点不合格就留空，不改主标题。
-来源优先：公司公告和交易所，然后新华社、央视、证监会这类官方稿，再是财联社和华尔街见闻，
-然后外媒，最后是群聊、星球和 ima。最可信的一条过不了门槛，就试下一条。
-寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。缓存版本是 v13。
+展示主标题是簇里最可信的新闻原标题，只去掉来源前缀、括号、券商组名，以及开头的「报道」「据报道」「消息称」。
+保留完整的第一句，只在句号、分号、叹号、问号或全文结束处停下，不在 40 字或逗号处截开。公司名后面的冒号留下公司名，后面的顿号按原文保留。
+模型写一句话要点放在副标题。要点只丢掉空的、乱的、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。
+来源优先：公司公告和交易所，然后新华社、央视、证监会这类官方稿，再是财联社和华尔街见闻，然后外媒。
+知识星球、ima、钉钉，以及带「更新」「建议」「把握机会」「1e+」或编号列表的研报标题，不当主标题。
+有新闻源标题就用那条；没有就用过了严格门槛的模型标题；再没有就丢掉。
+寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。缓存版本是 v14。
 半截标题并回完整事件，提及次数跟着走。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社），券商「电新/计算机/研究称」，以及研报文件名里的日期戳和 #，并停在句号前。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
@@ -26,7 +27,7 @@
 已经点名的公司不能换成「公司」，这个对照看原始标题，不看清掉冒号之后的句子。
 签约、签署、战略合作要留下双方，不能只剩建发股份或只剩优必选。
 动词贴在句首、后面又接上另一组主体和动作的，是语序颠倒，这种稿不进列表。
-展示截断停在分句边界，不切开连续的英文字母或数字。只有「发布」没有宾语的短标签会跳过，改用下一条原标题。
+主标题保留第一整句，不在逗号处截开。只有「发布」没有宾语的短标签会跳过，改用下一条原标题。
 这种半截标题不能再单独占一条，免得和完整事件重复。
 标题末尾的券商组名（天风计算机）去掉。观点更新、话题用 & 拼起来的研报标签、
 停在「近八」这种没写完的数量，以及只有产品名没有主体的「Cybercab扩容提速」，都不进列表。
@@ -74,13 +75,12 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 主标题允许到大约 40 字。再长就停在句号或分句末，不按 20 字改写。
-_TITLE_DISPLAY_MAX = 40
-# 一句话要点。短于 12 或长于 18 就留空，不影响主标题。
-_SUBTITLE_MIN = 12
-_SUBTITLE_MAX = 18
-# 标题缓存按这个版本取。主标题改成原标题后，旧键里的短改写不再套用。
-_TITLE_CACHE_VERSION = 13
+# 半截标题对照用。第一句通常到不了这么长；再长仍整句保留，页面两行截断。
+_TITLE_DISPLAY_MAX = 80
+# 标题缓存按这个版本取。要点门槛放宽后，v13 里记成未采用的结果不再套用。
+_TITLE_CACHE_VERSION = 14
+# 钉钉作文、知识星球、ima。这些研究聊天不当主标题。
+_RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
 # 财联社、华尔街见闻，以及没单独点名的 ETF 资金流。
@@ -567,6 +567,7 @@ def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
             or _first_original_title(_candidate_rows(event))
             or int(event.get("red_count") or 0) > 0
             or _worth_labeling(event)
+            or _awaiting_news_title(event)
         ):
             events.append(event)
     return _rank_events(events, now, grade=True)
@@ -2640,45 +2641,35 @@ def _display_stitch(body: str) -> str:
     return joined + nxt_sep + tail
 
 
-def _retreat_word_end(full: str, window: str) -> str:
-    """截断点落在词或连续字母数字中间时，退到上一个完整边界。"""
-    while window and (
-        _boundary_reason(window, [full])
-        or (
-            len(window) < len(full)
-            and _is_ascii_alnum(window[-1])
-            and _is_ascii_alnum(full[len(window)])
-        )
-    ):
-        if len(window) < len(full) and _is_ascii_alnum(window[-1]) and _is_ascii_alnum(full[len(window)]):
-            window = _retreat_open_alnum(full, window)
-        elif window:
-            window = window[:-1]
-        if len(window) < 4:
-            break
-    return window
+_LEAD_ATTRIBUTION = re.compile(r"^(?:据报道|消息称|报道)")
+_GLUED_LIST_INDEX = re.compile(r"(?<=[\u4e00-\u9fff])[0-9](?=[\u4e00-\u9fff])")
+
+
+def _strip_lead_attribution(text: str) -> str:
+    """句首的「报道 / 据报道 / 消息称」不是主体。"""
+    body = text
+    changed = True
+    while body and changed:
+        changed = False
+        match = _LEAD_ATTRIBUTION.match(body)
+        if match:
+            body = body[match.end():].lstrip("：:，,|｜ ")
+            changed = True
+    return body
 
 
 def _clip_original_length(text: str) -> str:
-    """40 字以内整句留下。更长就停在句号或分句末，不从词中间切开。"""
+    """保留第一句。只在。；！？或全文结束处停下，不在逗号或 40 字处截开。"""
     body = _compact(text)
-    if len(body) <= _TITLE_DISPLAY_MAX:
-        return body
-    cut = -1
-    limit = min(len(body), _TITLE_DISPLAY_MAX)
-    for index, char in enumerate(body[:limit]):
-        if char in "。！？；，、":
-            cut = index
-    if cut >= 8:
-        window = body[:cut]
-    else:
-        window = _retreat_word_end(body, _retreat_open_alnum(body, body[:_TITLE_DISPLAY_MAX]))
-    return window.strip("，。！？、；：")
+    for index, char in enumerate(body):
+        if char in "。；！？":
+            return body[:index].strip("，。！？、；：")
+    return body.strip("，。！？、；：")
 
 
 def _display_original(text: str) -> str:
-    """只去来源前缀、括号标签和券商组名。不改写成短标题。"""
-    body = _strip_source_prefix(text)
+    """只去来源前缀、括号标签、券商组名和句首转述。不改写成短标题。"""
+    body = _strip_lead_attribution(_strip_source_prefix(text))
     if not body or body == "事件":
         return ""
     body = _display_stitch(body)
@@ -2686,6 +2677,30 @@ def _display_original(text: str) -> str:
     if not body or body == "事件":
         return ""
     return body
+
+
+def _report_chatter(text: str) -> bool:
+    """研报口吻和编号清单不能当主标题。"""
+    body = _compact(text)
+    if not body:
+        return False
+    if "1e+" in body.lower() or any(mark in body for mark in ("更新", "把握机会")):
+        return True
+    # 工信部建议加快部署是政策动作。没有主体的「建议关注」仍是研报口吻。
+    if "建议" in body and _is_commentary(body):
+        return True
+    return bool(_LIST_MARKER.search(body) or _GLUED_LIST_INDEX.search(body))
+
+
+def _headline_blocked(source: str, title: str) -> bool:
+    """星球、ima、钉钉，以及清理后仍带研报标记的标题，不拿来当主标题。
+
+    研报文件名里的「更新」会先被剥掉。剥完还剩「十五五政策定调」这种句子时可以上屏。
+    """
+    if str(source or "").strip().lower() in _RESEARCH_SOURCES:
+        return True
+    cleaned = _display_original(title)
+    return bool(cleaned and _report_chatter(cleaned))
 
 
 def _original_reject_reason(title: str, sources: list[str] | None = None) -> str:
@@ -2966,11 +2981,13 @@ def _candidate_rows(event: dict) -> list[tuple[str, str]]:
 
 
 def _first_original_title(rows: list[tuple[str, str]]) -> str:
-    """按来源档次试原标题。最可信的一条不合格，就试下一条。半截的跳过。"""
+    """按来源档次试新闻原标题。研报和群聊跳过。最可信的一条不合格，就试下一条。"""
     ordered = sorted(enumerate(rows), key=lambda item: (_headline_tier(item[1][0], item[1][1]), item[0]))
     blobs = [title for _source, title in rows]
     passing: list[str] = []
-    for _index, (_source, title) in ordered:
+    for _index, (source, title) in ordered:
+        if _headline_blocked(source, title):
+            continue
         cleaned = _display_original(title)
         if not cleaned or cleaned in passing:
             continue
@@ -2992,10 +3009,32 @@ def _fallback_cleaned_name(event: dict) -> str:
     return _first_credible_title(_candidate_rows(event))
 
 
+def _awaiting_news_title(event: dict) -> bool:
+    """没有能用的新闻原标题时先留下，让模型试一条严格标题。"""
+    rows = _candidate_rows(event)
+    if not rows or _first_original_title(rows):
+        return False
+    return any(_headline_blocked(source, title) for source, title in rows)
+
+
 def _ensure_shown_name(event: dict) -> None:
-    """主标题永远是原标题。要点写在 subtitle，这里不动它。"""
-    event["name"] = _first_original_title(_candidate_rows(event))
-    event["subtitle"] = str(event.get("subtitle") or "")
+    """主标题优先用新闻原标题。没有时，严格门槛通过的模型标题顶上，否则留空。"""
+    rows = _candidate_rows(event)
+    original = _first_original_title(rows)
+    subtitle = str(event.get("subtitle") or "")
+    if original:
+        event["name"] = original
+        event["subtitle"] = subtitle
+    elif (
+        _awaiting_news_title(event)
+        and subtitle
+        and _llm_title_reject_reason(subtitle, _event_source_text(event)) == ""
+    ):
+        event["name"] = subtitle
+        event["subtitle"] = ""
+    else:
+        event["name"] = ""
+        event["subtitle"] = subtitle
     event.pop("_llm_title_applied", None)
 
 
@@ -3079,16 +3118,38 @@ def _keep_shown_event(event: dict) -> bool:
     return _original_reject_reason(name, blobs) == ""
 
 
+def _subtitle_has_source_prefix(text: str) -> bool:
+    if _is_source_only(text):
+        return True
+    if _SOURCE_BRACKET.match(text) or _SOURCE_LABEL.match(text) or _SOURCE_DATELINE.match(text):
+        return True
+    return bool(_BROKER_NOTE.match(text) or _BROKER_TEAM_LEAD.match(text))
+
+
+def _subtitle_garbled(text: str) -> bool:
+    if "..." in text or "…" in text or _has_emoji(text):
+        return True
+    if _starts_fragment(text) or _title_incoherent(text) or _has_file_debris(text):
+        return True
+    if text[0].isdigit() or any(char in text for char in "【】[]"):
+        return True
+    if _ends_split_verb(text) or _ends_mid_number(text):
+        return True
+    return bool(_boundary_reason(text, []) or _surface_block_reason(text))
+
+
 def _subtitle_reject_reason(title: str, source: str = "") -> str:
-    """一句话要点。不合格就留空，不换主标题。"""
+    """一句话要点。只丢掉空的、乱的、来源前缀和寒暄。不套主标题的主谓宾门槛。"""
     text = _compact(title)
-    if not text:
+    del source
+    if not text or text == "事件":
         return "空标题"
-    reason = _llm_title_reject_reason(text, source)
-    if reason:
-        return reason
-    if not _SUBTITLE_MIN <= len(text) <= _SUBTITLE_MAX:
-        return "字数不符"
+    if any(mark in text for mark in _CHATTER_MARKS):
+        return "寒暄"
+    if _subtitle_has_source_prefix(text):
+        return "来源前缀"
+    if _subtitle_garbled(text):
+        return "乱码"
     return ""
 
 
@@ -3125,11 +3186,10 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "只输出 JSON："
         '{"events":[{"id":"1","title":"","concepts":[],"category":"",'
         '"direction":"利好或利空","importance":"重大或重要或一般或琐碎"}]}。'
-        "title 是一句话要点，12到18个字，写明主体和动作，例如美联储宣布降息25基点。"
-        "不要半句话，不要时间戳，不要【】，不要省略号，不要为了压字数把词从中间截断。"
-        "不要写成展示标题，不要超过18个字，也不要短于12个字。"
+        "title 是一句话要点，写明发生了什么，例如WTI原油期货收涨至91.85美元。"
+        "不要半句话，不要时间戳，不要【】，不要省略号，不要把词从中间截断。"
         "不要写早上好、各位或利空叙事。不要用「事件」当要点。"
-        "不要输出重点、点评或栏目标签。不要只写媒体名或公司名。"
+        "不要带来源前缀。不要输出重点、点评或栏目标签。不要只写媒体名。"
         "不要把已经点名的公司换成「公司」。不要写观点更新或券商组名。"
         f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
         "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
