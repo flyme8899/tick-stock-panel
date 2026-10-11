@@ -6,10 +6,11 @@
 聚类看标题里的主体、动作，以及标题里出现的细概念，再加同一时间窗。正文里抽到、
 但标题没写的概念不参与聚类，避免旁支概念把无关消息粘成一件事。同一主体和动作，
 或标题高度相似，会在较短时间窗内合并。「A与B签署」和「B与A签署」是同一组双方，
-不分前后。摘要只在标题没有主体时参与，避免各条资讯共用的页脚把整天粘成一件事。
+不分前后；双方和动作都相同的，合并窗口是整个交易日（上一收盘到下一 9:25），
+不再卡 6 小时。摘要只在标题没有主体时参与，避免各条资讯共用的页脚把整天粘成一件事。
 宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v9。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v10。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社），券商「电新/计算机/研究称」，以及研报文件名里的日期戳和 #，并停在句号前。
@@ -22,6 +23,10 @@
 签约、签署、战略合作要留下双方，不能只剩建发股份或只剩优必选。
 动词贴在句首、后面又接上另一组主体和动作的，是语序颠倒，退回清理后的原标题。
 截断必须停在分句边界，不能把「集体涨价」切成「集体」。
+没超过 28 字不截短，不切开连续的英文字母或数字，也不能把还带宾语的句子收成只有动作的半截。
+这种半截标题不能再单独占一条，免得和完整事件重复。
+标题末尾的券商组名（天风计算机）去掉。观点更新、话题用 & 拼起来的研报标签、
+停在「近八」这种没写完的数量，以及只有产品名没有主体的「Cybercab扩容提速」，都不进列表。
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
@@ -66,8 +71,8 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。双方顺序、语序和分句截断的判定变了，旧键不再套用。
-_TITLE_CACHE_VERSION = 9
+# 标题缓存按这个版本取。截断、交易日合并和研报残句的判定变了，旧键不再套用。
+_TITLE_CACHE_VERSION = 10
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -290,6 +295,22 @@ _BROKER_NOTE = re.compile(
     r"^(?!(?:国务院|发改委|工信部|证监会|财政部|央行|国资委|商务部|美联储|政治局|欧央行))"
     r"[\u4e00-\u9fff]{2,8}(?:电新|计算机|研究)称"
 )
+# 末尾或冒号前的组名。天风计算机、招商电新。没有这些券商名时，不因为句子里有「计算机」就删。
+_BROKER_HOUSES = (
+    "天风", "招商", "中信", "华泰", "中金", "国泰君安", "海通", "广发", "兴业",
+    "申万", "国信", "安信", "方正", "长江", "东吴", "浙商", "中泰", "国金", "光大",
+)
+_BROKER_DESKS = ("计算机", "电新", "研究", "策略")
+_BROKER_HOUSE = "|".join(sorted(_BROKER_HOUSES, key=len, reverse=True))
+_BROKER_DESK = "|".join(_BROKER_DESKS)
+_BROKER_TEAM_LEAD = re.compile(rf"^(?:{_BROKER_HOUSE})(?:{_BROKER_DESK})[：:]")
+_BROKER_TEAM_TAIL = re.compile(rf"(?:{_BROKER_HOUSE})(?:{_BROKER_DESK})$")
+# PCB设备&钓针观点更新这类研报标签。普通标题里的斜杠另有规则。
+_TOPIC_JOIN = re.compile(r"[\u4e00-\u9fff][&＆][\u4e00-\u9fff]")
+# 停在「近八」而后面没有单位，是半截数量，不是「近八成」或「降息25基点」。
+_MID_PHRASE_CUT = re.compile(r"(?:近|约|逾)[0-9０-９一二三四五六七八九十]+$")
+# 只有拉丁产品名加扩容、提速，没有中文主体。
+_SUBJECTLESS_PRODUCT = re.compile(r"^[A-Za-z][A-Za-z0-9]+(?:扩容|提速|加速|放量|提产)+$")
 # 1）和①是列表残句，不是事件标题。
 _LIST_MARKER = re.compile(r"(?:[0-9]+[)）]|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫])")
 _REUTERS_TAIL = re.compile(r"(?:[-|｜]\s*)?(?:Reuters|路透社|路透)$")
@@ -438,6 +459,7 @@ def _compute(now: datetime, store: NewsStore) -> dict:
     for event in events:
         _ensure_shown_name(event)
     events = [event for event in events if _keep_shown_event(event)]
+    events = _drop_cutoff_duplicates(events)
     if not events:
         return {
             "as_of": None,
@@ -1042,10 +1064,14 @@ def _same_policy_subject(left: dict, right: dict) -> bool:
 
 
 def _can_merge(left: dict, right: dict) -> bool:
+    # 同一组双方做同一件事时，合并这一交易日里的全部稿，00:13 和 08:39 也算一件。
+    # 其他合并仍看 6 小时。聚类按交易日分桶，不会把上一场收盘后的稿并进上午。
+    if _same_party_action(left, right):
+        return True
     gap = abs(left["published"] - right["published"])
     if gap > _CLUSTER_WINDOW:
         return False
-    if _same_subject_action(left, right) or _same_party_action(left, right):
+    if _same_subject_action(left, right):
         return True
     if _same_policy_subject(left, right):
         return True
@@ -1300,6 +1326,7 @@ def _display_clause_ok(text: str) -> bool:
         or _has_file_debris(body)
         or _watch_or_list_fragment(body)
         or _misordered_title(body)
+        or _surface_block_reason(body)
     ):
         return False
     if not body or body == "事件" or len(body) < 4 or len(body) > _TITLE_HARD:
@@ -1379,7 +1406,7 @@ def _cut_ellipsis_tail(text: str) -> str:
 def _prepare_headline(text: str) -> str:
     body = _cut_ellipsis_tail(_strip_source_prefix(text))
     body = _first_sentence(_stitch_subject_verb(body))
-    return _cut_glued_sentence(body)
+    return _attach_following_object(_cut_glued_sentence(body))
 
 
 def _cleaned_headline(text: str) -> str:
@@ -1427,42 +1454,85 @@ def _core_event_clause(text: str) -> str:
     return body
 
 
+def _is_ascii_alnum(char: str) -> bool:
+    return bool(char) and char.isascii() and char.isalnum()
+
+
+def _retreat_open_alnum(text: str, window: str) -> str:
+    """截断点落在字母或数字中间时，整串退回，不留下 Vicor对V 这种半个词。"""
+    if not window or not text.startswith(window) or len(window) >= len(text):
+        return window
+    if not (_is_ascii_alnum(window[-1]) and _is_ascii_alnum(text[len(window)])):
+        return window
+    while window and _is_ascii_alnum(window[-1]):
+        window = window[:-1]
+    return window
+
+
 def _clip_at_boundary(text: str) -> str:
-    if _title_incoherent(text) or _watch_or_list_fragment(text) or _misordered_title(text):
+    if (
+        _title_incoherent(text)
+        or _watch_or_list_fragment(text)
+        or _misordered_title(text)
+        or _surface_block_reason(text)
+    ):
         return ""
     core = _core_event_clause(text)
     if core and core != _compact(text):
         text = core
     if _has_file_debris(text):
         text = _strip_report_label(text)
-    if not text or text == "事件":
+    if not text or text == "事件" or _surface_block_reason(text):
         return ""
     if _display_clause_ok(text):
         return text
     signed = _signing_title(text)
     if signed:
         return signed
-    window = text[:_TITLE_HARD]
-    if len(text) > _TITLE_HARD and _ends_mid_number(window):
-        while window and window[-1].isdigit():
+    # 没超过上限就整句留下。残词（停在「政」上）仍要削掉，那不是按字数截断。
+    # 超长才按上限截，并且不能切开连续的字母或数字。
+    if len(text) <= _TITLE_HARD:
+        window = text
+        if _ends_abruptly(window) or _ends_split_verb(window) or _ends_mid_number(window):
+            while window and (
+                _ends_abruptly(window)
+                or _ends_split_verb(window)
+                or _ends_mid_number(window)
+                or window[-1] in "的和与及"
+            ):
+                window = window[:-1]
+    else:
+        window = _retreat_open_alnum(text, text[:_TITLE_HARD])
+        if _ends_mid_number(window):
+            while window and window[-1].isdigit():
+                window = window[:-1]
+            window = _retreat_open_alnum(text, window)
+        if len(text) > len(window) and _ends_split_verb(window):
             window = window[:-1]
-    if len(text) > len(window) and _ends_split_verb(window):
-        window = window[:-1]
-    cut = -1
-    for sep in ("以及", "并且", "同时", "和", "与", "及"):
-        index = window.rfind(sep)
-        if index >= 4:
-            cut = max(cut, index)
-    if cut >= 4:
-        window = window[:cut]
-    while window and (
-        _ends_abruptly(window) or _ends_split_verb(window) or _ends_mid_number(window) or window[-1] in "的和与及"
-    ):
-        window = window[:-1]
-    if _display_clause_ok(window):
+        cut = -1
+        for sep in ("以及", "并且", "同时", "和", "与", "及"):
+            index = window.rfind(sep)
+            if index >= 4:
+                cut = max(cut, index)
+        if cut >= 4:
+            window = window[:cut]
+        while window and (
+            _ends_abruptly(window)
+            or _ends_split_verb(window)
+            or _ends_mid_number(window)
+            or window[-1] in "的和与及"
+        ):
+            window = window[:-1]
+        window = _retreat_open_alnum(text, window)
+    if _display_clause_ok(window) and not _drops_known_action(window, text):
         return window
     repaired = _repair_headline(text)
-    if repaired and (_display_clause_ok(repaired) or _title_ok(repaired)):
+    if (
+        repaired
+        and not _drops_known_action(repaired, text)
+        and not _is_harmful_cutoff(repaired, text)
+        and (_display_clause_ok(repaired) or _title_ok(repaired))
+    ):
         return repaired
     if (
         len(window) >= 4
@@ -1471,6 +1541,8 @@ def _clip_at_boundary(text: str) -> str:
         and not _ends_abruptly(window)
         and not _ends_split_verb(window)
         and not _ends_mid_number(window)
+        and not _surface_block_reason(window)
+        and not _drops_known_action(window, text)
     ):
         return window
     return ""
@@ -1618,6 +1690,22 @@ def _has_file_debris(text: str) -> bool:
     return bool(_file_debris_reason(text))
 
 
+def _surface_block_reason(text: str) -> str:
+    """研报标签、没写完的数量、没有主体的产品名、整句只剩券商组名。"""
+    body = _compact(text)
+    if not body:
+        return ""
+    if "观点更新" in body or _TOPIC_JOIN.search(body):
+        return "研报标签"
+    if _MID_PHRASE_CUT.search(body):
+        return "结尾不完整"
+    if _SUBJECTLESS_PRODUCT.fullmatch(body):
+        return "缺少主体"
+    if _BROKER_TEAM_TAIL.search(body):
+        return "券商组名"
+    return ""
+
+
 def _looks_like_report_file(text: str) -> bool:
     body = _FILE_EXT.sub("", _compact(text))
     if not body:
@@ -1647,11 +1735,12 @@ def _strip_source_prefix(text: str) -> str:
     changed = True
     while body and changed:
         changed = False
-        for pattern in (_SOURCE_BRACKET, _SOURCE_DATELINE, _SOURCE_LABEL, _BROKER_NOTE):
+        for pattern in (_SOURCE_BRACKET, _SOURCE_DATELINE, _SOURCE_LABEL, _BROKER_NOTE, _BROKER_TEAM_LEAD):
             updated = pattern.sub("", body, count=1)
             if updated != body:
                 body = updated.lstrip("，。！？、；：")
                 changed = True
+    body = _BROKER_TEAM_TAIL.sub("", body)
     body = _REUTERS_TAIL.sub("", body)
     body = _BROKEN_BRACKET.sub("", body)
     body = _BRACKET_PAIR.sub("", body)
@@ -1826,6 +1915,46 @@ def _split_headline(text: str) -> tuple[str, str, str]:
     return lead, verb, obj.strip("，。！？、；：")
 
 
+def _clause_continues_object(text: str) -> bool:
+    """逗号后面没有新的主体和动作，就是上一句的宾语，不是另一件事。"""
+    body = _compact(text)
+    if not body or _starts_fragment(body) or _watch_or_list_fragment(body):
+        return False
+    for glue in _RUNON_GLUE:
+        if body.startswith(glue):
+            return False
+    for finder in (_tuple_action, _narrative_action, _directive_action):
+        index, verb = finder(body)
+        if not verb:
+            continue
+        if finder is _directive_action or _subject_ok(body[:index]):
+            return False
+    return True
+
+
+def _attach_following_object(body: str) -> str:
+    """不超过 28 字时，不要把「定调，固态电池…」收成只有「定调」。"""
+    parts = [part.strip() for part in _CLAUSE.split(body) if part.strip()]
+    if len(parts) < 2 or len(_compact(body)) > _TITLE_HARD:
+        return body
+    lead, action, obj = _split_headline(parts[0])
+    if not action or obj or not _subject_ok(lead):
+        return body
+    extra: list[str] = []
+    for part in parts[1:]:
+        if not _clause_continues_object(part):
+            break
+        extra.append(part)
+    if not extra:
+        return body
+    joined = parts[0] + "".join(extra)
+    if len(joined) > _TITLE_HARD:
+        return body
+    if _display_clause_ok(joined) or _title_ok(joined):
+        return joined
+    return body
+
+
 def _ends_mid_clause(text: str) -> bool:
     """停在「集体」或半个词上，说明这一句还没写完。"""
     body = _compact(text)
@@ -1866,6 +1995,7 @@ def _title_ok(title: str) -> bool:
         or _has_file_debris(text)
         or _watch_or_list_fragment(text)
         or _misordered_title(text)
+        or _surface_block_reason(text)
     ):
         return False
     if not text or len(text) > _TITLE_LIMIT or text in BROAD_SECTORS:
@@ -2182,6 +2312,9 @@ def _llm_title_reject_reason(title: str, source: str = "") -> str:
         return "不是具体事件"
     if _misordered_title(text):
         return "语序颠倒"
+    blocked = _surface_block_reason(text)
+    if blocked:
+        return blocked
     name_reason = _title_name_reject_reason(text)
     if name_reason:
         return name_reason
@@ -2220,6 +2353,8 @@ def _llm_title_reject_reason(title: str, source: str = "") -> str:
         return "主体被换成泛称"
     if source and _dropped_signing_party(text, source):
         return "缺少合作方"
+    if source and _cuts_any(text, [line for line in source.split("\n") if line.strip()]):
+        return "截断过短"
     lead, action, obj = _split_headline(text)
     if not (action and obj and _subject_ok(lead) and _concrete_subject(lead)):
         return "缺少主体、动作或宾语"
@@ -2267,6 +2402,7 @@ def _cleaned_display_ok(name: object) -> bool:
         or _is_commentary(text)
         or _watch_or_list_fragment(text)
         or _misordered_title(text)
+        or _surface_block_reason(text)
     ):
         return False
     if _core_event_clause(text) != text:
@@ -2281,25 +2417,91 @@ def _cleaned_display_ok(name: object) -> bool:
     return "..." not in text and "…" not in text
 
 
-def _fallback_cleaned_name(event: dict) -> str:
+def _event_title_sources(event: dict) -> list[str]:
     sources = [str(item) for item in (event.get("headlines") or [])]
     sources.append(str(event.get("headline") or ""))
     sources.append(str(event.get("name") or ""))
+    return [text for text in sources if text.strip()]
+
+
+def _drops_known_action(short: str, full: str) -> bool:
+    """截完以后原句里的动作不在了，这句不能上屏。"""
+    _lead, verb, _obj = _split_headline(full)
+    return bool(verb) and verb not in _compact(short)
+
+
+def _is_harmful_cutoff(short: str, long: str) -> bool:
+    """半截标题：切开了英文或数字，丢掉了动作，或把没超长的句子收成只有动作。"""
+    short_text = _compact(short)
+    long_text = _compact(long)
+    if not short_text or len(short_text) < 4 or len(short_text) >= len(long_text):
+        return False
+    if not long_text.startswith(short_text):
+        return False
+    if _cut_glued_sentence(long_text) == short_text:
+        return False
+    rest = long_text[len(short_text):]
+    if re.fullmatch(r"[.。…]+", rest):
+        return False
+    nxt = rest[0]
+    prev = short_text[-1]
+    if _is_ascii_alnum(prev) and _is_ascii_alnum(nxt):
+        return True
+    if _drops_known_action(short_text, long_text):
+        return True
+    return nxt not in "，。！？、；：" and len(long_text) <= _TITLE_HARD and not _ends_abruptly(long_text)
+
+
+def _cuts_any(name: str, sources: list[str]) -> bool:
+    for raw in sources:
+        if _is_harmful_cutoff(name, raw) or _is_harmful_cutoff(name, _cleaned_headline(raw)):
+            return True
+    return False
+
+
+def _fallback_cleaned_name(event: dict) -> str:
+    sources = _event_title_sources(event)
+    found: list[str] = []
     for text in sources:
         cleaned = _cleaned_headline(text)
-        if _fallback_title_ok(cleaned):
-            return cleaned
-    return ""
+        if cleaned and _fallback_title_ok(cleaned) and cleaned not in found:
+            found.append(cleaned)
+    if not found:
+        return ""
+    found.sort(key=len, reverse=True)
+    for candidate in found:
+        if any(candidate != other and _is_harmful_cutoff(candidate, other) for other in found):
+            continue
+        return candidate
+    return found[0]
 
 
 def _ensure_shown_name(event: dict) -> None:
-    if event.get("_llm_title_applied") and _llm_title_ok(str(event.get("name") or "")):
-        return
+    sources = _event_title_sources(event)
     name = str(event.get("name") or "")
-    if _fallback_title_ok(name):
+    if event.get("_llm_title_applied") and _llm_title_ok(name) and not _cuts_any(name, sources):
+        return
+    if _fallback_title_ok(name) and not _cuts_any(name, sources):
         return
     event["name"] = _fallback_cleaned_name(event)
     event.pop("_llm_title_applied", None)
+
+
+def _drop_cutoff_duplicates(events: list[dict]) -> list[dict]:
+    """半截标题如果已经有完整的那一条，就不再单列。"""
+    texts = [_event_title_sources(event) for event in events]
+    names = [_compact(str(event.get("name") or "")) for event in events]
+    drop: set[int] = set()
+    for index, name in enumerate(names):
+        if not name:
+            continue
+        for other, blobs in enumerate(texts):
+            if other == index:
+                continue
+            if names[other] and (_is_harmful_cutoff(name, names[other]) or _cuts_any(name, blobs)):
+                drop.add(index)
+                break
+    return [event for index, event in enumerate(events) if index not in drop]
 
 
 def _has_ashare_mapping(event: dict) -> bool:
@@ -2381,6 +2583,8 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "不要把已经点名的公司换成「公司」，立讯精密仍写立讯精密。"
         "不要把动词放在主体前面，例如不要写成「重申…白宫…签署」。"
         "标题写不下时停在分句边界，不要把动词从句子中间切掉。"
+        "不要在英文字母或数字中间截断。没超过28个字的标题不要截短，不要只留下动作、把宾语丢掉。"
+        "不要在标题末尾写天风计算机这类券商组名，不要写观点更新这类研报标签。"
         "冒号前面如果是公司名，要保留公司名。公司名后面接着「公司」或「本公司」时，用公司名替换，不要写成「公司」。"
         "不要以持续关注开头，不要写1）或①这样的列表序号。"
         "不要写招商电新称、计算机称、研究称这类券商前缀。"

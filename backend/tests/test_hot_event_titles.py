@@ -1427,12 +1427,12 @@ def test_truncation_stops_at_the_clause_boundary():
 
 
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v9 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v10 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 9
-    reset_store_for_tests(tmp_path / "cache-v9.sqlite")
+    assert hot_mod._TITLE_CACHE_VERSION == 10
+    reset_store_for_tests(tmp_path / "cache-v10.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
@@ -1442,6 +1442,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v6:{fingerprint}"] = {"title": "美联储降息旧缓存第六版"}
     hot_mod._LLM_CACHE[f"title-v7:{fingerprint}"] = {"title": "美联储降息旧缓存第七版"}
     hot_mod._LLM_CACHE[f"title-v8:{fingerprint}"] = {"title": "美联储降息旧缓存第八版"}
+    hot_mod._LLM_CACHE[f"title-v9:{fingerprint}"] = {"title": "美联储降息旧缓存第九版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1455,6 +1456,107 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     assert named["events"][0]["name"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
     assert all(
-        not str(key).startswith(("title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:"))
+        not str(key).startswith((
+            "title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:", "title-v9:",
+        ))
         for key in hot_mod._LLM_CACHE
     )
+
+
+def _insert_at(source_id: str, title: str, hour: int, minute: int, source: str = "cls") -> None:
+    status = get_store().insert_item(
+        source=source,
+        source_id=source_id,
+        published_at=_publish(date(2026, 10, 9), hour, minute),
+        author="",
+        title=title,
+        clean_text=title,
+        raw=None,
+        content_hash=source_id,
+        url="",
+        level="",
+        media_ids=[],
+        extra=None,
+        mentions=[],
+    )
+    assert status == "inserted"
+
+
+def test_under_limit_titles_stay_whole_and_latin_is_not_split():
+    """没超过 28 字不截短。超长时也不能把 VPD 切成 V。"""
+    vicor = "Vicor对VPD发起337调查"
+    plan = "十五五政策定调固态电池产业化进入关键期"
+    assert _keyword_title([{"title": vicor}]) == vicor
+    assert _cleaned_headline(vicor) == vicor
+    assert _keyword_title([{"title": plan}]) == plan
+    assert _cleaned_headline(plan) == plan
+    comma = "十五五政策定调，固态电池产业化进入关键期"
+    assert _keyword_title([{"title": comma}]) == plan
+    assert _cleaned_headline(comma) == plan
+    filler = "甲" * 21
+    assert len(filler + "Vicor对V") == 28
+    clipped = _keyword_title([{"title": filler + vicor}])
+    assert "对V" not in clipped.replace("对VPD", "")
+    assert _keyword_title([{"title": "锂电行业更新-20261009#十五五政策定调"}]) == "十五五政策定调"
+
+
+def test_cutoff_titles_do_not_duplicate_the_full_event(tmp_path):
+    """半截标题不能和完整事件并存。"""
+    vicor = "Vicor对VPD发起337调查"
+    plan = "十五五政策定调固态电池产业化进入关键期"
+    reset_store_for_tests(tmp_path / "cutoff-dup.sqlite")
+    _insert("plan", plan, 1)
+    _insert("plan-cut", "十五五政策定调", 2, source="wscn")
+    _insert_rich("vicor", vicor, 10, 3, level="A")
+    _insert_rich("vicor-cut", "Vicor对V", 10, 4, level="A", source="wscn")
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert names.count(plan) == 1
+    assert "十五五政策定调" not in names
+    assert names.count(vicor) == 1
+    assert "Vicor对V" not in names
+
+
+def test_broker_tail_report_label_and_subjectless_product():
+    """去掉末尾券商组名，研报标签和没写完的数量不上屏，没有主体就退回原标题。"""
+    vicor = "Vicor对VPD发起337调查"
+    assert _keyword_title([{"title": "某某公司发布新品天风计算机"}]) == "某某公司发布新品"
+    assert _keyword_title([{"title": f"天风计算机：{vicor}"}]) == vicor
+    assert _llm_title_reject_reason("某某公司发布新品天风计算机") == "券商组名"
+    label = "PCB设备&钓针观点更新"
+    assert _llm_title_reject_reason(label) == "研报标签"
+    assert not _fallback_title_ok(label)
+    assert _keyword_title([{"title": label}]) == ""
+    assert _keyword_title([{"title": "PCB设备&钓针观点更新2026"}]) == ""
+    cutoff = "运作满一年产品近八"
+    assert _llm_title_reject_reason(cutoff) == "结尾不完整"
+    assert not _fallback_title_ok(cutoff)
+    assert _keyword_title([{"title": cutoff}]) == ""
+    bare = "Cybercab扩容提速"
+    assert _llm_title_reject_reason(bare) == "缺少主体"
+    assert not _fallback_title_ok(bare)
+    assert _keyword_title([{"title": bare}]) == ""
+    source = "特斯拉发布Cybercab扩容提速"
+    event = {"name": bare, "headline": source, "headlines": [source]}
+    _ensure_shown_name(event)
+    assert event["name"] == source
+    assert _keyword_title([{"title": "美联储降息25基点"}]) == "美联储降息25基点"
+    kept = _keyword_title([{"title": "国务院研究称将出台增量政策"}])
+    assert kept.startswith("国务院") and "研究称" in kept
+
+
+def test_same_party_merges_across_the_trading_day(tmp_path):
+    """同一组双方、同一动作，00:13 和 08:39 并成一件。别的合并仍看 6 小时。"""
+    reset_store_for_tests(tmp_path / "party-day.sqlite")
+    _insert_at("seres-night", "赛力斯与宁德时代签署长期战略合作协议", 0, 13)
+    _insert_at("seres-morning", "宁德时代与赛力斯签署长期战略合作协议", 8, 39, source="wscn")
+    _insert_at("seres-buyback", "赛力斯与宁德时代回购股份", 8, 40)
+    _insert_at("huawei-night", "华为发布盘古新模型", 0, 13)
+    _insert_at("huawei-morning", "华为发布盘古新模型", 8, 39, source="wscn")
+    events = top_hot_events(NOW)["events"]
+    seres = [event for event in events if "赛力斯" in event["name"] and "宁德时代" in event["name"]]
+    signing = [event for event in seres if "回购" not in event["name"]]
+    assert len(signing) == 1
+    assert signing[0]["mentions"] == 2
+    assert sum(1 for event in events if "回购" in event["name"]) == 1
+    huawei = [event for event in events if "盘古" in event["name"]]
+    assert len(huawei) == 2
