@@ -136,11 +136,50 @@ export const SAMPLE_SCREEN = [
   { code: 'NVDA', name: '英伟达', market: 'us', score: 69, reason: '高位波动加大，只保留观察' },
 ]
 
-export const SAMPLE_RISK = [
-  { name: '行业集中', level: '偏高', detail: '样例组合里消费权重超过 40%' },
-  { name: '单一标的', level: '中性', detail: '最大持仓约占净值 18%' },
-  { name: '汇率', level: '偏低', detail: '港股与美股敞口有部分对冲' },
-]
+export const SAMPLE_RISK = {
+  as_of: '2026-10-10',
+  currency: 'CNY',
+  cost_method: 'fifo',
+  thresholds: {
+    concentration_alert_pct: 35,
+    drawdown_alert_pct: 15,
+    stop_loss_alert_pct: 10,
+    stop_loss_near_ratio: 0.8,
+    lookback_days: 180,
+  },
+  concentration: {
+    total_market_value: 1280000,
+    top_weight_pct: 42.5,
+    alert: true,
+    top_positions: [
+      { symbol: '600519', market_value_base: 544000, weight_pct: 42.5, is_alert: true },
+      { symbol: '000858', market_value_base: 320000, weight_pct: 25, is_alert: false },
+    ],
+  },
+  sector_concentration: {
+    total_market_value: 1280000,
+    top_weight_pct: 67.5,
+    alert: true,
+    top_sectors: [
+      { sector: '白酒', market_value_base: 864000, weight_pct: 67.5, symbol_count: 2, is_alert: true },
+    ],
+  },
+  drawdown: {
+    series_points: 40,
+    max_drawdown_pct: 8.2,
+    current_drawdown_pct: 3.1,
+    alert: false,
+    fx_stale: false,
+  },
+  stop_loss: {
+    near_alert: true,
+    triggered_count: 1,
+    near_count: 1,
+    items: [
+      { symbol: '000858', avg_cost: 120, last_price: 105, loss_pct: 12.5, is_triggered: true },
+    ],
+  },
+}
 
 export const SAMPLE_ALERTS = [
   { name: '茅台跌破参考位', symbol: '600519', status: '启用', last: '尚未触发' },

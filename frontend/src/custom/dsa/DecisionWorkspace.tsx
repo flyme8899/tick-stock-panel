@@ -48,6 +48,7 @@ import {
 } from './client'
 import { DashboardPanel } from './DashboardPanel'
 import { formatPercentPoints } from './dashboardHistory'
+import { PortfolioRiskView } from './portfolioRisk'
 import {
   SAMPLE_ALERTS,
   SAMPLE_NEWS,
@@ -97,6 +98,186 @@ function Panel({ title, hint, children, extra }: { title: string; hint?: string;
 
 function Notice({ children }: { children: ReactNode }) {
   return <p className="rounded-btn bg-elevated px-3 py-2 text-xs leading-relaxed text-secondary">{children}</p>
+}
+
+function RawJson({ data }: { data: unknown }) {
+  if (data == null) return null
+  return (
+    <details data-raw-json className="mt-3">
+      <summary className="cursor-pointer text-xs text-secondary">原始数据</summary>
+      <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-secondary">{JSON.stringify(data, null, 2)}</pre>
+    </details>
+  )
+}
+
+function countOf(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : '—'
+}
+
+const CAPABILITY_STATUS: Record<string, string> = {
+  ok: '可用',
+  partial: '部分可用',
+  unconfigured: '未配置',
+  unavailable: '不可用',
+  unknown: '未知',
+  degraded: '降级',
+  stale: '过期',
+}
+
+export function CapabilitySummary({ data }: { data: unknown }) {
+  if (!isRecord(data)) return null
+  const providers = asRecords(data.providers)
+  const datasets = asRecords(data.datasets)
+  const priorities = asRecords(data.priorities)
+  if (providers.length === 0 && datasets.length === 0 && priorities.length === 0) {
+    return <p className="text-xs text-muted">还没有数据源能力说明。</p>
+  }
+  return (
+    <div className="space-y-3">
+      {providers.length > 0 && (
+        <ul className="space-y-2">
+          {providers.map(item => (
+            <li key={textOf(item.name)} className="rounded-lg border border-border bg-base px-3 py-2">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="text-sm text-foreground">{textOf(item.label, textOf(item.name))}</span>
+                <span className="shrink-0 text-[11px] text-secondary">{CAPABILITY_STATUS[textOf(item.status, '')] ?? textOf(item.status)}</span>
+              </div>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
+                {Array.isArray(item.markets) ? item.markets.join('、') : '—'}
+                {Array.isArray(item.datasets) && item.datasets.length > 0 ? ` · ${item.datasets.join('、')}` : ''}
+              </p>
+              {typeof item.last_error === 'string' && item.last_error && <p className="mt-1 text-[11px] text-warning">{item.last_error}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {datasets.length > 0 && (
+        <ul className="divide-y divide-border text-xs">
+          {datasets.map(item => (
+            <li key={textOf(item.dataset)} className="flex items-baseline justify-between gap-3 py-1.5">
+              <span className="min-w-0 truncate text-foreground">{textOf(item.dataset)}</span>
+              <span className="shrink-0 text-muted">{CAPABILITY_STATUS[textOf(item.status, '')] ?? textOf(item.status)}{item.source ? ` · ${textOf(item.source, '')}` : ''}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {priorities.length > 0 && (
+        <ul className="space-y-1 text-[11px] text-secondary">
+          {priorities.map(item => (
+            <li key={textOf(item.scenario)}>
+              {textOf(item.scenario)}：{Array.isArray(item.providers) ? item.providers.join(' → ') : '—'}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+export function BacktestSummary({ data }: { data: unknown }) {
+  if (!isRecord(data)) return null
+  const stats = [
+    ['候选', data.processed],
+    ['写入', data.saved],
+    ['完成', data.completed],
+    ['数据不足', data.insufficient],
+    ['错误', data.errors],
+  ] as const
+  return (
+    <div className="mt-3 space-y-2">
+      <dl data-backtest-summary className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+        {stats.map(([label, value]) => (
+          <div key={label} className="rounded-lg border border-border bg-base px-3 py-2">
+            <dt className="text-[11px] text-muted">{label}</dt>
+            <dd className="num text-sm text-foreground">{countOf(value)}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="text-[11px] text-muted">评估窗口 {countOf(data.applied_eval_window_days)} 个交易日</p>
+      {typeof data.message === 'string' && data.message && <p className="text-xs leading-relaxed text-secondary">{data.message}</p>}
+    </div>
+  )
+}
+
+export function ImportSummary({ data }: { data: unknown }) {
+  if (!isRecord(data)) return null
+  const items = asRecords(data.items)
+  const codes = Array.isArray(data.codes) ? data.codes.filter((item): item is string => typeof item === 'string' && item.length > 0) : []
+  if (items.length === 0 && codes.length === 0) {
+    return <EmptyState icon={Upload} title="没有识别出代码" hint="换一段文本或文件再试。" />
+  }
+  const rows: Record<string, unknown>[] = items.length > 0 ? items : codes.map(code => ({ code }))
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full min-w-[24rem] text-left text-xs">
+        <thead className="text-muted">
+          <tr>
+            <th className="py-1 pr-3 font-normal">代码</th>
+            <th className="py-1 pr-3 font-normal">名称</th>
+            <th className="py-1 font-normal">置信度</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => (
+            <tr key={`${textOf(row.code, 'row')}-${index}`} className="border-t border-border">
+              <td className="whitespace-nowrap py-1.5 pr-3 font-mono text-foreground">{textOf(row.code)}</td>
+              <td className="whitespace-nowrap py-1.5 pr-3">{textOf(row.name, '')}</td>
+              <td className="whitespace-nowrap py-1.5 text-secondary">{textOf(row.confidence, '')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+const USAGE_CALL_TYPES: Record<string, string> = {
+  analysis: '个股分析',
+  agent: '问股',
+  market_review: '大盘复盘',
+}
+
+export function UsageSummary({ data }: { data: unknown }) {
+  if (!isRecord(data)) return null
+  const period = textOf(data.period, '')
+  const periodLabel = period === 'today' ? '今日' : period === 'month' ? '本月' : period === 'all' ? '全部' : period || '—'
+  return (
+    <div className="mt-2 space-y-3">
+      <p className="text-[11px] text-muted">{periodLabel} · {textOf(data.from_date, '')} 至 {textOf(data.to_date, '')}</p>
+      <dl data-usage-summary className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {([
+          ['调用', data.total_calls],
+          ['输入 token', data.total_prompt_tokens],
+          ['输出 token', data.total_completion_tokens],
+        ] as [string, unknown][]).map(([label, value]) => (
+          <div key={String(label)} className="rounded-lg border border-border bg-base px-3 py-2">
+            <dt className="text-[11px] text-muted">{label}</dt>
+            <dd className="num text-sm text-foreground">{countOf(value)}</dd>
+          </div>
+        ))}
+      </dl>
+      {asRecords(data.by_call_type).length > 0 && (
+        <ul className="divide-y divide-border text-xs">
+          {asRecords(data.by_call_type).map(row => (
+            <li key={textOf(row.call_type)} className="flex justify-between gap-3 py-1.5">
+              <span className="text-foreground">{USAGE_CALL_TYPES[textOf(row.call_type, '')] ?? textOf(row.call_type)}</span>
+              <span className="num text-muted">{countOf(row.calls)} 次 · {countOf(row.total_tokens)} token</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {asRecords(data.by_model).length > 0 && (
+        <ul className="divide-y divide-border text-xs">
+          {asRecords(data.by_model).map(row => (
+            <li key={textOf(row.model)} className="flex justify-between gap-3 py-1.5">
+              <span className="min-w-0 truncate font-mono text-foreground">{textOf(row.model)}</span>
+              <span className="num shrink-0 text-muted">{countOf(row.calls)} 次</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 function Failure({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
@@ -469,7 +650,12 @@ function Markets({ reachable, markets }: { reachable: boolean; markets: { id: st
       <Panel title="上游数据能力">
         {!reachable && <Notice>连接决策服务后，这里显示各数据源实际可用的能力。</Notice>}
         {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
-        {query.data != null && <pre className="max-h-80 overflow-auto whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-secondary">{JSON.stringify(query.data, null, 2)}</pre>}
+        {query.data != null && (
+          <>
+            <CapabilitySummary data={query.data} />
+            <RawJson data={query.data} />
+          </>
+        )}
       </Panel>
     </div>
   )
@@ -679,7 +865,7 @@ function EtfRotation() {
 function Chat({ reachable }: { reachable: boolean }) {
   const [skill, setSkill] = useState('')
   const [input, setInput] = useState('')
-  const [lines, setLines] = useState<{ role: 'user' | 'assistant'; text: string }[]>([])
+  const [lines, setLines] = useState<{ role: 'user' | 'assistant'; text: string; raw?: unknown }[]>([])
   const send = useMutation({
     mutationFn: (message: string) => dsaUpstream<Record<string, unknown>>('agent/chat', {
       method: 'POST',
@@ -687,7 +873,7 @@ function Chat({ reachable }: { reachable: boolean }) {
     }),
     onSuccess: data => {
       const text = ['reply', 'content', 'message', 'text'].map(key => data[key]).find(item => typeof item === 'string') as string | undefined
-      setLines(current => [...current, { role: 'assistant', text: text || JSON.stringify(data, null, 2) }])
+      setLines(current => [...current, { role: 'assistant', text: text || '没有可显示的回复。', raw: text ? undefined : data }])
     },
     onError: (error: DsaError) => {
       setLines(current => [...current, { role: 'assistant', text: error.message }])
@@ -708,6 +894,7 @@ function Chat({ reachable }: { reachable: boolean }) {
         {lines.map((line, index) => (
           <div key={`${line.role}-${index}`} className={cn('rounded-lg px-3 py-2 text-xs leading-relaxed', line.role === 'user' ? 'bg-accent/10 text-foreground' : 'bg-elevated text-secondary')}>
             {line.text}
+            {line.raw != null && <RawJson data={line.raw} />}
           </div>
         ))}
       </div>
@@ -897,14 +1084,24 @@ function Alerts({ sample, reachable }: { sample: boolean; reachable: boolean }) 
       {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
       {rows.length === 0 && !query.isError && <EmptyState icon={Bell} title="还没有决策预警" />}
       <ul className="divide-y divide-border">
-        {rows.map((row, index) => (
-          <li key={`${textOf(row.name, 'rule')}-${index}`} className="flex items-center justify-between gap-3 py-2 text-xs">
-            <span className="text-foreground">{textOf(row.name, textOf(row.title))}</span>
-            <span className="font-mono text-muted">{textOf(row.symbol, textOf(row.stock_code, ''))}</span>
-            <span className="text-secondary">{textOf(row.status, textOf(row.enabled, ''))}</span>
-            <span className="text-muted">{textOf(row.last, textOf(row.last_triggered_at, ''))}</span>
-          </li>
-        ))}
+        {rows.map((row, index) => {
+          const enabled = typeof row.enabled === 'boolean' ? (row.enabled ? '启用' : '停用') : textOf(row.status, '')
+          const target = textOf(row.target, textOf(row.symbol, textOf(row.stock_code, '')))
+          const kind = textOf(row.alert_type, '')
+          const severity = textOf(row.severity, '')
+          return (
+            <li key={`${textOf(row.id, textOf(row.name, 'rule'))}-${index}`} className="py-2">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="min-w-0 truncate text-sm text-foreground">{textOf(row.name, textOf(row.title))}</span>
+                {enabled && <span className="shrink-0 text-[11px] text-secondary">{enabled}</span>}
+              </div>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
+                {[target, kind, severity].filter(Boolean).join(' · ') || '—'}
+              </p>
+              <p className="text-[11px] text-muted">最近触发 {textOf(row.last_triggered_at, textOf(row.last, '尚未触发'))}</p>
+            </li>
+          )
+        })}
       </ul>
     </Panel>
   )
@@ -1165,32 +1362,17 @@ function Portfolio({ sample, reachable }: { sample: boolean; reachable: boolean 
     enabled: reachable,
     retry: false,
   })
-  const rows = reachable ? asRecords(risk.data) : sample ? sampleRecords(SAMPLE_RISK) : []
+  const data = reachable ? risk.data : sample ? SAMPLE_RISK : null
   return (
     <Panel title={sample ? '持仓风险 · 样例' : '持仓风险'} hint="DSA 自己的账户账本。持仓提醒和模拟盘的数据不会混进来。">
       {risk.isError && <Failure error={risk.error} onRetry={() => risk.refetch()} />}
-      {rows.length === 0 && !risk.isError && risk.data == null && (
-        <EmptyState
-          icon={PieChart}
-          title={reachable ? '还没有组合账户' : '决策服务未连接'}
-          hint={reachable ? '可在上游导入成交。' : undefined}
-        />
-      )}
-      {rows.length > 0 && (
-        <ul className="divide-y divide-border">
-          {rows.map((row, index) => (
-            <li key={`${textOf(row.name)}-${index}`} className="py-2 text-xs">
-              <div className="flex justify-between gap-3">
-                <span className="text-foreground">{textOf(row.name, textOf(row.title))}</span>
-                <span className="text-warning">{textOf(row.level, '')}</span>
-              </div>
-              <p className="mt-0.5 text-muted">{textOf(row.detail, textOf(row.summary, ''))}</p>
-            </li>
-          ))}
-        </ul>
-      )}
-      {rows.length === 0 && risk.data != null && (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-secondary">{JSON.stringify(risk.data, null, 2)}</pre>
+      {!reachable && !sample && <EmptyState icon={PieChart} title="决策服务未连接" />}
+      {reachable && risk.isPending && risk.data == null && <p className="text-xs text-muted">加载中…</p>}
+      {data != null && !risk.isError && (
+        <>
+          <PortfolioRiskView data={data} />
+          <RawJson data={data} />
+        </>
       )}
     </Panel>
   )
@@ -1211,7 +1393,12 @@ function DecisionBacktest({ reachable, initialCode }: { reachable: boolean; init
         <button className={primaryBtn} type="submit" disabled={!reachable || run.isPending}>评估历史建议</button>
       </form>
       {run.isError && <div className="mt-2"><Failure error={run.error} /></div>}
-      {run.data != null && <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-secondary">{JSON.stringify(run.data, null, 2)}</pre>}
+      {run.data != null && (
+        <>
+          <BacktestSummary data={run.data} />
+          <RawJson data={run.data} />
+        </>
+      )}
     </Panel>
   )
 }
@@ -1251,7 +1438,12 @@ function ImportCodes({ reachable }: { reachable: boolean }) {
         </label>
       </div>
       {(parseText.isError || parseFile.isError) && <div className="mt-2"><Failure error={parseText.error ?? parseFile.error} /></div>}
-      {result != null && <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-secondary">{JSON.stringify(result, null, 2)}</pre>}
+      {result != null && (
+        <>
+          <ImportSummary data={result} />
+          <RawJson data={result} />
+        </>
+      )}
     </Panel>
   )
 }
@@ -1283,7 +1475,12 @@ function SettingsPanel({
           用量接口在服务可用时显示在下方。
         </p>
         {usage.isError && <div className="mt-2"><Failure error={usage.error} /></div>}
-        {usage.data != null && <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-secondary">{JSON.stringify(usage.data, null, 2)}</pre>}
+        {usage.data != null && (
+          <>
+            <UsageSummary data={usage.data} />
+            <RawJson data={usage.data} />
+          </>
+        )}
       </Panel>
       <Panel title="和现有功能怎么共存">
         <ul className="space-y-2">
