@@ -1307,13 +1307,74 @@ def test_growth_fallback_needs_a_concrete_subject(tmp_path):
     assert "宁德时代净利润同比增长50%" in names
 
 
+def test_company_colon_keeps_the_named_subject():
+    """公司名加冒号不是来源。后面以公司/本公司起笔时，换成这家公司。"""
+    raw = "立讯精密：公司及立讯技术涉337调查 尚处立案初期"
+    expected = "立讯精密及立讯技术涉337调查尚处立案初期"
+    assert _keyword_title([{"title": raw}]) == expected
+    assert _cleaned_headline(raw) == expected
+    assert _llm_title_reject_reason("公司及立讯技术涉337调查尚处立案初期", raw) == "主体被换成泛称"
+    own = "立讯精密：本公司及立讯技术涉337调查尚处立案初期"
+    assert _keyword_title([{"title": own}]) == expected
+    assert _llm_title_reject_reason("本公司及立讯技术涉337调查尚处立案初期", own) == "主体被换成泛称"
+    assert _keyword_title([{"title": "央视财经：橡胶价格大涨超预期"}]) == "橡胶价格大涨超预期"
+    assert _keyword_title([{"title": "财联社：橡胶价格大涨超预期"}]) == "橡胶价格大涨超预期"
+    assert _keyword_title([{"title": "新华社：工信部出台机器人补贴"}]) == "工信部出台机器人补贴"
+    assert _llm_title_reject_reason(
+        "公司在前三季度净利润增长50%",
+        "【财联社】公司在前三季度净利润增长50%",
+    ) == ""
+    assert _llm_title_reject_reason("航运公司上调运价", "航运公司上调运价") == ""
+
+
+def test_watch_list_and_broker_prefixes_prefer_the_event():
+    """持续关注和 1）、① 不是标题。券商电新/计算机/研究称要去掉。"""
+    raw = "景旺电子：Q3利润加速释放…持续关注1）Q3业绩增长强劲"
+    assert _llm_title_reject_reason("持续关注1）Q3业绩增长强") == "不是具体事件"
+    assert _llm_title_reject_reason("①Q3业绩增长强劲") == "不是具体事件"
+    assert not _fallback_title_ok("持续关注1）Q3业绩增长强")
+    assert _keyword_title([{"title": "持续关注1）Q3业绩增长强"}]) == ""
+    assert _keyword_title([{"title": raw}]) == "景旺电子Q3利润加速释放"
+    assert _cleaned_headline(raw) == "景旺电子Q3利润加速释放"
+
+    assert _keyword_title([{"title": "招商电新称碳酸锂报价继续上涨"}]) == "碳酸锂报价继续上涨"
+    assert _keyword_title([{"title": "中信计算机称存储芯片厂宣布涨价"}]) == "存储芯片厂宣布涨价"
+    assert _keyword_title([{"title": "华泰研究称美联储降息25基点"}]) == "美联储降息25基点"
+    kept = _keyword_title([{"title": "国务院研究称将出台增量政策"}])
+    assert kept.startswith("国务院") and "出台" in kept and "研究称" in kept
+
+
+def test_signing_titles_keep_both_parties(tmp_path):
+    """签约和战略合作要留下双方，不能剪成只剩建发股份。"""
+    paired = "建发股份与优必选战略合作签约"
+    assert _keyword_title([{"title": paired}]) == paired
+    colon = "建发股份：与优必选达成战略合作并签约"
+    colon_title = _keyword_title([{"title": colon}])
+    assert "建发股份" in colon_title and "优必选" in colon_title
+    long = "建发股份与优必选签署战略合作协议并将在机器人领域展开全面合作"
+    long_title = _keyword_title([{"title": long}])
+    assert long_title == "建发股份与优必选签署战略合作"
+    assert "建发股份" in long_title and "优必选" in long_title
+    assert _llm_title_reject_reason("建发股份战略合作签约", paired) == "缺少合作方"
+    assert _llm_title_reject_reason(paired, paired) != "缺少合作方"
+
+    reset_store_for_tests(tmp_path / "signing-parties.sqlite")
+    _insert("pair", paired, 1)
+    _insert("colon", colon, 2)
+    _insert_rich("long", long, 11, 3, level="A")
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert "建发股份战略合作签约" not in names
+    assert all("建发股份" not in name or "优必选" in name for name in names)
+    assert any("建发股份" in name and "优必选" in name for name in names)
+
+
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v7 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v8 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 7
-    reset_store_for_tests(tmp_path / "cache-v7.sqlite")
+    assert hot_mod._TITLE_CACHE_VERSION == 8
+    reset_store_for_tests(tmp_path / "cache-v8.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
@@ -1321,6 +1382,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v4:{fingerprint}"] = {"title": "美联储降息25基点"}
     hot_mod._LLM_CACHE[f"title-v5:{fingerprint}"] = {"title": "美联储降息二十五基点旧缓存"}
     hot_mod._LLM_CACHE[f"title-v6:{fingerprint}"] = {"title": "美联储降息旧缓存第六版"}
+    hot_mod._LLM_CACHE[f"title-v7:{fingerprint}"] = {"title": "美联储降息旧缓存第七版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1333,4 +1395,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     named = top_hot_events(NOW)
     assert named["events"][0]["name"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
-    assert all(not str(key).startswith(("title-v4:", "title-v5:", "title-v6:")) for key in hot_mod._LLM_CACHE)
+    assert all(
+        not str(key).startswith(("title-v4:", "title-v5:", "title-v6:", "title-v7:"))
+        for key in hot_mod._LLM_CACHE
+    )
