@@ -896,7 +896,7 @@ def test_bad_fallback_titles_are_rejected_and_dropped(tmp_path, monkeypatch, cap
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         names = [event["name"] for event in top_hot_events(NOW)["events"]]
     assert "热门事件标题未采用: 市场没有太关注到公司近期正在进行" in caplog.text
-    assert "缺少主体、动作或宾语" in caplog.text
+    assert "不是具体事件" in caplog.text
     for bad in _FALLBACK_BAD:
         assert bad not in names
     assert "美联储降息25基点" in names
@@ -1174,19 +1174,153 @@ def test_commentary_titles_fall_back_or_drop(tmp_path, monkeypatch, caplog):
     assert "宁德时代发布固态电池" in names
 
 
-def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v6 后，旧键里的标题即使当时能用也不再套用。"""
+def test_named_company_is_not_replaced_with_generic(tmp_path, monkeypatch, caplog):
+    """点名的公司不能换成「公司」。原标题本来就写公司的，仍然可以。"""
+    import logging
+
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 6
-    reset_store_for_tests(tmp_path / "cache-v6.sqlite")
+    source = "立讯精密及立讯技术涉337调查尚处立案初期"
+    swapped = "公司及立讯技术涉337调查尚处立案初期"
+    assert _keyword_title([{"title": source}]) == source
+    assert _llm_title_reject_reason(swapped, source) == "主体被换成泛称"
+    assert _llm_title_reject_reason("公司在前三季度净利润增长50%") == ""
+    assert _llm_title_reject_reason(
+        "公司在前三季度净利润增长50%",
+        "公司在前三季度净利润增长50%",
+    ) == ""
+    assert _llm_title_reject_reason("航运公司上调运价", "航运公司上调运价") == ""
+
+    reset_store_for_tests(tmp_path / "luxshare-name.sqlite")
+    _insert("lux", source, 3)
+
+    def generic(_prompt: str, **_kwargs: object) -> str:
+        return json.dumps({"title": swapped}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", generic)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert "主体被换成泛称" in caplog.text
+    assert any(name.startswith("立讯精密") for name in names)
+    assert all(not name.startswith("公司及") for name in names)
+
+
+def test_watch_and_advice_commentary_is_not_an_event(tmp_path):
+    """关注、建议、推荐、布局、把握，没有主体和动作时是点评。"""
+    titles = (
+        "继续关注AI视频板块",
+        "机构建议继续布局",
+        "研报推荐算力链",
+        "把握本轮行情",
+    )
+    for title in titles:
+        assert _llm_title_reject_reason(title) == "不是具体事件"
+        assert not _fallback_title_ok(title)
+        assert _keyword_title([{"title": title}]) == ""
+    assert _llm_title_ok("宁德时代回购巩固行业地位")
+    assert _llm_title_reject_reason("证监会立案后机构建议回避") == ""
+
+    reset_store_for_tests(tmp_path / "watch-commentary.sqlite")
+    _insert_rich("watch", "继续关注AI视频板块", 11, 4, level="A")
+    _insert("fed", "美联储降息25基点", 5)
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert "继续关注AI视频板块" not in names
+    assert "美联储降息25基点" in names
+
+
+_POLICY_DIRECTIVES = (
+    "国务院布局未来产业",
+    "工信部建议加快5G部署",
+    "发改委布局算力枢纽",
+    "国资委推荐央企试点",
+)
+_COMMENTARY_DIRECTIVES = (
+    "继续关注AI视频板块",
+    "建议关注算力",
+    "推荐布局低空经济",
+)
+
+
+def test_directive_verbs_keep_policy_events_and_drop_commentary(tmp_path):
+    """机构或公司名后面的布局、建议、推荐是事件；没有主体的仍是点评。"""
+    for title in _POLICY_DIRECTIVES:
+        assert _llm_title_reject_reason(title) == ""
+        assert _llm_title_ok(title)
+        assert _keyword_title([{"title": title}]) == title
+        assert _fallback_title_ok(title)
+    for title in _COMMENTARY_DIRECTIVES:
+        assert _llm_title_reject_reason(title) == "不是具体事件"
+        assert not _llm_title_ok(title)
+        assert not _fallback_title_ok(title)
+        assert _keyword_title([{"title": title}]) == ""
+    assert _llm_title_ok("宁德时代布局固态电池")
+    assert _llm_title_reject_reason("机构建议继续布局") == "不是具体事件"
+
+    reset_store_for_tests(tmp_path / "directive-verbs.sqlite")
+    for index, title in enumerate(_POLICY_DIRECTIVES):
+        _insert(f"policy-{index}", title, index + 1)
+    for index, title in enumerate(_COMMENTARY_DIRECTIVES):
+        _insert_rich(f"note-{index}", title, 11, index + 1, level="A")
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    for title in _POLICY_DIRECTIVES:
+        assert title in names
+    for title in _COMMENTARY_DIRECTIVES:
+        assert title not in names
+
+
+def test_runon_titles_shorten_to_the_core_event():
+    """叠加、接续粘成的长标题收成不超过 20 字的核心事件。"""
+    raw = "赎回接续叠加资本补充需求前三季度银行二永债发行显著放量"
+    core = "前三季度银行二永债发行显著放量"
+    assert len(raw) > 20
+    assert len(core) <= 20
+    assert _llm_title_reject_reason(raw) == "标题过长"
+    assert not _fallback_title_ok(raw)
+    assert _keyword_title([{"title": raw}]) == core
+    assert _cleaned_headline(raw) == core
+    kept = "财政部有关负责人表示财政的小增量政策也出台了一批配套措施"
+    assert _keyword_title([{"title": kept}]) == kept
+
+
+def test_growth_fallback_needs_a_concrete_subject(tmp_path):
+    """同比增长、数据显示增长明显没有具体主体，不能当回退标题。"""
+    assert not _fallback_title_ok("同比增长")
+    assert not _fallback_title_ok("数据显示增长明显")
+    assert _llm_title_reject_reason("数据显示增长明显") == "缺少主体、动作或宾语"
+    assert _llm_title_reject_reason("同比增长50%") == "缺少主体、动作或宾语"
+    assert _keyword_title([{"title": "同比增长"}]) == ""
+    assert _keyword_title([{"title": "数据显示增长明显"}]) == ""
+    assert _llm_title_ok("宁德时代净利润同比增长50%")
+    assert _fallback_title_ok("宁德时代净利润同比增长50%")
+
+    reset_store_for_tests(tmp_path / "vague-growth.sqlite")
+    _insert("yoy", "同比增长", 6)
+    _insert("data", "数据显示增长明显", 7)
+    _insert("catl", "宁德时代净利润同比增长50%", 8)
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert "同比增长" not in names
+    assert "数据显示增长明显" not in names
+    assert "宁德时代净利润同比增长50%" in names
+
+
+def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
+    """缓存版本升到 v7 后，旧键里的标题即使当时能用也不再套用。"""
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    assert hot_mod._TITLE_CACHE_VERSION == 7
+    reset_store_for_tests(tmp_path / "cache-v7.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
     hot_mod.clear_hot_event_cache()
     hot_mod._LLM_CACHE[f"title-v4:{fingerprint}"] = {"title": "美联储降息25基点"}
     hot_mod._LLM_CACHE[f"title-v5:{fingerprint}"] = {"title": "美联储降息二十五基点旧缓存"}
+    hot_mod._LLM_CACHE[f"title-v6:{fingerprint}"] = {"title": "美联储降息旧缓存第六版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1199,4 +1333,4 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     named = top_hot_events(NOW)
     assert named["events"][0]["name"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
-    assert all(not str(key).startswith(("title-v4:", "title-v5:")) for key in hot_mod._LLM_CACHE)
+    assert all(not str(key).startswith(("title-v4:", "title-v5:", "title-v6:")) for key in hot_mod._LLM_CACHE)
