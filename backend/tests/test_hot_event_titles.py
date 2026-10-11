@@ -1087,18 +1087,106 @@ def test_concept_tags_follow_entities_not_column_names(tmp_path):
     assert all("俄乌" not in item["name"] and "快报" not in item["name"] for item in iran["mapping"])
 
 
-def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v5 后，旧键里的标题即使当时能用也不再套用。"""
+_EARNINGS_TITLES = (
+    "公司在前三季度净利润增长50%",
+    "宁德时代在前十大股东中新增社保基金",
+    "在前述公告基础上追加回购",
+)
+
+
+def test_earnings_shareholder_and_buyback_titles_pass(tmp_path):
+    """增长、新增、追加回购都有主体和动作，不能再报缺少主语、谓语或宾语。"""
+    for title in _EARNINGS_TITLES:
+        assert _llm_title_reject_reason(title) == ""
+        assert _llm_title_ok(title)
+        assert _title_ok(title)
+        assert _keyword_title([{"title": title}]) == title
+    assert _llm_title_ok("沪指在前一交易日大涨后回调")
+
+    reset_store_for_tests(tmp_path / "earnings-titles.sqlite")
+    for index, title in enumerate(_EARNINGS_TITLES):
+        _insert(f"earn-{index}", title, index + 1)
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    for title in _EARNINGS_TITLES:
+        assert title in names
+
+
+def test_commentary_titles_fall_back_or_drop(tmp_path, monkeypatch, caplog):
+    """侧面佐证、看好、地位这类没有主体和动作的点评不是事件。"""
+    import logging
+
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 5
-    reset_store_for_tests(tmp_path / "cache-v5.sqlite")
+    commentary = "侧面佐证AI电源地位&能力"
+    assert _llm_title_reject_reason(commentary) == "不是具体事件"
+    assert not _llm_title_ok(commentary)
+    assert not _fallback_title_ok(commentary)
+    assert _keyword_title([{"title": commentary}]) == ""
+    for title in (
+        "数据印证需求正在回暖",
+        "板块利好继续扩散",
+        "机构看好算力产业链",
+        "AI电源地位继续提升",
+        "算力逻辑继续强化",
+    ):
+        assert _llm_title_reject_reason(title) == "不是具体事件"
+        assert not _fallback_title_ok(title)
+        assert _keyword_title([{"title": title}]) == ""
+
+    assert _llm_title_ok("美联储降息利好黄金")
+    assert _llm_title_reject_reason("宁德时代回购巩固行业地位") == ""
+
+    kept = {
+        "name": commentary,
+        "headline": "宁德时代发布固态电池",
+        "headlines": ["宁德时代发布固态电池"],
+    }
+    _ensure_shown_name(kept)
+    assert kept["name"] == "宁德时代发布固态电池"
+    assert _keep_shown_event(kept)
+
+    dropped = {"name": commentary, "headline": commentary, "headlines": [commentary]}
+    _ensure_shown_name(dropped)
+    assert dropped["name"] == ""
+    assert not _keep_shown_event(dropped)
+
+    reset_store_for_tests(tmp_path / "commentary.sqlite")
+    _insert("battery", "宁德时代发布固态电池", 1)
+    _insert_rich("note", commentary, 11, 2, level="A")
+
+    def reject(_prompt: str, **_kwargs: object) -> str:
+        return json.dumps({
+            "events": [
+                {"id": "1", "title": commentary},
+                {"id": "2", "title": commentary},
+            ],
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", reject)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert "不是具体事件" in caplog.text
+    assert commentary not in names
+    assert "宁德时代发布固态电池" in names
+
+
+def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
+    """缓存版本升到 v6 后，旧键里的标题即使当时能用也不再套用。"""
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    assert hot_mod._TITLE_CACHE_VERSION == 6
+    reset_store_for_tests(tmp_path / "cache-v6.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
     hot_mod.clear_hot_event_cache()
     hot_mod._LLM_CACHE[f"title-v4:{fingerprint}"] = {"title": "美联储降息25基点"}
+    hot_mod._LLM_CACHE[f"title-v5:{fingerprint}"] = {"title": "美联储降息二十五基点旧缓存"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1111,4 +1199,4 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     named = top_hot_events(NOW)
     assert named["events"][0]["name"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
-    assert all(not str(key).startswith("title-v4:") for key in hot_mod._LLM_CACHE)
+    assert all(not str(key).startswith(("title-v4:", "title-v5:")) for key in hot_mod._LLM_CACHE)
