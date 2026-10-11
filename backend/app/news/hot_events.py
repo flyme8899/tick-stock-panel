@@ -8,14 +8,16 @@
 或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
 共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v4。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v5。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
-清理会去掉开头的钟点、【】标签、末尾省略号，以及「央视财经：」这类来源前缀，并停在句号前。
-栏目标题、只有来源名或公司名、以及只有点评、重点、没有动作的稿，不进列表。
+清理会去掉开头的钟点、【】标签、末尾省略号、「央视财经：」这类来源前缀，以及研报文件名里的日期戳和 #，并停在句号前。
+栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
+奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
-事件自己没有概念时，模型只能从这张词典里选。词典没写到的无关概念仍然丢掉。
+概念必须对得上标题里的主体：伊朗、中东映射到中东，不能因为都出现了「冲突」就标成俄乌。
+「俄乌冲突快报」这类栏目名不是概念。事件自己没有概念时，模型只能从这张词典里选。词典没写到的无关概念仍然丢掉。
 同一时间窗里，财政部、国务院这类国内政策主体即使一个写发布、一个写出台，也并成一件事。
 """
 from __future__ import annotations
@@ -55,8 +57,8 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。旧键里的截断标题不再套用，下一轮重新生成。
-_TITLE_CACHE_VERSION = 4
+# 标题缓存按这个版本取。旧键里的截断标题、乱码标题和错位概念不再套用，下一轮重新生成。
+_TITLE_CACHE_VERSION = 5
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -71,7 +73,7 @@ BROAD_SECTORS = frozenset({
     "食品饮料",
 })
 _ACTIONS = (
-    "发布", "出台", "涨价", "降价", "提价", "上调", "下调", "报价", "收购", "中标", "获批", "上市",
+    "发布", "出台", "定调", "涨价", "降价", "提价", "上调", "下调", "报价", "收购", "中标", "获批", "上市",
     "回购", "签约", "停产", "召回", "立案", "补贴", "降准", "降息", "加息", "制裁", "收紧",
     "追加", "订单",
 )
@@ -94,6 +96,7 @@ _CATEGORY_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 _ACTION_CATEGORY = {
     "出台": "国内政策/宏观",
+    "定调": "国内政策/宏观",
     "补贴": "国内政策/宏观",
     "降准": "国内政策/宏观",
     "加息": "海外市场/央行",
@@ -147,6 +150,11 @@ _GENERIC_TOKENS = frozenset({
     "超预期", "不及预期", "预期", "公告", "消息", "行情", "价格", "股价",
     "政策", "市场", "公司", "股份", "板块", "概念", "产业链", "产业",
     "上涨", "下跌", "大涨", "大跌",
+})
+# 概念名和标题只共用这些词时，不能当成同一件事。冲突两个字会把伊朗稿贴上俄乌。
+_CONCEPT_GLUE = frozenset({
+    "冲突", "战争", "危机", "局势", "问题", "方面", "情况", "事件",
+    "最新", "焦点", "热点", "快报", "解决", "构想", "消息",
 })
 _SUBJECT_TRAIL = (
     "价格", "股价", "期货", "行情", "板块", "概念", "产业链", "产业",
@@ -235,6 +243,30 @@ _SUBJECT_CONCEPTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("原油",), ("石油", "油服")),
     (("IEA",), ("石油", "油服")),
     (("美联储", "加息"), ("黄金", "银行")),
+    (("伊朗",), ("中东",)),
+    (("以色列",), ("中东",)),
+    (("加沙",), ("中东",)),
+    (("巴勒斯坦",), ("中东",)),
+    (("中东",), ("中东",)),
+)
+# 概念里点名的地缘实体必须在事件正文里出现。同一组里任一说法都算对上。
+_GEO_ENTITY_GROUPS = (
+    ("俄乌", "乌克兰"),
+    ("伊朗", "中东", "以色列", "加沙", "巴勒斯坦"),
+    ("俄罗斯",),
+)
+# 没有 A 股映射时直接丢掉。发布、获奖这类弱动词留不住诺贝尔和世界杯。
+_HARD_NON_MARKET = (
+    "诺贝尔", "奥斯卡", "金球奖", "格莱美", "金像奖", "金马奖", "艾美奖", "普利策", "图灵奖",
+    "世界杯", "欧冠", "奥运会", "冬奥会", "亚运会", "欧洲杯", "亚洲杯",
+    "英超", "西甲", "德甲", "意甲", "法甲", "中超", "NBA", "CBA",
+)
+# 政策、价格里顺带提到演出时仍保留。纯文体稿没有这些市场动作就丢掉。
+_SOFT_NON_MARKET = ("演唱会", "电影节", "新专辑")
+_STRONG_MARKET = (
+    "出台", "补贴", "降准", "降息", "加息", "涨价", "降价", "提价", "上调", "下调",
+    "回购", "收购", "立案", "制裁", "定调", "政策",
+    *_PRICE_NARRATIVE,
 )
 _SOURCE_DATELINE = re.compile(
     r"^(?:" + _SOURCE_ALT + r")(?:\d{1,2}月\d{1,2}日)?(?:电|讯)[，,]?"
@@ -249,6 +281,34 @@ _MINUTE_BEFORE_BRACKET = re.compile(r"^\d{1,2}(?=【)")
 _LEFTOVER_MINUTE = re.compile(r"^\d{1,2}(?![年月日号点时分])(?=[\u4e00-\u9fff])")
 _TRAILING_ELLIPSIS = re.compile(r"(?:\.{2,}|…+|。{2,})+$")
 _SENTENCE_END = re.compile(r"[。；！？\n]")
+# 机器翻译把 former judge 写成「在前法官」。只拦紧挨着职务的「在前」，
+# 「在前三季度」「在前述」是正常说法。
+_FORMER_OFFICES = (
+    "副董事长", "副总统", "副总理", "副部长", "董事长", "发言人",
+    "总统", "首相", "总理", "主席", "财长", "外长", "防长", "行长",
+    "部长", "法官", "局长", "省长", "市长", "州长", "议长", "院长",
+    "署长", "书记", "总裁", "董事", "首席", "大使", "国王", "女王", "元首",
+    "CEO", "CFO", "CTO", "COO",
+)
+_BROKEN_FORMER = re.compile(
+    r"在前(?:" + "|".join(_FORMER_OFFICES) + r")",
+    re.IGNORECASE,
+)
+_FILE_EXT = re.compile(r"(?i)\.(?:pdf|docx?|xlsx?|pptx?|txt|csv)$")
+_COMPACT_DATE = r"20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])"
+_DASHED_DATE = r"20\d{2}[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01])"
+# 文件名日期：前面是连字符，或后面紧跟 #。正文里的「央行2026-10-09」不在这里。
+_FILE_DATE = re.compile(
+    rf"(?:(?<=[-_—–])(?:{_COMPACT_DATE}|{_DASHED_DATE})(?!\d)"
+    rf"|(?<!\d)(?:{_COMPACT_DATE}|{_DASHED_DATE})(?=[#＃]))"
+)
+_REPORT_KINDS = ("更新", "报告", "研报", "点评", "周报", "日报", "月报", "纪要", "简报")
+_REPORT_PREFIX = re.compile(
+    r"^(?:[\u4e00-\u9fffA-Za-z0-9]{1,24}(?:" + "|".join(_REPORT_KINDS) + r"))"
+    r"[-_—–]+"
+    r"(?:20\d{6}|20\d{2}[-./](?:0?[1-9]|1[0-2])[-./](?:0?[1-9]|[12]\d|3[01]))"
+    r"[-_—–]*"
+)
 _SECTION_MATERIAL = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,12}材料$")
 # 价格叙述后面再出现这些动作，就是下一句被粘进了标题。
 _UNGLUE_VERBS = _GLUE_FOLLOWUPS | frozenset({"涨价", "降价", "提价"})
@@ -417,7 +477,12 @@ def _doc(row: dict) -> dict | None:
             concepts.append(name or key)
         elif kind == "stock":
             stocks[key] = name or key
-    lead, action, obj = _parse_phrase(title)
+    lead, action, obj = "", "", ""
+    phrase = _strip_report_label(title)
+    if phrase and phrase != _compact(title):
+        lead, action, obj = _parse_phrase(phrase)
+    if not lead or not action:
+        lead, action, obj = _parse_phrase(title)
     if not lead or not action:
         lead, action, obj = _parse_phrase(summary)
     shown = title or summary[:80]
@@ -466,8 +531,15 @@ def _summary_text(row: dict) -> str:
     return str(row.get("clean_text") or "").strip()
 
 
+def _is_column_concept(name: str) -> bool:
+    """来源栏目不是 A 股概念。俄乌冲突快报只是专栏名。"""
+    return "快报" in _compact(name)
+
+
 def _fine_concept(key: str, name: str) -> bool:
     text = (name or key).strip()
+    if _is_column_concept(text) or _is_column_concept(key):
+        return False
     if text in BROAD_SECTORS or key in BROAD_SECTORS:
         return False
     return _usable_sector_name(text)
@@ -955,7 +1027,20 @@ def _representative_members(members: list[dict], name: str) -> list[dict]:
     return chosen or list(members)
 
 
+def _concept_entity_miss(name: str, blob: str) -> bool:
+    """概念点了俄乌，正文却只有伊朗，就不能留。同一组里出现任一说法算对上。"""
+    for group in _GEO_ENTITY_GROUPS:
+        if not any(token in name for token in group):
+            continue
+        if any(token in blob for token in group):
+            continue
+        return True
+    return False
+
+
 def _concept_relevant(name: str, blob: str, subjects: set[str]) -> bool:
+    if _is_column_concept(name) or _concept_entity_miss(name, blob):
+        return False
     if name and name in blob:
         return True
     # 细概念延伸标题里已经出现的词，例如标题写「机器人」、提及是「工业机器人」。
@@ -968,7 +1053,7 @@ def _concept_relevant(name: str, blob: str, subjects: set[str]) -> bool:
         if core:
             checked.append(core)
     for token in checked:
-        if len(token) < 2 or token in _GENERIC_TOKENS or token in _STOP:
+        if len(token) < 2 or token in _GENERIC_TOKENS or token in _STOP or token in _CONCEPT_GLUE:
             continue
         if token in name:
             return True
@@ -983,7 +1068,7 @@ def _headline_maps_concept(name: str, blob: str) -> bool:
     for size in range(min(len(name) - 1, 6), 1, -1):
         for start in range(0, len(name) - size + 1):
             token = name[start:start + size]
-            if token in _GENERIC_TOKENS or token in _STOP:
+            if token in _GENERIC_TOKENS or token in _STOP or token in _CONCEPT_GLUE:
                 continue
             if token in blob:
                 return True
@@ -1035,7 +1120,7 @@ def _dictionary_concepts(blob: str) -> list[str]:
 def _merge_mapped_concepts(concepts: list[str], blob: str) -> list[str]:
     merged: list[str] = []
     for name in [*_dictionary_concepts(blob), *concepts]:
-        if name and name not in merged:
+        if name and not _is_column_concept(name) and name not in merged:
             merged.append(name)
         if len(merged) >= _CONCEPT_LIMIT:
             break
@@ -1084,6 +1169,8 @@ def _ends_mid_number(text: str) -> bool:
 def _display_clause_ok(text: str) -> bool:
     """整句可以比 20 字长，但不能停在半个动词、半个数字或半个词上。"""
     body = _compact(text)
+    if _title_incoherent(body) or _has_file_debris(body):
+        return False
     if not body or body == "事件" or len(body) < 4 or len(body) > _TITLE_HARD:
         return False
     if any(char in body for char in "【】[]"):
@@ -1129,6 +1216,10 @@ def _cleaned_headline(text: str) -> str:
 
 
 def _clip_at_boundary(text: str) -> str:
+    if _title_incoherent(text):
+        return ""
+    if _has_file_debris(text):
+        text = _strip_report_label(text)
     if not text or text == "事件":
         return ""
     if _display_clause_ok(text):
@@ -1291,6 +1382,46 @@ def _compact(text: str) -> str:
     return body.strip("，。！？、；：\"'“”")
 
 
+def _title_incoherent(text: str) -> bool:
+    """「在前」紧挨职务才是拆词，例如「在前法官」。在前三季度、在前述不是。"""
+    return bool(_BROKEN_FORMER.search(_compact(text)))
+
+
+def _file_debris_reason(text: str) -> str:
+    body = _compact(text)
+    if "#" in body or "＃" in body or _FILE_EXT.search(body):
+        return "含文件标记"
+    if _FILE_DATE.search(body):
+        return "含日期戳"
+    return ""
+
+
+def _has_file_debris(text: str) -> bool:
+    return bool(_file_debris_reason(text))
+
+
+def _looks_like_report_file(text: str) -> bool:
+    body = _FILE_EXT.sub("", _compact(text))
+    if not body:
+        return False
+    if _FILE_DATE.search(body):
+        return True
+    return any(body.endswith(kind) for kind in _REPORT_KINDS)
+
+
+def _strip_report_label(text: str) -> str:
+    """去掉研报文件名。只删连字符后或 # 前的日期，正文里的央行日期留下。"""
+    body = _FILE_EXT.sub("", _compact(text))
+    parts = re.split(r"[#＃]", body)
+    if len(parts) >= 2 and _looks_like_report_file(parts[0]):
+        body = _compact("".join(parts[1:]))
+    elif len(parts) >= 2:
+        body = _compact("".join(parts))
+    body = _REPORT_PREFIX.sub("", body)
+    body = _FILE_DATE.sub("", body)
+    return body.strip("-_—–#＃")
+
+
 def _strip_source_prefix(text: str) -> str:
     body = _compact(text)
     body = _CLOCK_PREFIX.sub("", body)
@@ -1309,6 +1440,7 @@ def _strip_source_prefix(text: str) -> str:
     body = _STRAY_BRACKET.sub("", body)
     body = _LEFTOVER_MINUTE.sub("", body)
     body = _TRAILING_ELLIPSIS.sub("", body)
+    body = _strip_report_label(body)
     return body.strip("，。！？、；：")
 
 
@@ -1444,6 +1576,8 @@ def _cut_glued_sentence(text: str) -> str:
 def _title_ok(title: str) -> bool:
     """完整、有主体和动作、不超过 20 字，且不是半句话或词中间截断。"""
     text = _compact(title)
+    if _title_incoherent(text) or _has_file_debris(text):
+        return False
     if not text or len(text) > _TITLE_LIMIT or text in BROAD_SECTORS:
         return False
     if _starts_fragment(text) or _ends_abruptly(text):
@@ -1627,6 +1761,11 @@ def _llm_title_reject_reason(title: str) -> str:
     name_reason = _title_name_reject_reason(text)
     if name_reason:
         return name_reason
+    debris = _file_debris_reason(text)
+    if debris:
+        return debris
+    if _title_incoherent(text):
+        return "标题不连贯"
     if len(text) < 6:
         return "过短"
     if len(text) > _LLM_TITLE_MAX:
@@ -1689,6 +1828,8 @@ def _fallback_title_ok(name: object) -> bool:
 def _cleaned_display_ok(name: object) -> bool:
     """关键词回退不要求满 6 字，但钟点、括号、省略号和栏目标题不能上屏。"""
     text = _compact(str(name or ""))
+    if _title_incoherent(text) or _has_file_debris(text):
+        return False
     if not _display_name_ok(text) or _is_section_label(text):
         return False
     if text[0].isdigit() or any(char in text for char in "【】[]"):
@@ -1717,7 +1858,36 @@ def _ensure_shown_name(event: dict) -> None:
     event.pop("_llm_title_applied", None)
 
 
+def _has_ashare_mapping(event: dict) -> bool:
+    if any(str(name).strip() for name in (event.get("concepts") or [])):
+        return True
+    for item in event.get("mentioned_stocks") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name") or "").strip() or str(item.get("key") or "").strip():
+            return True
+    return False
+
+
+def _has_strong_market_cue(text: str) -> bool:
+    if any(org in text for org in _ORG_SUBJECTS):
+        return True
+    return any(cue in text for cue in _STRONG_MARKET)
+
+
+def _non_market_unmapped(event: dict) -> bool:
+    """奖项、文体、体育，又没有 A 股概念或个股时，不进热榜。"""
+    if _has_ashare_mapping(event):
+        return False
+    text = _event_text(event)
+    if any(cue in text for cue in _HARD_NON_MARKET):
+        return True
+    return any(cue in text for cue in _SOFT_NON_MARKET) and not _has_strong_market_cue(text)
+
+
 def _keep_shown_event(event: dict) -> bool:
+    if _non_market_unmapped(event):
+        return False
     name = str(event.get("name") or "")
     if event.get("_llm_title_applied"):
         return _llm_title_ok(name)
@@ -1759,6 +1929,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "title 必须是完整的中文标题，尽量不超过28个字，写完整，不要为了压字数把词截断，"
         "写明主体、动作和宾语，"
         "例如美联储降息25基点。不要半句话，不要时间戳，不要【】，不要省略号，"
+        "不要把「前法官」「前总统」写成「在前法官」「在前总统」。不要文件名、连字符后的日期和#。"
         "不要以数字或钟点开头，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
         "不要把下一句粘进来。不要用「事件」当标题。不要输出重点、点评或栏目标签。"
         "不要只写媒体名或公司名，标题里要有动作。"
@@ -1767,7 +1938,8 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
         "寻常涨价、获批、订单是重要。"
         f"concepts 只在该事件还没有概念时填写，并且只能从这些名称里选：{names}。"
-        "对不上就留空。不要新造概念。"
+        "对不上就留空。不要新造概念。不要用来源栏目，栏目名里的快报不是概念。"
+        "概念要和标题里的国家地区一致，不要把伊朗或中东标成俄乌。"
         "direction 表示对 A 股相关方向是利好还是利空。"
         "没有把握就留空，不要编造标题里没出现的事实。\n"
         f"{retry_line}\n"

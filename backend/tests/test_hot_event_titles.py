@@ -3,18 +3,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from datetime import date, datetime, timedelta
 
 from app.market_time import CN_TZ
 from app.news.hot_events import (
     _cleaned_headline,
+    _concept_relevant,
+    _dictionary_concepts,
     _ensure_shown_name,
     _fallback_title_ok,
+    _fine_concept,
     _is_section_label,
     _keep_shown_event,
     _keyword_title,
     _llm_title_ok,
     _llm_title_reject_reason,
+    _relevant_concepts,
+    _strip_report_label,
     _title_ok,
 )
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
@@ -243,6 +249,7 @@ def _insert_rich(
     sectors: list[str] | None = None,
     stocks: list[tuple[str, str]] | None = None,
     summary: str = "",
+    level: str = "",
 ) -> None:
     mentions = [("sector", name, name, "", "structured") for name in (sectors or [])]
     mentions += [
@@ -259,7 +266,7 @@ def _insert_rich(
         raw=None,
         content_hash=source_id,
         url="",
-        level="",
+        level=level,
         media_ids=[],
         extra=None,
         mentions=mentions,
@@ -962,3 +969,146 @@ def test_bare_source_and_company_names_are_not_titles(tmp_path, caplog):
     assert "央视财经" not in names
     assert "光智科技" not in names
     assert any("橡胶" in name and "大涨" in name for name in names)
+
+
+def test_garbled_and_non_market_titles_stay_off_the_hot_list(tmp_path):
+    """主体被拆开的译稿，以及没有 A 股映射的奖项、文体、体育，不进热榜。"""
+    garbled = "美国在前法官获得诺贝尔"
+    assert _llm_title_reject_reason(garbled) == "标题不连贯"
+    assert not _llm_title_ok(garbled)
+    assert not _fallback_title_ok(garbled)
+    assert not _title_ok(garbled)
+    assert _keyword_title([{"title": garbled}]) == ""
+    assert _llm_title_reject_reason("美国在前财长宣布加息") == "标题不连贯"
+
+    kept = _keyword_title([{"title": "财政部在前期出台增量政策"}])
+    assert "财政部" in kept and "出台" in kept and "在前期" in kept
+    for title in (
+        "公司在前三季度净利润增长50%",
+        "宁德时代在前十大股东中新增社保基金",
+        "沪指在前一交易日大涨后回调",
+        "在前述公告基础上追加回购",
+    ):
+        assert _llm_title_reject_reason(title) != "标题不连贯"
+        assert _keyword_title([{"title": title}]) == title
+        assert _fallback_title_ok(title)
+
+    reset_store_for_tests(tmp_path / "non-market.sqlite")
+    _insert_rich("garbled", garbled, 8, 1, level="A")
+    _insert_rich("nobel", "美国前法官获得诺贝尔和平奖", 8, 2, level="A")
+    _insert_rich("nobel-verb", "组委会发布诺贝尔奖得主", 8, 3, level="A")
+    _insert_rich("cup", "国际足联发布世界杯赛程", 8, 4, level="A")
+    _insert_rich("album", "歌手发布新专辑", 8, 5, level="A")
+    _insert_rich("show", "文旅部出台演唱会补贴", 8, 6)
+    _insert_rich(
+        "oscar",
+        "光线传媒发布新片获得奥斯卡奖",
+        8,
+        7,
+        stocks=[("300251.SZ", "光线传媒")],
+    )
+    _insert_rich("fed", "美联储降息25基点", 8, 8)
+
+    events = top_hot_events(NOW)["events"]
+    names = [event["name"] for event in events]
+    assert garbled not in names
+    assert "美国前法官获得诺贝尔和平奖" not in names
+    assert not any("诺贝尔" in name for name in names)
+    assert not any("世界杯" in name for name in names)
+    assert not any("新专辑" in name for name in names)
+    assert any("演唱会" in name and "出台" in name for name in names)
+    oscar = next(event for event in events if "奥斯卡" in event["name"])
+    assert any(stock["name"] == "光线传媒" for stock in oscar["mentioned_stocks"])
+    assert "美联储降息25基点" in names
+
+
+def test_report_file_labels_are_stripped_from_titles(tmp_path):
+    """研报文件名、八位日期戳和 # 不能留在展示标题里。"""
+    raw = "锂电行业更新-20261009#十五五政策定调"
+    assert _strip_report_label(raw) == "十五五政策定调"
+    assert _strip_report_label("锂电行业更新-2026-10-09#十五五政策定调") == "十五五政策定调"
+    assert _strip_report_label("锂电行业更新-20261009十五五政策定调") == "十五五政策定调"
+    assert _cleaned_headline(raw) == "十五五政策定调"
+    assert _keyword_title([{"title": raw}]) == "十五五政策定调"
+    assert _llm_title_reject_reason(raw) == "含文件标记"
+    assert not _llm_title_ok(raw)
+    assert not _fallback_title_ok(raw)
+    dated = "锂电行业更新-20261009十五五政策定调"
+    assert _llm_title_reject_reason(dated) == "含日期戳"
+    fiscal = _cleaned_headline("财政部发布2026年上半年中长期财政规划")
+    assert "2026" in fiscal and "20261009" not in fiscal
+    repo = "央行2026-10-09开展逆回购"
+    assert _strip_report_label(repo) == repo
+    assert _cleaned_headline(repo) == repo
+    assert _llm_title_reject_reason(repo) != "含日期戳"
+    compact_repo = "央行20261009开展逆回购"
+    assert "20261009" in _strip_report_label(compact_repo)
+    assert _llm_title_reject_reason(compact_repo) != "含日期戳"
+
+    reset_store_for_tests(tmp_path / "report-label.sqlite")
+    _insert("lithium", raw, 3)
+    _insert("fed", "美联储降息25基点", 4)
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert raw not in names
+    assert "十五五政策定调" in names
+    assert all("#" not in name and "20261009" not in name for name in names)
+    assert "美联储降息25基点" in names
+
+
+def test_concept_tags_follow_entities_not_column_names(tmp_path):
+    """伊朗稿不能标成俄乌；快报是栏目名，不是概念。"""
+    title = "普京向特朗普转达伊朗方面解决冲突构想"
+    assert _fine_concept("俄乌冲突快报", "俄乌冲突快报") is False
+    assert _concept_relevant("俄乌冲突快报", "俄罗斯与乌克兰冲突升级", set()) is False
+    assert _concept_relevant("俄乌冲突", title, set()) is False
+    assert _concept_relevant("俄乌冲突快报", title, set()) is False
+    assert _dictionary_concepts(title) == ["中东"]
+    kept = _relevant_concepts(
+        Counter({"俄乌冲突": 1, "俄乌冲突快报": 2}),
+        [title],
+        set(),
+    )
+    assert kept == []
+
+    reset_store_for_tests(tmp_path / "iran-concept.sqlite")
+    _insert_rich(
+        "iran",
+        title,
+        9,
+        10,
+        level="A",
+        sectors=["俄乌冲突快报", "俄乌冲突"],
+    )
+    events = top_hot_events(NOW)["events"]
+    iran = next(event for event in events if "伊朗" in event["name"])
+    assert iran["concepts"] == ["中东"]
+    assert iran["category"] == "地缘政治"
+    assert all("俄乌" not in name and "快报" not in name for name in iran["concepts"])
+    assert all("俄乌" not in item["name"] and "快报" not in item["name"] for item in iran["mapping"])
+
+
+def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
+    """缓存版本升到 v5 后，旧键里的标题即使当时能用也不再套用。"""
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    assert hot_mod._TITLE_CACHE_VERSION == 5
+    reset_store_for_tests(tmp_path / "cache-v5.sqlite")
+    title = "【财联社】美联储宣布降息25基点"
+    _insert("fed", title, 1)
+    fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
+    hot_mod.clear_hot_event_cache()
+    hot_mod._LLM_CACHE[f"title-v4:{fingerprint}"] = {"title": "美联储降息25基点"}
+    prompts: list[str] = []
+
+    def good(prompt: str, **_kwargs: object) -> str:
+        prompts.append(prompt)
+        return '{"title":"美联储宣布降息二十五基点"}'
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", good)
+    monkeypatch.setattr(news_service, "_reserve_llm_call", lambda: True)
+    named = top_hot_events(NOW)
+    assert named["events"][0]["name"] == "美联储宣布降息二十五基点"
+    assert len(prompts) == 1
+    assert all(not str(key).startswith("title-v4:") for key in hot_mod._LLM_CACHE)
