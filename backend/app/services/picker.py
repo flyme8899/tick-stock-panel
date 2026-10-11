@@ -838,6 +838,8 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
         "trading_day": snapshot.get("trading_day"),
         "fallback": bool(snapshot.get("fallback")),
         "hint": snapshot.get("hint") or None,
+        "status": snapshot.get("status"),
+        "computed_at": snapshot.get("computed_at"),
         "error": error,
         "items": items,
     }
@@ -1284,7 +1286,7 @@ def load_financial_from_dir(data_dir: Path, as_of: date) -> tuple[pl.DataFrame, 
         return pl.DataFrame(), "扣非增速"
     try:
         frame = pl.read_parquet(path)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("picker financial snapshot unreadable", exc_info=True)
         return pl.DataFrame(), "扣非增速"
     keep = [column for column in frame.columns if column in _FINANCIAL_COLUMNS]
@@ -1294,13 +1296,27 @@ def load_financial_from_dir(data_dir: Path, as_of: date) -> tuple[pl.DataFrame, 
     return with_profit_yoy(latest)
 
 
+_DIMENSION_CACHE: dict[tuple, dict[str, list[str] | str]] = {}
+
+
 def _read_dimension_table(data_dir: Path, config_id: str, column: str, splitter: str) -> dict[str, list[str] | str]:
     path = data_dir / "ext_data" / config_id / "part.parquet"
     if not path.is_file():
         return {}
     try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    cache_key = (str(path), column, splitter, stat.st_mtime_ns, stat.st_size)
+    cached = _DIMENSION_CACHE.get(cache_key)
+    if cached is not None:
+        return {
+            symbol: (list(labels) if isinstance(labels, list) else labels)
+            for symbol, labels in cached.items()
+        }
+    try:
         frame = pl.read_parquet(path)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("picker ext data unreadable: %s", config_id, exc_info=True)
         return {}
     symbol_col = "symbol" if "symbol" in frame.columns else ("股票代码" if "股票代码" in frame.columns else None)
@@ -1316,7 +1332,13 @@ def _read_dimension_table(data_dir: Path, config_id: str, column: str, splitter:
             out[symbol] = [part.strip() for part in raw.split(splitter) if part.strip()]
         else:
             out[symbol] = raw
-    return out
+    if len(_DIMENSION_CACHE) >= 8:
+        _DIMENSION_CACHE.pop(next(iter(_DIMENSION_CACHE)))
+    _DIMENSION_CACHE[cache_key] = out
+    return {
+        symbol: (list(labels) if isinstance(labels, list) else labels)
+        for symbol, labels in out.items()
+    }
 
 
 def load_dimensions_from_dir(data_dir: Path) -> Dimensions:
@@ -1382,9 +1404,11 @@ def sync_dsa_watchlist(
 
 
 def load_top_events_from_news(now: datetime) -> dict:
-    from app.news.service import top_hot_events
+    """选股页只读最近一次快照。now 仍留在依赖签名里，请求里不再按这个时点聚类。"""
+    from app.news.hot_snapshot import read_served_snapshot
 
-    return top_hot_events(now)
+    del now
+    return read_served_snapshot()
 
 
 def deps_from_app(request, *, limiter=None, dsa_request=None, poll_seconds: float = 12.0) -> PickerDeps:

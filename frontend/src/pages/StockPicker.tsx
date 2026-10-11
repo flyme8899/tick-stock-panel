@@ -283,6 +283,8 @@ export function StockPicker() {
             hintClassName={hot?.fallback ? 'text-amber-600 dark:text-amber-400' : undefined}
             ready={hot?.error ? (
               <p className="px-2 py-3 text-xs text-danger">{hot.error}</p>
+            ) : hot?.status === 'computing' ? (
+              <p className="px-2 py-3 text-xs text-muted">正在计算热门事件，请稍候</p>
             ) : (
               <p className="px-2 py-3 text-xs text-muted">今日暂无热门事件</p>
             )}

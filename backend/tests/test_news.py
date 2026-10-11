@@ -907,8 +907,9 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     from app.api import news as news_api
     from app.market_time import current_trading_day
     from app.news.extract import StructuredStock
+    from app.news.hot_snapshot import publish_hot_snapshot
     from app.news.push import format_hot_markdown
-    from app.news.service import event_detail, hot_event_listing
+    from app.news.service import event_detail, hot_event_listing, top_hot_events
 
     reset_store_for_tests(tmp_path / "events.sqlite")
     day = current_trading_day(cn_now())
@@ -961,6 +962,7 @@ def test_hot_page_lists_concrete_events_and_keeps_sector_rank(tmp_path):
     assert "item_ids" not in head
 
     detail = event_detail(head["key"], now=cn_now())
+    publish_hot_snapshot(top_hot_events(cn_now()), persist=False)
     assert {item["title"] for item in detail["items"]} == {
         "华为发布盘古新模型，昇腾链走强",
         "华为发布盘古新模型",

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
@@ -16,6 +17,11 @@ from app.market_time import CN_TZ, current_trading_day, in_continuous_session
 from app.news.push import abnormal_signals
 
 logger = logging.getLogger(__name__)
+
+_FRAME_LOCK = threading.Lock()
+_FRAME_CACHE: dict[tuple, object] = {}
+_INDEX_LOCK = threading.Lock()
+_INDEX_CACHE: tuple | None = None
 
 _INDEX = "000300.SH"
 _MOVE_MAX = 30
@@ -1088,19 +1094,18 @@ def _members(
     found: dict[str, list[str]] = {}
     if concepts and (data_dir / "ext_data" / "ext_gn_ths").exists():
         try:
-            from app.services.picker import (
-                build_label_index,
-                load_dimensions_from_dir,
-                match_sector_symbols,
-            )
-            index = build_label_index(load_dimensions_from_dir(data_dir))
+            from app.services.picker import match_sector_symbols
+
+            index = _cached_label_index(data_dir)
+            if index is None:
+                logger.info("盘面验证没有读到概念成分")
+            else:
+                for name in concepts:
+                    symbols = sorted(match_sector_symbols(name, name, index))[:30]
+                    if symbols:
+                        found[name] = symbols
         except Exception:  # noqa: BLE001
             logger.info("盘面验证没有读到概念成分")
-        else:
-            for name in concepts:
-                symbols = sorted(match_sector_symbols(name, name, index))[:30]
-                if symbols:
-                    found[name] = symbols
     if session is not None and concepts:
         for name, symbols in _limit_theme_members(data_dir, session, concepts).items():
             merged: list[str] = []
@@ -1254,11 +1259,57 @@ def _concept_flow_map(data_dir: Path, session: date, concepts: list[str]) -> dic
     return found
 
 
+def _dimension_stamp(data_dir: Path) -> tuple | None:
+    stamps = []
+    found = False
+    for name in ("ext_gn_ths", "ext_hy_ths"):
+        path = data_dir / "ext_data" / name / "part.parquet"
+        if path.is_file():
+            stat = path.stat()
+            stamps.append((str(path), stat.st_mtime_ns, stat.st_size))
+            found = True
+        else:
+            stamps.append((str(path), 0, 0))
+    if not found:
+        return None
+    return tuple(stamps)
+
+
+def _cached_label_index(data_dir: Path):
+    """概念成分和行业路径按文件戳缓存，盘面验证不用每次重读全市场代码表。"""
+    global _INDEX_CACHE
+    stamp = _dimension_stamp(data_dir)
+    if stamp is None:
+        return None
+    with _INDEX_LOCK:
+        cached = _INDEX_CACHE
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    from app.services.picker import build_label_index, load_dimensions_from_dir
+
+    index = build_label_index(load_dimensions_from_dir(data_dir))
+    with _INDEX_LOCK:
+        _INDEX_CACHE = (stamp, index)
+    return index
+
+
 def _read_frame(path: Path):
     if not path.exists():
         return None
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    with _FRAME_LOCK:
+        cached = _FRAME_CACHE.get(key)
+    if cached is not None:
+        return cached
     import polars as pl
-    return pl.read_parquet(path)
+
+    frame = pl.read_parquet(path)
+    with _FRAME_LOCK:
+        if len(_FRAME_CACHE) >= 24:
+            _FRAME_CACHE.pop(next(iter(_FRAME_CACHE)))
+        _FRAME_CACHE[key] = frame
+    return frame
 
 
 def _bar_from(row: dict, *, kind: str, on: date | None = None) -> dict | None:
