@@ -8,12 +8,14 @@
 或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
 共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v6。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v7。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
 清理会去掉开头的钟点、【】标签、末尾省略号、「央视财经：」这类来源前缀，以及研报文件名里的日期戳和 #，并停在句号前。
 栏目标题、只有来源名或公司名、把「前法官」写成「在前法官」的标题，以及只有点评、重点、没有动作的稿，不进列表。
-侧面佐证、印证、看好、地位、逻辑这类没有主体和动作的点评不是事件。增长、新增、追加这类业绩和回购动作算事件。
+侧面佐证、印证、看好、地位、逻辑、关注、建议、推荐、布局、把握这类没有主体和动作的点评不是事件。
+增长、新增、追加这类业绩和回购动作算事件，但同比、数据显示这种没有具体主体的不算。
+已经点名的公司不能换成「公司」。叠加、接续粘成的长标题收成不超过 20 字的核心事件。
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
@@ -58,8 +60,8 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。业绩动词和点评判定变了，旧键不再套用，下一轮重新生成。
-_TITLE_CACHE_VERSION = 6
+# 标题缓存按这个版本取。主体、点评和长度的判定变了，旧键不再套用。
+_TITLE_CACHE_VERSION = 7
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -316,7 +318,17 @@ _SECTION_MATERIAL = re.compile(r"^[A-Za-z][A-Za-z0-9]{1,12}材料$")
 # 价格叙述后面再出现这些动作，就是下一句被粘进了标题。
 _UNGLUE_VERBS = _GLUE_FOLLOWUPS | frozenset({"涨价", "降价", "提价"})
 # 没有具体主体和动作时，这些是点评，不是事件。
-_COMMENTARY_CUES = ("侧面佐证", "印证", "利好", "看好", "地位", "逻辑")
+_COMMENTARY_CUES = (
+    "侧面佐证", "印证", "利好", "看好", "地位", "逻辑",
+    "关注", "建议", "推荐", "布局", "把握",
+)
+# 模型若把「立讯精密」写成「公司」，标题不能用。
+_GENERIC_SUBJECT_HEADS = ("公司", "企业", "厂商", "集团")
+# 叠加、接续把原因和事件粘成一句时，只留后面的核心事件。
+_RUNON_GLUE = ("再叠加", "叠加", "接续", "再加上", "加上", "以及", "并且", "同时")
+_CAUSE_TAILS = ("需求", "压力", "影响", "带动", "推动", "背景", "因素")
+# 增长前面只有这些词时，还没有具体主体。
+_STAT_PREFIXES = ("数据显示", "统计显示", "据统计", "同比", "环比")
 
 _CACHE: dict[tuple, dict] = {}
 _LLM_CACHE: dict[str, dict] = {}
@@ -1220,9 +1232,41 @@ def _cleaned_headline(text: str) -> str:
     return ""
 
 
+def _core_event_clause(text: str) -> str:
+    """超过 20 字、又用叠加或接续粘了原因时，只留后面的核心事件。"""
+    body = _compact(text)
+    if len(body) <= _TITLE_LIMIT:
+        return body
+    cut_at = -1
+    span = 0
+    for glue in _RUNON_GLUE:
+        index = body.rfind(glue)
+        if index > cut_at:
+            cut_at = index
+            span = len(glue)
+    if cut_at < 0:
+        return body
+    core = body[cut_at + span:].lstrip("，。！？、；：")
+    if len(core) > _TITLE_LIMIT:
+        for tail in _CAUSE_TAILS:
+            index = core.find(tail)
+            if not 0 < index <= 8:
+                continue
+            rest = core[index + len(tail):].lstrip("的")
+            if 6 <= len(rest) <= _TITLE_LIMIT:
+                core = rest
+                break
+    if core and core != body and 6 <= len(core) <= _TITLE_LIMIT and not _starts_fragment(core):
+        return core
+    return body
+
+
 def _clip_at_boundary(text: str) -> str:
     if _title_incoherent(text):
         return ""
+    core = _core_event_clause(text)
+    if core and core != _compact(text):
+        text = core
     if _has_file_debris(text):
         text = _strip_report_label(text)
     if not text or text == "事件":
@@ -1515,6 +1559,21 @@ def _subject_ok(before: str) -> bool:
     return _tuple_action(lead)[0] < 0
 
 
+def _concrete_subject(before: str) -> bool:
+    """同比、数据显示不是主体。国别和公司名可以。"""
+    text = _subject_text(before)
+    if len(text) < 2 or text in _NOT_SUBJECT or text in _GENERIC_TOKENS:
+        return False
+    core = text
+    for prefix in _STAT_PREFIXES:
+        if core.startswith(prefix):
+            core = core[len(prefix):].lstrip("的")
+            break
+    if len(core) < 2 or core in {"显示", "表明", "称"}:
+        return False
+    return core not in _NOT_SUBJECT and core not in _GENERIC_TOKENS
+
+
 def _normalize_subject(before: str) -> str:
     lead = _drop_leading_fragment(_subject_text(before))
     lead = _TIME_PREFIX.sub("", lead)
@@ -1759,7 +1818,7 @@ def _title_name_reject_reason(text: str) -> str:
 
 
 def _is_commentary(text: str) -> bool:
-    """侧面佐证、看好、地位这类说法，没有主体和动作时不是事件。"""
+    """侧面佐证、看好、关注、建议这类说法，没有主体和动作时不是事件。"""
     body = _compact(text)
     if not body or not any(cue in body for cue in _COMMENTARY_CUES):
         return False
@@ -1767,7 +1826,32 @@ def _is_commentary(text: str) -> bool:
     return not (action and _subject_ok(lead))
 
 
-def _llm_title_reject_reason(title: str) -> str:
+def _named_subject_swapped(title: str, source: str) -> bool:
+    """标题用「公司」换掉了原标题里的专名。原标题本来就以「公司」开头则不是。"""
+    text = _compact(title)
+    generic = next((word for word in _GENERIC_SUBJECT_HEADS if text.startswith(word)), "")
+    if not generic or not source:
+        return False
+    rest = text[len(generic):]
+    if len(rest) < 2:
+        return False
+    for raw in source.split("\n"):
+        src = _strip_source_prefix(raw)
+        if len(src) < 4 or src.startswith(generic):
+            continue
+        index = src.find(rest)
+        if index < 2:
+            continue
+        opener = src[:index]
+        if len(opener) > 12 or not re.fullmatch(r"[\u4e00-\u9fffA-Za-z0-9]+", opener):
+            continue
+        if opener in text or opener in _NOT_SUBJECT or opener in _STOP or opener in _GENERIC_TOKENS:
+            continue
+        return True
+    return False
+
+
+def _llm_title_reject_reason(title: str, source: str = "") -> str:
     """模型标题的拒绝原因。空字符串表示可以上屏。
 
     字数只卡到 48。标题中间的年份、价格（2026、13.1元）不是截断；
@@ -1810,8 +1894,12 @@ def _llm_title_reject_reason(title: str) -> str:
         return "中文不足"
     if _cut_glued_sentence(text) != text:
         return "粘连了下一句"
+    if len(text) > _TITLE_LIMIT and _core_event_clause(text) != text:
+        return "标题过长"
+    if source and _named_subject_swapped(text, source):
+        return "主体被换成泛称"
     lead, action, obj = _split_headline(text)
-    if not (action and obj and _subject_ok(lead)):
+    if not (action and obj and _subject_ok(lead) and _concrete_subject(lead)):
         return "缺少主体、动作或宾语"
     return ""
 
@@ -1842,13 +1930,21 @@ def _fallback_title_ok(name: object) -> bool:
         return False
     if any(text.startswith(prefix) for prefix in _FALLBACK_BAD_OPENINGS):
         return False
-    return not any(text.endswith(tail) for tail in _FALLBACK_BAD_TAILS)
+    if any(text.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
+        return False
+    lead, action, _obj = _split_headline(text)
+    return not action or _concrete_subject(lead)
 
 
 def _cleaned_display_ok(name: object) -> bool:
     """关键词回退不要求满 6 字，但钟点、括号、省略号和栏目标题不能上屏。"""
     text = _compact(str(name or ""))
     if _title_incoherent(text) or _has_file_debris(text) or _is_commentary(text):
+        return False
+    if _core_event_clause(text) != text:
+        return False
+    lead, action, _obj = _split_headline(text)
+    if action and not _concrete_subject(lead):
         return False
     if not _display_name_ok(text) or _is_section_label(text):
         return False
@@ -1951,10 +2047,12 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "例如美联储降息25基点。不要半句话，不要时间戳，不要【】，不要省略号，"
         "不要把「前法官」「前总统」写成「在前法官」「在前总统」。不要文件名、连字符后的日期和#。"
         "不要以数字或钟点开头，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
-        "不要把下一句粘进来。不要用「事件」当标题。不要输出重点、点评或栏目标签。"
+        "不要把下一句粘进来。用叠加、接续把原因和事件粘在一起时，只写后面的核心事件，不超过20个字。"
+        "不要用「事件」当标题。不要输出重点、点评或栏目标签。"
         "不要只写媒体名或公司名，标题里要有动作。"
-        "不要写侧面佐证、印证、看好、地位或逻辑这类没有具体动作的点评。"
-        "主体必须写明，例如美联储、国务院、财政部。"
+        "不要把已经点名的公司换成「公司」，立讯精密仍写立讯精密。"
+        "不要写侧面佐证、印证、看好、关注、建议、推荐、布局或把握这类没有具体动作的点评。"
+        "主体必须写明，例如美联储、国务院、财政部。不要只写同比或数据显示。"
         f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
         "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
         "寻常涨价、获批、订单是重要。"
@@ -2025,7 +2123,7 @@ def _label_with_llm(events: list[dict]) -> None:
 
 def _accept_title(event: dict, parsed: dict | None) -> bool:
     title = str((parsed or {}).get("title") or "")
-    reason = _llm_title_reject_reason(title)
+    reason = _llm_title_reject_reason(title, _event_source_text(event))
     if reason:
         logger.info("热门事件标题未采用: %s（%s）", title or "∅", reason)
         return False
