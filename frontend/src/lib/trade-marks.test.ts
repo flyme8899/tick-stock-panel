@@ -31,16 +31,16 @@ describe('买卖点标记映射', () => {
     expect(formatForward(-0.012)).toBe('-1.20%')
   })
 
-  it('策略买点为绿三角，突破为菱形，卖点为红三角', () => {
+  it('策略买点为红三角，突破为菱形，卖点为绿三角', () => {
     const marks = strategyMarkers([
       marker(),
       marker({ id: 'buy:2024-03-04:breakout', date: '2024-03-04', style: 'breakout' }),
       marker({ id: 'sell:2024-03-06:triangle', date: '2024-03-06', side: 'sell', style: 'triangle' }),
     ], true)
     expect(marks.map(item => [item.style, item.kind, item.color, item.markerId])).toEqual([
-      ['triangle', 'buy', '#12B76A', 'buy:2024-03-01:triangle'],
-      ['breakout', 'buy', '#12B76A', 'buy:2024-03-04:breakout'],
-      ['triangle', 'sell', '#F04438', 'sell:2024-03-06:triangle'],
+      ['triangle', 'buy', '#F04438', 'buy:2024-03-01:triangle'],
+      ['breakout', 'buy', '#F04438', 'buy:2024-03-04:breakout'],
+      ['triangle', 'sell', '#12B76A', 'sell:2024-03-06:triangle'],
     ])
     expect(strategyMarkers([marker()], false)).toEqual([])
   })
@@ -51,8 +51,8 @@ describe('买卖点标记映射', () => {
       { date: '2024-03-08', side: 'sell', price: 11, qty: 100, account: 'default' },
     ]
     const marks = fillMarkers(fills, true)
-    expect(marks[0]).toMatchObject({ style: 'circle', kind: 'buy', color: '#12B76A' })
-    expect(marks[1]).toMatchObject({ style: 'circle', kind: 'sell', color: '#F04438' })
+    expect(marks[0]).toMatchObject({ style: 'circle', kind: 'buy', color: '#F04438' })
+    expect(marks[1]).toMatchObject({ style: 'circle', kind: 'sell', color: '#12B76A' })
     expect(fillMarkers(fills, false)).toEqual([])
   })
 
@@ -75,10 +75,16 @@ describe('买卖点标记映射', () => {
       { kind: 'target', label: '目标价', price: 1900 },
     ]
     expect(dsaLines(sniper, true).map(line => [line.label, line.color])).toEqual([
-      ['理想买入 1800.00', '#12B76A'],
-      ['止损 1700.00', '#F04438'],
-      ['目标价 1900.00', '#F97316'],
+      ['理想买入 1800.00', '#F04438'],
+      ['止损 1700.00', '#12B76A'],
+      ['目标价 1900.00', '#A855F7'],
     ])
+    const mixed: TradeLevel[] = [
+      { kind: 'target', label: '目标价', price: 1900 },
+      { kind: 'resistance', label: '压力', price: 1910 },
+    ]
+    const colors = dsaLines(mixed, true).map(line => line.color)
+    expect(colors).toEqual(['#A855F7', '#F97316'])
   })
 
   it('悬停卡片能对上策略规则和模拟盘成交', () => {

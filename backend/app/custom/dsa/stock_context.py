@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from typing import Any
@@ -21,6 +23,10 @@ MAX_FLOW_DAYS = 10
 MIN_FLOW_DAYS = 5
 MAX_TITLE = 40
 MAX_TEXT = 1800
+CONTEXT_CACHE_TTL = 30
+_CONTEXT_CACHE_MAX = 64
+_cache_lock = threading.Lock()
+_context_cache: dict[str, tuple[float, dict]] = {}
 _AUCTION_SLICE_MINUTES = 10
 _SESSION_MINUTES = 240
 _FLOW_STALE_DAYS = 3
@@ -170,6 +176,29 @@ def render_context(
         "missing": missing,
         "stale": stale,
     }
+
+
+def clear_context_cache() -> None:
+    with _cache_lock:
+        _context_cache.clear()
+
+
+def load_context_cached(symbol: str, *, now: datetime | None = None, repo=None) -> dict[str, Any]:
+    """同一只股票 30 秒内复用已拼好的文本。分析重试不会再读一遍事件和资金。"""
+    key = normalize_symbol(symbol) or str(symbol or "").strip()
+    stamp = time.monotonic()
+    with _cache_lock:
+        hit = _context_cache.get(key)
+        if hit is not None and stamp - hit[0] < CONTEXT_CACHE_TTL:
+            return hit[1]
+    payload = load_context(symbol, now=now, repo=repo)
+    stored = str(payload.get("symbol") or key)
+    with _cache_lock:
+        _context_cache[stored] = (time.monotonic(), payload)
+        if len(_context_cache) > _CONTEXT_CACHE_MAX:
+            oldest = min(_context_cache, key=lambda item: _context_cache[item][0])
+            _context_cache.pop(oldest, None)
+    return payload
 
 
 def load_context(symbol: str, *, now: datetime | None = None, repo=None) -> dict[str, Any]:

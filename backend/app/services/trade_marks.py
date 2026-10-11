@@ -413,14 +413,18 @@ def build_payload(
 
 
 def load_dsa_levels(symbol: str) -> list[dict]:
+    """本地提醒线和 DSA 报告价位合并。同一种以本地为准，报告里的支撑压力仍保留。"""
+    local: list[dict] = []
     try:
         from app.custom.dsa.sniper_alerts import chart_levels
 
-        local = chart_levels(symbol)
-        if local:
-            return local
+        local = chart_levels(symbol) or []
     except Exception:  # noqa: BLE001 — 图表叠加失败时留空，不把错误价位当成信号
         logger.warning("local dsa levels unreadable", exc_info=True)
+    return _merge_level_rows(local, _remote_dsa_levels(symbol))
+
+
+def _remote_dsa_levels(symbol: str) -> list[dict]:
     try:
         from app.custom.dsa.proxy import InvalidUpstreamPathError, UpstreamError, enabled, forward
     except Exception:  # noqa: BLE001 — 图表叠加失败时留空，不把错误价位当成信号
@@ -453,8 +457,20 @@ def load_dsa_levels(symbol: str) -> list[dict]:
                 return levels
     except (UpstreamError, InvalidUpstreamPathError, ValueError, OSError, TypeError):
         logger.info("dsa levels unavailable for %s", symbol, exc_info=True)
-        return []
     return []
+
+
+def _merge_level_rows(local: list[dict], remote: list[dict]) -> list[dict]:
+    chosen: dict[str, dict] = {}
+    for row in remote:
+        kind = row.get("kind") if isinstance(row, dict) else None
+        if kind:
+            chosen[str(kind)] = row
+    for row in local:
+        kind = row.get("kind") if isinstance(row, dict) else None
+        if kind:
+            chosen[str(kind)] = row
+    return [chosen[kind] for kind in _LEVEL_ORDER if kind in chosen]
 
 
 def _strategy_is_fundamental(strategies: list[dict], strategy_id: str) -> bool:

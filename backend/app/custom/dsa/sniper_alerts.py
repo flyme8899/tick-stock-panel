@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,7 @@ _LABEL = {kind: label for _key, kind, label, _direction in _LEVELS}
 
 _lock = threading.Lock()
 _previous: dict[str, float] = {}
+_previous_day: dict[str, date] = {}
 _queue: list[dict] = []
 _worker_started = False
 _cache: dict[str, tuple[int, dict]] = {}
@@ -91,6 +92,7 @@ def register(
         lines = _trim(others + fresh, moment)
         _write(target, {"version": 1, "lines": lines, "fired": fired})
         _previous.pop(symbol, None)
+        _previous_day.pop(symbol, None)
     return {"symbol": symbol, "lines": fresh, "replaced": True}
 
 
@@ -118,13 +120,19 @@ def evaluate(
     now: datetime,
     *,
     cooldown: timedelta = COOLDOWN,
+    gap_from: dict[str, float] | None = None,
 ) -> tuple[list[dict], dict[str, float], dict[str, str]]:
-    """比较上一笔原始价和这一笔。第一笔只记价格，不触发。"""
+    """比较上一笔原始价和这一笔。没有参照价时只记账。
+
+    gap_from 是前收或上一交易日的最后一笔。当天第一笔相对它穿过价位时触发，并标成开盘跳空。
+    """
     moment = _local(now)
     next_previous = dict(previous)
     next_fired = dict(fired)
+    opens = gap_from or {}
     triggers = []
     seen_prev: dict[str, float | None] = {}
+    seen_gap: dict[str, bool] = {}
     for line in lines:
         symbol = str(line.get("symbol") or "")
         price = prices.get(symbol)
@@ -132,6 +140,9 @@ def evaluate(
             continue
         if symbol not in seen_prev:
             seen_prev[symbol] = next_previous.get(symbol)
+            seen_gap[symbol] = seen_prev[symbol] is None and symbol in opens
+            if seen_prev[symbol] is None:
+                seen_prev[symbol] = opens.get(symbol)
             next_previous[symbol] = price
         prev = seen_prev[symbol]
         if prev is None:
@@ -157,12 +168,16 @@ def evaluate(
             "line": round(float(level), 4),
             "price": round(price, 4),
             "analyzed_at": str(line.get("analyzed_at") or ""),
+            "gap": bool(seen_gap.get(symbol)),
         })
     return triggers, next_previous, next_fired
 
 
-def observe_frame(frame, *, now: datetime | None = None, enqueue: bool = True) -> list[dict]:
-    """行情线程调用。只筛有价位线的代码，网络推送另走队列。"""
+def observe_frame(frame, *, now: datetime | None = None, enqueue: bool = True, references=None) -> list[dict]:
+    """行情线程调用。只筛有价位线的代码，网络推送另走队列。
+
+    references 是本轮行情补充表，用来取前收。当天还没有盘中价时，用前收判断是不是开盘跳空。
+    """
     if frame is None or not alerts_enabled():
         return []
     moment = _local(now)
@@ -181,14 +196,29 @@ def observe_frame(frame, *, now: datetime | None = None, enqueue: bool = True) -
             if expired:
                 _write(target, {"version": 1, "lines": lines, "fired": state.get("fired") or {}})
             return []
+        today = moment.date()
+        same_day: dict[str, float] = {}
+        gap_from: dict[str, float] = {}
+        for symbol, prior in _previous.items():
+            seen = _previous_day.get(symbol)
+            if seen is None or seen == today:
+                same_day[symbol] = prior
+            else:
+                gap_from[symbol] = prior
+        for symbol, prior in _prior_closes(references if references is not None else frame, symbols).items():
+            if symbol not in same_day:
+                gap_from.setdefault(symbol, prior)
         triggers, updated, fired = evaluate(
             lines,
             prices,
-            _previous,
+            same_day,
             state.get("fired") or {},
             moment,
+            gap_from=gap_from,
         )
         _previous.update(updated)
+        for symbol in updated:
+            _previous_day[symbol] = today
         if triggers or expired:
             _write(target, {"version": 1, "lines": lines, "fired": fired})
         if enqueue and triggers:
@@ -202,10 +232,11 @@ def alert_text(item: dict) -> tuple[str, str]:
     name = item.get("name") or item.get("symbol") or "股票"
     label = item.get("label") or "价位"
     title = f"{label} {name}"
+    how = "开盘跳空触及" if item.get("gap") else "触及"
     text = (
         f"### {label}\n\n"
         f"{name}（{item.get('symbol')}）现价 {_price(item.get('price'))}，"
-        f"触及{label} {_price(item.get('line'))}。\n\n"
+        f"{how}{label} {_price(item.get('line'))}。\n\n"
         f"分析时间 {item.get('analyzed_at') or '未知'}。"
     )
     return title[:64], text
@@ -282,6 +313,28 @@ def _trim(lines: list[dict], now: datetime) -> list[dict]:
         return fresh
     fresh.sort(key=lambda row: str(row.get("analyzed_at") or ""))
     return fresh[-MAX_LINES:]
+
+
+def _prior_closes(frame, symbols: set[str]) -> dict[str, float]:
+    if frame is None or not symbols or getattr(frame, "is_empty", lambda: True)():
+        return {}
+    columns = getattr(frame, "columns", [])
+    if "symbol" not in columns or "prev_close" not in columns:
+        return {}
+    try:
+        import polars as pl
+
+        slim = frame.filter(pl.col("symbol").is_in(list(symbols))).select("symbol", "prev_close")
+    except Exception:  # noqa: BLE001 — 行情表结构异常时跳过这一轮
+        logger.warning("价位提醒没能读取前收", exc_info=True)
+        return {}
+    found = {}
+    for row in slim.to_dicts():
+        symbol = canonical_symbol(str(row.get("symbol") or "")) or str(row.get("symbol") or "")
+        price = _price_value(row.get("prev_close"))
+        if symbol and price is not None:
+            found[symbol] = price
+    return found
 
 
 def _prices(frame, symbols: set[str]) -> dict[str, float]:

@@ -18,7 +18,7 @@ from app.custom.dsa.proxy import (
 )
 from app.custom.dsa.quant_evidence import evidence_summary
 from app.custom.dsa.schedule import ScheduleSettingsError, load_schedule, save_schedule
-from app.custom.dsa.stock_context import load_context
+from app.custom.dsa.stock_context import load_context_cached
 
 
 class BotCommandRequest(BaseModel):
@@ -67,7 +67,7 @@ def build_router() -> APIRouter:
     @router.get("/stock-context")
     def stock_context(symbol: str, request: Request) -> dict:
         repo = getattr(request.app.state, "repo", None)
-        return load_context(symbol, repo=repo)
+        return load_context_cached(symbol, repo=repo)
 
     @router.post("/sniper-lines")
     def sniper_lines(body: SniperLineRequest) -> dict:

@@ -19,6 +19,7 @@ _SNIPER_PATH = "/api/dsa/sniper-lines"
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "app", "tsp"}
 _LEVEL_KEYS = ("ideal_buy", "stop_loss", "take_profit")
 _MAX_BLOCK = 2000
+_CONTEXT_TIMEOUT = 3
 
 
 def feed_base_url() -> str:
@@ -216,7 +217,7 @@ def _get_json(url: str, params: dict) -> dict:
 
     if not feed_token() or not _allowed(url, _CONTEXT_PATH):
         return {}
-    response = requests.get(url, params=params, headers=_headers(), timeout=8)
+    response = requests.get(url, params=params, headers=_headers(), timeout=_CONTEXT_TIMEOUT)
     response.raise_for_status()
     payload = response.json()
     return payload if isinstance(payload, dict) else {}

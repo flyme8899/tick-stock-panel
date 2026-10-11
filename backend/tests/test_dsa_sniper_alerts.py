@@ -74,7 +74,15 @@ def test_cross_cooldown_and_first_print_do_not_refire():
     title, text = sniper.alert_text(down[0])
     assert "理想买入" in title
     assert "贵州茅台" in text
+    assert "开盘跳空" not in text
     assert "app.custom" not in text
+    gap, _previous, _fired = sniper.evaluate(
+        lines, {"600519.SH": 99}, {}, {}, NOW, gap_from={"600519.SH": 110},
+    )
+    assert [item["label"] for item in gap] == ["理想买入"]
+    assert gap[0]["gap"] is True
+    _gap_title, gap_text = sniper.alert_text(gap[0])
+    assert "开盘跳空触及理想买入" in gap_text
 
 
 def test_observe_uses_raw_close_and_skips_when_disabled(tmp_path: Path, monkeypatch):
@@ -82,6 +90,7 @@ def test_observe_uses_raw_close_and_skips_when_disabled(tmp_path: Path, monkeypa
     monkeypatch.setattr(sniper, "lines_path", lambda: path)
     monkeypatch.setattr(sniper, "alerts_enabled", lambda: True)
     sniper._previous.clear()
+    sniper._previous_day.clear()
     sniper._queue.clear()
     sniper.register(_payload(), now=NOW, path=path)
     sniper._previous["600519.SH"] = 110
@@ -92,20 +101,42 @@ def test_observe_uses_raw_close_and_skips_when_disabled(tmp_path: Path, monkeypa
     monkeypatch.setattr(sniper, "alerts_enabled", lambda: False)
     sniper._previous["600519.SH"] = 100
     assert sniper.observe_frame(frame, now=NOW + timedelta(minutes=40), enqueue=False) == []
+    monkeypatch.setattr(sniper, "alerts_enabled", lambda: True)
+    sniper._previous.clear()
+    sniper._previous_day.clear()
+    opened = pl.DataFrame({"symbol": ["600519.SH"], "close": [99.0], "prev_close": [110.0]})
+    gaps = sniper.observe_frame(opened, now=NOW, enqueue=False)
+    assert [item["kind"] for item in gaps] == ["buy"]
+    assert gaps[0]["gap"] is True
 
 
-def test_chart_prefers_local_lines_over_upstream(tmp_path: Path, monkeypatch):
+def test_chart_merges_local_lines_with_report_levels(tmp_path: Path, monkeypatch):
     path = tmp_path / "lines.json"
     sniper.register(_payload(), now=NOW, path=path)
     monkeypatch.setattr(sniper, "lines_path", lambda: path)
-
-    def explode(*args, **kwargs):
-        raise AssertionError("不应再请求 DSA 历史")
-
-    monkeypatch.setattr("app.custom.dsa.proxy.forward", explode)
     monkeypatch.setattr("app.custom.dsa.proxy.enabled", lambda: True)
-    levels = load_dsa_levels("600519.SH")
-    assert [row["label"] for row in levels] == ["理想买入", "止损", "目标价"]
+
+    def forward(method, path, **kwargs):
+        if path == "history":
+            body = '{"items":[{"id":"h1","created_at":"2026-10-09T10:00:00+08:00"}]}'
+        else:
+            body = (
+                '{"strategy":{"ideal_buy":"50","stop_loss":"80"},'
+                '"details":{"raw_result":{"dashboard":{"price":'
+                '{"support_level":70,"resistance_level":"140"}}}}}'
+            )
+        return 200, body, "application/json", {}
+
+    monkeypatch.setattr("app.custom.dsa.proxy.forward", forward)
+    levels = {row["kind"]: row["price"] for row in load_dsa_levels("600519.SH")}
+    assert levels == {"buy": 100, "stop": 90, "target": 120, "support": 70, "resistance": 140}
+
+    def fail(*args, **kwargs):
+        raise OSError("dsa down")
+
+    monkeypatch.setattr("app.custom.dsa.proxy.forward", fail)
+    kept = [row["kind"] for row in load_dsa_levels("600519.SH")]
+    assert kept == ["buy", "stop", "target"]
 
 
 def test_preference_defaults_on_and_quote_hook_is_wired(monkeypatch):
@@ -114,7 +145,7 @@ def test_preference_defaults_on_and_quote_hook_is_wired(monkeypatch):
     root = Path(__file__).resolve().parents[2]
     text = (root / "backend/app/services/quote_service.py").read_text(encoding="utf-8")
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "observe_frame" in text
+    assert "observe_frame(daily_df, references=quote_extra)" in text
     assert "analysis_bridge.py:/opt/tsp/analysis_bridge.py" in compose
 
 

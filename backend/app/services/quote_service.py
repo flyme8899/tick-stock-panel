@@ -1207,7 +1207,7 @@ class QuoteService:
             try:
                 from app.custom.dsa.sniper_alerts import observe_frame
 
-                observe_frame(daily_df)
+                observe_frame(daily_df, references=quote_extra)
             except Exception:  # noqa: BLE001
                 logger.warning("DSA 价位提醒评估失败", exc_info=True)
             # 获取 enriched 数据 (刚算好的)

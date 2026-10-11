@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 
 from app.custom.dsa import stock_context
 from app.custom.dsa.analysis_bridge import (
+    _CONTEXT_TIMEOUT,
     merge_news,
     sniper_payload,
     wrap_context_loader,
@@ -226,6 +227,27 @@ def _request(path: str, header: str = "") -> Request:
 
 async def _ok(_request):
     return JSONResponse({"ok": True})
+
+
+def test_context_cache_lasts_about_thirty_seconds(monkeypatch):
+    calls = []
+    clock = {"now": 100.0}
+
+    def fake(symbol, now=None, repo=None):
+        calls.append(symbol)
+        return {"symbol": "600519.SH", "text": "cached", "missing": [], "stale": []}
+
+    monkeypatch.setattr(stock_context, "load_context", fake)
+    monkeypatch.setattr(stock_context.time, "monotonic", lambda: clock["now"])
+    stock_context.clear_context_cache()
+    first = stock_context.load_context_cached("600519", now=NOW)
+    second = stock_context.load_context_cached("600519.SH", now=NOW)
+    assert second == first
+    assert calls == ["600519"]
+    clock["now"] += stock_context.CONTEXT_CACHE_TTL + 1
+    stock_context.load_context_cached("600519", now=NOW)
+    assert calls == ["600519", "600519"]
+    assert _CONTEXT_TIMEOUT == 3
 
 
 def test_stock_context_and_sniper_routes_use_feed_token(monkeypatch):
