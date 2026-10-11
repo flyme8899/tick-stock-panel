@@ -5,10 +5,11 @@
 
 聚类看标题里的主体、动作，以及标题里出现的细概念，再加同一时间窗。正文里抽到、
 但标题没写的概念不参与聚类，避免旁支概念把无关消息粘成一件事。同一主体和动作，
-或标题高度相似，会在较短时间窗内合并。摘要只在标题没有主体时参与，避免各条资讯
-共用的页脚把整天粘成一件事。宽行业名不参与聚类，也不拿去扩成分股。
+或标题高度相似，会在较短时间窗内合并。「A与B签署」和「B与A签署」是同一组双方，
+不分前后。摘要只在标题没有主体时参与，避免各条资讯共用的页脚把整天粘成一件事。
+宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v8。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v9。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社），券商「电新/计算机/研究称」，以及研报文件名里的日期戳和 #，并停在句号前。
@@ -19,6 +20,8 @@
 增长、新增、追加这类业绩和回购动作算事件，但同比、数据显示这种没有具体主体的不算。
 已经点名的公司不能换成「公司」，这个对照看原始标题，不看清掉冒号之后的句子。叠加、接续粘成的长标题收成不超过 20 字的核心事件。
 签约、签署、战略合作要留下双方，不能只剩建发股份或只剩优必选。
+动词贴在句首、后面又接上另一组主体和动作的，是语序颠倒，退回清理后的原标题。
+截断必须停在分句边界，不能把「集体涨价」切成「集体」。
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
@@ -63,8 +66,8 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。公司冒号、列表残句和签约双方的判定变了，旧键不再套用。
-_TITLE_CACHE_VERSION = 8
+# 标题缓存按这个版本取。双方顺序、语序和分句截断的判定变了，旧键不再套用。
+_TITLE_CACHE_VERSION = 9
 _CONCEPT_LIMIT = 4
 
 # 申万一级和口头上的大板块。出现在标题里也不够把两条资讯收成同一事件。
@@ -984,6 +987,40 @@ def _same_subject_action(left: dict, right: dict) -> bool:
     return bool(_subject_keys(left) & _subject_keys(right))
 
 
+_PARTY_PAIR = re.compile(
+    r"([\u4e00-\u9fffA-Za-z0-9]{2,12})[与和及]([\u4e00-\u9fffA-Za-z0-9]{2,12})"
+)
+
+
+def _party_pair(text: str) -> tuple[str, str]:
+    """「赛力斯与宁德时代签署」里的双方。动作紧跟在双方后面才算。"""
+    body = _compact(_strip_source_prefix(text))
+    body = re.sub(r"([\u4e00-\u9fffA-Za-z0-9]{2,12})[：:]与", r"\1与", body)
+    index, verb = _tuple_action(body)
+    if index < 0 or not verb:
+        return "", ""
+    head = _TIME_PREFIX.sub("", body[:index])
+    match = _PARTY_PAIR.fullmatch(head)
+    if not match:
+        return "", ""
+    left, right = match.group(1), match.group(2)
+    blocked = _NOT_SUBJECT | _STOP | _SOURCE_NAMES | _GENERIC_TOKENS
+    if left in blocked or right in blocked or left == right:
+        return "", ""
+    return left, right
+
+
+def _same_party_action(left: dict, right: dict) -> bool:
+    """A与B做同一件事，和 B与A 是同一事件。动作不同则不并。"""
+    if not left.get("action") or left.get("action") != right.get("action"):
+        return False
+    first = _party_pair(str(left.get("title") or ""))
+    second = _party_pair(str(right.get("title") or ""))
+    if not first[0] or not second[0]:
+        return False
+    return frozenset(first) == frozenset(second)
+
+
 def _policy_subject(doc: dict) -> str:
     """财政部增量政策和隐债方案是同一件事，即使一条写发布、另一条写出台。"""
     blob = "\n".join([
@@ -1008,7 +1045,7 @@ def _can_merge(left: dict, right: dict) -> bool:
     gap = abs(left["published"] - right["published"])
     if gap > _CLUSTER_WINDOW:
         return False
-    if _same_subject_action(left, right):
+    if _same_subject_action(left, right) or _same_party_action(left, right):
         return True
     if _same_policy_subject(left, right):
         return True
@@ -1207,6 +1244,44 @@ def _ends_mid_number(text: str) -> bool:
     return bool(text) and text[-1].isdigit()
 
 
+def _verb_spans(text: str) -> list[tuple[int, str]]:
+    """按出现位置列出动词。同一处只留更长的那个。"""
+    found: list[tuple[int, str]] = []
+    for verb in (*_ACTIONS, *_PRICE_NARRATIVE, *_DIRECTIVE_VERBS, "重申"):
+        start = 0
+        while True:
+            index = text.find(verb, start)
+            if index < 0:
+                break
+            found.append((index, verb))
+            start = index + len(verb)
+    found.sort(key=lambda item: (item[0], -len(item[1])))
+    kept: list[tuple[int, str]] = []
+    occupied = -1
+    for index, verb in found:
+        if index < occupied:
+            continue
+        kept.append((index, verb))
+        occupied = index + len(verb)
+    return kept
+
+
+def _misordered_title(text: str) -> bool:
+    """句首动词没有主体，后面又接上另一组主体和动作。重申…白宫…签署就是这种。"""
+    body = re.sub(r"[《》「」]", "", _compact(text))
+    spans = _verb_spans(body)
+    if len(spans) < 2:
+        return False
+    index, verb = spans[0]
+    if index > 0 and _subject_ok(body[:index]):
+        return False
+    for later, _later_verb in spans[1:]:
+        lead = body[index + len(verb):later]
+        if _subject_ok(lead):
+            return True
+    return False
+
+
 def _watch_or_list_fragment(text: str) -> bool:
     """持续关注开头，或带 1）、① 的列表残句，不是事件。"""
     body = _compact(text)
@@ -1220,7 +1295,12 @@ def _watch_or_list_fragment(text: str) -> bool:
 def _display_clause_ok(text: str) -> bool:
     """整句可以比 20 字长，但不能停在半个动词、半个数字或半个词上。"""
     body = _compact(text)
-    if _title_incoherent(body) or _has_file_debris(body) or _watch_or_list_fragment(body):
+    if (
+        _title_incoherent(body)
+        or _has_file_debris(body)
+        or _watch_or_list_fragment(body)
+        or _misordered_title(body)
+    ):
         return False
     if not body or body == "事件" or len(body) < 4 or len(body) > _TITLE_HARD:
         return False
@@ -1348,7 +1428,7 @@ def _core_event_clause(text: str) -> str:
 
 
 def _clip_at_boundary(text: str) -> str:
-    if _title_incoherent(text) or _watch_or_list_fragment(text):
+    if _title_incoherent(text) or _watch_or_list_fragment(text) or _misordered_title(text):
         return ""
     core = _core_event_clause(text)
     if core and core != _compact(text):
@@ -1746,8 +1826,18 @@ def _split_headline(text: str) -> tuple[str, str, str]:
     return lead, verb, obj.strip("，。！？、；：")
 
 
+def _ends_mid_clause(text: str) -> bool:
+    """停在「集体」或半个词上，说明这一句还没写完。"""
+    body = _compact(text)
+    if not body:
+        return True
+    if any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
+        return True
+    return _ends_abruptly(body)
+
+
 def _cut_glued_sentence(text: str) -> str:
-    """价格叙述后面又接涨价、发布，标题就停在下一句动作之前。"""
+    """价格叙述后面又接下一句时，停在分句边界，不能把「集体涨价」切成「集体」。"""
     body = _compact(text)
     if not body:
         return ""
@@ -1758,13 +1848,25 @@ def _cut_glued_sentence(text: str) -> str:
     later, later_verb = _tuple_action(rest)
     if later <= 0 or later_verb not in _UNGLUE_VERBS:
         return body
-    return body[:index + len(verb) + later].rstrip("，。！？、；：")
+    head = body[:index + len(verb) + later].rstrip("，。！？、；：")
+    gap = body[index + len(verb):index + len(verb) + later]
+    boundary = max((gap.rfind(char) for char in "，。！？、；"), default=-1)
+    if boundary >= 0:
+        return body[:index + len(verb) + boundary].rstrip("，。！？、；：")
+    if _ends_mid_clause(head):
+        return body[:index + len(verb) + later + len(later_verb)]
+    return head
 
 
 def _title_ok(title: str) -> bool:
     """完整、有主体和动作、不超过 20 字，且不是半句话或词中间截断。"""
     text = _compact(title)
-    if _title_incoherent(text) or _has_file_debris(text) or _watch_or_list_fragment(text):
+    if (
+        _title_incoherent(text)
+        or _has_file_debris(text)
+        or _watch_or_list_fragment(text)
+        or _misordered_title(text)
+    ):
         return False
     if not text or len(text) > _TITLE_LIMIT or text in BROAD_SECTORS:
         return False
@@ -2078,6 +2180,8 @@ def _llm_title_reject_reason(title: str, source: str = "") -> str:
         return "空标题"
     if _is_commentary(text) or _watch_or_list_fragment(text):
         return "不是具体事件"
+    if _misordered_title(text):
+        return "语序颠倒"
     name_reason = _title_name_reject_reason(text)
     if name_reason:
         return name_reason
@@ -2157,7 +2261,13 @@ def _fallback_title_ok(name: object) -> bool:
 def _cleaned_display_ok(name: object) -> bool:
     """关键词回退不要求满 6 字，但钟点、括号、省略号和栏目标题不能上屏。"""
     text = _compact(str(name or ""))
-    if _title_incoherent(text) or _has_file_debris(text) or _is_commentary(text) or _watch_or_list_fragment(text):
+    if (
+        _title_incoherent(text)
+        or _has_file_debris(text)
+        or _is_commentary(text)
+        or _watch_or_list_fragment(text)
+        or _misordered_title(text)
+    ):
         return False
     if _core_event_clause(text) != text:
         return False
@@ -2269,6 +2379,8 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "不要用「事件」当标题。不要输出重点、点评或栏目标签。"
         "不要只写媒体名或公司名，标题里要有动作。"
         "不要把已经点名的公司换成「公司」，立讯精密仍写立讯精密。"
+        "不要把动词放在主体前面，例如不要写成「重申…白宫…签署」。"
+        "标题写不下时停在分句边界，不要把动词从句子中间切掉。"
         "冒号前面如果是公司名，要保留公司名。公司名后面接着「公司」或「本公司」时，用公司名替换，不要写成「公司」。"
         "不要以持续关注开头，不要写1）或①这样的列表序号。"
         "不要写招商电新称、计算机称、研究称这类券商前缀。"

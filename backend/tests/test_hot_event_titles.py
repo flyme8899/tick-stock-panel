@@ -1368,13 +1368,71 @@ def test_signing_titles_keep_both_parties(tmp_path):
     assert any("建发股份" in name and "优必选" in name for name in names)
 
 
+def test_swapped_party_order_is_one_event(tmp_path):
+    """A与B做同一件事，和 B与A 并成一件。动作不同则分开。"""
+    reset_store_for_tests(tmp_path / "party-order.sqlite")
+    _insert("seres", "赛力斯与宁德时代签署长期战略合作协议", 1)
+    _insert("catl", "宁德时代与赛力斯签署长期战略合作协议", 2, source="wscn")
+    _insert("jianfa", "建发股份与优必选签署合作备忘录", 3)
+    _insert("ubtech", "优必选与建发股份签署战略协议", 4, source="wscn")
+    _insert("buyback", "优必选与建发股份回购股份", 5)
+    events = top_hot_events(NOW)["events"]
+    seres = [event for event in events if "赛力斯" in event["name"] and "宁德时代" in event["name"]]
+    assert len(seres) == 1
+    assert seres[0]["mentions"] == 2
+    signing = [
+        event for event in events
+        if "建发股份" in event["name"] and "优必选" in event["name"] and "回购" not in event["name"]
+    ]
+    assert len(signing) == 1
+    assert signing[0]["mentions"] == 2
+    assert sum(1 for event in events if "回购" in event["name"]) == 1
+
+
+def test_misordered_verb_falls_back_to_the_source_headline():
+    """句首动词没有主体、后面又有主体和动作时，退回清理后的原标题。"""
+    garbled = "重申AI安全白宫《超级智能协议》签署"
+    source = "白宫签署超级智能协议"
+    assert _llm_title_reject_reason(garbled) == "语序颠倒"
+    assert not _llm_title_ok(garbled)
+    assert not _fallback_title_ok(garbled)
+    assert _keyword_title([{"title": garbled}]) == ""
+    assert _llm_title_reject_reason(source) == ""
+    assert _llm_title_ok("美联储降息25基点")
+    assert _llm_title_reject_reason("宁德时代回购巩固行业地位") == ""
+    event = {"name": garbled, "headline": source, "headlines": [source]}
+    _ensure_shown_name(event)
+    assert event["name"] == source
+
+
+def test_truncation_stops_at_the_clause_boundary():
+    """不能把「集体涨价」切成「集体」。没有句读时，动词留在这一句里。"""
+    raw = "央视财经：橡胶价格大涨超60家轮胎企业集体涨价"
+    expected = "橡胶价格大涨超60家轮胎企业集体涨价"
+    assert _keyword_title([{"title": raw}]) == expected
+    assert _cleaned_headline(raw) == expected
+    assert not expected.endswith("集体")
+    glued = "橡胶价格大涨超60家轮胎企业集体涨价今年以来"
+    assert _keyword_title([{"title": glued}]) == expected
+    assert "今年以来" not in expected
+    punctuated = _keyword_title([{
+        "title": "橡胶价格大涨超60%。60家轮胎企业集体涨价。今年以来橡胶价格持续上涨",
+    }])
+    assert "集体涨价" not in punctuated
+    assert punctuated.startswith("橡胶价格大涨")
+    assert _keyword_title([{"title": "央视财经：橡胶价格大涨超预期"}]) == "橡胶价格大涨超预期"
+    assert _keyword_title([{
+        "title": "【财联社】橡胶价格大涨超预期发布公告",
+    }]) == "橡胶价格大涨超预期"
+
+
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v8 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v9 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 8
-    reset_store_for_tests(tmp_path / "cache-v8.sqlite")
+    assert hot_mod._TITLE_CACHE_VERSION == 9
+    reset_store_for_tests(tmp_path / "cache-v9.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
@@ -1383,6 +1441,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v5:{fingerprint}"] = {"title": "美联储降息二十五基点旧缓存"}
     hot_mod._LLM_CACHE[f"title-v6:{fingerprint}"] = {"title": "美联储降息旧缓存第六版"}
     hot_mod._LLM_CACHE[f"title-v7:{fingerprint}"] = {"title": "美联储降息旧缓存第七版"}
+    hot_mod._LLM_CACHE[f"title-v8:{fingerprint}"] = {"title": "美联储降息旧缓存第八版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1396,6 +1455,6 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     assert named["events"][0]["name"] == "美联储宣布降息二十五基点"
     assert len(prompts) == 1
     assert all(
-        not str(key).startswith(("title-v4:", "title-v5:", "title-v6:", "title-v7:"))
+        not str(key).startswith(("title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:"))
         for key in hot_mod._LLM_CACHE
     )
