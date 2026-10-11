@@ -1,7 +1,6 @@
 """第二批东财数据的一次同步。请求都走注入的 get，默认是 em_get。"""
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Callable
 from datetime import datetime
@@ -25,13 +24,18 @@ from app.market_time import cn_now
 logger = logging.getLogger(__name__)
 
 DC_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-QA_URL = "https://search-api-web.eastmoney.com/search/jsonp"
+QA_URL = "https://mguba.eastmoney.com/interface/GetData.aspx"
 NOTICE_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann"
 CHANGES_URL = "https://push2ex.eastmoney.com/getAllStockChanges"
 _EMPTY = 9201
 _PAGE = 500
 _QA_BATCH = 4
 _SEEN_CAP = 4000
+_SEAT_COLUMNS = "SECURITY_CODE,TRADE_DATE,OPERATEDEPT_NAME,EXPLANATION,BUY,SELL,NET"
+_MARGIN_COLUMNS = "SCODE,SECNAME,RZYE,RQYE,RZMRE,TRADE_MARKET,DATE,SECUCODE"
+# 栏目常写成「增持」「减持」，两词一起覆盖增减持。
+_MAJOR_MARKS = ("业绩预告", "重组", "回购", "增持", "减持", "立案")
+_MAJOR_NOTICE_CAP = 40
 _CHANGE_TYPES = (
     (8193, "大笔买入"),
     (8194, "大笔卖出"),
@@ -48,17 +52,11 @@ class EventStoppedError(Exception):
 
 
 def sync_lhb(data_dir: Path, day: str, *, get: Getter | None = None, stop=None) -> dict:
-    try:
-        return _sync_lhb(data_dir, day, _http(get), stop)
-    except EventStoppedError:
-        return {"ok": False, "stopped": True}
+    return _guard(data_dir, "lhb", lambda: _sync_lhb(data_dir, day, _http(get), stop))
 
 
 def sync_margin(data_dir: Path, day: str, *, get: Getter | None = None, stop=None) -> dict:
-    try:
-        return _sync_margin(data_dir, day, _http(get), stop)
-    except EventStoppedError:
-        return {"ok": False, "stopped": True}
+    return _guard(data_dir, "margin", lambda: _sync_margin(data_dir, day, _http(get), stop))
 
 
 def sync_qa(
@@ -69,24 +67,29 @@ def sync_qa(
     symbols: list[str] | None = None,
     batch: int = _QA_BATCH,
 ) -> dict:
-    try:
-        return _sync_qa(data_dir, _http(get), stop, symbols, batch)
-    except EventStoppedError:
-        return {"ok": False, "stopped": True}
+    return _guard(data_dir, "qa", lambda: _sync_qa(data_dir, _http(get), stop, symbols, batch))
 
 
 def sync_notice(data_dir: Path, *, get: Getter | None = None, stop=None) -> dict:
-    try:
-        return _sync_notice(data_dir, _http(get), stop)
-    except EventStoppedError:
-        return {"ok": False, "stopped": True}
+    return _guard(data_dir, "notice", lambda: _sync_notice(data_dir, _http(get), stop))
 
 
 def sync_changes(data_dir: Path, day: str, *, get: Getter | None = None, stop=None) -> dict:
+    return _guard(data_dir, "changes", lambda: _sync_changes(data_dir, day, _http(get), stop))
+
+
+def _guard(data_dir: Path, kind: str, fn: Callable[[], dict]) -> dict:
     try:
-        return _sync_changes(data_dir, day, _http(get), stop)
+        return fn()
     except EventStoppedError:
         return {"ok": False, "stopped": True}
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).strip()[:300] or exc.__class__.__name__
+        _touch(data_dir, kind, ok=False, error=message)
+        if kind == "notice":
+            _mark_notice(ok=False, items=0, error=message)
+        logger.warning("事件上下文%s失败: %s", kind, message)
+        return {"ok": False, "error": message}
 
 
 def _sync_lhb(data_dir: Path, day: str, get: Getter, stop) -> dict:
@@ -109,18 +112,20 @@ def _sync_lhb(data_dir: Path, day: str, get: Getter, stop) -> dict:
         buys = parse_lhb_seats(_dc_pages(
             get, stop,
             report="RPT_BILLBOARD_DAILYDETAILSBUY",
-            columns="SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,OPERATEDEPT_NAME,BUY,SELL,NET,EXPLANATION",
+            columns=_SEAT_COLUMNS,
             filt=f"(TRADE_DATE='{day}')",
             referer="https://data.eastmoney.com/stock/lhb.html",
             what="龙虎榜买入营业部",
+            sort_column="BUY",
         ), side="buy")
         sells = parse_lhb_seats(_dc_pages(
             get, stop,
             report="RPT_BILLBOARD_DAILYDETAILSSELL",
-            columns="SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,OPERATEDEPT_NAME,BUY,SELL,NET,EXPLANATION",
+            columns=_SEAT_COLUMNS,
             filt=f"(TRADE_DATE='{day}')",
             referer="https://data.eastmoney.com/stock/lhb.html",
             what="龙虎榜卖出营业部",
+            sort_column="SELL",
         ), side="sell")
         seats = [row for row in (*buys, *sells) if row["trade_date"] == day]
     except EventStoppedError:
@@ -160,8 +165,8 @@ def _sync_margin(data_dir: Path, day: str, get: Getter, stop) -> dict:
     raw = _dc_pages(
         get, stop,
         report="RPTA_WEB_RZRQ_GGMX",
-        columns="SCODE,SECNAME,RZYE,RQYE,RZMRE,TRADE_MARKET,DATE,SECUCODE,TRADE_DATE",
-        filt=f"(TRADE_DATE='{day}')",
+        columns=_MARGIN_COLUMNS,
+        filt=f"(DATE='{day}')",
         referer="https://data.eastmoney.com/rzrq/detail/all.html",
         what="两融明细",
         max_pages=20,
@@ -204,7 +209,7 @@ def _sync_qa(data_dir: Path, get: Getter, stop, symbols: list[str] | None, batch
         payload = as_data(get(
             QA_URL,
             params=_qa_params(code),
-            headers={"Referer": "https://so.eastmoney.com/"},
+            headers={"Referer": "https://guba.eastmoney.com/"},
             timeout=REQUEST_TIMEOUT,
         ))
         for item in parse_qa_payload(payload, code=code):
@@ -261,7 +266,8 @@ def _sync_notice(data_dir: Path, get: Getter, stop) -> dict:
         if page > 30:
             break
     written = _write_grouped(data_dir, "notice", fresh, "notice_date")
-    ingested = _ingest_notices(fresh) if fresh else 0
+    majors = _major_notices(fresh)
+    ingested = _ingest_notices(majors) if majors else 0
     _touch(
         data_dir, "notice", ok=True, items=written,
         seen=_cap(list(seen), _SEEN_CAP), page=next_page,
@@ -306,23 +312,27 @@ def _dc_pages(
     referer: str,
     what: str,
     max_pages: int = 12,
+    sort_column: str = "",
 ) -> list[dict]:
     found: list[dict] = []
     page = 1
     while page <= max_pages:
         _raise_if_stopped(stop)
+        params = {
+            "reportName": report,
+            "columns": columns,
+            "pageNumber": str(page),
+            "pageSize": str(_PAGE),
+            "sortTypes": "-1",
+            "source": "WEB",
+            "client": "WEB",
+            "filter": filt,
+        }
+        if sort_column:
+            params["sortColumns"] = sort_column
         payload = as_data(get(
             DC_URL,
-            params={
-                "reportName": report,
-                "columns": columns,
-                "pageNumber": str(page),
-                "pageSize": str(_PAGE),
-                "sortTypes": "-1",
-                "source": "WEB",
-                "client": "WEB",
-                "filter": filt,
-            },
+            params=params,
             headers={"Referer": referer},
             timeout=REQUEST_TIMEOUT,
         ))
@@ -345,16 +355,23 @@ def _dc_pages(
 
 
 def _qa_params(code: str) -> dict:
-    body = {
-        "uid": "",
-        "keyword": code,
-        "type": ["wenDongMiWeb"],
-        "client": "web",
-        "clientType": "web",
-        "clientVersion": "curr",
-        "param": {"wenDongMiWeb": {"pageSize": 20, "pageIndex": 1, "preTag": "", "postTag": ""}},
+    return {
+        "path": "question/api/info/Search",
+        "param": f"code={code}&ps=20&p=1&qatype=1",
+        "env": "2",
     }
-    return {"cb": "jQuery", "param": json.dumps(body, ensure_ascii=False)}
+
+
+def _major_notices(rows: list[dict]) -> list[dict]:
+    """全量公告留在事件分区。只有重大类别、并且每次少量，才进热门事件用的资讯库。"""
+    picked: list[dict] = []
+    for row in rows:
+        text = f"{row.get('column_name') or ''}{row.get('title') or ''}"
+        if any(mark in text for mark in _MAJOR_MARKS):
+            picked.append(row)
+            if len(picked) >= _MAJOR_NOTICE_CAP:
+                break
+    return picked
 
 
 def _write_grouped(data_dir: Path, kind: str, rows: list[dict], date_key: str) -> int:
@@ -417,12 +434,15 @@ def _ingest_notices(rows: list[dict]) -> int:
     return int(result.get("inserted") or 0)
 
 
-def _mark_notice(*, ok: bool, items: int) -> None:
+def _mark_notice(*, ok: bool, items: int, error: str = "") -> None:
     try:
         from app.news.service import get_store
 
         get_store().mark_health(
-            "notice", ok=ok, error="" if ok else "公告入库失败", auth_state="ok" if ok else "unknown",
+            "notice",
+            ok=ok,
+            error="" if ok else (error or "公告入库失败")[:300],
+            auth_state="ok" if ok else "unknown",
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("公告健康状态没写上: %s", exc)

@@ -1,7 +1,6 @@
 """第二批东财数据：解析、保留上次结果、增量、超时不重开线程。不出网。"""
 from __future__ import annotations
 
-import json
 import threading
 from datetime import datetime
 
@@ -68,6 +67,29 @@ def test_parsers_cover_lhb_margin_qa_notice_and_changes() -> None:
         code="600519",
     )
     assert qa[0]["question_id"] == "q1"
+    moutai = parse.parse_qa_payload({
+        "re": [
+            {
+                "post_id": 1735298801,
+                "ask_question": "董秘你好，请问什么时候披露中报？",
+                "ask_answer": "已安排",
+                "post_publish_time": "2026-06-29 16:48:00",
+                "post_guba": {"stockbar_code": "600519", "stockbar_name": "贵州茅台"},
+            },
+            {
+                "post_id": 9,
+                "ask_question": "别的股票",
+                "post_publish_time": "2026-06-29 16:48:00",
+                "post_guba": {"stockbar_code": "000858", "stockbar_name": "五粮液"},
+            },
+        ],
+    }, code="600519")
+    assert len(moutai) == 1
+    assert moutai[0]["question_id"] == "1735298801"
+    assert moutai[0]["code"] == "600519"
+    assert moutai[0]["name"] == "贵州茅台"
+    assert "中报" in moutai[0]["question"]
+    assert moutai[0]["answer"] == "已安排"
     notices = parse.parse_notices({"data": {"list": [{
         "art_code": "AN1",
         "title": "关于回购的公告",
@@ -133,6 +155,61 @@ def test_lhb_keeps_net_buy_when_seats_are_empty(tmp_path) -> None:
     assert row["broker"] == ""
 
 
+def test_lhb_seats_use_broker_columns(tmp_path) -> None:
+    def get(url, *, params, headers=None, timeout=None):
+        report = params["reportName"]
+        if report == "RPT_DAILYBILLBOARD_DETAILSNEW":
+            return _dc([{
+                "SECURITY_CODE": "600519",
+                "SECURITY_NAME_ABBR": "贵州茅台",
+                "TRADE_DATE": DAY,
+                "BILLBOARD_NET_AMT": 99,
+                "CHANGE_RATE": 1,
+                "EXPLANATION": "偏离",
+            }])
+        assert "SECURITY_NAME_ABBR" not in params["columns"]
+        assert "OPERATEDEPT_NAME" in params["columns"]
+        if report == "RPT_BILLBOARD_DAILYDETAILSBUY":
+            assert params["sortColumns"] == "BUY"
+            return _dc([{
+                "SECURITY_CODE": "600519",
+                "TRADE_DATE": DAY,
+                "OPERATEDEPT_NAME": "自然人",
+                "BUY": 956036300,
+                "SELL": None,
+                "NET": 956036300,
+                "EXPLANATION": "偏离",
+            }])
+        assert params["sortColumns"] == "SELL"
+        return _dc([], code=9201)
+
+    result = jobs.sync_lhb(tmp_path, DAY, get=get)
+    assert result["ok"] is True
+    row = store.read_partition(tmp_path, "lhb", DAY).to_dicts()[0]
+    assert row["broker"] == "自然人"
+    assert row["broker_net"] == 956036300
+    assert row["name"] == "贵州茅台"
+    assert row["net_buy"] == 99
+    assert row["side"] == "buy"
+
+
+def test_margin_date_error_shows_on_health(tmp_path, monkeypatch) -> None:
+    def get(url, *, params, headers=None, timeout=None):
+        assert params["filter"] == f"(DATE='{DAY}')"
+        return _Resp({"success": False, "code": 100, "message": "DATE列不存在"})
+
+    monkeypatch.setattr("app.config.settings.data_dir", tmp_path)
+    result = jobs.sync_margin(tmp_path, DAY, get=get)
+    assert result["ok"] is False
+    assert "DATE列不存在" in result["error"]
+    block = store.load_state(tmp_path)["margin"]
+    assert "DATE列不存在" in block["last_error"]
+    assert not block.get("last_ok_at")
+    row = next(item for item in query.health_sources() if item["id"] == "margin_detail")
+    assert "DATE列不存在" in row["last_error"]
+    assert row["auth_state"] == "unknown"
+
+
 def test_margin_sz_gap_keeps_previous_balances(tmp_path) -> None:
     store.write_rows(tmp_path, "margin", "2026-10-08", [{
         "code": "000001",
@@ -148,6 +225,9 @@ def test_margin_sz_gap_keeps_previous_balances(tmp_path) -> None:
     def get(url, *, params, headers=None, timeout=None):
         assert "datacenter" in url
         assert timeout == (10.0, 30.0)
+        assert params["filter"] == f"(DATE='{DAY}')"
+        assert "TRADE_DATE" not in params["columns"]
+        assert "TRADE_DATE" not in params["filter"]
         return _dc([{
             "SCODE": "600519",
             "SECNAME": "贵州茅台",
@@ -177,28 +257,29 @@ def test_qa_is_incremental_and_limited_to_given_symbols(tmp_path) -> None:
     asked: list[str] = []
 
     def get(url, *, params, headers=None, timeout=None):
-        assert "search-api-web.eastmoney.com" in url
-        body = json.loads(params["param"])
-        asked.append(body["keyword"])
-        payload = {
-            "result": {
-                "wenDongMiWeb": [
-                    {
-                        "questionId": "new",
-                        "securityCode": body["keyword"],
-                        "questionContent": "新问题",
-                        "questionTime": "2026-10-09 11:00:00",
-                    },
-                    {
-                        "questionId": "old",
-                        "securityCode": body["keyword"],
-                        "questionContent": "旧问题",
-                        "questionTime": "2026-10-08 11:00:00",
-                    },
-                ],
-            },
-        }
-        return json.dumps(payload, ensure_ascii=False)
+        assert "mguba.eastmoney.com" in url
+        assert params["path"] == "question/api/info/Search"
+        assert "qatype=1" in params["param"]
+        assert timeout == (10.0, 30.0)
+        code = params["param"].split("code=", 1)[1].split("&", 1)[0]
+        asked.append(code)
+        return _Resp({
+            "re": [
+                {
+                    "post_id": "new",
+                    "ask_question": "新问题",
+                    "ask_answer": "已回复",
+                    "post_publish_time": "2026-10-09 11:00:00",
+                    "post_guba": {"stockbar_code": code, "stockbar_name": "测试"},
+                },
+                {
+                    "post_id": "old",
+                    "ask_question": "旧问题",
+                    "post_publish_time": "2026-10-08 11:00:00",
+                    "post_guba": {"stockbar_code": code, "stockbar_name": "测试"},
+                },
+            ],
+        })
 
     first = jobs.sync_qa(tmp_path, get=get, symbols=["600519.SH", "000001.SZ", "300750.SZ"], batch=1)
     assert first["symbols"] == ["600519"]
@@ -217,13 +298,22 @@ def test_notice_is_incremental_and_ingested(tmp_path, monkeypatch) -> None:
     def get(url, *, params, headers=None, timeout=None):
         assert "np-anotice-stock.eastmoney.com" in url
         assert params["f_node"] == "0"
-        return _Resp({"data": {"list": [{
-            "art_code": "AN1",
-            "title": "回购公告",
-            "notice_date": f"{DAY} 00:00:00",
-            "columns": [{"column_name": "回购"}],
-            "codes": [{"stock_code": "600519", "short_name": "贵州茅台"}],
-        }]}})
+        return _Resp({"data": {"list": [
+            {
+                "art_code": "AN1",
+                "title": "回购公告",
+                "notice_date": f"{DAY} 00:00:00",
+                "columns": [{"column_name": "回购"}],
+                "codes": [{"stock_code": "600519", "short_name": "贵州茅台"}],
+            },
+            {
+                "art_code": "AN2",
+                "title": "股东大会通知",
+                "notice_date": f"{DAY} 00:00:00",
+                "columns": [{"column_name": "股东大会"}],
+                "codes": [{"stock_code": "600519", "short_name": "贵州茅台"}],
+            },
+        ]}})
 
     def ingest(items):
         ingested.extend(item.source_id for item in items)
@@ -234,11 +324,51 @@ def test_notice_is_incremental_and_ingested(tmp_path, monkeypatch) -> None:
         "mark_health": lambda *args, **kwargs: None,
     })())
     first = jobs.sync_notice(tmp_path, get=get)
-    assert first["rows"] == 1
+    assert first["rows"] == 2
     assert ingested == ["AN1"]
     second = jobs.sync_notice(tmp_path, get=get)
     assert second["rows"] == 0
-    assert store.read_partition(tmp_path, "notice", DAY).height == 1
+    assert second["ingested"] == 0
+    frame = store.read_partition(tmp_path, "notice", DAY)
+    assert frame.height == 2
+    assert set(frame["art_code"].to_list()) == {"AN1", "AN2"}
+
+
+def test_only_a_few_major_notices_enter_hot_events(tmp_path, monkeypatch) -> None:
+    ingested: list[str] = []
+
+    def get(url, *, params, headers=None, timeout=None):
+        rows = []
+        for index in range(jobs._MAJOR_NOTICE_CAP + 5):
+            rows.append({
+                "art_code": f"CASE{index}",
+                "title": f"立案告知{index}",
+                "notice_date": f"{DAY} 00:00:00",
+                "columns": [{"column_name": "立案"}],
+                "codes": [{"stock_code": "600519", "short_name": "贵州茅台"}],
+            })
+        rows.append({
+            "art_code": "MEET",
+            "title": "日常经营公告",
+            "notice_date": f"{DAY} 00:00:00",
+            "columns": [{"column_name": "日常经营"}],
+            "codes": [{"stock_code": "000001", "short_name": "平安银行"}],
+        })
+        return _Resp({"data": {"list": rows}})
+
+    def ingest(items):
+        ingested.extend(item.source_id for item in items)
+        return {"inserted": len(items)}
+
+    monkeypatch.setattr("app.news.service.ingest_items", ingest)
+    monkeypatch.setattr("app.news.service.get_store", lambda: type("Store", (), {
+        "mark_health": lambda *args, **kwargs: None,
+    })())
+    result = jobs.sync_notice(tmp_path, get=get)
+    assert result["rows"] == jobs._MAJOR_NOTICE_CAP + 6
+    assert len(ingested) == jobs._MAJOR_NOTICE_CAP
+    assert "MEET" not in ingested
+    assert store.read_partition(tmp_path, "notice", DAY).height == jobs._MAJOR_NOTICE_CAP + 6
 
 
 def test_changes_merge_is_idempotent(tmp_path) -> None:

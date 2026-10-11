@@ -169,21 +169,37 @@ def parse_qa_payload(payload: object, *, code: str = "") -> list[dict]:
         if not isinstance(row, dict):
             continue
         qid = str(_pick(row, "questionId", "question_id", "post_id", "id") or "").strip()
-        question = str(_pick(row, "questionContent", "question", "title", "askContent") or "").strip()
+        question = str(_pick(
+            row,
+            "questionContent",
+            "ask_question",
+            "question",
+            "post_title",
+            "title",
+            "askContent",
+        ) or "").strip()
         if not qid or not question:
             continue
-        item_code = code6(_pick(row, "securityCode", "code", "stock_code", "SCODE")) or wanted
+        item_code = _qa_code(row) or wanted
         if wanted and item_code and item_code != wanted:
             continue
         out.append({
             "question_id": qid,
             "code": item_code,
-            "name": str(_pick(row, "securityShortName", "shortName", "name") or ""),
+            "name": _qa_name(row),
             "published_at": stamp_text(_pick(
-                row, "questionTime", "showTime", "publishTime", "noticeDate", "time",
+                row,
+                "questionTime",
+                "showTime",
+                "publishTime",
+                "post_publish_time",
+                "noticeDate",
+                "time",
             )),
             "question": question,
-            "answer": str(_pick(row, "answerContent", "answer", "content", "reply") or ""),
+            "answer": str(_pick(
+                row, "answerContent", "ask_answer", "Answer", "answer", "reply", "content",
+            ) or ""),
             "source": "eastmoney_qa",
         })
     return out
@@ -285,7 +301,30 @@ def _pick(row: dict, *names: str) -> object:
     return None
 
 
+def _qa_code(row: dict) -> str:
+    direct = code6(_pick(row, "securityCode", "code", "stock_code", "SCODE"))
+    if direct:
+        return direct
+    guba = row.get("post_guba")
+    if isinstance(guba, dict):
+        return code6(guba.get("stockbar_code") or guba.get("code"))
+    return ""
+
+
+def _qa_name(row: dict) -> str:
+    direct = _pick(row, "securityShortName", "shortName", "name")
+    if direct:
+        return str(direct)
+    guba = row.get("post_guba")
+    if isinstance(guba, dict):
+        return str(guba.get("stockbar_name") or "")
+    return ""
+
+
 def _qa_rows(data: dict) -> list:
+    raw = data.get("re")
+    if isinstance(raw, list):
+        return raw
     result = data.get("result") if isinstance(data.get("result"), dict) else data
     block = result.get("wenDongMiWeb") if isinstance(result, dict) else None
     if isinstance(block, list):
