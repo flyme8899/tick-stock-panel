@@ -256,3 +256,22 @@ def parse_pe_ttm(rows: list[dict]) -> float | None:
             latest = pe
             latest_day = day
     return latest
+
+
+def parse_pe_market(rows: list[dict]) -> list[dict]:
+    """全市场快照里的 PE(TTM)。倍数原样保存，负值也保留。空倍数留给逐只补充。"""
+    values: dict[str, float | None] = {}
+    order: list[str] = []
+    for row in rows:
+        symbol = ashare_symbol(_text(row, "SECURITY_CODE", "代码", "股票代码"))
+        if not symbol:
+            continue
+        if symbol not in values:
+            order.append(symbol)
+            values[symbol] = None
+        pe = _num(row.get("PE_TTM"))
+        if pe is None:
+            pe = _num(row.get("PE(TTM)"))
+        if pe is not None:
+            values[symbol] = pe
+    return [{"symbol": symbol, "pe_ttm": values[symbol]} for symbol in order]
