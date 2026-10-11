@@ -984,7 +984,17 @@ function BotConsole({ commands }: { commands: { name: string; usage: string; sum
   )
 }
 
-function Schedule({ reachable }: { reachable: boolean }) {
+const NOTIFICATION_TEST_CHANNELS = [
+  { value: 'dingtalk', label: '钉钉' },
+  { value: 'feishu', label: '飞书' },
+  { value: 'wechat', label: '企业微信' },
+  { value: 'telegram', label: 'Telegram' },
+  { value: 'discord', label: 'Discord' },
+  { value: 'slack', label: 'Slack' },
+  { value: 'email', label: '邮件' },
+] as const
+
+export function Schedule({ reachable }: { reachable: boolean }) {
   const qc = useQueryClient()
   const query = useQuery({
     queryKey: QK.dsaSchedule,
@@ -1023,7 +1033,7 @@ function Schedule({ reachable }: { reachable: boolean }) {
     mutationFn: () => dsaUpstream('system/scheduler/run-now', { method: 'POST' }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: QK.dsaSchedule }) },
   })
-  const [channel, setChannel] = useState('feishu')
+  const [channel, setChannel] = useState<string>(NOTIFICATION_TEST_CHANNELS[0].value)
   const test = useMutation({
     mutationFn: () => dsaUpstream('system/config/notification/test-channel', {
       method: 'POST',
@@ -1095,12 +1105,9 @@ function Schedule({ reachable }: { reachable: boolean }) {
       <Panel title="通知渠道试发" hint="渠道密钥写在 .env。这里只发一条测试，不改 TSP 监控推送。">
         <form className="flex gap-2" onSubmit={event => { event.preventDefault(); test.mutate() }}>
           <select className={fieldCls} value={channel} onChange={event => setChannel(event.target.value)} aria-label="通知渠道">
-            <option value="feishu">飞书</option>
-            <option value="wechat">企业微信</option>
-            <option value="telegram">Telegram</option>
-            <option value="discord">Discord</option>
-            <option value="slack">Slack</option>
-            <option value="email">邮件</option>
+            {NOTIFICATION_TEST_CHANNELS.map(item => (
+              <option key={item.value} value={item.value}>{item.label}</option>
+            ))}
           </select>
           <button className={ghostBtn} type="submit" disabled={!reachable || test.isPending}>发送测试</button>
         </form>
