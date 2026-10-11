@@ -5,10 +5,15 @@ from datetime import datetime
 
 from app.market_time import CN_TZ
 from app.news.hot_events import (
+    _cleaned_display_ok,
+    _cleaned_headline,
+    _clip_at_boundary,
+    _display_clause_ok,
     _display_gate_reason,
     _ensure_shown_name,
     _fallback_title_ok,
     _first_credible_title,
+    _keyword_title,
     _llm_title_ok,
 )
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
@@ -66,6 +71,15 @@ _BAD = (
     "建议关注算力",
     "推荐布局低空经济",
     "机构建议继续布局",
+    "财政部发布",
+    "招商电新称十五五政策定调固态电池产业化进入关键期",
+    "招商电新称十五五…",
+    "早上好考虑到",
+    "早上好考虑到…",
+    "早上好考虑到美联储降息",
+    "腾讯&Meta对比",
+    "Optimus加速落地",
+    "中国巨石预告点评扣非表现好于预期（激励费环比增长）",
 )
 
 # 可以上屏。回退标题不要求宾语，所以「油价走高」在这里，不在模型验收里。
@@ -83,8 +97,8 @@ _GOOD = (
     "橡胶价格大涨至每吨13.1元",
     "油价走高",
     "美国制裁",
-    "宏观经济运行出台",
     "宏观经济运行情况出台务实管用的增量政策",
+    "宏观经济运行出台务实管用的增量",
     "财政部发布2026年上半年中长期财政规划",
     "财政部发布2026年上半年中长期财政规划并明确后续增量政策",
     "财政部发布上半年财政规划",
@@ -127,6 +141,8 @@ _GOOD = (
     "沙特利雅得机场再次遭袭造成12人受伤",
     "沪指在前一交易日大涨后回调",
     "白宫签署超级智能协议",
+    "优化实施财政金融协同促内需一揽子政策",
+    "中国巨石预告扣非表现好于预期",
 )
 
 
@@ -136,8 +152,14 @@ def test_display_gate_rejects_the_bad_corpus_and_keeps_the_good_one():
         assert _display_gate_reason(title), title
         assert not _fallback_title_ok(title)
         assert not _llm_title_ok(title)
+        assert not _cleaned_display_ok(title)
+        assert not _display_clause_ok(title)
+        assert _keyword_title([{"title": title}]) != title
+        assert _clip_at_boundary(title) != title
     for title in _GOOD:
         assert _display_gate_reason(title) == "", title
+        assert _fallback_title_ok(title)
+        assert _cleaned_display_ok(title)
 
 
 def test_cutoff_and_missing_party_lose_to_the_full_headline():
@@ -243,3 +265,51 @@ def test_red_chatter_and_narrative_are_dropped(tmp_path):
     assert "利空叙事在节前已经释放" not in names
     assert "风险可控从容应" not in names
     assert "美联储降息25基点" in names
+
+
+def test_bare_publish_loses_to_the_full_policy_line(tmp_path):
+    """只有「财政部发布」时不上屏，簇里有完整政策标题就用那一条。"""
+    reset_store_for_tests(tmp_path / "fiscal-object.sqlite")
+    short = "财政部发布"
+    full = "优化实施财政金融协同促内需一揽子政策"
+    _insert("short", short, 10, 1)
+    _insert("full", full, 10, 6, source="wscn")
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert short not in names
+    assert full in names
+    rows = [("cls", short), ("wscn", full)]
+    assert _first_credible_title(rows) == full
+
+
+def test_source_fallback_strips_the_broker_prefix():
+    """回退到原标题时也要去掉招商电新称，不能把券商前缀再放上屏。"""
+    raw = "招商电新称十五五政策定调固态电池产业化进入关键期"
+    cleaned = "十五五政策定调固态电池产业化进入关键期"
+    assert _cleaned_headline(raw) == cleaned
+    assert _display_gate_reason(cleaned) == ""
+    event = {
+        "name": raw,
+        "headline": raw,
+        "headlines": [raw],
+        "_candidates": [{"source": "cls", "title": raw}],
+    }
+    _ensure_shown_name(event)
+    assert event["name"] == cleaned
+    ellipsis = "招商电新称十五五…"
+    assert _display_gate_reason(ellipsis)
+    assert not _cleaned_headline(ellipsis).startswith("招商")
+
+
+def test_same_company_earnings_notes_are_one_event(tmp_path):
+    """同一家公司的业绩预告并成一件，括号和点评不留在标题里。"""
+    reset_store_for_tests(tmp_path / "jushi.sqlite")
+    raw = "中国巨石预告点评扣非表现好于预期（激励费环比增长）"
+    other = "中国巨石扣非净利润同比增长"
+    assert _cleaned_headline(raw) == "中国巨石预告扣非表现好于预期"
+    _insert("note", raw, 9, 10)
+    _insert("result", other, 11, 40, source="wscn")
+    events = [event for event in top_hot_events(NOW)["events"] if "巨石" in event["name"]]
+    assert len(events) == 1
+    assert events[0]["mentions"] == 2
+    assert "点评" not in events[0]["name"]
+    assert "（" not in events[0]["name"] and "(" not in events[0]["name"]

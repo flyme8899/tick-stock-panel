@@ -10,7 +10,7 @@
 不再卡 6 小时。摘要只在标题没有主体时参与，避免各条资讯共用的页脚把整天粘成一件事。
 宽行业名不参与聚类，也不拿去扩成分股。
 
-展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v11。
+展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v12。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：模型和回退标题走同一道展示门槛。不合格就记下原因再问一次，仍不行就按来源可信度
 试簇里清理后的原标题，再不行就丢掉。半截标题并回完整事件，提及次数跟着走。
@@ -72,8 +72,8 @@ _LLM_TITLE_MAX = 48
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
-# 标题缓存按这个版本取。展示门槛和半截簇合并的判定变了，旧键不再套用。
-_TITLE_CACHE_VERSION = 11
+# 标题缓存按这个版本取。展示门槛又收紧了，旧键不再套用。
+_TITLE_CACHE_VERSION = 12
 # 回退标题按来源可信度从高到低试。没写在这里的来源排在最后。
 _SOURCE_CREDIBILITY = (
     "cls", "wscn", "reuters", "bloomberg", "wsj", "sec",
@@ -330,8 +330,15 @@ _BROKER_TEAM_TAIL = re.compile(rf"(?:{_BROKER_HOUSE})(?:{_BROKER_DESK})$")
 _TOPIC_JOIN = re.compile(r"[\u4e00-\u9fff][&＆][\u4e00-\u9fff]")
 # 停在「近八」而后面没有单位，是半截数量，不是「近八成」或「降息25基点」。
 _MID_PHRASE_CUT = re.compile(r"(?:近|约|逾)[0-9０-９一二三四五六七八九十]+$")
-# 只有拉丁产品名加扩容、提速，没有中文主体。
-_SUBJECTLESS_PRODUCT = re.compile(r"^[A-Za-z][A-Za-z0-9]+(?:扩容|提速|加速|放量|提产)+$")
+# 只有拉丁产品名加扩容、提速、加速落地，没有中文主体。
+_SUBJECTLESS_PRODUCT = re.compile(
+    r"^[A-Za-z][A-Za-z0-9]*(?:扩容|提速|加速|放量|提产|落地|推进)+$"
+)
+# 发布、出台这类及物动词没有宾语时，不能拿来替代更完整的原标题。
+_OBJECT_VERBS = ("发布", "出台", "宣布", "签署", "签约", "签订", "推出", "公布", "披露", "印发")
+_EARNINGS_CUES = ("业绩预告", "净利润", "扣非", "预告", "业绩", "净利", "营收")
+_PAREN_NOTE = re.compile(r"（[^）]*）|\([^)]*\)")
+_REPORT_DIANPING = re.compile(r"(?<=(?:业绩|预告|财报|年报|中报|季报))点评")
 # 1）和①是列表残句，不是事件标题。
 _LIST_MARKER = re.compile(r"(?:[0-9]+[)）]|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫])")
 _REUTERS_TAIL = re.compile(r"(?:[-|｜]\s*)?(?:Reuters|路透社|路透)$")
@@ -533,7 +540,12 @@ def _cluster_day(rows: list[dict], now: datetime) -> list[dict]:
     for members in groups.values():
         event = _event_from(members, now)
         # 加红稿即使关键词标题还不完整也先留下，后面还有模型和回退标题。
-        if _cleaned_display_ok(event.get("name")) or int(event.get("red_count") or 0) > 0:
+        # 原标题里已经有动作、但清理结果还过不了展示门槛的，也留给模型重写。
+        if (
+            _cleaned_display_ok(event.get("name"))
+            or int(event.get("red_count") or 0) > 0
+            or _worth_labeling(event)
+        ):
             events.append(event)
     return _rank_events(events, now, grade=True)
 
@@ -571,7 +583,7 @@ def _doc(row: dict) -> dict | None:
     # 加红不依赖涨价、发布这类动词。普通稿仍要主体和动作都在，才不会把闲聊收进榜。
     # 停在单个拉丁字母上的半截标题先留下，好并回完整事件，提及次数才不会丢。
     if relevance < _RELEVANCE_MIN and not red:
-        if not _latin_cutoff_fragment(title):
+        if not (_latin_cutoff_fragment(title) or _informative_policy(title)):
             return None
         relevance = _RELEVANCE_MIN
     entity_text = title
@@ -1102,10 +1114,44 @@ def _same_policy_subject(left: dict, right: dict) -> bool:
     return bool(subject) and subject == _policy_subject(right)
 
 
+def _earnings_company(text: str) -> str:
+    """业绩、预告、扣非前面的公司名。同一家公司的业绩稿并成一件。"""
+    body = _compact(_strip_report_comment(_strip_source_prefix(text)))
+    found = -1
+    for cue in _EARNINGS_CUES:
+        index = body.find(cue)
+        if index >= 2 and (found < 0 or index < found):
+            found = index
+    if found < 0:
+        return ""
+    head = body[:found].strip("的")
+    if not 2 <= len(head) <= 12 or head in _NOT_SUBJECT or head in _STOP:
+        return ""
+    if _tuple_action(head)[0] >= 0 or _narrative_action(head)[0] >= 0:
+        return ""
+    return head
+
+
+def _worth_labeling(event: dict) -> bool:
+    """原标题里有动作或是完整政策句时，先送给模型，展示门槛放在最后。"""
+    for headline in event.get("headlines") or []:
+        text = str(headline or "")
+        if _informative_policy(text):
+            return True
+        if _tuple_action(text)[0] >= 0 or _narrative_action(text)[0] >= 0:
+            return True
+    return False
+
+
+def _same_company_earnings(left: dict, right: dict) -> bool:
+    company = _earnings_company(str(left.get("title") or ""))
+    return bool(company) and company == _earnings_company(str(right.get("title") or ""))
+
+
 def _can_merge(left: dict, right: dict) -> bool:
     # 同一组双方做同一件事时，合并这一交易日里的全部稿，00:13 和 08:39 也算一件。
-    # 其他合并仍看 6 小时。聚类按交易日分桶，不会把上一场收盘后的稿并进上午。
-    if _same_party_action(left, right) or _cutoff_pair(left, right):
+    # 同一家公司的业绩预告同样并进这一交易日。其他合并仍看 6 小时。
+    if _same_party_action(left, right) or _cutoff_pair(left, right) or _same_company_earnings(left, right):
         return True
     gap = abs(left["published"] - right["published"])
     if gap > _CLUSTER_WINDOW:
@@ -1378,7 +1424,9 @@ def _display_clause_ok(text: str) -> bool:
     if not action or not _subject_ok(lead):
         return False
     consumed = len(lead) + len(action) + len(obj)
-    return not body[consumed:].strip("，。！？、；：")
+    if body[consumed:].strip("，。！？、；："):
+        return False
+    return _display_gate_reason(body) == ""
 
 
 def _colon_subject(head: str) -> bool:
@@ -1442,8 +1490,15 @@ def _cut_ellipsis_tail(text: str) -> str:
     return head or text
 
 
+def _strip_report_comment(text: str) -> str:
+    """去掉括号里的补充，以及「预告点评」里的点评。机构点评美联储降息这种留下。"""
+    body = _PAREN_NOTE.sub("", text or "")
+    return _REPORT_DIANPING.sub("", body)
+
+
 def _prepare_headline(text: str) -> str:
     body = _cut_ellipsis_tail(_strip_source_prefix(text))
+    body = _strip_report_comment(body)
     body = _first_sentence(_stitch_subject_verb(body))
     return _attach_following_object(_cut_glued_sentence(body))
 
@@ -1524,10 +1579,10 @@ def _clip_at_boundary(text: str) -> str:
     if not text or text == "事件" or _surface_block_reason(text):
         return ""
     if _display_clause_ok(text):
-        return text
+        return _gated_text(text)
     signed = _signing_title(text)
-    if signed:
-        return signed
+    if signed and _gated_text(signed):
+        return _gated_text(signed)
     # 没超过上限就整句留下。残词（停在「政」上）仍要削掉，那不是按字数截断。
     # 超长才按上限截，并且不能切开连续的字母或数字。
     if len(text) <= _TITLE_HARD:
@@ -1564,15 +1619,16 @@ def _clip_at_boundary(text: str) -> str:
             window = window[:-1]
         window = _retreat_open_alnum(text, window)
     if _display_clause_ok(window) and not _drops_known_action(window, text):
-        return window
+        return _gated_text(window)
     repaired = _repair_headline(text)
     if (
         repaired
         and not _drops_known_action(repaired, text)
         and not _is_harmful_cutoff(repaired, text)
         and (_display_clause_ok(repaired) or _title_ok(repaired))
+        and _gated_text(repaired)
     ):
-        return repaired
+        return _gated_text(repaired)
     if (
         len(window) >= 4
         and window != "事件"
@@ -1582,8 +1638,9 @@ def _clip_at_boundary(text: str) -> str:
         and not _ends_mid_number(window)
         and not _surface_block_reason(window)
         and not _drops_known_action(window, text)
+        and _gated_text(window)
     ):
-        return window
+        return _gated_text(window)
     return ""
 
 
@@ -1736,6 +1793,10 @@ def _surface_block_reason(text: str) -> str:
         return ""
     if "观点更新" in body or _TOPIC_JOIN.search(body):
         return "研报标签"
+    if "对比" in body and re.search(r"[&＆]", body):
+        return "研报标签"
+    if body.endswith("对比") and _tuple_action(body)[0] < 0 and _narrative_action(body)[0] < 0:
+        return "不是具体事件"
     if _MID_PHRASE_CUT.search(body):
         return "结尾不完整"
     if _SUBJECTLESS_PRODUCT.fullmatch(body):
@@ -2420,22 +2481,8 @@ def _has_emoji(text: str) -> bool:
 
 
 def _fallback_title_ok(name: object) -> bool:
-    """回退标题比关键词聚类更严：表情、斜杠串票、残词和点评起句都不能上屏。"""
-    if not _cleaned_display_ok(name):
-        return False
-    text = _compact(str(name or ""))
-    if _title_name_reject_reason(text):
-        return False
-    if _has_emoji(text) or _CJK_SLASH.search(text):
-        return False
-    if any(text.startswith(prefix) for prefix in _FALLBACK_BAD_OPENINGS):
-        return False
-    if any(text.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
-        return False
-    lead, action, _obj = _split_headline(text)
-    if action and not _concrete_subject(lead):
-        return False
-    return _display_gate_reason(text) == ""
+    """回退标题和模型标题、展示截断用同一道门槛。"""
+    return _display_gate_reason(str(name or "")) == ""
 
 
 def _cleaned_display_ok(name: object) -> bool:
@@ -2457,9 +2504,11 @@ def _cleaned_display_ok(name: object) -> bool:
         return False
     if not _display_name_ok(text) or _is_section_label(text):
         return False
-    if text[0].isdigit() or any(char in text for char in "【】[]"):
+    if text[0].isdigit() or any(char in text for char in "【】[]（）()"):
         return False
-    return "..." not in text and "…" not in text
+    if "..." in text or "…" in text:
+        return False
+    return _display_gate_reason(text) == ""
 
 
 def _event_title_sources(event: dict) -> list[str]:
@@ -2660,7 +2709,38 @@ def _has_gate_subject_action(text: str) -> bool:
         or _directive_action(body)[0] >= 0
     ):
         return False
-    return _pos_subject_action(body)
+    return _pos_subject_action(body) or _informative_policy(body)
+
+
+def _bare_transitive(text: str) -> bool:
+    """「财政部发布」只有主体和及物动词，宾语被丢掉了。签约双方写全时宾语可以在动词前。"""
+    body = _compact(text)
+    lead, verb, obj = _split_headline(body)
+    if verb not in _OBJECT_VERBS or _compact(obj):
+        return False
+    if verb in ("签约", "签署", "签订") and any(
+        mark in body for mark in ("与", "和", "协议", "战略合作", "备忘录")
+    ):
+        return False
+    return _subject_ok(lead) and _concrete_subject(lead)
+
+
+def _informative_policy(text: str) -> bool:
+    """完整的政策原标题。比「财政部发布」更该上屏。"""
+    body = _compact(text)
+    if len(body) < 12 or _bare_transitive(body):
+        return False
+    if not body.endswith(("政策", "方案", "规划", "措施")):
+        return False
+    return any(str(word.flag).startswith("v") and len(word.word) >= 2 for word in _pos_cut(body))
+
+
+def _gated_text(text: str) -> str:
+    """展示、回退和截断都只留下这道门槛通过的句子。"""
+    body = _compact(str(text or ""))
+    if body and _display_gate_reason(body) == "":
+        return body
+    return ""
 
 
 def _display_gate_reason(title: str, sources: list[str] | None = None) -> str:
@@ -2673,12 +2753,16 @@ def _display_gate_reason(title: str, sources: list[str] | None = None) -> str:
         return "不是具体事件"
     if "..." in text or "…" in text:
         return "省略号"
-    if any(char in text for char in "【】[]"):
+    if any(char in text for char in "【】[]（）()"):
         return "含括号"
+    if _BROKER_NOTE.match(text) or _BROKER_TEAM_LEAD.match(text):
+        return "券商前缀"
     if text[0].isdigit():
         return "以数字开头"
     if _cut_glued_sentence(text) != text:
         return "粘连了下一句"
+    if len(text) > _TITLE_LIMIT and _core_event_clause(text) != text:
+        return "标题过长"
     if _is_commentary(text) or _watch_or_list_fragment(text) or _misordered_title(text):
         return "不是具体事件"
     blocked = _surface_block_reason(text)
@@ -2693,6 +2777,8 @@ def _display_gate_reason(title: str, sources: list[str] | None = None) -> str:
         return boundary
     if blobs and _dropped_signing_party(text, "\n".join(blobs)):
         return "缺少合作方"
+    if _bare_transitive(text):
+        return "缺少宾语"
     if not _has_gate_subject_action(text):
         return "缺少主体或动作"
     return ""

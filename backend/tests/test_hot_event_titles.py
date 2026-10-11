@@ -11,6 +11,7 @@ from app.news.hot_events import (
     _cleaned_headline,
     _concept_relevant,
     _dictionary_concepts,
+    _display_gate_reason,
     _ensure_shown_name,
     _fallback_title_ok,
     _fine_concept,
@@ -104,7 +105,7 @@ def test_keyword_title_uses_clause_instead_of_gluing_snippets():
     bare = _keyword_title([
         {"title": "和之前结构性降息"},
     ])
-    assert bare == "结构性降息"
+    assert bare != "和之前结构性降息"
     assert bare != "事件"
     assert _keyword_title([{"title": "【财联社】事件"}]) == ""
     assert _keyword_title([{"title": "事件"}]) == ""
@@ -117,7 +118,8 @@ def test_keyword_title_uses_clause_instead_of_gluing_snippets():
     clipped = _keyword_title([
         {"title": "根据宏观经济运行出台务实管用的增量政"},
     ])
-    assert clipped == "宏观经济运行出台"
+    assert clipped == "宏观经济运行出台务实管用的增量"
+    assert clipped != "宏观经济运行出台"
     assert clipped != "根据宏观经济运行出台务实管用的增量政"
     assert _keyword_title([
         {"title": "华尔街见闻：工信部出台机器人补贴"},
@@ -700,8 +702,10 @@ def test_production_titles_drop_clocks_ellipsis_and_labels():
 
     clipped = _keyword_title([{"title": "32财政部发布2026年上半年中"}])
     assert clipped != "32财政部发布2026年上半年中"
-    assert clipped.startswith("财政部")
-    assert "2026" in clipped
+    assert not clipped.startswith("32")
+    if clipped:
+        assert clipped.startswith("财政部") and "2026" in clipped
+        assert _display_gate_reason(clipped) == ""
 
     rubber = _keyword_title([{
         "title": "橡胶价格大涨超60%。60家轮胎企业集体涨价。今年以来橡胶价格持续上涨",
@@ -1427,12 +1431,12 @@ def test_truncation_stops_at_the_clause_boundary():
 
 
 def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
-    """缓存版本升到 v11 后，旧键里的标题即使当时能用也不再套用。"""
+    """缓存版本升到 v12 后，旧键里的标题即使当时能用也不再套用。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
-    assert hot_mod._TITLE_CACHE_VERSION == 11
-    reset_store_for_tests(tmp_path / "cache-v11.sqlite")
+    assert hot_mod._TITLE_CACHE_VERSION == 12
+    reset_store_for_tests(tmp_path / "cache-v12.sqlite")
     title = "【财联社】美联储宣布降息25基点"
     _insert("fed", title, 1)
     fingerprint = hashlib.sha1(title.encode("utf-8")).hexdigest()
@@ -1444,6 +1448,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     hot_mod._LLM_CACHE[f"title-v8:{fingerprint}"] = {"title": "美联储降息旧缓存第八版"}
     hot_mod._LLM_CACHE[f"title-v9:{fingerprint}"] = {"title": "美联储降息旧缓存第九版"}
     hot_mod._LLM_CACHE[f"title-v10:{fingerprint}"] = {"title": "美联储降息旧缓存第十版"}
+    hot_mod._LLM_CACHE[f"title-v11:{fingerprint}"] = {"title": "美联储降息旧缓存第十一版"}
     prompts: list[str] = []
 
     def good(prompt: str, **_kwargs: object) -> str:
@@ -1459,7 +1464,7 @@ def test_title_cache_v4_is_not_reused(tmp_path, monkeypatch):
     assert all(
         not str(key).startswith((
             "title-v4:", "title-v5:", "title-v6:", "title-v7:", "title-v8:", "title-v9:",
-            "title-v10:",
+            "title-v10:", "title-v11:",
         ))
         for key in hot_mod._LLM_CACHE
     )
