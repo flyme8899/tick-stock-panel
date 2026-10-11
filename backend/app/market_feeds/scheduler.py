@@ -117,8 +117,10 @@ def due_tasks(
         and "limit_close" not in due
     ):
         due.append("limit_intraday")
-    # 研报窗口：交易日过了 16:00 才拉（避开盘中和收盘快照抢东财配额），
-    # 交易日开盘前补跑。非交易日不设时刻门槛 —— 已经补完收盘快照要接着补研报。
+    # 研报窗口：交易日过了 16:00 才拉（避开盘中和收盘快照抢东财配额）；
+    # 非交易日在收盘快照补完后接着跑。**交易日盘前不再补研报** —— 原实现
+    # 的 ``morning`` 顺带覆盖了盘前，但盘前该优先补的是上一交易日的收盘快照，
+    # 研报延到当天 16:00 之后即可，避免和盘前补跑抢东财配额。
     research_window = (trading and clock >= _RESEARCH_AT) or (not trading and "limit_close" not in due)
     if (
         flags.get("research")

@@ -163,20 +163,20 @@ def _write_grouped(data_dir: Path, kind: str, rows: list[dict]) -> None:
         grouped.setdefault(str(row["publish_date"]), []).append(row)
     for day, chunk in grouped.items():
         store.write_rows(data_dir, kind, day, chunk)
-    _mark_health(data_dir, kind, ok=True, note=f"{len(rows)} new rows" if rows else "no new rows")
 
 
-def _mark_health(data_dir: Path, kind: str, *, ok: bool, note: str = "") -> None:
+def _mark_health(*, ok: bool, note: str = "", items: int = 0) -> None:
     """记录研报抓取健康度。
 
-    抓取成功但一条都没抓到（无新研报 / 该股本来就没研报）时不能记为 ok —— 那会把
-    「拉取链路断了」和「确实没内容」混成同一个绿点。用 ok=False + 说明文案，让
-    健康页能区分「今天没新研报」和「抓取失败」。
+    写的是 ``research`` —— 与 news.config.SOURCE_ORDER / SOURCE_LABELS 里的 id
+    一致，健康页才读得到。抓取成功但一条都没抓到（无新研报 / 该股本来就没研报）
+    时记 ok=False 并带上说明：否则会把「拉取链路断了」和「确实没内容」混成同一个
+    绿点。auth_state 沿用 ``ok``，保持与其它网络源一致。
     """
     try:
         from app.news.service import get_store
 
-        get_store().mark_health(f"research_{kind}", ok=ok, error="" if ok else note[:200], auth_state="n/a")
+        get_store().mark_health("research", ok=ok, error="" if ok else note[:200], auth_state="ok")
     except Exception as exc:  # noqa: BLE001
         logger.debug("研报健康状态未写入: %s", exc)
 
@@ -223,7 +223,7 @@ def _ingest(rows: list[dict], *, data_dir: Path, today: date) -> int:
             raw={"kind": row.get("kind"), "rating": rating},
         ))
     result = ingest_items(items, Lexicon([]))
-    _mark_health(data_dir, "news", ok=True, note=f"ingested {int(result.get('inserted') or 0)}")
+    _mark_health(ok=True, items=int(result.get("inserted") or 0))
     return int(result.get("inserted") or 0)
 
 

@@ -194,13 +194,23 @@ def sync_stock(
     backfill = latest is None
     target = None if backfill else latest
     refresh_day = False
+    refresh_boards: set[str] | None = None
     universe = len({code for symbol in symbols if (code := normalize.code6(symbol))})
     if trade_date:
         current = store.read_partition(data_dir, "stock", trade_date)
         expected, full = store.board_coverage(data_dir)
-        refresh_day = store.is_partial_ranking(
-            store.code_count(current), universe, current, expected=expected, full=full,
-        )
+        count = store.code_count(current)
+        if count < store.ranking_limit(universe):
+            # 样本连门槛都没到：整份重拉，不限板块。
+            refresh_day = True
+        else:
+            # 样本够，但上游缺整段板块（同花顺个股榜不覆盖深主板）。
+            # 只补缺的那几个板块里的代码，已有的照常 skip —— 否则 refresh_day
+            # 会让 _skip 对所有代码返回 False，每轮把 5882 只全量重打一遍东财，
+            # 而缺口又永远补不上，等于 30 分钟一次的无限全量重跑。
+            gaps = store.missing_boards(current, expected=expected, full=full)
+            if gaps:
+                refresh_boards = set(gaps)
         present_sources = _present_sources(current)
     elif target is not None:
         present_sources = _present_sources(store.read_partition(data_dir, "stock", target))
@@ -212,7 +222,12 @@ def sync_stock(
             return False
         if trade_date is None:
             return not backfill
-        return not refresh_day
+        if refresh_day:
+            return False
+        if refresh_boards is not None:
+            # 只重拉缺口板块；其它板块已经拉到的代码保持 skip。
+            return store.board_of(code) not in refresh_boards
+        return True
 
     def _paced(source: str, breaker: CircuitBreaker, fn):
         sleep(pace.delay_s)

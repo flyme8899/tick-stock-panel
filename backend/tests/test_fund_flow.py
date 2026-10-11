@@ -1124,3 +1124,66 @@ def test_board_coverage_reports_each_board_size(tmp_path) -> None:
 def test_listed_boards_returns_none_without_instruments(tmp_path) -> None:
     assert store.listed_boards(tmp_path) is None
     assert store.board_coverage(tmp_path) == (None, None)
+
+
+def test_board_side_keeps_ranking_when_upstream_misses_a_board(tmp_path) -> None:
+    """上游缺整段板块时，个股榜必须照常展示，不能整块变空（线上回归）。
+
+    同花顺个股榜不覆盖深主板，分区 3723 只但 missing_boards=['sz_main']。
+    若展示层把板块缺口也当成"样本不够"，个股主力净流入榜和 DSA
+    「主力净流入居前」会永久消失 —— 板块缺口只该决定要不要重拉。
+    """
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    rows = ([f"300{i:03d}" for i in range(900)] + [f"600{i:03d}" for i in range(700)]
+            + [f"000{i:03d}" for i in range(200)])  # 深主板应有 200 只，实际一只没有
+    pl.DataFrame({
+        "symbol": [f"{c}.SZ" if c[0] in "03" else f"{c}.SH" for c in rows],
+        "code": rows,
+    }).write_parquet(inst / "instruments.parquet")
+    store.write_rows(tmp_path, "stock", "2026-10-09", [
+        {"code": c, "trade_date": "2026-10-09", "main_net": float(i + 1), "source": "akshare_ths"}
+        for i, c in enumerate(r for r in rows if not r.startswith("000"))
+    ])
+
+    today = query._stocks_today(tmp_path)
+    assert today["partial"] is False          # 不能因板块缺口变 partial
+    assert len(today["inflow"]) > 0           # 榜单必须有内容
+    assert today["note"] and "深市主板" in today["note"]   # 缺口要以 note 提示
+    context = query.dsa_context(tmp_path)
+    assert any("主力净流入居前" in item["summary"] for item in context["items"])
+
+
+def test_refresh_scoped_to_missing_board_only() -> None:
+    """缺口重拉只碰缺失板块的代码，已拉到的照常 skip。"""
+    existing = ["300001", "600519", "688981"]     # 已有：创业板/沪主板/科创板
+    refresh_boards = {"sz_main"}                  # 只有深主板缺
+    for code in existing:
+        assert store.board_of(code) not in refresh_boards   # → keep skip
+    for code in ("000001", "002415", "001979", "003816"):
+        assert store.board_of(code) in refresh_boards       # → 才重拉
+
+
+def test_board_gap_tries_are_capped_per_day() -> None:
+    """同一交易日板块缺口补拉次数封顶，避免每 30 分钟全量重打东财。"""
+    from app.fund_flow import scheduler as ff_scheduler
+
+    assert ff_scheduler.BOARD_GAP_MAX_TRIES >= 1
+    st = {"board_gap_date": "2026-10-09", "board_gap_tries": ff_scheduler.BOARD_GAP_MAX_TRIES}
+    assert ff_scheduler._board_gap_exhausted(st, "2026-10-09") is True
+    # 换一天重新计数
+    assert ff_scheduler._board_gap_exhausted(st, "2026-10-10") is False
+    # 没记过就是不限
+    assert ff_scheduler._board_gap_exhausted({}, "2026-10-09") is False
+
+
+def test_bj_board_includes_920_segment() -> None:
+    """北交所新段 920xxx 必须归到 bj，不能算 unknown 被忽略。"""
+    for code in ("920001", "920999", "830799", "430047"):
+        assert store.board_of(code) == "bj"
+
+
+def test_board_gap_note_labels_are_human_readable() -> None:
+    assert query.board_gap_note([]) is None
+    assert query.board_gap_note(["sz_main"]) == "上游个股资金榜未覆盖：深市主板"
+    assert "深市主板" in query.board_gap_note(["sz_main", "bj"])
