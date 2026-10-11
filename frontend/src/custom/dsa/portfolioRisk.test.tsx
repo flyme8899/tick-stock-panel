@@ -69,7 +69,7 @@ it('renders the other upstream payloads as summaries', async () => {
       <CapabilitySummary data={{ providers: [{ name: 'tickflow', label: 'TickFlow', status: 'ok', markets: ['cn'], datasets: ['daily'] }], datasets: [], priorities: [] }} />
       <BacktestSummary data={{ processed: 4, saved: 3, completed: 2, insufficient: 1, errors: 0, applied_eval_window_days: 5, message: '有一条样本不足' }} />
       <ImportSummary data={{ codes: ['600519'], items: [{ code: '600519', name: '贵州茅台', confidence: 'high' }] }} />
-      <UsageSummary data={{ period: 'today', from_date: '2026-10-11', to_date: '2026-10-11', total_calls: 2, total_prompt_tokens: 100, total_completion_tokens: 40, total_tokens: 140, by_call_type: [{ call_type: 'analysis', calls: 2, total_tokens: 140 }], by_model: [{ model: 'demo', calls: 2 }] }} />
+      <UsageSummary data={{ period: 'month', from_date: '2026-10-01', to_date: '2026-10-11', total_calls: 12, total_prompt_tokens: 123456, total_completion_tokens: 40000, total_tokens: 163456, by_call_type: [{ call_type: 'analysis', calls: 12, prompt_tokens: 100000, completion_tokens: 23456, total_tokens: 123456 }] }} />
     </>,
   )
   expect(host.textContent).toContain('TickFlow')
@@ -78,7 +78,16 @@ it('renders the other upstream payloads as summaries', async () => {
   expect(host.textContent).toContain('有一条样本不足')
   expect(host.querySelector('table')?.textContent).toContain('贵州茅台')
   expect(host.querySelector('table')?.parentElement?.className).toContain('overflow-x-auto')
-  expect(host.querySelector('[data-usage-summary]')?.textContent).toContain('2')
-  expect(host.textContent).toContain('个股分析')
+  const usage = host.querySelector('[data-usage-summary]')
+  expect(usage?.textContent).toContain('本月')
+  expect(usage?.textContent).toContain('12.35万')
+  expect(usage?.textContent).toContain('4万')
+  expect(usage?.textContent).toContain('16.35万')
+  const types = host.querySelector('[data-usage-types]')
+  expect(types?.className).toContain('overflow-x-auto')
+  expect(types?.textContent).toContain('个股分析')
+  expect(types?.textContent).toContain('10万')
+  expect(types?.textContent).toContain('2.35万')
+  expect(host.textContent).not.toContain('total_prompt_tokens')
   expect(host.querySelector('pre')).toBeNull()
 })

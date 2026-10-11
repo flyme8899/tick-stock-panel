@@ -114,6 +114,26 @@ function countOf(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? String(value) : '—'
 }
 
+function formatWan(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  const abs = Math.abs(value)
+  const sign = value < 0 ? '-' : ''
+  if (abs < 10_000) return `${sign}${Math.round(abs).toLocaleString('zh-CN')}`
+  const unit = abs >= 100_000_000 ? '亿' : '万'
+  const scaled = abs / (unit === '亿' ? 100_000_000 : 10_000)
+  return `${sign}${scaled.toFixed(2).replace(/\.?0+$/, '')}${unit}`
+}
+
+function parsedJson(text: string): unknown | null {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
+  try {
+    return JSON.parse(trimmed) as unknown
+  } catch {
+    return null
+  }
+}
+
 const CAPABILITY_STATUS: Record<string, string> = {
   ok: '可用',
   partial: '部分可用',
@@ -241,40 +261,49 @@ export function UsageSummary({ data }: { data: unknown }) {
   if (!isRecord(data)) return null
   const period = textOf(data.period, '')
   const periodLabel = period === 'today' ? '今日' : period === 'month' ? '本月' : period === 'all' ? '全部' : period || '—'
+  const byType = asRecords(data.by_call_type)
   return (
     <div className="mt-2 space-y-3">
-      <p className="text-[11px] text-muted">{periodLabel} · {textOf(data.from_date, '')} 至 {textOf(data.to_date, '')}</p>
-      <dl data-usage-summary className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      <p className="text-[11px] text-muted">{textOf(data.from_date, '')} 至 {textOf(data.to_date, '')}</p>
+      <dl data-usage-summary className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {([
-          ['调用', data.total_calls],
-          ['输入 token', data.total_prompt_tokens],
-          ['输出 token', data.total_completion_tokens],
-        ] as [string, unknown][]).map(([label, value]) => (
-          <div key={String(label)} className="rounded-lg border border-border bg-base px-3 py-2">
+          ['周期', periodLabel],
+          ['调用', countOf(data.total_calls)],
+          ['输入 token', formatWan(data.total_prompt_tokens)],
+          ['输出 token', formatWan(data.total_completion_tokens)],
+          ['合计 token', formatWan(data.total_tokens)],
+        ] as [string, string][]).map(([label, value]) => (
+          <div key={label} className="rounded-lg border border-border bg-base px-3 py-2">
             <dt className="text-[11px] text-muted">{label}</dt>
-            <dd className="num text-sm text-foreground">{countOf(value)}</dd>
+            <dd className="num text-sm text-foreground">{value}</dd>
           </div>
         ))}
       </dl>
-      {asRecords(data.by_call_type).length > 0 && (
-        <ul className="divide-y divide-border text-xs">
-          {asRecords(data.by_call_type).map(row => (
-            <li key={textOf(row.call_type)} className="flex justify-between gap-3 py-1.5">
-              <span className="text-foreground">{USAGE_CALL_TYPES[textOf(row.call_type, '')] ?? textOf(row.call_type)}</span>
-              <span className="num text-muted">{countOf(row.calls)} 次 · {countOf(row.total_tokens)} token</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {asRecords(data.by_model).length > 0 && (
-        <ul className="divide-y divide-border text-xs">
-          {asRecords(data.by_model).map(row => (
-            <li key={textOf(row.model)} className="flex justify-between gap-3 py-1.5">
-              <span className="min-w-0 truncate font-mono text-foreground">{textOf(row.model)}</span>
-              <span className="num shrink-0 text-muted">{countOf(row.calls)} 次</span>
-            </li>
-          ))}
-        </ul>
+      {byType.length > 0 && (
+        <div data-usage-types className="overflow-x-auto">
+          <table className="w-full min-w-[28rem] text-left text-xs">
+            <thead className="text-muted">
+              <tr>
+                <th className="py-1 pr-3 font-normal">类型</th>
+                <th className="py-1 pr-3 font-normal">次数</th>
+                <th className="py-1 pr-3 font-normal">输入</th>
+                <th className="py-1 pr-3 font-normal">输出</th>
+                <th className="py-1 font-normal">合计</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byType.map(row => (
+                <tr key={textOf(row.call_type)} className="border-t border-border">
+                  <td className="whitespace-nowrap py-1.5 pr-3 text-foreground">{USAGE_CALL_TYPES[textOf(row.call_type, '')] ?? textOf(row.call_type)}</td>
+                  <td className="num whitespace-nowrap py-1.5 pr-3">{countOf(row.calls)}</td>
+                  <td className="num whitespace-nowrap py-1.5 pr-3">{formatWan(row.prompt_tokens)}</td>
+                  <td className="num whitespace-nowrap py-1.5 pr-3">{formatWan(row.completion_tokens)}</td>
+                  <td className="num whitespace-nowrap py-1.5">{formatWan(row.total_tokens)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
@@ -933,11 +962,22 @@ function BotConsole({ commands }: { commands: { name: string; usage: string; sum
           <button className={primaryBtn} type="submit" disabled={send.isPending || !input.trim()}>执行</button>
         </form>
         <div className="mt-3 space-y-2">
-          {lines.map((line, index) => (
-            <pre key={`${line.title}-${index}`} className="overflow-auto whitespace-pre-wrap rounded-lg bg-base px-3 py-2 font-mono text-[11px] leading-relaxed text-secondary">
-              {line.title}{'\n'}{line.text}
-            </pre>
-          ))}
+          {lines.map((line, index) => {
+            const json = parsedJson(line.text)
+            if (json != null) {
+              return (
+                <div key={`${line.title}-${index}`} className="rounded-lg bg-base px-3 py-2">
+                  <p className="text-xs text-foreground">{line.title}</p>
+                  <RawJson data={json} />
+                </div>
+              )
+            }
+            return (
+              <pre key={`${line.title}-${index}`} className="overflow-auto whitespace-pre-wrap rounded-lg bg-base px-3 py-2 font-mono text-[11px] leading-relaxed text-secondary">
+                {line.title}{'\n'}{line.text}
+              </pre>
+            )
+          })}
         </div>
       </Panel>
     </div>
