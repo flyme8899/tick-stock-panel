@@ -150,9 +150,13 @@ export function Screener() {
     queryFn: () => api.screenerCandleMatch(filter.patternId, filter.patternSide, patternWithin),
     enabled: !!filter.patternId && !!filter.patternSide,
   })
-  const patternSymbols = filter.patternId
-    ? (patternQuery.data ? new Set(patternQuery.data.symbols) : null)
-    : undefined
+  const patternSymbols = !filter.patternId
+    ? undefined
+    : patternQuery.isError
+      ? new Set<string>()
+      : patternQuery.data
+        ? new Set(patternQuery.data.symbols)
+        : null
 
   const filteredRows = useMemo(
     () => (result ? applyFilter(result.rows, filter, patternSymbols) : []),
@@ -1122,6 +1126,11 @@ export function Screener() {
                     if (activeStrategy) filterMap.current.delete(activeStrategy)
                   }}
                 />
+              )}
+              {filter.patternId && patternQuery.isError && (
+                <div className="mb-2 text-xs text-warning">
+                  形态名单加载失败，已停止显示未筛选的全部结果。
+                </div>
               )}
 
               {displayRows.length === 0 ? (

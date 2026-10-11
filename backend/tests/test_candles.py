@@ -79,40 +79,48 @@ def test_engulfing_hammer_and_doji_family():
     assert _last(grave_frame, "cdl_gravestone_doji") == -100
 
 
-def test_hanging_man_stars_soldiers_crows_harami_piercing_dark_cloud():
+_TALIB_ONLY = {
+    "three_white_soldiers",
+    "three_black_crows",
+    "rising_falling_three",
+    "long_line",
+    "separating_lines",
+    "abandoned_baby",
+    "stick_sandwich",
+}
+
+
+def test_divergent_patterns_unavailable_without_talib():
+    by_id = {pat.id: pat for pat in CATALOG}
+    for pattern_id in _TALIB_ONLY:
+        assert by_id[pattern_id].builtin is False
+    frame = compute_candle_patterns(pl.DataFrame(_small_bodies(20)), engine="builtin")
+    present = [pattern_id for pattern_id in _TALIB_ONLY if f"cdl_{pattern_id}" in frame.columns]
+    assert present == []
+
+
+def test_hanging_man_stars_harami_piercing_dark_cloud():
     days = _days(20)
     base = _small_bodies(12)
 
     hang = [*base, _bar(days[12], 10.0, 12.2, 9.8, 12.0), _bar(days[13], 12.15, 12.18, 10.0, 12.1)]
     assert _last(compute_candle_patterns(pl.DataFrame(hang), engine="builtin"), "cdl_hanging_man") == -100
 
-    morning = [*base, 
+    # 第一根实体 3。30% 穿透阈值是 9.9，中点是 10.5。收盘 10.2 只满足 30%。
+    morning = [*base,
         _bar(days[12], 12.0, 12.2, 8.8, 9.0),
         _bar(days[13], 8.5, 8.6, 8.2, 8.4),
-        _bar(days[14], 9.2, 11.2, 9.0, 11.0),
+        _bar(days[14], 9.2, 10.4, 9.0, 10.2),
     ]
     assert _last(compute_candle_patterns(pl.DataFrame(morning), engine="builtin"), "cdl_morning_star") == 100
 
-    evening = [*base, 
+    # 第一根实体 3。30% 穿透阈值是 11.1，中点是 10.5。收盘 10.8 只满足 30%。
+    evening = [*base,
         _bar(days[12], 9.0, 12.2, 8.8, 12.0),
         _bar(days[13], 12.6, 12.8, 12.4, 12.5),
-        _bar(days[14], 12.2, 12.3, 9.4, 9.6),
+        _bar(days[14], 12.2, 12.3, 9.4, 10.8),
     ]
     assert _last(compute_candle_patterns(pl.DataFrame(evening), engine="builtin"), "cdl_evening_star") == -100
-
-    soldiers = [*base, 
-        _bar(days[12], 10.0, 12.05, 9.9, 12.0),
-        _bar(days[13], 11.0, 13.05, 10.8, 13.0),
-        _bar(days[14], 12.0, 14.05, 11.8, 14.0),
-    ]
-    assert _last(compute_candle_patterns(pl.DataFrame(soldiers), engine="builtin"), "cdl_three_white_soldiers") == 100
-
-    crows = [*base, 
-        _bar(days[12], 14.0, 14.1, 11.9, 12.0),
-        _bar(days[13], 13.0, 13.1, 10.9, 11.0),
-        _bar(days[14], 12.0, 12.1, 9.9, 10.0),
-    ]
-    assert _last(compute_candle_patterns(pl.DataFrame(crows), engine="builtin"), "cdl_three_black_crows") == -100
 
     harami = [*base, 
         _bar(days[12], 12.0, 12.2, 8.8, 9.0),

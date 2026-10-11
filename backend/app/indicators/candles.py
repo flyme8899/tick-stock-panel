@@ -6,8 +6,9 @@
 
 计算引擎：
 - 进程能 ``import talib`` 时走 TA-Lib（Docker 里装得上就用它）。
-- 否则用 Polars 实现主体形态。未实现的冷门形态列保持 0，
-  目录里 ``builtin=False``，选股下拉不提供。
+- 否则用 Polars 实现主体形态。和 TA-Lib 对不齐的形态（三白兵、三只乌鸦、
+  上升下降三法、长蜡烛、分离线、弃婴、条形三明治）以及规则更长的冷门形态
+  标 ``builtin=False``，选股下拉不提供，也不写出这些列。
 
 只依赖 OHLC。调用方须按标的、日期排好序；本模块会再排一次。
 形态窗口很短（实体均值 10 根、星线 3 根），全市场只重算最近几十个
@@ -68,9 +69,10 @@ CATALOG: tuple[CandlePattern, ...] = (
     CandlePattern("evening_star", "CDLEVENINGSTAR", "暮星", "bear"),
     CandlePattern("morning_doji_star", "CDLMORNINGDOJISTAR", "十字晨星", "bull"),
     CandlePattern("evening_doji_star", "CDLEVENINGDOJISTAR", "十字暮星", "bear"),
-    CandlePattern("abandoned_baby", "CDLABANDONEDBABY", "弃婴", "both"),
-    CandlePattern("three_white_soldiers", "CDL3WHITESOLDIERS", "三个白兵", "bull"),
-    CandlePattern("three_black_crows", "CDL3BLACKCROWS", "三只乌鸦", "bear"),
+    # 下面七个 Polars 规则和 TA-Lib 差得远，没有 TA-Lib 时不提供。
+    CandlePattern("abandoned_baby", "CDLABANDONEDBABY", "弃婴", "both", builtin=False),
+    CandlePattern("three_white_soldiers", "CDL3WHITESOLDIERS", "三个白兵", "bull", builtin=False),
+    CandlePattern("three_black_crows", "CDL3BLACKCROWS", "三只乌鸦", "bear", builtin=False),
     CandlePattern("identical_three_crows", "CDLIDENTICAL3CROWS", "三胞胎乌鸦", "bear"),
     CandlePattern("three_inside", "CDL3INSIDE", "三内部", "both"),
     CandlePattern("three_outside", "CDL3OUTSIDE", "三外部", "both"),
@@ -79,19 +81,19 @@ CATALOG: tuple[CandlePattern, ...] = (
     CandlePattern("belt_hold", "CDLBELTHOLD", "捉腰带", "both"),
     CandlePattern("spinning_top", "CDLSPINNINGTOP", "纺锤", "both"),
     CandlePattern("high_wave", "CDLHIGHWAVE", "风高浪大", "both"),
-    CandlePattern("long_line", "CDLLONGLINE", "长蜡烛", "both"),
+    CandlePattern("long_line", "CDLLONGLINE", "长蜡烛", "both", builtin=False),
     CandlePattern("short_line", "CDLSHORTLINE", "短蜡烛", "both"),
     CandlePattern("homing_pigeon", "CDLHOMINGPIGEON", "家鸽", "bull"),
     CandlePattern("matching_low", "CDLMATCHINGLOW", "相同低价", "bull"),
     CandlePattern("counterattack", "CDLCOUNTERATTACK", "反击线", "both"),
-    CandlePattern("separating_lines", "CDLSEPARATINGLINES", "分离线", "both"),
+    CandlePattern("separating_lines", "CDLSEPARATINGLINES", "分离线", "both", builtin=False),
     CandlePattern("in_neck", "CDLINNECK", "颈内线", "bear"),
     CandlePattern("on_neck", "CDLONNECK", "颈上线", "bear"),
     CandlePattern("thrusting", "CDLTHRUSTING", "插入", "bear"),
     CandlePattern("kicking", "CDLKICKING", "反冲", "both"),
     CandlePattern("tristar", "CDLTRISTAR", "三星", "both"),
-    CandlePattern("stick_sandwich", "CDLSTICKSANDWICH", "条形三明治", "bull"),
-    CandlePattern("rising_falling_three", "CDLRISEFALL3METHODS", "上升下降三法", "both"),
+    CandlePattern("stick_sandwich", "CDLSTICKSANDWICH", "条形三明治", "bull", builtin=False),
+    CandlePattern("rising_falling_three", "CDLRISEFALL3METHODS", "上升下降三法", "both", builtin=False),
     # 下面这些规则长、歧义多，没有 TA-Lib 时不猜测。
     CandlePattern("two_crows", "CDL2CROWS", "两只乌鸦", "bear", builtin=False),
     CandlePattern("upside_gap_two_crows", "CDLUPSIDEGAP2CROWS", "向上跳空两只乌鸦", "bear", builtin=False),
@@ -230,7 +232,6 @@ def _prepare(df: pl.DataFrame) -> pl.DataFrame:
     ).with_columns(
         (pl.col("_body") < pl.col("_body_avg")).alias("_body_short"),
         (pl.col("_body") > pl.col("_body_avg")).alias("_body_long"),
-        (pl.col("_body") > pl.col("_body_avg") * 3).alias("_body_vlong"),
         (
             (pl.col("_hl") > 0)
             & pl.col("_hl_avg").is_not_null()
@@ -243,8 +244,6 @@ def _prepare(df: pl.DataFrame) -> pl.DataFrame:
         (pl.col("_lower") > pl.col("_body")).alias("_ls_long"),
         (pl.col("_lower") > pl.col("_body") * 2).alias("_ls_vlong"),
         (pl.col("_upper") > pl.col("_body") * 2).alias("_us_vlong"),
-        (pl.col("_upper") <= pl.col("_body")).alias("_us_shortish"),
-        (pl.col("_lower") <= pl.col("_body")).alias("_ls_shortish"),
     )
 
 
@@ -276,41 +275,18 @@ def _builtin_flags() -> dict[str, pl.Expr]:
     maru_bull = _flag(white & pl.col("_body_long") & pl.col("_us_vshort") & pl.col("_ls_vshort"))
     maru_bear = _flag(black & pl.col("_body_long") & pl.col("_us_vshort") & pl.col("_ls_vshort"))
 
-    soldiers = _flag(
-        white & _sh("_white", 1) & _sh("_white", 2)
-        & (c > _px("close", 1)) & (_px("close", 1) > _px("close", 2))
-        & (o > _px("open", 1)) & (o < _px("close", 1))
-        & (_px("open", 1) > _px("open", 2)) & (_px("open", 1) < _px("close", 2))
-        & pl.col("_body_long") & _sh("_body_long", 1) & _sh("_body_long", 2)
-        & pl.col("_us_shortish") & _sh("_us_shortish", 1) & _sh("_us_shortish", 2)
-    )
-    crows = _flag(
-        black & _sh("_white", 1).not_() & _sh("_white", 2).not_()
-        & (c < _px("close", 1)) & (_px("close", 1) < _px("close", 2))
-        & (o < _px("open", 1)) & (o > _px("close", 1))
-        & (_px("open", 1) < _px("open", 2)) & (_px("open", 1) > _px("close", 2))
-        & pl.col("_body_long") & _sh("_body_long", 1) & _sh("_body_long", 2)
-        & pl.col("_ls_shortish") & _sh("_ls_shortish", 1) & _sh("_ls_shortish", 2)
-    )
-
     def _star(bullish: bool, middle_doji: bool) -> pl.Expr:
+        # TA-Lib 默认 optInPenetration=0.3：第三根收盘进入第一根实体的 30%，不是中点。
         if bullish:
             first = _sh("_white", 2).not_() & _sh("_body_long", 2)
             gap = _top(1) < _bot(2)
-            third = white & doji.not_() & (c > _mid(2))
+            third = white & doji.not_() & (c > _px("close", 2) + _sh("_body", 2) * 0.3)
         else:
             first = _sh("_white", 2) & _sh("_body_long", 2)
             gap = _bot(1) > _top(2)
-            third = black & doji.not_() & (c < _mid(2))
+            third = black & doji.not_() & (c < _px("close", 2) - _sh("_body", 2) * 0.3)
         middle = _sh("_doji", 1) if middle_doji else _sh("_body_short", 1)
         return _flag(first & middle & gap & third)
-
-    small_inside = (
-        _sh("_body_short", 1) & _sh("_body_short", 2) & _sh("_body_short", 3)
-        & (_px("high", 1) < _px("high", 4)) & (_px("low", 1) > _px("low", 4))
-        & (_px("high", 2) < _px("high", 4)) & (_px("low", 2) > _px("low", 4))
-        & (_px("high", 3) < _px("high", 4)) & (_px("low", 3) > _px("low", 4))
-    )
 
     flags = {
         "doji": _flag(doji),
@@ -369,20 +345,7 @@ def _builtin_flags() -> dict[str, pl.Expr]:
         "evening_star": _star(False, False),
         "morning_doji_star": _star(True, True),
         "evening_doji_star": _star(False, True),
-        "abandoned_baby_bull": _flag(
-            _sh("_white", 2).not_() & _sh("_body_long", 2) & _sh("_doji", 1)
-            & (_px("high", 1) < _px("low", 2))
-            & white & (pl.col("low") > _px("high", 1))
-        ),
-        "abandoned_baby_bear": _flag(
-            _sh("_white", 2) & _sh("_body_long", 2) & _sh("_doji", 1)
-            & (_px("low", 1) > _px("high", 2))
-            & black & (pl.col("high") < _px("low", 1))
-        ),
-        "three_white_soldiers": soldiers,
-        "three_black_crows": crows,
-        # 三胞胎要求后两根开盘贴近前收。三只乌鸦的「开在实体内部」是严格不等式，
-        # 开盘等于前收时两者不能同时成立，所以这里单独写。
+        # 开盘贴近前收。三只乌鸦要求开在前一根实体内部，没有 TA-Lib 时不提供那条规则。
         "identical_three_crows": _flag(
             black & _sh("_white", 1).not_() & _sh("_white", 2).not_()
             & (c < _px("close", 1)) & (_px("close", 1) < _px("close", 2))
@@ -400,8 +363,6 @@ def _builtin_flags() -> dict[str, pl.Expr]:
         "spinning_top_bear": _flag(black & pl.col("_body_short") & pl.col("_us_long") & pl.col("_ls_long")),
         "high_wave_bull": _flag(white & pl.col("_body_short") & pl.col("_us_vlong") & pl.col("_ls_vlong")),
         "high_wave_bear": _flag(black & pl.col("_body_short") & pl.col("_us_vlong") & pl.col("_ls_vlong")),
-        "long_line_bull": _flag(white & pl.col("_body_vlong")),
-        "long_line_bear": _flag(black & pl.col("_body_vlong")),
         "short_line_bull": _flag(white & pl.col("_body_short") & pl.col("_us_vshort") & pl.col("_ls_vshort")),
         "short_line_bear": _flag(black & pl.col("_body_short") & pl.col("_us_vshort") & pl.col("_ls_vshort")),
         "homing_pigeon": _flag(
@@ -418,14 +379,6 @@ def _builtin_flags() -> dict[str, pl.Expr]:
         "counterattack_bear": _flag(
             _sh("_white") & black & _sh("_body_long") & pl.col("_body_long")
             & ((c - _px("close", 1)).abs() <= pl.col("_equal"))
-        ),
-        "separating_lines_bull": _flag(
-            _sh("_white").not_() & white & _sh("_body_long") & pl.col("_body_long")
-            & ((o - _px("open", 1)).abs() <= pl.col("_equal"))
-        ),
-        "separating_lines_bear": _flag(
-            _sh("_white") & black & _sh("_body_long") & pl.col("_body_long")
-            & ((o - _px("open", 1)).abs() <= pl.col("_equal"))
         ),
         "in_neck": _flag(
             _sh("_white").not_() & _sh("_body_long") & white
@@ -454,21 +407,6 @@ def _builtin_flags() -> dict[str, pl.Expr]:
             & (_bot(1) > _top(2))
             & (_top(0) < _bot(1))
         ),
-        "stick_sandwich": _flag(
-            _sh("_white", 2).not_() & _sh("_white", 1) & black
-            & ((c - _px("close", 2)).abs() <= pl.col("_equal"))
-            & (_px("close", 1) > _px("close", 2))
-        ),
-        "rising_falling_three_bull": _flag(
-            _sh("_white", 4) & _sh("_body_long", 4) & white & pl.col("_body_long")
-            & (c > _px("close", 4))
-            & small_inside
-        ),
-        "rising_falling_three_bear": _flag(
-            _sh("_white", 4).not_() & _sh("_body_long", 4) & black & pl.col("_body_long")
-            & (c < _px("close", 4))
-            & small_inside
-        ),
     }
     return flags
 
@@ -490,21 +428,18 @@ _SINGLE = {
     "evening_star": (None, "evening_star"),
     "morning_doji_star": ("morning_doji_star", None),
     "evening_doji_star": (None, "evening_doji_star"),
-    "three_white_soldiers": ("three_white_soldiers", None),
-    "three_black_crows": (None, "three_black_crows"),
     "identical_three_crows": (None, "identical_three_crows"),
     "homing_pigeon": ("homing_pigeon", None),
     "matching_low": ("matching_low", None),
     "in_neck": (None, "in_neck"),
     "on_neck": (None, "on_neck"),
     "thrusting": (None, "thrusting"),
-    "stick_sandwich": ("stick_sandwich", None),
 }
 _BOTH = (
-    "doji_star", "engulfing", "harami", "harami_cross", "abandoned_baby",
+    "doji_star", "engulfing", "harami", "harami_cross",
     "three_inside", "three_outside", "marubozu", "closing_marubozu", "belt_hold",
-    "spinning_top", "high_wave", "long_line", "short_line", "counterattack",
-    "separating_lines", "kicking", "tristar", "rising_falling_three",
+    "spinning_top", "high_wave", "short_line", "counterattack",
+    "kicking", "tristar",
 )
 
 

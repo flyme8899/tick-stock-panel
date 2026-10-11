@@ -101,7 +101,7 @@ GOLDEN_COLUMNS: list[dict] = [
     {"id": "kdj_kd_diff", "label": "KDJ K-D差", "group": "趋势", "desc": "KDJ K值 - D值, 正值代表快线在慢线上方"},
     {"id": "bps_latest", "label": "每股净资产(最新公告)", "group": "财务", "desc": "最新已公告每股净资产; 公告前为空"},
     {"id": "eps_latest", "label": "每股收益(最新公告)", "group": "财务", "desc": "最新已公告基本每股收益。按 basic_eps、eps、eps_basic 的顺序取第一列，列都没有时为空"},
-    {"id": "pe_latest", "label": "市盈率(收盘/每股收益)", "group": "财务", "desc": "收盘价 / 最新已公告基本每股收益。不是市盈率TTM；收益缺失或非正时为空"},
+    {"id": "pe_latest", "label": "收盘价/最新报告期每股收益（未年化）", "group": "财务", "desc": "收盘价 / 最新报告期基本每股收益。报告期未年化，一季报会把比值放大到约四倍；不是市盈率TTM。收益缺失或非正时为空"},
     {"id": "roa_latest", "label": "ROA(最新公告)", "group": "财务", "desc": "最新已公告总资产收益率。财务表无 roa 列时为空"},
     {"id": "ocf_to_revenue_latest", "label": "经营现金流/营收(最新公告)", "group": "财务", "desc": "最新已公告经营现金净额/营业收入。列缺失时为空"},
 ]

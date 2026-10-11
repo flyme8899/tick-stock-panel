@@ -86,7 +86,8 @@ export function applyFilter(
     }
     // ST: name 含 ST/*ST/退 的排除 (对齐后端口径 (?i)ST|退)
     if (f.excludeST && /ST|退/i.test(String(r.name ?? ''))) return false
-    // 形态名单还在加载时先不按代码裁；空 Set 表示已经查完、没有命中。
+    // 名单还在加载时 patternSymbols 为 null，先不按代码裁。
+    // 查询失败必须传入空 Set：null 会放过全部结果。
     if (f.patternId && patternSymbols != null && !patternSymbols.has(String(r.symbol))) return false
     const close = Number(r.close ?? 0)
     const v = (field: string) => num(field)
@@ -134,7 +135,8 @@ export function FilterPanel({ value, onChange, onClose, onReset }: {
   const catalog = useQuery({
     queryKey: QK.screenerCandleCatalog,
     queryFn: () => api.screenerCandleCatalog(),
-    staleTime: 60_000,
+    staleTime: 30 * 60_000,
+    gcTime: 24 * 60 * 60_000,
   })
   const patterns = (catalog.data?.patterns ?? []).filter((item) => item.available)
   const selected = patterns.find((item) => item.id === value.patternId)
@@ -270,6 +272,9 @@ export function FilterPanel({ value, onChange, onClose, onReset }: {
             {sideLabel(selected, side)}
           </button>
         ))}
+        {catalog.isError && (
+          <span className="text-[11px] text-warning">形态列表加载失败，当前无法按形态筛选</span>
+        )}
         {value.patternId && (
           <label className="inline-flex items-center gap-1 text-[11px] text-secondary">
             近

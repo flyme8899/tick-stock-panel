@@ -14,7 +14,8 @@
 | InStock | TSP | 状态 |
 | --- | --- | --- |
 | 最新价、最高、最低、昨收、成交量、成交额、换手率、振幅 | `close` / `high` / `low` / `prev_close` / `volume` / `amount` / `turnover_rate` / `amplitude` | 已有 |
-| 涨跌幅、3/5/10 日涨跌幅 | `change_pct`、`momentum_5d`、`momentum_10d`。3 日用 `deviate` 的内部动量，不单列条件 | 已有（3 日涨跌幅未单列） |
+| 涨跌幅、5/10 日涨跌幅 | `change_pct`、`momentum_5d`、`momentum_10d` | 已有 |
+| 3 日涨跌幅 | `momentum_3d` 只作为 `deviate` 的内部动量，没有进入指标列，也不能当选股条件 | 本地已有但未接条件 |
 | 量比 | `vol_ratio_5d` | 已有 |
 | 总市值、流通市值 | 选股结果筛选用收盘价 × 股本。不是自定义信号因子 | 已有（结果筛选） |
 | 总股本、流通股本 | `total_shares`、`float_shares`，来自维表 | 已有 |
@@ -33,7 +34,7 @@
 | ROE、毛利率、净利率、营收增速、净利增速、资产负债率 | `roe_latest` 等 | 已有 |
 | 每股净资产 | `bps_latest` | 本次接入 |
 | 每股收益 | `eps_latest`。按 `basic_eps`、`eps`、`eps_basic` 取第一列 | 本次接入 |
-| 市盈率 | `pe_latest` = 收盘 / 最新已公告基本每股收益。收益缺失或非正时为空。这不是市盈率 TTM | 本次接入 |
+| 市盈率 | `pe_latest` 的条件名是「收盘价/最新报告期每股收益（未年化）」= 收盘 / 最新报告期每股收益。一季报未年化，数值大约是市盈率 TTM 的四倍。收益缺失或非正时为空 | 本次接入 |
 | ROA | `roa_latest`。快照没有 `roa` 列时为空，不影响其他财务因子 | 本次接入 |
 | 经营现金流 / 营收 | `ocf_to_revenue_latest`。没有 `operating_cash_to_revenue` 列时为空 | 本次接入 |
 | 市盈率 TTM、扣非市盈率、市销率 TTM、市现率 TTM、动态市盈率、预测市盈率、预测 PEG、企业价值倍数 | 估值快照只用来推每股净资产，没有把这些倍数落成条件列 | 需新数据 |

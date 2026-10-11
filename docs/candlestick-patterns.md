@@ -2,9 +2,9 @@
 
 日 K 上的经典蜡烛形态，数值沿用 TA-Lib `CDL*`：`100` 看涨，`-100` 看跌，`0` 没有出现。锤头、上吊这类单边形态在 TA-Lib 里也返回 `100`，这里按语义把看跌写成 `-100`，选股条件才能直接区分方向。
 
-目录与 InStock `STOCK_KLINE_PATTERN_DATA` 同一组，共 61 个。进程能 `import talib` 时全部用 TA-Lib 计算。装不上时用 Polars 实现其中主体形态；`builtin=False` 的冷门形态不猜测，选股下拉里不出现。环境变量 `TSP_CANDLE_ENGINE=builtin` 可以强制走 Polars。
+目录与 InStock `STOCK_KLINE_PATTERN_DATA` 同一组，共 61 个。进程能 `import talib` 时全部用 TA-Lib 计算。装不上时用 Polars 实现其中主体形态。三白兵、三只乌鸦、上升下降三法、长蜡烛、分离线、弃婴、条形三明治和 TA-Lib 差得远，以及规则更长的冷门形态，标 `builtin=False`，没有 TA-Lib 时选股下拉里不出现。环境变量 `TSP_CANDLE_ENGINE=builtin` 可以强制走 Polars。晨星、暮星（含十字星变体）的第三根收盘要进入第一根实体的 30%，与 TA-Lib 默认 `optInPenetration` 相同。
 
-Docker 构建会尝试 `uv pip install TA-Lib`。C 库或轮子缺失时这条命令失败也不让镜像构建失败，运行时自动改走内置实现。
+Docker 构建执行 `uv pip install --no-deps 'TA-Lib==0.8.1'`。0.8.1 自带 C 库，`--no-deps` 不改已经锁定的 numpy。`USE_CN_MIRROR=1` 时这条安装走清华主源和阿里云备用源。轮子缺失时命令失败也不让镜像构建失败，运行时改走内置实现。
 
 ## 增量
 
