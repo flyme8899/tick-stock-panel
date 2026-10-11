@@ -1148,8 +1148,12 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert kept["events"][0]["importance"] == "一般"
 
 
-def test_hot_event_llm_labels_all_events_in_one_batch(tmp_path, monkeypatch):
-    """展示标题一次批量问完；20 多条也要一次装进同一批，不合格再问一次。"""
+def test_hot_event_llm_labels_all_events_in_batches(tmp_path, monkeypatch):
+    """展示标题按批问完；21 条分两批（每批 20），每批模型返回空再各问一次。
+
+    批次大小是 20（_LLM_TITLE_BATCH）：40 条一批时后段条目会被模型集体留空，
+    所以拆小。21 条 → 2 批；模型第一次返回空对象，触发每批一次重写，共 4 次。
+    """
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
@@ -1173,13 +1177,13 @@ def test_hot_event_llm_labels_all_events_in_one_batch(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache()
     snapshot = top_hot_events(NOW)
     assert len(snapshot["events"]) == 21
-    assert len(prompts) == 2
-    assert "补充要点" in prompts[0]
-    assert "上一轮要点不合格" in prompts[1]
-    # 21 条全在同一批里。早前批次上限是 20，第 21 条永远拿不到要点。
-    in_first = [title for title in titles if title in prompts[0]]
-    assert len(in_first) == 21
-    assert not [title for title in titles if title not in prompts[0]]
+    # 2 批 × 2 轮（首轮 + 空返回触发重写）= 4 次。
+    assert len(prompts) == 4
+    assert all("补充要点" in prompt for prompt in prompts)
+    assert sum(1 for prompt in prompts if "上一轮要点不合格" in prompt) == 2
+    # 21 条全都被问到（跨批次拼起来覆盖全部标题）。
+    asked = "\n".join(prompts)
+    assert not [title for title in titles if title not in asked]
 
 
 def test_blocked_clustering_matches_pairwise_rank_and_merges(tmp_path, monkeypatch):
