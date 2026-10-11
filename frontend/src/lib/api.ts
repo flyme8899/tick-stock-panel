@@ -1540,6 +1540,46 @@ export interface FactorBatchResult {
   error: string | null
 }
 
+export type FactorBacktestRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'interrupted'
+
+export interface FactorBacktestRunRequest {
+  factor_name?: string
+  factor_names?: string[]
+  symbols?: string[] | null
+  start?: string | null
+  end?: string | null
+  n_groups?: number
+  rebalance?: 'daily' | 'weekly' | 'monthly'
+  weight?: 'equal' | 'factor_weight'
+  fees_pct?: number
+  slippage_bps?: number
+  asset_type?: string
+}
+
+export interface FactorBacktestRun {
+  run_id: string
+  kind: 'factor' | 'batch'
+  status: FactorBacktestRunStatus
+  username: string | null
+  request: FactorBacktestRunRequest
+  summary: {
+    n_symbols?: number | null
+    n_dates?: number | null
+    n_factors?: number | null
+    elapsed_ms?: number | null
+    error?: string | null
+    ic_mean?: number | null
+    ir?: number | null
+    ic_win_rate?: number | null
+  } | null
+  error: string | null
+  elapsed_ms: number | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  result?: FactorBacktestResult | FactorBatchResult | null
+}
+
 // ===== Factor / strategy mining =====
 export type MiningBudgetProfile = 'exploratory' | 'balanced' | 'strict'
 export type MiningRunStatus =
@@ -3500,6 +3540,37 @@ export const api = {
       method: 'POST',
       timeoutMs: FACTOR_BACKTEST_TIMEOUT_MS,
       body: JSON.stringify(payload),
+    }),
+
+  // 页面走这条：提交后立即返回 run_id，结果用 factorBacktestRun 轮询。
+  factorBacktestSubmit: (payload: {
+    kind: 'factor' | 'batch'
+    factor_name?: string
+    factor_names?: string[]
+    symbols?: string[] | null
+    start?: string | null
+    end?: string | null
+    n_groups?: number
+    rebalance?: 'daily' | 'weekly' | 'monthly'
+    weight?: 'equal' | 'factor_weight'
+    fees_pct?: number
+    slippage_bps?: number
+    asset_type?: 'stock' | 'etf' | 'index'
+  }) =>
+    request<FactorBacktestRun>('/api/backtest/factor/runs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  factorBacktestRuns: () =>
+    request<{ items: FactorBacktestRun[] }>('/api/backtest/factor/runs'),
+
+  factorBacktestRun: (runId: string) =>
+    request<FactorBacktestRun>(`/api/backtest/factor/runs/${encodeURIComponent(runId)}`),
+
+  factorBacktestRunDelete: (runId: string) =>
+    request<{ ok: boolean }>(`/api/backtest/factor/runs/${encodeURIComponent(runId)}`, {
+      method: 'DELETE',
     }),
 
   miningRuns: () =>

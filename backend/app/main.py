@@ -130,6 +130,13 @@ async def _application_lifespan(app: FastAPI):
     app.state.mining_manager = mining_manager
     if recovered_mining_runs:
         logger.warning("recovered %d interrupted mining runs", recovered_mining_runs)
+    from app.services.factor_backtest_runs import FactorBacktestJobManager
+
+    factor_backtest_jobs = FactorBacktestJobManager(store.data_dir)
+    recovered_factor_runs = factor_backtest_jobs.recover_interrupted()
+    app.state.factor_backtest_jobs = factor_backtest_jobs
+    if recovered_factor_runs:
+        logger.warning("recovered %d interrupted factor backtest runs", recovered_factor_runs)
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
     if settings.backtest_matrix_disk_cache_enabled:
         try:
@@ -425,6 +432,9 @@ async def _application_lifespan(app: FastAPI):
         mmanager = getattr(app.state, "mining_manager", None)
         if mmanager:
             mmanager.shutdown()
+        factor_jobs = getattr(app.state, "factor_backtest_jobs", None)
+        if factor_jobs:
+            factor_jobs.shutdown()
         if app.state.scheduler:
             app.state.scheduler.shutdown(wait=False)
         ps = getattr(app.state, "pull_scheduler", None)

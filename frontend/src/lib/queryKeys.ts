@@ -59,6 +59,8 @@ export const QK = {
   backtestCandidates:   ['backtest-candidates'] as const,
   factorColumns:        ['backtest-factor-columns'] as const,
   factorColumnsExperimental: ['backtest-factor-columns', 'experimental'] as const,
+  factorBacktestRuns:   ['factor-backtest-runs'] as const,
+  factorBacktestRun:    (id: string) => ['factor-backtest-run', id] as const,
   factorLibrary:        (assetType: string) => ['factors-library', assetType] as const,
   miningRuns:           ['backtest-mining-runs'] as const,
   miningAvailability:   (assetType: string, profile: string, start: string, end: string) =>
