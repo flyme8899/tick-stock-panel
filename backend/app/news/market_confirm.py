@@ -60,7 +60,17 @@ def load_market_tape(now: datetime, events: list[dict]) -> dict:
         return _blank_tape(session, live=in_continuous_session(now))
 
 
+_ORDER_BULL = frozenset({"大笔买入", "封涨停板", "火箭发射"})
+_ORDER_BEAR = frozenset({"大笔卖出", "封跌停板"})
+
+
 def score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[dict] | None = None) -> dict:
+    """给一条事件打盘面分，并用盘口异动做补充确认。"""
+    result = _score_confirmation(event, tape, now, peers=peers)
+    return _apply_order_changes(event, tape, result)
+
+
+def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[dict] | None = None) -> dict:
     """给一条事件打盘面分。首见之前的成交不计入验证分，只用来判断消息是否滞后。"""
     first = _first_at(event)
     session = _session_date(tape)
@@ -232,6 +242,7 @@ def _load_market_tape(now: datetime, events: list[dict]) -> dict:
         "index_bars": index_bars,
         "stocks": stocks,
         "concepts": concept_flows,
+        "changes": _order_changes(data_dir, session),
     }
 
 
@@ -243,7 +254,73 @@ def _blank_tape(session: date, *, live: bool) -> dict:
         "index_bars": [],
         "stocks": {},
         "concepts": {},
+        "changes": {},
     }
+
+
+def _order_changes(data_dir: Path, session: date) -> dict:
+    try:
+        from app.event_context.query import changes_for
+
+        return changes_for(data_dir, session.isoformat())
+    except Exception:
+        logger.warning("盘口异动没读到", exc_info=True)
+        return {}
+
+
+def _apply_order_changes(event: dict, tape: dict, result: dict) -> dict:
+    changes = tape.get("changes") if isinstance(tape, dict) else None
+    if not isinstance(changes, dict) or not changes:
+        return result
+    if str(result.get("label") or "") == "等待竞价":
+        return result
+    first = _first_at(event)
+    if first is None:
+        return result
+    session = _session_date(tape)
+    bull = str(event.get("direction") or "利好") != "利空"
+    wanted = _ORDER_BULL if bull else _ORDER_BEAR
+    hit = False
+    for symbol in _event_symbols(event, tape):
+        for row in _change_rows(changes, symbol):
+            if str(row.get("kind") or "") not in wanted:
+                continue
+            stamp = _change_clock(row.get("at"), session)
+            if stamp is not None and stamp >= first:
+                hit = True
+                break
+        if hit:
+            break
+    if not hit:
+        return result
+    updated = dict(result)
+    updated["abnormal"] = True
+    if updated.get("strength") == "无":
+        updated["strength"] = "弱"
+        updated["score"] = round(max(float(updated.get("score") or 0), 6.0), 4)
+    return updated
+
+
+def _change_rows(changes: dict, symbol: str) -> list:
+    rows = list(changes.get(symbol) or [])
+    digits = "".join(ch for ch in symbol if ch.isdigit())
+    code = digits[-6:] if len(digits) >= 6 else ""
+    if code and code != symbol:
+        rows.extend(changes.get(code) or [])
+    return rows
+
+
+def _change_clock(at: object, session: date | None) -> datetime | None:
+    text = str(at or "")
+    parts = text.split(":")
+    if session is None or len(parts) < 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+        second = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        return None
+    return datetime(session.year, session.month, session.day, hour, minute, second, tzinfo=CN_TZ)
 
 
 def _result(

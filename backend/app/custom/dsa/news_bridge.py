@@ -42,6 +42,7 @@ _SOURCES = (
     ),
     ("sec", "SEC 8-K", "SEC 最新 8-K Atom，只存标题、摘要和申报链接。"),
     ("research", "研报", "东财个股研报和行业研报，只同步标题、机构和 PDF 地址，不下载 PDF。"),
+    ("notice", "公告", "东财全市场公告，增量写入资讯库，可作热门事件新闻源。"),
     ("hot", "TSP热门候选", "TSP 按当天资讯聚类的具体事件；没有事件时仍给热门板块和个股，供大盘复盘引用。"),
 )
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal", "app", "tsp"}

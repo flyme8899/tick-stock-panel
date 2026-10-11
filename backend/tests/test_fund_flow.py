@@ -1365,3 +1365,94 @@ def test_etf_share_sse_other_keyerror_still_opens_breaker(tmp_path):
     )
     assert not breaker.allow()
     assert any("fund_etf_scale_sse" in item for item in res.errors)
+
+
+def test_four_missing_star_names_are_not_an_entire_board() -> None:
+    universe = [f"688{i:03d}" for i in range(100)] + [f"000{i:03d}" for i in range(1, 81)]
+    assert jobs._entirely_missing_labels(universe[:4], universe) == []
+    assert jobs._entirely_missing_labels([f"000{i:03d}" for i in range(1, 81)], universe) == ["深市主板"]
+
+
+def test_sz_main_gap_uses_one_board_batch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(store, "ranking_limit", lambda _universe: 1)
+    monkeypatch.setattr(store, "missing_boards", lambda _frame, **_kwargs: ["sz_main"])
+    store.write_rows(tmp_path, "stock", "2026-10-09", [{
+        "symbol": "600519",
+        "code": "600519",
+        "name": "贵州茅台",
+        "trade_date": "2026-10-09",
+        "main_net": 10.0,
+        "large_net": 1.0,
+        "super_net": 2.0,
+        "source": "efinance",
+    }])
+    bills: list[str] = []
+    seen: list[dict] = []
+
+    def bill(symbol: str):
+        bills.append(symbol)
+        raise AssertionError(symbol)
+
+    def fake(url, *, params=None, headers=None, timeout=None):
+        seen.append({"url": url, "timeout": timeout, "fs": (params or {}).get("fs")})
+        return type("Response", (), {"json": lambda self: {
+            "data": {"total": 1, "diff": [{
+                "f12": "000001", "f14": "平安银行", "f62": 5e8, "f66": 2e8, "f72": 1e8,
+            }]},
+        }})()
+
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake)
+    jobs.sync_stock(
+        tmp_path,
+        ["600519.SH", "000001.SZ"],
+        SourceClients(history_bill=bill, ak_call=lambda *args, **kwargs: []),
+        efinance=CircuitBreaker("efinance", clock=lambda: 0),
+        mx=CircuitBreaker("mx", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+        mx_key="",
+        trade_date="2026-10-09",
+    )
+    assert bills == []
+    assert seen and "eastmoney.com" in seen[0]["url"]
+    assert seen[0]["timeout"] == (10.0, 30.0)
+    frame = store.read_partition(tmp_path, "stock", "2026-10-09")
+    row = {item["code"]: item for item in frame.to_dicts()}["000001"]
+    assert row["main_net"] == 5e8
+    assert row["source"] == "eastmoney_sz_main"
+    assert row["large_net"] == 1e8
+
+
+def test_sz_main_batch_failure_does_not_fall_back_to_history_bill(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(store, "ranking_limit", lambda _universe: 1)
+    monkeypatch.setattr(store, "missing_boards", lambda _frame, **_kwargs: ["sz_main"])
+    store.write_rows(tmp_path, "stock", "2026-10-09", [{
+        "symbol": "600519",
+        "code": "600519",
+        "name": "贵州茅台",
+        "trade_date": "2026-10-09",
+        "main_net": 10.0,
+        "source": "efinance",
+    }])
+    bills: list[str] = []
+
+    def bill(symbol: str):
+        bills.append(symbol)
+        raise AssertionError(symbol)
+
+    def fake(*_args, **_kwargs):
+        raise RuntimeError("push2 down")
+
+    monkeypatch.setattr("app.eastmoney.client.em_get", fake)
+    result = jobs.sync_stock(
+        tmp_path,
+        ["600519.SH", "000001.SZ"],
+        SourceClients(history_bill=bill, ak_call=lambda *args, **kwargs: []),
+        efinance=CircuitBreaker("efinance", clock=lambda: 0),
+        mx=CircuitBreaker("mx", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+        mx_key="",
+        trade_date="2026-10-09",
+    )
+    assert bills == []
+    assert any("整批失败" in item for item in result.errors)
+    assert store.read_partition(tmp_path, "stock", "2026-10-09").height == 1

@@ -75,7 +75,7 @@ class NewsScheduler:
             now = cn_now()
             stamp = now.timestamp()
             for source in SOURCE_ORDER:
-                if source == "research" or not source_enabled(source):
+                if source in {"research", "notice"} or not source_enabled(source):
                     continue
                 due = self._next.get(source, 0)
                 if stamp < due:

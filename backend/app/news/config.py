@@ -12,6 +12,7 @@ SOURCE_ORDER = (
     "dws", "zsxq", "ima", "cls", "wscn", "etf_flow",
     "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "reddit", "sec",
     "research",
+    "notice",
 )
 
 SOURCE_LABELS = {
@@ -30,6 +31,7 @@ SOURCE_LABELS = {
     "reddit": "Reddit",
     "sec": "SEC 8-K",
     "research": "研报",
+    "notice": "公告",
     "hot": "TSP热门候选",
 }
 
@@ -167,6 +169,8 @@ def reddit_oauth_ready() -> bool:
 
 
 def source_configured(source: str) -> bool:
+    if source == "notice":
+        return True
     if source == "etf_flow":
         return bool(vision_api_key())
     if source == "ima":
@@ -179,6 +183,10 @@ def source_configured(source: str) -> bool:
 
 
 def source_enabled(source: str) -> bool:
+    if source == "notice":
+        from app.event_context.config import notice_enabled
+
+        return notice_enabled()
     if not source_configured(source):
         return False
     env_name = f"NEWS_{source.upper()}_ENABLED"
@@ -197,6 +205,8 @@ def source_enabled(source: str) -> bool:
 
 
 def source_locked(source: str) -> bool:
+    if source == "notice":
+        return True
     return _flag(f"NEWS_{source.upper()}_ENABLED") is not None
 
 

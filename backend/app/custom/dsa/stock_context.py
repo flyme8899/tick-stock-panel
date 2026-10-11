@@ -32,6 +32,7 @@ _SESSION_MINUTES = 240
 _FLOW_STALE_DAYS = 3
 _EVENT_STALE = timedelta(hours=6)
 
+_OMIT = object()
 _HEADER = (
     "【TSP个股上下文】\n"
     "这是本股分析输入，不是结论。\n"
@@ -157,6 +158,7 @@ def render_context(
     sector_rank: dict | None = None,
     concept_ranks: list[dict] | None = None,
     quote: dict | None,
+    event_lines: Any = _OMIT,
 ) -> dict[str, Any]:
     """拼一段有长度上限的上下文。events/news/flow/quote 为 None 表示没读到。"""
     local_now = now.astimezone(CN_TZ)
@@ -168,6 +170,10 @@ def render_context(
         _red_section(red_news, events or [], missing),
         _flow_section(flow_rows, sector_rank, concept_ranks, local_now.date(), missing, stale),
     ]
+    if event_lines is not _OMIT:
+        extra = _event_context_section(event_lines, missing)
+        if extra:
+            sections.append(extra)
     text = _fit(_HEADER, sections)
     return {
         "symbol": symbol,
@@ -209,6 +215,7 @@ def load_context(symbol: str, *, now: datetime | None = None, repo=None) -> dict
     news, _news_ok = _capture(lambda: _load_red_news(code))
     flow_pack, _flow_ok = _capture(lambda: _load_flow(code, (events_pack or {}).get("events") or []))
     bars, _bars_ok = _capture(lambda: _load_bars(repo, code, moment))
+    event_lines, event_ok = _capture(lambda: _load_event_lines(code))
     quote = quote_from_rows(bars, moment) if bars is not None else None
     events = None if events_pack is None else events_pack.get("events")
     flow_rows = None if flow_pack is None else flow_pack.get("rows")
@@ -223,6 +230,7 @@ def load_context(symbol: str, *, now: datetime | None = None, repo=None) -> dict
         sector_rank=None if flow_pack is None else flow_pack.get("sector"),
         concept_ranks=None if flow_pack is None else flow_pack.get("concepts"),
         quote=quote if bars is not None else None,
+        event_lines=None if not event_ok else event_lines,
     )
 
 
@@ -330,6 +338,25 @@ def _fit(header: str, sections: list[str]) -> str:
     if len(text) <= MAX_TEXT:
         return text
     return text[: MAX_TEXT - 1].rstrip() + "…"
+
+
+def _load_event_lines(symbol: str) -> list[str]:
+    from pathlib import Path
+
+    from app.config import settings
+    from app.event_context.query import context_lines
+
+    return context_lines(Path(settings.data_dir), symbol)
+
+
+def _event_context_section(lines, missing) -> str | None:
+    if lines is None:
+        missing.append("event_context")
+        return "## 事件上下文\n状态: 缺失"
+    if not lines:
+        return None
+    body = "\n".join(f"- {_clip(line, 80)}" for line in lines[:8])
+    return f"## 事件上下文\n状态: 可用\n{body}"
 
 
 def _load_events(symbol: str, now: datetime) -> dict:

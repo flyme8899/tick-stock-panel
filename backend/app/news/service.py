@@ -673,6 +673,9 @@ def health_payload() -> dict:
             "last_error": (row["last_error"] if row else "") or "",
             "items_ingested": row["items_ingested"] if row else 0,
         })
+    from app.event_context.query import health_sources
+
+    sources.extend(health_sources())
     return {"sources": sources, "as_of": cn_now().isoformat(timespec="seconds")}
 
 
@@ -884,8 +887,8 @@ def run_due(source: str) -> dict:
         return collect_reuters()
     if source in FOREIGN_FEEDS:
         return collect_foreign(source)
-    if source == "research":
-        # 研报由 market_feeds 写入资讯库，不在这套轮询里打东财。
+    if source in {"research", "notice"}:
+        # 研报由打板线程写入，公告由事件上下文线程写入，不在这套轮询里打东财。
         return {"inserted": 0, "duplicate": 0, "skipped": True}
     return {}
 
