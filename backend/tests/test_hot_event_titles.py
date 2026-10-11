@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 
 from app.market_time import CN_TZ
 from app.news.hot_events import (
+    _cleaned_headline,
     _ensure_shown_name,
     _fallback_title_ok,
     _is_section_label,
@@ -894,3 +895,70 @@ def test_bad_fallback_titles_are_rejected_and_dropped(tmp_path, monkeypatch, cap
     assert "美联储降息25基点" in names
     assert not any("财政部" in name for name in names)
     assert not any("橡胶" in name for name in names)
+
+
+_BARE_SOURCES = ("央视财经", "财联社", "华尔街见闻", "路透", "路透社", "彭博", "格隆汇", "金十")
+
+
+def test_bare_source_and_company_names_are_not_titles(tmp_path, caplog):
+    """来源名和没有动作的公司名不能当标题；「央视财经：」要先剥掉再回退。"""
+    import logging
+
+    from app.news.hot_events import _accept_title
+
+    for name in _BARE_SOURCES:
+        assert not _fallback_title_ok(name)
+        assert not _llm_title_ok(name)
+        assert _llm_title_reject_reason(name) == "只有来源名"
+        event = {"name": name, "headline": name, "headlines": [name], "_fp": name}
+        _ensure_shown_name(event)
+        assert event["name"] == ""
+        assert not _keep_shown_event(event)
+
+    assert _llm_title_reject_reason("光智科技") == "只有主体没有动作"
+    assert not _fallback_title_ok("光智科技")
+    company = {"name": "光智科技", "headline": "光智科技", "headlines": ["光智科技"]}
+    _ensure_shown_name(company)
+    assert company["name"] == ""
+    assert not _keep_shown_event(company)
+
+    kept = {
+        "name": "光智科技",
+        "headline": "光智科技发布新品",
+        "headlines": ["光智科技发布新品"],
+    }
+    _ensure_shown_name(kept)
+    assert kept["name"] == "光智科技发布新品"
+    assert _llm_title_ok("光智科技发布新品")
+    assert _fallback_title_ok("光智科技发布新品")
+
+    cleaned = _cleaned_headline("央视财经：橡胶价格大涨超预期")
+    assert cleaned != "央视财经"
+    assert "橡胶" in cleaned and "大涨" in cleaned
+    assert _keyword_title([{"title": "央视财经：橡胶价格大涨超预期"}]) == "橡胶价格大涨超预期"
+    assert _cleaned_headline("格隆汇：橡胶价格大涨超预期") != "格隆汇"
+    assert _cleaned_headline("金十：原油价格走高") != "金十"
+    assert "原油" in _cleaned_headline("金十：原油价格走高")
+
+    rubber = {
+        "name": "央视财经",
+        "headline": "央视财经：橡胶价格大涨超预期",
+        "headlines": ["央视财经：橡胶价格大涨超预期"],
+    }
+    _ensure_shown_name(rubber)
+    assert rubber["name"] != "央视财经"
+    assert "橡胶" in rubber["name"] and "大涨" in rubber["name"]
+
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        assert not _accept_title({"_fp": "cctv"}, {"title": "央视财经"})
+        assert not _accept_title({"_fp": "guangzhi"}, {"title": "光智科技"})
+    assert "热门事件标题未采用: 央视财经（只有来源名）" in caplog.text
+    assert "热门事件标题未采用: 光智科技（只有主体没有动作）" in caplog.text
+
+    reset_store_for_tests(tmp_path / "bare-names.sqlite")
+    _insert("rubber", "央视财经：橡胶价格大涨超预期", 1)
+    _insert("bare", "光智科技", 2)
+    names = [event["name"] for event in top_hot_events(NOW)["events"]]
+    assert "央视财经" not in names
+    assert "光智科技" not in names
+    assert any("橡胶" in name and "大涨" in name for name in names)

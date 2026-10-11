@@ -8,8 +8,8 @@
 展示标题由模型一次写完要展示的事件，最多 20 条，按成员标题指纹缓存，缓存版本仍是 v4。
 模型要给出完整中文标题，尽量不超过 28 字并写完整，写明主体、动作和宾语，不带时间戳、括号和省略号。
 规则只做校验：不合格就记下原因再问一次，仍不行就退回清理后的原标题，再不行就丢掉。
-清理会去掉开头的钟点或【前的分钟数字、【】标签和末尾省略号，并停在句号前。
-栏目标题，以及只有点评、重点、没有动作的稿，不进列表。
+清理会去掉开头的钟点、【】标签、末尾省略号，以及「央视财经：」这类来源前缀，并停在句号前。
+栏目标题、只有来源名或公司名、以及只有点评、重点、没有动作的稿，不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
 事件自己没有概念时，模型只能从这张词典里选。词典没写到的无关概念仍然丢掉。
@@ -209,8 +209,11 @@ _CLOSED_TAILS = {
 _SOURCE_HEADS = (
     "财联社", "华尔街见闻", "证券时报", "上海证券报", "中国证券报",
     "第一财经", "澎湃新闻", "新浪财经", "新华社", "界面新闻",
-    "路透社", "路透", "彭博", "南华早报",
+    "央视财经", "格隆汇", "金十数据", "金十",
+    "路透社", "路透", "彭博社", "彭博", "南华早报",
 )
+_SOURCE_NAMES = frozenset(_SOURCE_HEADS)
+_SOURCE_ALT = "|".join(sorted(_SOURCE_NAMES, key=len, reverse=True))
 _SOURCE_BRACKET = re.compile(r"^(?:【[^】]{1,16}】|\[[^\]]{1,16}\]|（[^）]{1,12}）|\([^)]{1,12}\))")
 # 残缺的前导标签，例如「新增隐债】」。成对的【】在后面整段去掉。
 _BROKEN_BRACKET = re.compile(r"^[^【】\[\]]{1,16}[】\]]")
@@ -231,10 +234,10 @@ _SUBJECT_CONCEPTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("美联储", "加息"), ("黄金", "银行")),
 )
 _SOURCE_DATELINE = re.compile(
-    r"^(?:" + "|".join(_SOURCE_HEADS) + r")(?:\d{1,2}月\d{1,2}日)?(?:电|讯)[，,]?"
+    r"^(?:" + _SOURCE_ALT + r")(?:\d{1,2}月\d{1,2}日)?(?:电|讯)[，,]?"
 )
 _SOURCE_LABEL = re.compile(
-    r"^(?:" + "|".join(_SOURCE_HEADS) + r"|快讯|突发|独家|刚刚)[：:|｜]"
+    r"^(?:(?:" + _SOURCE_ALT + r")(?:报道|快讯|讯|电)?|快讯|突发|独家|刚刚)[：:|｜]"
 )
 _REUTERS_TAIL = re.compile(r"(?:[-|｜]\s*)?(?:Reuters|路透社|路透)$")
 # 15:32【财联社】被冒号切开后，会剩「32【…】」这种钟点碎片。
@@ -1535,6 +1538,49 @@ def _is_section_label(name: object) -> bool:
     return "点评" in text or text.startswith("重点")
 
 
+_COMPANY_SUFFIXES = (
+    "股份有限公司", "有限责任公司", "有限公司", "集团股份", "控股集团",
+    "科技", "股份", "集团", "控股", "银行", "证券", "医药", "电子", "能源",
+    "实业", "材料", "生物", "光电", "通信", "传媒", "地产", "汽车", "化工",
+    "矿业", "资源", "国际", "电力", "新材", "信息", "网络", "软件", "智能",
+    "环保", "装备", "机械", "半导体",
+)
+# 这些字出现在标题里，说明不是光秃的一个名字。
+_NAME_GLUE = frozenset("的了在将把被从对而或已正再又也还就都与和")
+
+
+def _is_source_only(text: str) -> bool:
+    """整段标题只是媒体名，例如央视财经、财联社电、金十快讯。"""
+    body = _compact(text)
+    for tail in ("快讯", "报道", "消息", "电讯", "电", "讯"):
+        if body.endswith(tail) and len(body) - len(tail) >= 2:
+            body = body[: -len(tail)]
+            break
+    return body in _SOURCE_NAMES
+
+
+def _is_bare_entity(text: str) -> bool:
+    """整段标题只是公司或证券简称，里面没有动作。"""
+    body = _compact(text)
+    if not body or _tuple_action(body)[0] >= 0 or _narrative_action(body)[0] >= 0:
+        return False
+    if any(char.isdigit() for char in body) or any(char in _NAME_GLUE for char in body):
+        return False
+    if not re.fullmatch(r"[\u4e00-\u9fffA-Za-z]{2,16}", body):
+        return False
+    if any(body.endswith(suffix) and len(body) > len(suffix) for suffix in _COMPANY_SUFFIXES):
+        return True
+    return len(body) <= 8
+
+
+def _title_name_reject_reason(text: str) -> str:
+    if _is_source_only(text):
+        return "只有来源名"
+    if _is_bare_entity(text):
+        return "只有主体没有动作"
+    return ""
+
+
 def _llm_title_reject_reason(title: str) -> str:
     """模型标题的拒绝原因。空字符串表示可以上屏。
 
@@ -1544,6 +1590,9 @@ def _llm_title_reject_reason(title: str) -> str:
     text = _compact(title)
     if not text or text == "事件":
         return "空标题"
+    name_reason = _title_name_reject_reason(text)
+    if name_reason:
+        return name_reason
     if len(text) < 6:
         return "过短"
     if len(text) > _LLM_TITLE_MAX:
@@ -1594,6 +1643,8 @@ def _fallback_title_ok(name: object) -> bool:
     if not _cleaned_display_ok(name):
         return False
     text = _compact(str(name or ""))
+    if _title_name_reject_reason(text):
+        return False
     if _has_emoji(text) or _CJK_SLASH.search(text):
         return False
     if any(text.startswith(prefix) for prefix in _FALLBACK_BAD_OPENINGS):
@@ -1676,6 +1727,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "例如美联储降息25基点。不要半句话，不要时间戳，不要【】，不要省略号，"
         "不要以数字或钟点开头，不要以叠加、和之前、根据、与开头，不要在词中间截断。"
         "不要把下一句粘进来。不要用「事件」当标题。不要输出重点、点评或栏目标签。"
+        "不要只写媒体名或公司名，标题里要有动作。"
         "主体必须写明，例如美联储、国务院、财政部。"
         f"category 只能是：{'、'.join(CATEGORY_NAMES)}。"
         "importance 按分量：央行利率、国家级政策、战争制裁、大宗商品冲击、龙头公司重大事项是重大；"
