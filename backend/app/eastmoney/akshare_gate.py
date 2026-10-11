@@ -3,7 +3,8 @@
 akshare 自己用 ``requests``。补丁挂在 ``Session.request`` 上，但只对
 调用 ``call_akshare`` / ``install`` 的那个线程生效：主机是
 ``eastmoney.com`` 的 GET 改走 ``EastMoneyLimiter``，其它主机仍走原来的
-requests。资金流、研报等其它线程即使撞上补丁，也拿原来的响应，不进这把锁。
+requests。这个线程没有自带超时时，补上连接和读取超时。资金流、研报等
+其它线程即使撞上补丁，也拿原来的响应，不进这把锁，也不被改超时。
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.eastmoney.client import EastMoneyLimiter, _host_allowed, get_limiter
+from app.selection_fields.timeouts import REQUEST_TIMEOUT
 
 _lock = threading.Lock()
 _local = threading.local()
@@ -70,23 +72,14 @@ class _Response:
             raise RuntimeError(f"eastmoney HTTP {self.status_code}")
 
 
-def _timeout_seconds(value: Any) -> float:
-    if isinstance(value, (tuple, list)) and value:
-        value = value[-1]
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 15.0
-    if number <= 0:
-        return 15.0
-    return number
-
-
 def _patched(self: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
     limiter = _limiter
     original = _original
+    opted_in = _thread_depth() > 0
+    if opted_in and kwargs.get("timeout") is None:
+        kwargs["timeout"] = REQUEST_TIMEOUT
     if (
-        _thread_depth() > 0
+        opted_in
         and limiter is not None
         and str(method).upper() == "GET"
         and _host_allowed(str(url))
@@ -95,7 +88,7 @@ def _patched(self: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any
             str(url),
             params=kwargs.get("params"),
             headers=kwargs.get("headers"),
-            timeout=_timeout_seconds(kwargs.get("timeout")),
+            timeout=kwargs.get("timeout"),
         )
         return _Response(response)
     if original is None:

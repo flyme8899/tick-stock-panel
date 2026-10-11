@@ -33,6 +33,13 @@ _TASKS = (
 
 _worker: SelectionWorker | None = None
 _worker_lock = threading.Lock()
+_TASK_LABELS = {
+    "northbound": "北向持股",
+    "holders": "股东户数",
+    "index": "指数成分",
+    "unlock": "解禁时间",
+    "pe": "PE(TTM)",
+}
 
 
 def selection_paused() -> bool:
@@ -127,33 +134,38 @@ class SelectionWorker:
         tasks = due_tasks(now, trading=trading, state=state, flags=flags)
         if not tasks:
             return None
-        name = tasks[0]
         day = session_day(now, trading=trading)
-        if name == "pe":
-            outcome = jobs.advance_pe(
-                data_dir,
-                self._call,
-                day,
-                flush_every=config.pe_flush_every(),
-                busy=tickflow_sync_busy,
-                stop=self._stop.is_set,
-            )
-            if outcome.get("complete"):
-                state["pe_date"] = day
-            elif outcome.get("note"):
-                state["pe_note"] = outcome["note"]
-        else:
-            state[f"{name}_at"] = now.isoformat(timespec="seconds")
-            if name == "index":
-                outcome = jobs.sync_indexes(self._call, data_dir, day=day)
+        started: list[str] = []
+        for name in tasks:
+            if name == "pe":
+                outcome = _run_bounded(name, lambda: _advance(self, data_dir, day))
             else:
-                outcome = _run_named(name, self._call, data_dir, now.date())
+                state[f"{name}_at"] = now.isoformat(timespec="seconds")
+                outcome = _run_bounded(
+                    name,
+                    lambda name=name: _execute(name, self._call, data_dir, now.date(), day),
+                )
+            started.append(name)
+            if name == "pe":
+                if outcome.get("error"):
+                    state["last_error"] = str(outcome["error"])[:300]
+                if outcome.get("timed_out"):
+                    continue
+                if outcome.get("complete"):
+                    state["pe_date"] = day
+                elif outcome.get("note"):
+                    state["pe_note"] = outcome["note"]
+                break
             if outcome.get("ok"):
                 state[f"{name}_date"] = day
-            elif outcome.get("error"):
+                break
+            if outcome.get("error"):
                 state["last_error"] = str(outcome["error"])[:300]
+            if outcome.get("timed_out"):
+                continue
+            break
         _save_state(data_dir, state)
-        return name
+        return started[0] if started else None
 
     def _call(self, name: str, **kwargs):
         if self._ak is not None:
@@ -166,6 +178,51 @@ class SelectionWorker:
         from app.config import settings
 
         return Path(settings.data_dir)
+
+
+def _advance(worker: SelectionWorker, data_dir: Path, day: str) -> dict:
+    from app.fund_flow.scheduler import tickflow_sync_busy
+
+    return jobs.advance_pe(
+        data_dir,
+        worker._call,
+        day,
+        flush_every=config.pe_flush_every(),
+        busy=tickflow_sync_busy,
+        stop=worker._stop.is_set,
+    )
+
+
+def _execute(name: str, ak, data_dir: Path, today: date, day: str) -> dict:
+    if name == "index":
+        return jobs.sync_indexes(ak, data_dir, day=day)
+    return _run_named(name, ak, data_dir, today)
+
+
+def _run_bounded(name: str, fn) -> dict:
+    """到点还没返回就记超时。调用方接着跑后面的任务，不再干等这个子任务。"""
+    from app.selection_fields.timeouts import task_timeout
+
+    timeout_s = task_timeout(name)
+    holder: dict = {}
+
+    def target() -> None:
+        try:
+            holder["value"] = fn()
+        except Exception as exc:  # noqa: BLE001
+            holder["value"] = {"ok": False, "error": str(exc)[:300]}
+
+    thread = threading.Thread(target=target, name=f"selection-{name}", daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        label = _TASK_LABELS.get(name, name)
+        logger.warning("选股补充字段%s超时（%.0f 秒）", label, timeout_s)
+        return {"ok": False, "error": f"{label}任务超时", "timed_out": True}
+    value = holder.get("value")
+    if isinstance(value, dict):
+        return value
+    return {"ok": False, "error": "任务没有结果"}
 
 
 def _run_named(name: str, ak, data_dir: Path, today: date) -> dict:

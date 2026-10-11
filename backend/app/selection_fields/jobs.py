@@ -246,11 +246,13 @@ def advance_pe(
 
 def _em_json(params: dict) -> dict:
     from app.eastmoney.client import em_get
+    from app.selection_fields.timeouts import REQUEST_TIMEOUT
 
     response = em_get(
         _NORTHBOUND_URL,
         params=params,
         headers={"Referer": _NORTHBOUND_REFERER},
+        timeout=REQUEST_TIMEOUT,
     )
     reader = getattr(response, "json", None)
     payload = reader() if callable(reader) else None
