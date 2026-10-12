@@ -114,3 +114,103 @@ def test_candidate_industry_falls_back_to_mapping_column_then_snapshot() -> None
         "家电",
         "",
     ]
+
+
+def test_three_level_names_share_first_level_bucket() -> None:
+    """中远海控和大秦铁路都是交通运输，三级全名对不上关键词时仍进同一桶。"""
+    from src.services.screening.risk import _portfolio_bucket
+
+    buckets = _profile()["buckets"]
+    cosco = _portfolio_bucket("交通运输-物流-航运", "", buckets=buckets)
+    daqin = _portfolio_bucket("交通运输／铁路公路／铁路运输", "", buckets=buckets)
+    port = _portfolio_bucket("交通运输－港口－港口", "", buckets=buckets)
+
+    assert cosco == daqin == port == "交通运输"
+    assert _portfolio_bucket("银行-银行-股份制银行", "", buckets=buckets) == "金融"
+    # 二级里的关键词仍然优先于一级行业名。
+    assert _portfolio_bucket("电力设备-光伏设备-光伏设备", "", buckets=buckets) == "新能源"
+
+
+def test_tonghuashun_parquet_caps_same_first_level_industry(tmp_path: Path) -> None:
+    """ext_hy_ths 的 parquet 能直接当行业表，交通运输只留一只。"""
+    directory = tmp_path / "ext_hy_ths"
+    directory.mkdir()
+    path = directory / "part.parquet"
+    pd.DataFrame({
+        "股票代码": ["601919.SH", "601006.SH", "600000.SH", "300274.SZ"],
+        "股票简称": ["中远海控", "大秦铁路", "浦发银行", "阳光电源"],
+        "所属同花顺行业": [
+            "交通运输-物流-航运",
+            "交通运输-铁路公路-铁路运输",
+            "银行-银行-股份制银行",
+            "电力设备-光伏设备-光伏设备",
+        ],
+    }).to_parquet(path, index=False)
+    snapshot = pd.DataFrame([
+        {"code": "601919", "name": "中远海控", "industry": "", "screen_score": 90},
+        {"code": "601006", "name": "大秦铁路", "industry": "Other", "screen_score": 89},
+        {"code": "600000", "name": "浦发银行", "industry": "", "screen_score": 80},
+        {"code": "300274", "name": "阳光电源", "industry": "", "screen_score": 70},
+    ])
+
+    enriched, notes = enrich_industry_concepts(snapshot, map_files=[directory])
+    picks = _df_to_picks(enriched)
+    capped = limit_picks_per_industry(picks, profile=_profile())
+
+    assert [pick.code for pick in capped] == ["601919", "600000", "300274"]
+    assert any("industry map loaded" in note for note in notes)
+    assert sum(pick.industry.startswith("交通运输") for pick in capped) == 1
+
+
+def test_missing_industry_map_keeps_snapshot(tmp_path: Path) -> None:
+    snapshot = pd.DataFrame([
+        {"code": "600000", "name": "浦发银行", "industry": "银行", "screen_score": 1},
+    ])
+
+    enriched, notes = enrich_industry_concepts(
+        snapshot,
+        map_files=[tmp_path / "missing.parquet"],
+    )
+
+    assert enriched.iloc[0]["industry"] == "银行"
+    assert any("industry map skipped: missing" in note for note in notes)
+
+
+def test_unset_industry_map_files_uses_existing_ths_table(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from src.services.screening import config as screening_config
+
+    parquet = tmp_path / "part.parquet"
+    parquet.write_bytes(b"")
+    missing = tmp_path / "absent.parquet"
+    monkeypatch.setattr(
+        screening_config,
+        "_builtin_industry_map_candidates",
+        lambda: [missing, parquet],
+    )
+    monkeypatch.delenv("INDUSTRY_MAP_FILES", raising=False)
+
+    assert screening_config._resolve_industry_map_files() == [parquet]
+
+    monkeypatch.setenv("INDUSTRY_MAP_FILES", "off")
+    assert screening_config._resolve_industry_map_files() == []
+
+    custom = tmp_path / "custom.csv"
+    monkeypatch.setenv("INDUSTRY_MAP_FILES", str(custom))
+    assert screening_config._resolve_industry_map_files() == [custom]
+
+
+def test_compose_and_env_example_point_at_ext_hy_ths() -> None:
+    root = Path(__file__).resolve().parents[2]
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    example = (root / ".env.example").read_text(encoding="utf-8")
+    docs = (root / "docs" / "dsa-integration.md").read_text(encoding="utf-8")
+    container_path = "/opt/tsp/data/ext_data/ext_hy_ths/part.parquet"
+
+    assert f"INDUSTRY_MAP_FILES={container_path}" in compose
+    assert "./data:/opt/tsp/data:ro" in compose
+    assert "INDUSTRY_MAP_FILES" in example
+    assert "ext_hy_ths" in example
+    assert container_path in docs

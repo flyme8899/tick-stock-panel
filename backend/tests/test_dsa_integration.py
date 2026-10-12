@@ -503,6 +503,8 @@ def test_catalog_documents_screening_and_efinance_priority(client: TestClient) -
     payload = client.get("/api/dsa/catalog").json()
     purposes = {item["name"]: item["purpose"] for item in payload["env_vars"]}
     assert "screening_disabled" in purposes["SCREENING_ENABLED"]
+    assert "ext_hy_ths" in purposes["INDUSTRY_MAP_FILES"]
+    assert "第一级" in purposes["INDUSTRY_MAP_FILES"]
     assert "3" in purposes["EFINANCE_PRIORITY"]
     assert "TickFlow" in purposes["EFINANCE_PRIORITY"]
 

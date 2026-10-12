@@ -88,7 +88,11 @@ def enrich_industry_concepts(
 
     mapping: dict[str, dict[str, object]] = {}
     for path_like in map_files or []:
-        file_mapping = load_industry_map(path_like)
+        located = _locate_industry_map(path_like)
+        if located is None:
+            notes.append(f"industry map skipped: missing {path_like}")
+            continue
+        file_mapping = load_industry_map(located)
         trend_mapping, trend_note = _load_companion_board_heat_trends(path_like)
         if trend_mapping:
             _apply_board_heat_trends(file_mapping, trend_mapping)
@@ -124,15 +128,30 @@ def enrich_industry_concepts(
     return result, notes
 
 
-def load_industry_map(path_like: str | Path) -> dict[str, dict[str, object]]:
-    """Load code -> industry/concepts mapping from CSV, JSON or JSONL."""
+def _locate_industry_map(path_like: str | Path) -> Path | None:
+    """Return a readable map file, or the parquet inside an ext_hy_ths directory."""
     path = Path(path_like)
+    if path.is_dir():
+        nested = path / "part.parquet"
+        return nested if nested.is_file() else None
+    if path.is_file():
+        return path
+    return None
+
+
+def load_industry_map(path_like: str | Path) -> dict[str, dict[str, object]]:
+    """Load code -> industry/concepts mapping from CSV, JSON, JSONL or Parquet."""
+    located = _locate_industry_map(path_like)
+    path = located if located is not None else Path(path_like)
     if not path.is_file():
-        raise FileNotFoundError(f"Industry map file not found: {path}")
+        raise FileNotFoundError(f"Industry map file not found: {path_like}")
 
     suffix = path.suffix.lower()
     if suffix == ".csv":
         rows = pd.read_csv(path, dtype=str).fillna("").to_dict(orient="records")
+    elif suffix == ".parquet":
+        frame = pd.read_parquet(path)
+        rows = frame.where(frame.notna(), "").astype(str).to_dict(orient="records")
     elif suffix == ".jsonl":
         rows = []
         for line in path.read_text(encoding="utf-8").splitlines():
