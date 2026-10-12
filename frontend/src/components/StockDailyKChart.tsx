@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { type KlineDailyResponse, type KlineRow } from '@/lib/api'
+import { type KlineRow } from '@/lib/api'
 import { klineDailyQueryOptions } from '@/lib/kline'
 import { storage } from '@/lib/storage'
 import {
@@ -13,6 +13,7 @@ import {
   type OHLC,
   type VolumeCompareConfig,
 } from '@/components/EChartsCandlestick'
+import { selectPatternMarkers } from '@/components/patternMarkers'
 
 const SUB_INFO_H = 16
 const SUB_GAP = 4
@@ -80,15 +81,6 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
       boll_upper: r.boll_upper != null ? Number(r.boll_upper) : null,
       boll_lower: r.boll_lower != null ? Number(r.boll_lower) : null,
     }))
-}
-
-function buildPatternMarkers(markers: KlineDailyResponse['candle_markers']): ChartMarker[] {
-  if (!markers?.length) return []
-  return markers.map((marker) => ({
-    date: marker.date.slice(0, 10),
-    kind: marker.side === 'bear' ? 'sell' as const : marker.side === 'neutral' ? 'neutral' as const : 'buy' as const,
-    label: marker.name,
-  }))
 }
 
 function buildLimitUpMarkers(rows: KlineRow[]): ChartMarker[] {
@@ -161,7 +153,8 @@ export function StockDailyKChart({
 }: Props) {
   const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
   const [showMarkers, setShowMarkers] = useState(true)
-  const [showPatternMarkers, setShowPatternMarkers] = useState(true)
+  // 形态标签默认关闭，且不写入本地存储：首次进入和刷新后都是关的，要手动打开
+  const [showPatternMarkers, setShowPatternMarkers] = useState(false)
   // 加入自选日标注（与「异动」标记相互独立）
   const [showAddedMark, setShowAddedMark] = useState(true)
   const [volumeCompare, setVolumeCompare] = useState<VolumeCompareConfig>(() =>
@@ -176,8 +169,8 @@ export function StockDailyKChart({
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const patternMarkers = useMemo(
-    () => buildPatternMarkers(kline.data?.candle_markers),
-    [kline.data?.candle_markers],
+    () => selectPatternMarkers(kline.data?.candle_markers, rows),
+    [kline.data?.candle_markers, rows],
   )
   const allMarkers = useMemo(() => [
     ...(markers ?? []),
@@ -275,6 +268,7 @@ export function StockDailyKChart({
               active={showPatternMarkers}
               label="形态"
               activeClass="text-[#C74040] bg-[#C74040]/10"
+              title={showPatternMarkers ? '隐藏K线形态标签' : '显示少数重要K线形态'}
               onClick={() => setShowPatternMarkers(v => !v)}
             />
           )}
