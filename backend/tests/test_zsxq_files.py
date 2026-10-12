@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,8 +16,8 @@ from app.market_time import CN_TZ
 from app.news.collectors import parse_zsxq_payload
 from app.news.config import zsxq_files_enabled
 from app.news.extract import Lexicon
-from app.news.host_collector import _run_zsxq, read_cursor
-from app.news.zsxq_files import extract_pdf_text, files_dir, sync_zsxq_files
+from app.news.host_collector import _run_zsxq, read_cursor, write_cursor
+from app.news.zsxq_files import _signed_url, extract_pdf_text, files_dir, sync_zsxq_files
 from app.research_reports.ima_store import for_code
 
 
@@ -459,3 +461,100 @@ def test_total_size_cap_drops_oldest_extracted_pdf(tmp_path, monkeypatch):
     )
     assert not older.exists()
     assert newer.exists()
+
+
+def test_signed_url_reads_real_cli_body():
+    """zsxq-cli 把签名链接放在 body.resp_data.download_url，外层还有 status_code。"""
+    payload = {
+        "status_code": 200,
+        "body": {"resp_data": {"download_url": SIGNED}},
+        "trace_url": "https://evil.example/not-this",
+    }
+    assert _signed_url(json.dumps(payload)) == SIGNED
+    assert _signed_url(json.dumps({"body": [{"resp_data": {"url": SIGNED}}]})) == SIGNED
+    assert _signed_url(json.dumps({"body": {"resp_data": {"file": {"link": SIGNED}}}})) == SIGNED
+    with pytest.raises(RuntimeError) as caught:
+        _signed_url(json.dumps({
+            "status_code": 200,
+            "body": {"resp_data": {"download_url": "https://evil.example/secret"}},
+        }))
+    assert "没有拿到下载地址" in str(caught.value)
+    assert "evil.example" not in str(caught.value)
+    assert "files.zsxq.com" not in str(caught.value)
+
+
+def test_file_backfill_queues_old_posts_without_moving_text(tmp_path, monkeypatch):
+    _patch_host(monkeypatch)
+    monkeypatch.setenv("NEWS_ZSXQ_FILES_PER_ROUND", "1")
+    monkeypatch.setattr(
+        "app.news.zsxq_files._read_limited",
+        lambda _url, _opener, _max: _pdf_bytes(PDF_TEXT),
+    )
+    write_cursor(tmp_path, "zsxq:2002", MOMENT.isoformat())
+    calls: list[list[str]] = []
+    topics = [_topic([
+        _file("pdf1", "贵州茅台.pdf", digest="hash-1"),
+        _file("pdf2", "宁德时代.pdf", digest="hash-2"),
+    ])]
+    cli_body = json.dumps({
+        "status_code": 200,
+        "body": {"resp_data": {"download_url": SIGNED}},
+    })
+
+    def run(argv):
+        calls.append(list(argv))
+        if argv[1:3] == ["auth", "status"]:
+            return Proc(0, "logged in")
+        if argv[1:3] == ["group", "+topics"]:
+            return Proc(0, json.dumps(topics))
+        return Proc(0, cli_body)
+
+    assert _run_zsxq(tmp_path, run, "", "", "", backfill_files_since="2026-10-09") == "ok"
+    assert not list((tmp_path / "news" / "inbox").glob("*.json"))
+    assert read_cursor(tmp_path, "zsxq:2002", "") == MOMENT.isoformat()
+    downloads = [argv[-1] for argv in calls if argv[1:3] == ["api", "raw"]]
+    assert downloads == ["/v2/files/pdf1/download_url"]
+    index = json.loads((files_dir(tmp_path) / "index.json").read_text(encoding="utf-8"))
+    assert index["files"]["pdf1"]["status"] == "ok"
+    assert index["files"]["pdf2"]["status"] == "pending"
+    assert len(_rows(tmp_path)) == 1
+    _assert_no_secret(tmp_path)
+
+    calls.clear()
+    assert _run_zsxq(tmp_path, run, "", "", "") == "ok"
+    downloads = [argv[-1] for argv in calls if argv[1:3] == ["api", "raw"]]
+    assert downloads == ["/v2/files/pdf2/download_url"]
+    assert not any(argv[1:3] == ["group", "+topics"] and "--end-time" in argv for argv in calls)
+    topic_calls = [argv for argv in calls if argv[1:3] == ["group", "+topics"]]
+    assert len(topic_calls) == 1
+    assert len(_rows(tmp_path)) == 2
+    assert read_cursor(tmp_path, "zsxq:2002", "") == MOMENT.isoformat()
+    _assert_no_secret(tmp_path)
+
+
+def test_invalid_file_backfill_date_does_not_scan_history(tmp_path, monkeypatch):
+    _patch_host(monkeypatch)
+    write_cursor(tmp_path, "zsxq:2002", MOMENT.isoformat())
+    calls: list[list[str]] = []
+
+    def run(argv):
+        calls.append(list(argv))
+        if argv[1:3] == ["auth", "status"]:
+            return Proc(0, "logged in")
+        return Proc(0, json.dumps([_topic([_file("pdf1", "贵州茅台.pdf")])]))
+
+    assert _run_zsxq(tmp_path, run, "", "", "", backfill_files_since="不是日期") == "ok"
+    assert [argv[1:3] for argv in calls] == [["auth", "status"], ["group", "+topics"]]
+    assert _rows(tmp_path) == []
+
+
+def test_collector_help_lists_file_backfill():
+    script = Path(__file__).resolve().parents[2] / "scripts" / "news_host_collector.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert "--backfill-files-since" in proc.stdout
