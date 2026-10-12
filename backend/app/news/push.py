@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -46,6 +47,8 @@ T_LABELS = {
 }
 RANGE_RULES = frozenset({"near_high", "near_low"})
 TYPE_LABELS = {"hot": "热点候选", "abnormal": "异动监控", "t_trade": "做T提醒"}
+_CHANGE_MARKS = {"new": "新进", "jump": "升温"}
+_KIND_LABELS = {"event": "事件", "sector": "板块", "stock": "个股", "etf": "ETF"}
 
 HOT_CHECK_S = 300
 INTRADAY_CHECK_S = 180
@@ -227,6 +230,21 @@ def _verified_event_names() -> dict[str, str]:
     return found
 
 
+def _change_line(index: int, row: dict) -> str:
+    mark = _CHANGE_MARKS.get(str(row.get("reason") or ""), "变化")
+    kind = _KIND_LABELS.get(str(row.get("kind") or ""), "")
+    prefix = f"{mark} · {kind}" if kind else mark
+    name = str(row.get("name") or row.get("key") or "")
+    confirm = row.get("confirmation") if isinstance(row.get("confirmation"), dict) else {}
+    checked = _confirm_label(confirm)
+    label = f" · {checked}" if checked else ""
+    return (
+        f"{index}. {prefix} · {name}{label} · "
+        f"提及 {row.get('story_count', 0)} · "
+        f"来源 {row.get('source_count', 0)}"
+    )
+
+
 def format_hot_markdown(
     sectors: list[dict],
     stocks: list[dict],
@@ -234,9 +252,18 @@ def format_hot_markdown(
     heading: str,
     events: list[dict] | None = None,
     etfs: list[dict] | None = None,
+    changed: list[dict] | None = None,
 ) -> tuple[str, str] | None:
-    """热点候选。具体事件在前，板块、个股、ETF 升温榜在后。没有内容时不发。"""
+    """热点候选。具体事件在前，板块、个股、ETF 升温榜在后。没有内容时不发。
+
+    「变化」把新进、升温列在当前榜单前面。
+    """
     blocks = []
+    if changed:
+        lines = ["**本次变化**"]
+        for index, row in enumerate(changed, start=1):
+            lines.append(_change_line(index, row))
+        blocks.append("\n".join(lines))
     if events:
         lines = ["**具体事件**"]
         for index, row in enumerate(events, start=1):
@@ -698,6 +725,33 @@ def _due(state: PushState, key: str, now_ts: float, interval: int) -> bool:
     return now_ts - last >= interval
 
 
+def _eligible_hot_rows(rows: list[dict] | None, *, verified_only: bool) -> list[dict] | None:
+    """触发和正文用同一份事件。只推已验证时，未验证事件不参与比较。"""
+    if rows is None or not verified_only:
+        return rows
+    return [
+        row for row in rows
+        if row.get("kind") != "event" or event_is_verified(
+            row.get("confirmation") if isinstance(row.get("confirmation"), dict) else None
+        )
+    ]
+
+
+def _hot_digest(day: str, text: str) -> str:
+    """同一天的正文哈希。下一天的盘前、收盘不因昨天的正文被跳过。"""
+    return hashlib.sha256(f"{day}\n{text}".encode()).hexdigest()
+
+
+def _hot_names(*groups: list[dict]) -> list[str]:
+    names: list[str] = []
+    for rows in groups:
+        for row in rows:
+            name = str(row.get("name") or row.get("key") or "").strip()
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
 def _send(kind: str, title: str, text: str, opener, now_ts: float, state: PushState) -> bool:
     if not state.rate_ok(now_ts):
         logger.info("钉钉推送达到每分钟 %s 条上限，本轮跳过 %s", RATE_LIMIT, TYPE_LABELS.get(kind, kind))
@@ -785,14 +839,18 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     previous = state.data.get("hot_snapshot")
     if previous is not None and state.data.get("hot_day") != day:
         previous = None
+    verified_only = push_type_saved("hot_verified")
+    eligible = _eligible_hot_rows(snapshot, verified_only=verified_only)
+    eligible_prev = _eligible_hot_rows(previous, verified_only=verified_only)
     heading = None
+    changed: list[dict] = []
     if slot == "pre":
         heading = "【热点候选】盘前"
     elif slot == "post":
         heading = "【热点候选】收盘"
     elif change_due and not state.cooling("hot", stamp):
         changed = hot_material(
-            previous, snapshot, top_n=top_n(), min_stories=min_stories(), jump=score_jump(),
+            eligible_prev, eligible or [], top_n=top_n(), min_stories=min_stories(), jump=score_jump(),
         )
         if changed:
             heading = "【热点候选】变化"
@@ -803,22 +861,43 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         return False
     limit = top_n()
     events = [row for row in snapshot if row["kind"] == "event"][:limit]
-    if push_type_saved("hot_verified"):
-        events = [row for row in events if event_is_verified(row.get("confirmation"))]
+    if verified_only:
+        events = [
+            row for row in events
+            if event_is_verified(row.get("confirmation") if isinstance(row.get("confirmation"), dict) else None)
+        ]
     sectors = [row for row in snapshot if row["kind"] == "sector"][:limit]
     stocks = [row for row in snapshot if row["kind"] == "stock"][:limit]
     etfs = [row for row in snapshot if row["kind"] == "etf"][:limit]
     if loader is None:
         _attach_refs(sectors, stocks, events, etfs)
-    packed = format_hot_markdown(sectors, stocks, heading=heading, events=events, etfs=etfs)
+    packed = format_hot_markdown(
+        sectors, stocks, heading=heading, events=events, etfs=etfs, changed=changed or None,
+    )
     if packed is None:
         state.data["last_hot_check"] = stamp
         return False
+    digest = _hot_digest(day, packed[1])
+    if state.data.get("hot_digest") == digest:
+        logger.info("钉钉热点候选内容与上次相同，跳过 %s", heading)
+        state.data["last_hot_check"] = stamp
+        state.data["hot_snapshot"] = snapshot
+        state.data["hot_day"] = day
+        if slot:
+            state.data["slots"][f"{day}:{slot}"] = stamp
+        return False
     if not _send("hot", packed[0], packed[1], opener, stamp, state):
         return False
+    logger.info(
+        "钉钉热点候选已推送 %s %s %s",
+        now.isoformat(timespec="seconds"),
+        heading,
+        "、".join(_hot_names(changed, events, sectors, stocks, etfs)),
+    )
     state.data["last_hot_check"] = stamp
     state.data["hot_snapshot"] = snapshot
     state.data["hot_day"] = day
+    state.data["hot_digest"] = digest
     if slot:
         state.data["slots"][f"{day}:{slot}"] = stamp
     state.cool_until("hot", stamp, hot_cooldown_s())

@@ -235,6 +235,9 @@ def test_scheduled_push_once_and_change_respects_cooldown(tmp_path, monkeypatch)
     assert tick(later, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == ["hot"]
     assert tick(later, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == []
     assert "【热点候选】变化" in sent[1]["markdown"]["text"]
+    assert "本次变化" in sent[1]["markdown"]["text"]
+    assert "升温" in sent[1]["markdown"]["text"]
+    assert "半导体" in sent[1]["markdown"]["text"]
 
 
 def test_abnormal_and_t_only_after_baseline(tmp_path, monkeypatch):
@@ -710,6 +713,106 @@ def test_range_once_per_stock_per_day_still_allows_vwap(tmp_path, monkeypatch):
     assert "接近日内高点" in sent[0]["markdown"]["text"]
     assert "高于分时均价" in sent[1]["markdown"]["text"]
     assert len(sent) == 2
+
+
+def _enable_hot_push(monkeypatch, tmp_path, *, verified: bool = False):
+    monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)
+    monkeypatch.setattr("app.news.push.push_type_enabled", lambda kind: kind == "hot")
+    monkeypatch.setattr("app.news.push.push_type_saved", lambda type_id: type_id == "hot_verified" and verified)
+    monkeypatch.setattr(
+        "app.config.settings.dingtalk_webhook_url",
+        "https://oapi.dingtalk.com/robot/send?access_token=test",
+    )
+    monkeypatch.setattr("app.config.settings.dingtalk_secret", "SECtest")
+    monkeypatch.setattr("app.config.settings.news_push_top_n", 5)
+    monkeypatch.setattr("app.config.settings.news_push_min_stories", 2)
+    monkeypatch.setattr("app.config.settings.news_push_score_jump", 0.5)
+    monkeypatch.setattr("app.config.settings.news_push_hot_cooldown_min", 30)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+
+    def opener(request, timeout=10):
+        sent.append(json.loads(request.data.decode()))
+        return None
+
+    return state, sent, opener
+
+
+def _event_row(key: str, name: str, *, score: float, strength: str) -> dict:
+    return {
+        "kind": "event",
+        "key": key,
+        "name": name,
+        "score": score,
+        "story_count": 3,
+        "sources": ["cls", "wscn"],
+        "growth": 0,
+        "confirmation": {"phase": "intraday", "strength": strength},
+    }
+
+
+def test_unverified_new_event_does_not_trigger_hot_push(tmp_path, monkeypatch):
+    state, sent, opener = _enable_hot_push(monkeypatch, tmp_path, verified=True)
+    old = _event_row("ev_old", "旧事件", score=3, strength="强")
+    fresh = _event_row("ev_new", "尚未验证的新事件", score=4, strength="无")
+    morning = datetime(2026, 10, 12, 10, 0, tzinfo=CN_TZ)
+    assert tick(morning, state=state, opener=opener, trading=True, hot_loader=lambda: [old]) == []
+    later = morning + timedelta(seconds=301)
+    assert tick(
+        later, state=state, opener=opener, trading=True, hot_loader=lambda: [fresh, old],
+    ) == []
+    assert sent == []
+
+
+def test_verified_change_names_what_changed_and_is_logged(tmp_path, monkeypatch, caplog):
+    state, sent, opener = _enable_hot_push(monkeypatch, tmp_path, verified=True)
+    old = _event_row("ev_old", "旧事件", score=3, strength="强")
+    fresh = _event_row("ev_new", "竞价新事件", score=4, strength="中")
+    morning = datetime(2026, 10, 12, 10, 0, tzinfo=CN_TZ)
+    assert tick(morning, state=state, opener=opener, trading=True, hot_loader=lambda: [old]) == []
+    later = morning + timedelta(seconds=301)
+    caplog.set_level("INFO", logger="app.news.push")
+    assert tick(
+        later, state=state, opener=opener, trading=True, hot_loader=lambda: [fresh, old],
+    ) == ["hot"]
+    text = sent[0]["markdown"]["text"]
+    assert "【热点候选】变化" in text
+    assert "本次变化" in text
+    assert "新进" in text
+    assert "竞价新事件" in text
+    assert "尚未验证" not in text
+    assert text.index("本次变化") < text.index("具体事件")
+    assert "钉钉热点候选已推送" in caplog.text
+    assert "【热点候选】变化" in caplog.text
+    assert "竞价新事件" in caplog.text
+    assert state.data.get("hot_digest")
+
+
+def test_identical_hot_content_is_not_sent_again(tmp_path, monkeypatch):
+    state, sent, opener = _enable_hot_push(monkeypatch, tmp_path)
+    baseline = [{
+        "kind": "sector",
+        "key": "半导体",
+        "name": "半导体",
+        "score": 2,
+        "story_count": 3,
+        "sources": ["cls"],
+        "growth": 1.8,
+    }]
+    grown = [{**baseline[0], "score": 4, "story_count": 4}]
+    morning = datetime(2026, 10, 12, 10, 0, tzinfo=CN_TZ)
+    assert tick(morning, state=state, opener=opener, trading=True, hot_loader=lambda: baseline) == []
+    saved = json.loads(json.dumps(state.data["hot_snapshot"]))
+    later = morning + timedelta(seconds=301)
+    assert tick(later, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == ["hot"]
+    assert "升温" in sent[0]["markdown"]["text"]
+    state.data["hot_snapshot"] = saved
+    state.data["hot_day"] = later.date().isoformat()
+    state.data["cooldowns"]["hot"] = 0
+    state.data["last_hot_check"] = 0
+    again = later + timedelta(seconds=301)
+    assert tick(again, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == []
+    assert len(sent) == 1
 
 
 def test_t_daily_cap_counts_messages_across_the_watchlist(tmp_path, monkeypatch):

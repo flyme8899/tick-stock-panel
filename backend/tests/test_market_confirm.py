@@ -379,3 +379,67 @@ def test_shared_symbol_is_split_by_time_then_by_mapping_weight():
     assert direct["detail"]["share"] == 0.75
     assert indirect["detail"]["share"] == 0.25
     assert direct["detail"]["excess_pct"] > indirect["detail"]["excess_pct"] * 2
+
+
+def test_new_event_is_confirmed_in_the_same_snapshot(tmp_path, monkeypatch):
+    """新事件进榜时，个股映射要等要点补上。行情已经支持时，这一轮快照就要验证。"""
+    from app.news.hot_events import build_top_hot_events
+
+    store = reset_store_for_tests(tmp_path / "same-cycle.sqlite")
+    friday = datetime(2026, 10, 9, tzinfo=CN_TZ)
+    published = friday.replace(hour=9, minute=5)
+    status = store.insert_item(
+        source="cls",
+        source_id="drug-late",
+        published_at=published,
+        author="",
+        title="创新药临床获批",
+        clean_text="创新药临床获批。正文写长一些以免被当成短讯。",
+        raw=None,
+        content_hash="drug-late",
+        url="",
+        level="",
+        media_ids=[],
+        extra=None,
+        mentions=[],
+    )
+    assert status == "inserted"
+
+    def label(events):
+        for event in events:
+            blob = " ".join([
+                str(event.get("name") or ""),
+                str(event.get("headline") or ""),
+                * [str(item) for item in (event.get("headlines") or [])],
+            ])
+            if "临床获批" not in blob:
+                continue
+            event["mentioned_stocks"] = [{
+                "key": "601318.SH",
+                "name": "中国平安",
+                "mentions": 1,
+                "source_count": 1,
+                "direction": "利好",
+            }]
+            event["concepts"] = ["创新药"]
+            event["direction"] = "利好"
+
+    monkeypatch.setattr("app.news.hot_events._label_with_llm", label)
+    monkeypatch.setattr(
+        "app.news.market_confirm.load_market_tape",
+        lambda _now, _events: _tape([
+            _bar(10, 0, 10.2),
+            _bar(10, 20, 10.5),
+            _bar(14, 0, 10.8),
+            _bar(14, 40, 11.0, volume=80_000),
+        ], flows=[{
+            "at": datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ),
+            "value": 8e7,
+            "kind": "snapshot",
+        }]),
+    )
+    snapshot = build_top_hot_events(NOW, store, refresh=True)
+    assert snapshot["events"]
+    drug = snapshot["events"][0]
+    assert any(item.get("key") == "601318.SH" for item in drug["mentioned_stocks"])
+    assert drug["confirmation"]["strength"] == "强"
