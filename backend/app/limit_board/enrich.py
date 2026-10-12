@@ -38,6 +38,7 @@ def _stock_anchored(stock: dict, blob: str) -> bool:
 
     三种口径依次试：全名子串 → 去掉 ST/XD 前缀的简称 → 6 位代码。
     标题常用简称或代码（「宁德」「300750」），只看全名会把该补的题材误挡。
+    6 位代码加前后非数字边界，避免「600000 吨」这类金额数量误中。
     """
     name = str(stock.get("name") or "")
     if len(name) >= 2 and name in blob:
@@ -46,7 +47,7 @@ def _stock_anchored(stock: dict, blob: str) -> bool:
     if stripped != name and len(stripped) >= 2 and stripped in blob:
         return True
     code = code6_of(str(stock.get("key") or ""))
-    if code and code in blob:
+    if code and re.search(rf"(?<!\d){re.escape(code)}(?!\d)", blob):
         return True
     return False
 

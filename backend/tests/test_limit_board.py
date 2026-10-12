@@ -279,6 +279,21 @@ def test_enrich_anchors_stock_by_short_name_or_code(tmp_path: Path) -> None:
     assert code_hit["limit_reason"]["enriched"] == ["固态电池概念"]
 
 
+def test_enrich_code_anchor_requires_digit_boundary(tmp_path: Path) -> None:
+    """6 位代码要前后非数字，「600000 吨」这类金额数量不该被当成代码锚定。"""
+    store.write_rows(tmp_path, "ths", _DAY, parse_ths_pool(_load("ths_pool.json"), _DAY) or [])
+    # 标题里的 7 位数字（6000001）包含 6 位子串，但没有数字边界 → 不该锚定。
+    digits = {
+        "concepts": [],
+        "direction": "",
+        "name": "某公司成交额达3007500万元",
+        "headlines": ["某公司成交额达3007500万元"],
+        "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
+    }
+    apply_limit_reasons([digits], tmp_path, _DAY)
+    assert "limit_reason" not in digits
+
+
 def test_limit_board_sentiment_route(tmp_path, monkeypatch) -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
