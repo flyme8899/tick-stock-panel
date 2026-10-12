@@ -158,6 +158,10 @@ class Settings(BaseSettings):
     ima_api_key: str = ""
     ima_kb_id: str = ""
     ima_kb_name: str = "【爱分享】的财经资讯"
+    # 个人知识库里的券商研报全文。ID 只从环境变量来，不写死在代码里。
+    ima_research_kb_id: str = ""
+    ima_research_times: str = "06:30,08:30"
+    news_ima_research_enabled: str = ""
     dingtalk_webhook_url: str = ""
     dingtalk_secret: str = ""
     news_dsa_feed_token: str = ""

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.news.extract import code6_of
-from app.research_reports import store
+from app.research_reports import ima_store, store
 from app.research_reports.parse import research_code
 
 
@@ -21,6 +21,11 @@ def for_symbol(data_dir: Path, symbol: str, *, limit: int = 20) -> list[dict]:
             break
     rows.sort(key=lambda item: str(item.get("publish_date") or ""), reverse=True)
     return [_public_stock(row) for row in rows[:limit]]
+
+
+def ima_for_symbol(data_dir: Path, symbol: str, *, limit: int = 20) -> list[dict]:
+    """个人知识库里提及这只股票的研报全文。没有库文件时是空列表。"""
+    return ima_store.for_code(data_dir, symbol, limit=limit)
 
 
 def industry(data_dir: Path, *, limit: int = 30) -> list[dict]:

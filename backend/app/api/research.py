@@ -26,7 +26,7 @@ def stock(symbol: str, limit: int = Query(20, ge=1, le=50)) -> dict:
         rows = query.for_symbol(_dir(), symbol, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"symbol": symbol, "reports": rows}
+    return {"symbol": symbol, "reports": rows, "ima_reports": query.ima_for_symbol(_dir(), symbol, limit=limit)}
 
 
 @router.get("/industry")

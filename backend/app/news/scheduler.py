@@ -8,7 +8,7 @@ from datetime import time as dt_time
 
 from app.market_time import cn_now
 from app.news.collectors import FOREIGN_RSS_SOURCES, FOREIGN_SLOW_SOURCES, REDDIT_MIN_GAP
-from app.news.config import SOURCE_ORDER, source_enabled
+from app.news.config import BACKGROUND_SOURCES, SOURCE_ORDER, source_enabled
 from app.news.etf_flow import etf_wait_seconds
 from app.news.hot_snapshot import HOT_REFRESH_SECONDS
 from app.news.service import backfill_mentions, collect_inbox, get_lexicon, run_due
@@ -93,7 +93,7 @@ class NewsScheduler:
             now = cn_now()
             stamp = now.timestamp()
             for source in SOURCE_ORDER:
-                if source in {"research", "notice"} or not source_enabled(source):
+                if source in BACKGROUND_SOURCES or not source_enabled(source):
                     continue
                 due = self._next.get(source, 0)
                 if stamp < due:
