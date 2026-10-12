@@ -7,18 +7,26 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from app.market_time import CN_TZ
 from app.news.collectors import parse_zsxq_payload
-from app.news.config import zsxq_files_enabled
+from app.news.config import zsxq_files_enabled, zsxq_ocr_max_per_round
 from app.news.extract import Lexicon
-from app.news.host_collector import _run_zsxq, read_cursor, write_cursor
-from app.news.zsxq_files import _signed_url, extract_pdf_text, files_dir, sync_zsxq_files
-from app.research_reports.ima_store import for_code
+from app.news.host_collector import _run_zsxq, read_cursor, run_host, write_cursor
+from app.news.zsxq_files import (
+    _ocr_hours_closed,
+    _signed_url,
+    extract_pdf_text,
+    files_dir,
+    ocr_pdf_text,
+    requeue_failed_files,
+    sync_zsxq_files,
+)
+from app.research_reports.ima_store import INDUSTRY_TAG, for_code, search
 
 
 @pytest.fixture(autouse=True)
@@ -558,3 +566,495 @@ def test_collector_help_lists_file_backfill():
     )
     assert proc.returncode == 0
     assert "--backfill-files-since" in proc.stdout
+    assert "--requeue-failed-files" in proc.stdout
+
+
+def _mentions(data_dir: Path) -> list[sqlite3.Row]:
+    path = data_dir / "research" / "ima_reports.sqlite"
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return list(conn.execute("SELECT * FROM mentions ORDER BY media_id, symbol"))
+    finally:
+        conn.close()
+
+
+def _index(data_dir: Path) -> dict:
+    return json.loads((files_dir(data_dir) / "index.json").read_text(encoding="utf-8"))
+
+
+def test_pypdf_text_does_not_call_fallbacks(monkeypatch):
+    def fail(_data):
+        raise AssertionError("不应调用后备解析")
+
+    monkeypatch.setattr("app.news.zsxq_files._pdftotext_text", fail)
+    monkeypatch.setattr("app.news.zsxq_files._pdfminer_text", fail)
+    assert PDF_TEXT in extract_pdf_text(_pdf_bytes(PDF_TEXT))
+
+
+def test_pypdf_boolean_error_uses_pdftotext_layout(monkeypatch):
+    def boom(_data):
+        raise RuntimeError("Could not read Boolean object")
+
+    seen: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        seen.append(list(argv))
+        assert kwargs["input"].startswith(b"%PDF")
+        return Proc(0, "版式正文")
+
+    monkeypatch.setattr("app.news.zsxq_files._pypdf_text", boom)
+    monkeypatch.setattr(
+        "app.news.zsxq_files.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"pdftotext", "nice"} else None,
+    )
+    monkeypatch.setattr("app.news.zsxq_files.subprocess.run", run)
+    assert extract_pdf_text(b"%PDF-1.4") == "版式正文"
+    assert seen[0][:3] == ["nice", "-n", "19"]
+    assert "pdftotext" in seen[0]
+    assert "-layout" in seen[0]
+
+
+def test_empty_text_layer_falls_through_to_pdfminer(monkeypatch):
+    monkeypatch.setattr("app.news.zsxq_files._pypdf_text", lambda _data: "")
+    monkeypatch.setattr("app.news.zsxq_files._pdftotext_text", lambda _data: "  \n")
+    monkeypatch.setattr("app.news.zsxq_files._pdfminer_text", lambda _data: "pdfminer正文")
+    assert extract_pdf_text(b"%PDF-1.4") == "pdfminer正文"
+
+
+def test_all_parsers_empty_returns_blank(monkeypatch):
+    monkeypatch.setattr("app.news.zsxq_files._pypdf_text", lambda _data: "")
+    monkeypatch.setattr("app.news.zsxq_files._pdftotext_text", lambda _data: "")
+    monkeypatch.setattr("app.news.zsxq_files._pdfminer_text", lambda _data: "")
+    assert extract_pdf_text(b"%PDF-1.4") == ""
+
+
+def test_ocr_hours_follow_shanghai_clock():
+    assert _ocr_hours_closed(datetime(2026, 10, 9, 9, 14, tzinfo=CN_TZ)) is False
+    assert _ocr_hours_closed(datetime(2026, 10, 9, 9, 15, tzinfo=CN_TZ)) is True
+    assert _ocr_hours_closed(datetime(2026, 10, 9, 12, 0, tzinfo=CN_TZ)) is True
+    assert _ocr_hours_closed(datetime(2026, 10, 9, 15, 5, tzinfo=CN_TZ)) is True
+    assert _ocr_hours_closed(datetime(2026, 10, 9, 15, 6, tzinfo=CN_TZ)) is False
+    assert _ocr_hours_closed(datetime(2026, 10, 9, 1, 15, tzinfo=UTC)) is True
+    assert _ocr_hours_closed(datetime(2026, 10, 9, 7, 6, tzinfo=UTC)) is False
+
+
+def test_ocr_cap_defaults_to_five(monkeypatch):
+    monkeypatch.delenv("NEWS_ZSXQ_OCR_MAX_PER_ROUND", raising=False)
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "news_zsxq_ocr_max_per_round", "")
+    assert zsxq_ocr_max_per_round() == 5
+
+
+def test_ocr_renders_three_pages_with_tesseract(monkeypatch):
+    calls: list[list[str]] = []
+
+    def which(name):
+        if name in {"nice", "pdftoppm", "tesseract"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        if "pdftoppm" in argv:
+            assert argv[argv.index("-f") + 1] == "1"
+            assert argv[argv.index("-l") + 1] == "3"
+            prefix = argv[-1]
+            for page in range(1, 5):
+                Path(f"{prefix}-{page}.png").write_bytes(b"png")
+            return Proc(0, "")
+        assert "tesseract" in argv
+        assert "chi_sim+eng" in argv
+        return Proc(0, "锂电")
+
+    monkeypatch.setattr("app.news.zsxq_files.shutil.which", which)
+    monkeypatch.setattr("app.news.zsxq_files.subprocess.run", run)
+    assert ocr_pdf_text(b"%PDF-1.4") == "锂电\n锂电\n锂电"
+    assert calls[0][:3] == ["nice", "-n", "19"]
+    assert len([argv for argv in calls if "tesseract" in argv]) == 3
+
+
+def test_ocr_uses_rapidocr_when_tesseract_is_missing(monkeypatch):
+    calls: list[list[str]] = []
+
+    def which(name):
+        if name in {"nice", "pdftoppm"}:
+            return f"/usr/bin/{name}"
+        return None
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        if "pdftoppm" in argv:
+            Path(f"{argv[-1]}-1.png").write_bytes(b"png")
+            return Proc(0, "")
+        assert "rapidocr_onnxruntime" in " ".join(argv)
+        return Proc(0, "识别结果")
+
+    monkeypatch.setattr("app.news.zsxq_files.shutil.which", which)
+    monkeypatch.setattr("app.news.zsxq_files.subprocess.run", run)
+    assert ocr_pdf_text(b"%PDF-1.4") == "识别结果"
+    assert calls[0][:3] == ["nice", "-n", "19"]
+
+
+def _sync_one(tmp_path, name, *, moment, lexicon=None, file_id="pdf1"):
+    def run(argv):
+        return Proc(0, json.dumps({"download_url": SIGNED}))
+
+    return sync_zsxq_files(
+        tmp_path,
+        [_topic([_file(file_id, name)], topic_id=file_id)],
+        run,
+        "/bin/zsxq-cli",
+        opener=lambda _url: b"%PDF-1.4\n" + b"scan",
+        sleep=lambda _delay: None,
+        lexicon=lexicon if lexicon is not None else Lexicon([], []),
+        moment=moment,
+    )
+
+
+def test_trading_hours_defer_ocr_until_after_close(tmp_path, monkeypatch, caplog):
+    noon = datetime(2026, 10, 9, 12, 0, tzinfo=CN_TZ)
+    after = datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ)
+    ocr_calls: list[int] = []
+    monkeypatch.setattr("app.news.zsxq_files.extract_pdf_text", lambda _data: "")
+
+    def ocr(_data):
+        ocr_calls.append(1)
+        return "电力设备行业周报"
+
+    monkeypatch.setattr("app.news.zsxq_files.ocr_pdf_text", ocr)
+    with caplog.at_level(logging.INFO):
+        first = _sync_one(tmp_path, "行业周报.pdf", moment=noon)
+    assert first["inserted"] == 0
+    assert first["failed"] == 1
+    assert ocr_calls == []
+    assert _index(tmp_path)["files"]["pdf1"]["reason"] == "ocr-deferred"
+    assert int(_index(tmp_path)["files"]["pdf1"]["attempts"] or 0) == 0
+    again = _sync_one(tmp_path, "行业周报.pdf", moment=noon)
+    assert again["downloaded"] == 0
+    assert again["inserted"] == 0
+    assert ocr_calls == []
+    assert _index(tmp_path)["files"]["pdf1"]["reason"] == "ocr-deferred"
+    with caplog.at_level(logging.INFO):
+        third = _sync_one(tmp_path, "行业周报.pdf", moment=after)
+    assert third["inserted"] == 1
+    assert ocr_calls == [1]
+    assert "pdf1" in caplog.text
+    assert "耗时" in caplog.text
+    assert "秒" in caplog.text
+    row = _rows(tmp_path)[0]
+    assert row["tag"] == INDUSTRY_TAG
+    assert row["title"] == "行业周报"
+    assert "电力设备" in row["body"]
+    assert _mentions(tmp_path) == []
+    assert for_code(tmp_path, "600519") == []
+    found = search(tmp_path, "行业/综合")
+    assert [item["media_id"] for item in found] == ["zsxq:pdf1"]
+    assert found[0]["symbols"] == []
+    assert search(tmp_path, "%") == []
+
+
+def test_ocr_cap_leaves_the_rest_for_the_next_round(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEWS_ZSXQ_OCR_MAX_PER_ROUND", "1")
+    moment = datetime(2026, 10, 9, 16, 30, tzinfo=CN_TZ)
+    calls: list[str] = []
+    monkeypatch.setattr("app.news.zsxq_files.extract_pdf_text", lambda _data: "")
+
+    def ocr(_data):
+        calls.append("ocr")
+        return "行业综述"
+
+    monkeypatch.setattr("app.news.zsxq_files.ocr_pdf_text", ocr)
+
+    def run(argv):
+        return Proc(0, json.dumps({"download_url": SIGNED}))
+
+    topics = [_topic([
+        _file("a", "甲.pdf", digest="a"),
+        _file("b", "乙.pdf", digest="b"),
+    ])]
+    first = sync_zsxq_files(
+        tmp_path, topics, run, "/bin/zsxq-cli",
+        opener=lambda _url: b"%PDF-1.4\n",
+        sleep=lambda _delay: None,
+        lexicon=Lexicon([], []),
+        moment=moment,
+    )
+    assert first["inserted"] == 1
+    assert calls == ["ocr"]
+    assert _index(tmp_path)["files"]["b"]["reason"] == "ocr-deferred"
+    second = sync_zsxq_files(
+        tmp_path, [], run, "/bin/zsxq-cli",
+        opener=lambda _url: b"%PDF-1.4\n",
+        sleep=lambda _delay: None,
+        lexicon=Lexicon([], []),
+        moment=moment,
+    )
+    assert second["downloaded"] == 0
+    assert second["inserted"] == 1
+    assert calls == ["ocr", "ocr"]
+    assert len(_rows(tmp_path)) == 2
+    assert {row["tag"] for row in _rows(tmp_path)} == {INDUSTRY_TAG}
+
+
+def test_deferred_ocr_does_not_consume_download_slot(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEWS_ZSXQ_FILES_PER_ROUND", "1")
+    noon = datetime(2026, 10, 9, 12, 0, tzinfo=CN_TZ)
+    scan = b"%PDF-1.4\nscan"
+    text_pdf = _pdf_bytes(PDF_TEXT)
+    monkeypatch.setattr(
+        "app.news.zsxq_files.extract_pdf_text",
+        lambda data: "" if data == scan else PDF_TEXT,
+    )
+
+    def ocr(_data):
+        raise AssertionError("午间不应 OCR")
+
+    monkeypatch.setattr("app.news.zsxq_files.ocr_pdf_text", ocr)
+    queue = [scan, text_pdf]
+
+    def run(_argv):
+        return Proc(0, json.dumps({"download_url": SIGNED}))
+
+    topics = [_topic([
+        _file("a", "扫描件.pdf", digest="ha"),
+        _file("b", "文字层.pdf", digest="hb"),
+    ])]
+    done = sync_zsxq_files(
+        tmp_path, topics, run, "/bin/zsxq-cli",
+        opener=lambda _url: queue.pop(0),
+        sleep=lambda _delay: None,
+        lexicon=Lexicon([], []),
+        moment=noon,
+    )
+    assert queue == []
+    assert done["downloaded"] == 2
+    assert done["inserted"] == 1
+    assert done["failed"] == 1
+    index = _index(tmp_path)["files"]
+    assert index["a"]["reason"] == "ocr-deferred"
+    assert int(index["a"]["attempts"] or 0) == 0
+    assert index["b"]["status"] == "ok"
+    assert _rows(tmp_path)[0]["media_id"] == "zsxq:b"
+
+
+def test_stock_report_keeps_mapping_and_has_no_industry_tag(tmp_path):
+    pdf = _pdf_bytes(PDF_TEXT)
+
+    def run(argv):
+        return Proc(0, json.dumps({"download_url": SIGNED}))
+
+    sync_zsxq_files(
+        tmp_path,
+        [_topic([_file("pdf1", "贵州茅台.pdf")])],
+        run,
+        "/bin/zsxq-cli",
+        opener=lambda _url: pdf,
+        sleep=lambda _delay: None,
+        lexicon=Lexicon([("600519.SH", "贵州茅台", "600519")], []),
+        moment=MOMENT,
+    )
+    assert _rows(tmp_path)[0]["tag"] == ""
+    assert [row["code"] for row in _mentions(tmp_path)] == ["600519"]
+    assert for_code(tmp_path, "600519")[0]["title"] == "贵州茅台"
+    assert search(tmp_path, INDUSTRY_TAG) == []
+
+
+def test_requeue_failed_files_retries_empty_not_oversize(tmp_path, monkeypatch):
+    root = files_dir(tmp_path)
+    root.mkdir(parents=True)
+    (root / "pdf1.pdf").write_bytes(_pdf_bytes(PDF_TEXT))
+    index = {
+        "files": {
+            "pdf1": {
+                "status": "skipped",
+                "reason": "empty",
+                "attempts": 3,
+                "name": "行业周报.pdf",
+                "hash": "h1",
+                "size": 20,
+                "topic_id": "t1",
+                "published_at": "2026-10-09T10:00:00+08:00",
+                "group_name": "每日投研",
+            },
+            "unread1": {
+                "status": "failed",
+                "reason": "unreadable",
+                "attempts": 3,
+                "name": "坏档.pdf",
+                "hash": "h2",
+                "size": 20,
+            },
+            "dl1": {
+                "status": "failed",
+                "reason": "download",
+                "attempts": 2,
+                "name": "下载失败.pdf",
+                "hash": "h5",
+                "size": 20,
+            },
+            "extract1": {
+                "status": "skipped",
+                "reason": "extract",
+                "attempts": 3,
+                "name": "抽取失败.pdf",
+                "hash": "h6",
+                "size": 20,
+            },
+            "defer1": {
+                "status": "failed",
+                "reason": "ocr-deferred",
+                "attempts": 0,
+                "name": "延后.pdf",
+                "hash": "h7",
+                "size": 20,
+            },
+            "big1": {
+                "status": "skipped",
+                "reason": "oversize",
+                "attempts": 1,
+                "name": "超大.pdf",
+                "hash": "h3",
+                "size": 99,
+            },
+            "ok1": {"status": "ok", "reason": "", "attempts": 1, "name": "好.pdf", "hash": "h4"},
+        }
+    }
+    (root / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    assert requeue_failed_files(tmp_path) == 2
+    queued = _index(tmp_path)["files"]
+    assert queued["pdf1"]["status"] == "pending"
+    assert queued["pdf1"]["attempts"] == 0
+    assert queued["pdf1"]["reason"] == "empty"
+    assert queued["unread1"]["status"] == "pending"
+    assert queued["unread1"]["attempts"] == 0
+    assert queued["unread1"]["reason"] == "unreadable"
+    assert queued["dl1"]["status"] == "failed"
+    assert queued["dl1"]["attempts"] == 2
+    assert queued["extract1"]["status"] == "skipped"
+    assert queued["defer1"]["status"] == "failed"
+    assert queued["big1"]["status"] == "skipped"
+    assert queued["ok1"]["status"] == "ok"
+    summary = run_host(tmp_path, lambda _argv: Proc(1, ""), requeue_failed_files=True)
+    assert summary["zsxq_requeued"] == 0
+    monkeypatch.setenv("NEWS_ZSXQ_FILES_PER_ROUND", "1")
+
+    def run(argv):
+        return Proc(0, json.dumps({"download_url": SIGNED}))
+
+    monkeypatch.setattr(
+        "app.news.zsxq_files.extract_pdf_text",
+        lambda data: "本地再抽正文" if data.startswith(b"%PDF") else "",
+    )
+    done = sync_zsxq_files(
+        tmp_path, [], run, "/bin/zsxq-cli",
+        opener=lambda _url: (_ for _ in ()).throw(AssertionError("不应重新下载")),
+        sleep=lambda _delay: None,
+        lexicon=Lexicon([], []),
+        moment=datetime(2026, 10, 9, 16, 0, tzinfo=CN_TZ),
+    )
+    assert done["downloaded"] == 0
+    assert done["inserted"] == 1
+    assert _rows(tmp_path)[0]["media_id"] == "zsxq:pdf1"
+    assert _rows(tmp_path)[0]["tag"] == INDUSTRY_TAG
+
+
+def test_legacy_sqlite_without_tag_is_searchable(tmp_path):
+    path = tmp_path / "research" / "ima_reports.sqlite"
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE reports (
+            media_id TEXT PRIMARY KEY,
+            broker TEXT NOT NULL,
+            publish_date TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            source_note TEXT NOT NULL,
+            ingested_at TEXT NOT NULL
+        );
+        CREATE TABLE mentions (
+            media_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT NOT NULL,
+            code TEXT NOT NULL,
+            PRIMARY KEY (media_id, symbol)
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO reports VALUES (?,?,?,?,?,?,?,?)",
+        ("old-ind", "某券商", "2026-10-01", "电力设备周报", "排产上行", "排产", "", "2026-10-01T20:00:00+08:00"),
+    )
+    conn.execute(
+        "INSERT INTO reports VALUES (?,?,?,?,?,?,?,?)",
+        ("old-stk", "某券商", "2026-10-02", "贵州茅台点评", "提价", "提价", "", "2026-10-02T20:00:00+08:00"),
+    )
+    conn.execute(
+        "INSERT INTO mentions VALUES (?,?,?,?)",
+        ("old-stk", "600519.SH", "贵州茅台", "600519"),
+    )
+    conn.commit()
+    conn.close()
+    industry = search(tmp_path, "排产")
+    assert [row["media_id"] for row in industry] == ["old-ind"]
+    assert industry[0]["tag"] == INDUSTRY_TAG
+    assert industry[0]["symbols"] == []
+    stock = search(tmp_path, "贵州茅台")
+    assert stock[0]["tag"] == ""
+    assert stock[0]["symbols"][0]["code"] == "600519"
+    assert for_code(tmp_path, "600519")[0]["media_id"] == "old-stk"
+
+
+def test_research_search_route_returns_industry_reports(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.research import router
+    from app.research_reports.ima_store import insert_report
+
+    insert_report(tmp_path, {
+        "media_id": "zsxq:ind",
+        "broker": "知识星球·每日投研",
+        "publish_date": "2026-10-09",
+        "title": "电力设备周报",
+        "body": "排产上行",
+        "summary": "排产",
+        "source_note": "",
+        "symbols": [],
+        "ingested_at": "2026-10-09T16:00:00+08:00",
+    })
+    monkeypatch.setattr("app.api.research._dir", lambda: tmp_path)
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    listed = client.get("/api/research/search", params={"q": "电力"})
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["query"] == "电力"
+    assert body["reports"][0]["tag"] == INDUSTRY_TAG
+    assert body["reports"][0]["symbols"] == []
+    assert client.get("/api/research/search", params={"q": "   "}).json()["reports"] == []
+
+
+def test_docs_quote_sec_user_agent_and_list_pdf_deps():
+    root = Path(__file__).resolve().parents[2]
+    example = (root / ".env.example").read_text(encoding="utf-8")
+    docs = (root / "docs/news-sources.md").read_text(encoding="utf-8")
+    config_doc = (root / "docs/configuration.md").read_text(encoding="utf-8")
+    quoted = 'SEC_USER_AGENT="TSP-News ops@example.com"'
+    assert quoted in example
+    assert quoted in docs
+    assert quoted in config_doc
+    assert "NEWS_ZSXQ_OCR_MAX_PER_ROUND" in example
+    for text in (example, docs):
+        assert "poppler-utils" in text
+        assert "tesseract-ocr-chi-sim" in text
+        assert "pdfminer.six" in text
+        assert "rapidocr-onnxruntime" in text
+    assert "--requeue-failed-files" in docs

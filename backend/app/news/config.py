@@ -200,6 +200,13 @@ def zsxq_files_max_total_bytes() -> int:
     return mb * 1024 * 1024
 
 
+def zsxq_ocr_max_per_round() -> int:
+    """扫描版 PDF 每轮最多 OCR 几份。0 表示不 OCR。默认 5。"""
+    return _bounded_int(
+        "NEWS_ZSXQ_OCR_MAX_PER_ROUND", "news_zsxq_ocr_max_per_round", 5, 0, 32
+    )
+
+
 def group_id(source: str) -> str | list[tuple[str, str]]:
     """钉钉返回群号。知识星球返回 [(星球号, 名称), ...]。留空表示未配置。"""
     if source == "dws":

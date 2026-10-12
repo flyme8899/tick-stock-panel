@@ -3,12 +3,19 @@
 只下载 .pdf。mp3、xlsx 留在收件箱元数据里。签名链接用完即弃，不进索引、库和日志。
 文本采集的游标在此之前已经推进，这里失败只记索引，下轮再试。
 热门事件不读这张表，也不把 PDF 正文写进资讯库。
+
+正文先用 pypdf。它抛错或抽出空文本时，再试 poppler 的 ``pdftotext -layout``，
+然后是 pdfminer.six。仍然没有文字层的，在交易时段之外用 OCR 读前 3 页。
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -27,6 +34,7 @@ from app.news.config import (
     zsxq_files_max_bytes,
     zsxq_files_max_total_bytes,
     zsxq_files_per_round,
+    zsxq_ocr_max_per_round,
     zsxq_source_label,
 )
 from app.news.host_collector import zsxq_file_argv
@@ -42,7 +50,25 @@ _SUMMARY_LIMIT = 160
 _EMPTY_GIVE_UP = 3
 _DOWNLOAD_GIVE_UP = 8
 _PAGE_CAP = 80
+_OCR_PAGE_CAP = 3
 _FILES_HOST = "files.zsxq.com"
+# 本地文件还能用，不必重新下载。
+_LOCAL_REUSE_REASONS = {"extract", "empty", "unreadable", "ocr-deferred"}
+# 只把正文为空或无法读取的再排队。下载失败、超限、不是 PDF 保持原样。
+_REQUEUE_REASONS = {"empty", "unreadable"}
+_OCR_OPEN = 9 * 60 + 15
+_OCR_CLOSE = 15 * 60 + 5
+_RAPID_SNIPPET = (
+    "import sys\n"
+    "from rapidocr_onnxruntime import RapidOCR\n"
+    "engine = RapidOCR()\n"
+    "result, _elapse = engine(sys.argv[1])\n"
+    "lines = []\n"
+    "for item in result or []:\n"
+    "    if item and len(item) > 1 and item[1]:\n"
+    "        lines.append(str(item[1]))\n"
+    "sys.stdout.write('\\n'.join(lines))\n"
+)
 
 
 def files_dir(data_dir: Path) -> Path:
@@ -152,15 +178,23 @@ def _hash_done(index: dict, digest: str, file_id: str) -> bool:
     return False
 
 
-def _ordered(index: dict) -> list[str]:
+def _ordered(index: dict, *, skip_ocr_deferred: bool = False) -> list[str]:
     rows = []
     for file_id, row in index["files"].items():
         if not isinstance(row, dict) or not _FILE_ID.fullmatch(str(file_id)):
             continue
         if row.get("status") in {"ok", "skipped"} or not _is_pdf(str(row.get("name") or "")):
             continue
+        if skip_ocr_deferred and row.get("reason") == "ocr-deferred":
+            continue
         attempts = int(row.get("attempts") or 0)
-        rows.append((0 if attempts == 0 else 1, str(file_id)))
+        if row.get("reason") == "ocr-deferred":
+            tier = 2
+        elif attempts == 0:
+            tier = 0
+        else:
+            tier = 1
+        rows.append((tier, str(file_id)))
     rows.sort()
     return [file_id for _tier, file_id in rows]
 
@@ -286,20 +320,41 @@ def _urllib_read(url: str, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
-def extract_pdf_text(data: bytes) -> str:
+def _stdout(proc) -> str:
+    raw = getattr(proc, "stdout", "") or ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
+
+
+def _with_nice(argv: list[str]) -> list[str]:
+    """OCR 和后备解析让出 CPU。没有 nice 时直接跑，Windows 采集机不装它。"""
+    if shutil.which("nice"):
+        return ["nice", "-n", "19", *argv]
+    return list(argv)
+
+
+def _run_nice(argv: list[str], *, input_bytes: bytes | None = None, timeout: float = 60):
+    return subprocess.run(
+        _with_nice(argv),
+        input=input_bytes,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _pypdf_text(data: bytes) -> str:
     try:
         from pypdf import PdfReader
     except ImportError:
         raise RuntimeError("缺少 pypdf，暂不能抽取正文") from None
-    try:
-        reader = PdfReader(BytesIO(data))
-    except Exception:  # noqa: BLE001
-        raise RuntimeError("附件无法读取") from None
+    reader = PdfReader(BytesIO(data))
     if reader.is_encrypted:
         try:
             reader.decrypt("")
-        except Exception:  # noqa: BLE001
-            raise RuntimeError("附件无法读取") from None
+        except Exception as exc:
+            raise RuntimeError("附件无法读取") from exc
     parts: list[str] = []
     total = 0
     for page in list(reader.pages)[:_PAGE_CAP]:
@@ -312,6 +367,155 @@ def extract_pdf_text(data: bytes) -> str:
         if total >= _BODY_LIMIT:
             break
     return "\n".join(parts).strip()
+
+
+def _pdftotext_text(data: bytes) -> str:
+    if shutil.which("pdftotext") is None:
+        raise FileNotFoundError("pdftotext")
+    proc = _run_nice(
+        ["pdftotext", "-layout", "-enc", "UTF-8", "-f", "1", "-l", str(_PAGE_CAP), "-", "-"],
+        input_bytes=data,
+        timeout=60,
+    )
+    if int(getattr(proc, "returncode", 1) or 0) != 0:
+        raise RuntimeError("pdftotext")
+    return _stdout(proc)
+
+
+def _pdfminer_text(data: bytes) -> str:
+    try:
+        from pdfminer.high_level import extract_text
+    except ImportError:
+        raise RuntimeError("缺少 pdfminer.six") from None
+    return extract_text(BytesIO(data), maxpages=_PAGE_CAP) or ""
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """pypdf 抛错或空白时，依次试 pdftotext -layout 和 pdfminer.six。
+
+    三个解析器都没有文字时返回空字符串，调用方再决定要不要 OCR。
+    解析器缺失或 PdfReadError 不直接失败，避免扫描件停在第一次异常上。
+    """
+    for name, reader in (
+        ("pypdf", _pypdf_text),
+        ("pdftotext", _pdftotext_text),
+        ("pdfminer", _pdfminer_text),
+    ):
+        try:
+            text = (reader(data) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.info("PDF 解析器 %s 未得到正文: %s", name, type(exc).__name__)
+            continue
+        if text:
+            if len(text) > _BODY_LIMIT:
+                return text[:_BODY_LIMIT]
+            return text
+    return ""
+
+
+def _ocr_hours_closed(moment) -> bool:
+    """北京时间 09:15–15:05 不做 OCR，避免和盘中抢 CPU。含两端整分钟。"""
+    local = moment.astimezone(CN_TZ) if moment.tzinfo is not None else moment.replace(tzinfo=CN_TZ)
+    minutes = local.hour * 60 + local.minute
+    return _OCR_OPEN <= minutes <= _OCR_CLOSE
+
+
+def _tesseract_images(images: list[Path]) -> str:
+    parts: list[str] = []
+    for image in images:
+        proc = _run_nice(
+            ["tesseract", str(image), "stdout", "-l", "chi_sim+eng"],
+            timeout=60,
+        )
+        if int(getattr(proc, "returncode", 1) or 0) != 0:
+            logger.info("tesseract 退出码 %s", getattr(proc, "returncode", 1))
+            continue
+        chunk = _stdout(proc).strip()
+        if chunk:
+            parts.append(chunk)
+    return "\n".join(parts).strip()
+
+
+def _rapidocr_images(images: list[Path]) -> str:
+    parts: list[str] = []
+    for image in images:
+        proc = _run_nice(
+            [sys.executable, "-c", _RAPID_SNIPPET, str(image)],
+            timeout=90,
+        )
+        if int(getattr(proc, "returncode", 1) or 0) != 0:
+            continue
+        chunk = _stdout(proc).strip()
+        if chunk:
+            parts.append(chunk)
+    return "\n".join(parts).strip()
+
+
+def ocr_pdf_text(data: bytes) -> str:
+    """前 3 页栅格化后 OCR。优先 tesseract chi_sim+eng，没有则试 rapidocr。"""
+    if not data or shutil.which("pdftoppm") is None:
+        return ""
+    try:
+        with tempfile.TemporaryDirectory(prefix="zsxq-ocr-") as tmp:
+            pdf_path = Path(tmp) / "in.pdf"
+            pdf_path.write_bytes(data)
+            prefix = str(Path(tmp) / "page")
+            proc = _run_nice(
+                ["pdftoppm", "-f", "1", "-l", str(_OCR_PAGE_CAP), "-png", str(pdf_path), prefix],
+                timeout=90,
+            )
+            if int(getattr(proc, "returncode", 1) or 0) != 0:
+                return ""
+            images = sorted(Path(tmp).glob("page*.png"))[:_OCR_PAGE_CAP]
+            if not images:
+                return ""
+            if shutil.which("tesseract"):
+                text = _tesseract_images(images)
+            else:
+                text = _rapidocr_images(images)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if len(text) > _BODY_LIMIT:
+        return text[:_BODY_LIMIT]
+    return text.strip()
+
+
+def _ocr_decision(moment, used: int) -> str:
+    """run 本轮可以 OCR；defer 先搁下；skip 表示 OCR 被关掉，按空正文失败。"""
+    budget = zsxq_ocr_max_per_round()
+    if budget <= 0:
+        return "skip"
+    if _ocr_hours_closed(moment) or used >= budget:
+        return "defer"
+    return "run"
+
+
+def _defer_ocr(row: dict) -> None:
+    """不增加放弃次数。交易时段或本轮名额用完后，下一轮还能再试。"""
+    row["status"] = "failed"
+    row["reason"] = "ocr-deferred"
+
+
+def requeue_failed_files(data_dir: Path) -> int:
+    """把此前正文为空或无法读取而放弃的 PDF 重新标成待处理。
+
+    下载失败、超限、不是 PDF、已成功的不动。保留失败原因，这样本地 PDF 可以接着抽，不必重下。
+    """
+    data_dir = Path(data_dir)
+    index = _load_index(data_dir)
+    changed = 0
+    for row in index["files"].values():
+        if not isinstance(row, dict):
+            continue
+        status = row.get("status")
+        reason = str(row.get("reason") or "")
+        if status in {"failed", "skipped"} and reason in _REQUEUE_REASONS:
+            row["status"] = "pending"
+            row["attempts"] = 0
+            changed += 1
+    if changed:
+        _save_index(data_dir, index)
+    return changed
 
 
 def _title_from_name(name: str, file_id: str) -> str:
@@ -490,7 +694,10 @@ def sync_zsxq_files(
     when = moment or cn_now()
     delete_after = zsxq_files_delete_after()
     used = 0
-    candidates = _ordered(index)
+    ocr_used = 0
+    # 交易时段不再反复碰到已经决定延后的文件，把名额留给新下载。
+    skip_deferred = _ocr_hours_closed(when) and zsxq_ocr_max_per_round() > 0
+    candidates = _ordered(index, skip_ocr_deferred=skip_deferred)
     known: set[str] = set()
     if candidates:
         known = known_ids(data_dir, [_media_id(file_id) for file_id in candidates])
@@ -514,7 +721,7 @@ def sync_zsxq_files(
             changed = True
             continue
         pdf_path = files_dir(data_dir) / f"{file_id}.pdf"
-        reuse = pdf_path.is_file() and row.get("reason") in {"extract", "empty"}
+        reuse = pdf_path.is_file() and row.get("reason") in _LOCAL_REUSE_REASONS
         try:
             if reuse:
                 data = pdf_path.read_bytes()
@@ -526,6 +733,27 @@ def sync_zsxq_files(
                 pdf_path = _store_pdf(data_dir, file_id, data)
                 summary["downloaded"] += 1
             text = extract_pdf_text(data)
+            if not text:
+                decision = _ocr_decision(when, ocr_used)
+                if decision == "defer":
+                    _defer_ocr(row)
+                    summary["failed"] += 1
+                    changed = True
+                    logger.info("知识星球 PDF %s 暂缓 OCR", file_id)
+                    # 延后 OCR 不占本轮下载名额，后面的文字层 PDF 还能下。
+                    continue
+                if decision == "run":
+                    ocr_used += 1
+                    started = time.perf_counter()
+                    try:
+                        text = (ocr_pdf_text(data) or "").strip()
+                    except Exception:  # noqa: BLE001
+                        text = ""
+                    logger.info(
+                        "知识星球 PDF OCR %s 耗时 %.2f 秒",
+                        file_id,
+                        time.perf_counter() - started,
+                    )
             if not text:
                 raise RuntimeError("附件没有可抽取的正文")
             record = _record({**row, "file_id": file_id}, text, lexicon, when)

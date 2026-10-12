@@ -249,9 +249,14 @@ def run_host(
     *,
     backfill_since: str = "",
     backfill_files_since: str = "",
+    requeue_failed_files: bool = False,
 ) -> dict:
     """跑一轮宿主机采集。run(argv) -> 有 returncode/stdout/stderr 的对象。"""
     summary = {}
+    if requeue_failed_files:
+        from app.news.zsxq_files import requeue_failed_files as requeue
+
+        summary["zsxq_requeued"] = requeue(data_dir)
     webhook = os.environ.get("DINGTALK_WEBHOOK_URL", "")
     secret = os.environ.get("DINGTALK_SECRET", "")
     if enabled_from_env_and_prefs("dws", data_dir):

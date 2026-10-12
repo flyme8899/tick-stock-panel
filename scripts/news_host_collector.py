@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -42,8 +43,7 @@ def ensure_supported_python(version: tuple[int, ...] | None = None) -> None:
     raise SystemExit(1)
 
 
-def main() -> int:
-    ensure_supported_python()
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="宿主机只读采集钉钉和知识星球资讯")
     parser.add_argument("--data-dir", default="", help="TSP data 目录，默认 <仓库>/data 或 DATA_DIR")
     parser.add_argument("--backfill-since", default="", help="知识星球回补起点，如 2025-08-23")
@@ -52,6 +52,19 @@ def main() -> int:
         default="",
         help="补下已采集帖子里的 PDF，如 2026-10-01。不改文本游标，下载仍受每轮配额限制",
     )
+    parser.add_argument(
+        "--requeue-failed-files",
+        action="store_true",
+        help="把此前正文为空或无法读取而放弃的知识星球 PDF 重新排队",
+    )
+    return parser
+
+
+def main() -> int:
+    ensure_supported_python()
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("app.news.zsxq_files").setLevel(logging.INFO)
+    parser = build_parser()
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(_backend_path()))
@@ -72,6 +85,7 @@ def main() -> int:
         run,
         backfill_since=args.backfill_since,
         backfill_files_since=args.backfill_files_since,
+        requeue_failed_files=args.requeue_failed_files,
     )
     print(summary)
     return 0

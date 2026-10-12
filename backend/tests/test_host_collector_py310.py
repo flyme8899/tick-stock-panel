@@ -147,6 +147,12 @@ def test_ensure_supported_python_accepts_310_and_311():
     news_host_collector.ensure_supported_python((3, 11, 17))
 
 
+def test_requeue_flag_defaults_off():
+    parser = news_host_collector.build_parser()
+    assert parser.parse_args([]).requeue_failed_files is False
+    assert parser.parse_args(["--requeue-failed-files"]).requeue_failed_files is True
+
+
 def test_main_checks_python_before_importing_app():
     tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
     main = next(
