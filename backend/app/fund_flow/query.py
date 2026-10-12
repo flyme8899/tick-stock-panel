@@ -60,7 +60,7 @@ def intraday_latest(
     data_dir: Path | None = None,
     today: str | None = None,
 ) -> dict:
-    """今天最近一份盘中个股主力净流入。没有快照时 items 为空，不把缺失写成 0。
+    """今天最近一份同花顺即时净额（流入减流出）。没有快照时 items 为空，不把缺失写成 0。
 
     只读当天分区。昨天的快照不带到今天，避免开盘前把昨日盘中数当成即时。
     ``symbols`` 为空列表时不返回行，仍带上快照时间。``None`` 表示不按代码过滤。

@@ -37,6 +37,7 @@ describe('help topics', () => {
       'FUND_FLOW_ENABLED',
       '3 分钟',
       '6 分钟',
+      '盘中资金净额(同花顺)',
       'FUND_FLOW_STOCK_INTRADAY',
       '16:30',
       '并集',

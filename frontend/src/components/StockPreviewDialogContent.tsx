@@ -7,7 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
-import { fmtPct, fmtSignedFlow, flowClock, priceColorClass, cnDateFromUtc } from '@/lib/format'
+import { fmtPct, fmtSignedFlow, flowClock, intradayNetTitle, INTRADAY_NET_LABEL, priceColorClass, cnDateFromUtc } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { NavPager, NavWrapToast } from '@/components/NavPager'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
@@ -293,9 +293,9 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                 {name && <span className="truncate text-xs text-secondary">{name}</span>}
                 <span
                   className="inline-flex shrink-0 items-baseline gap-1 rounded border border-border/60 bg-base/50 px-1.5 py-0.5 text-[11px]"
-                  title={flowWhen ? `盘中主力净流入 ${flowWhen}` : '盘中主力净流入，还没有今日快照'}
+                  title={intradayNetTitle(flowWhen, flowNet != null)}
                 >
-                  <span className="text-muted">主力净流入</span>
+                  <span className="text-muted">{INTRADAY_NET_LABEL}</span>
                   <span className={`font-mono tabular-nums ${priceColorClass(flowNet)}`}>{fmtSignedFlow(flowNet)}</span>
                   {flowWhen ? <span className="font-mono text-[10px] text-muted">{flowWhen}</span> : null}
                 </span>

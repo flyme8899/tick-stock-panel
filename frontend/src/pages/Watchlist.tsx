@@ -9,7 +9,7 @@ import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { extendMinuteTail } from '@/lib/minuteTailExtend'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
-import { fmtPrice, fmtPct, fmtBigNum, fmtSignedFlow, flowClock, priceColorClass, formatExtNumber } from '@/lib/format'
+import { fmtPrice, fmtPct, fmtBigNum, fmtSignedFlow, flowClock, intradayNetTitle, INTRADAY_NET_HINT, INTRADAY_NET_LABEL, priceColorClass, formatExtNumber } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
@@ -499,7 +499,7 @@ const StockCard = React.memo(function StockCard({
   groups: WatchlistGroup[]
   onToggleMember: (symbol: string, groupId: string, member: boolean) => void
   groupChangePending: boolean
-  /** 盘中主力净流入，单位元。没有快照时为 null，卡片显示 —。 */
+  /** 同花顺即时净额，单位元。没有快照时为 null，卡片显示 —。 */
   mainNet: number | null
   flowClockLabel: string
 }) {
@@ -601,8 +601,8 @@ const StockCard = React.memo(function StockCard({
 
         {/* 第三行: 指标 */}
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-muted leading-relaxed">
-          <span title={mainNet != null && flowClockLabel ? `盘中主力净流入 ${flowClockLabel}` : '盘中主力净流入，还没有今日快照'}>
-            主力
+          <span title={intradayNetTitle(flowClockLabel, mainNet != null)}>
+            {INTRADAY_NET_LABEL}
             <span className={`font-mono ml-0.5 ${priceColorClass(mainNet)}`}>{fmtSignedFlow(mainNet)}</span>
           </span>
           <span title="换手率">换手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span></span>
@@ -1676,6 +1676,13 @@ export function Watchlist() {
               rowClassName={(r: any) => cn('border-t border-border transition-colors duration-150 ease-smooth hover:bg-elevated/50', r.symbol === previewSymbol && 'bg-accent/10 hover:bg-accent/15')}
               // 日k列表头：标签 + 显示/隐藏眼睛按钮
               renderHeaderContent={(col) => {
+                if (col.source.type === 'builtin' && col.source.key === 'main_net_intraday') {
+                  return (
+                    <span className="shrink-0 whitespace-nowrap" title={INTRADAY_NET_HINT}>
+                      {col.label}
+                    </span>
+                  )
+                }
                 if (col.source.type === 'builtin' && col.source.key === 'candle') {
                   return (
                     <span className="inline-flex items-center justify-center gap-1.5">
@@ -1842,9 +1849,7 @@ export function Watchlist() {
                 }
                 if (key === 'main_net_intraday') {
                   const net = mainNetOf(r.symbol)
-                  const title = net != null && flowCaptured
-                    ? `盘中即时 ${flowCaptured}`
-                    : '盘中即时，还没有今日快照'
+                  const title = intradayNetTitle(flowCaptured, net != null)
                   return (
                     <td className={`${numCls} ${priceColorClass(net)}`} title={title}>
                       {fmtSignedFlow(net)}
