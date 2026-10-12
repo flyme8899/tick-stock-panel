@@ -27,6 +27,7 @@ const CATEGORIES = [
 type HotTab = (typeof TABS)[number]['key']
 
 function confirmBadge(confirm: NonNullable<NewsHotEvent['confirmation']>): string {
+  if (confirm.pending || confirm.label === '待开盘验证') return '待开盘验证'
   const session = confirm.label && !confirm.live ? confirm.label : ''
   const horizon = confirm.horizon
     || (confirm.persistence && confirm.persistence !== '无' ? confirm.persistence : '')
@@ -277,7 +278,11 @@ export function HotEvents() {
                       {item.confirmation && (
                         <span className={cn(
                           'rounded px-1 text-[10px] leading-4',
-                          item.confirmation.strength === '强' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
+                          item.confirmation.pending || item.confirmation.label === '待开盘验证'
+                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                            : item.confirmation.strength === '强'
+                              ? 'bg-accent/15 text-accent'
+                              : 'bg-elevated text-secondary',
                         )}>
                           {confirmBadge(item.confirmation)}
                         </span>

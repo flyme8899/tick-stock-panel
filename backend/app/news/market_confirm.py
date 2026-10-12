@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
@@ -92,15 +93,15 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
     live = bool(tape.get("live")) and in_continuous_session(now)
     if first is None:
         return _result(0, False, "无", "无", _session_text(session, live, waited=False), session, live, {})
-    # 竞价时点还没到时，周末稿的日期会晚于最近一个交易日。先标等待竞价，
-    # 不要被「首见晚于最近交易日」这条短路走掉。
-    deadline = _auction_deadline(first)
-    waiting = deadline is not None and now.astimezone(CN_TZ) < deadline
+    # 竞价时点还没到时，周末稿的日期会晚于最近一个交易日。先标待开盘验证，
+    # 不要被「首见晚于最近交易日」这条短路走掉。已知休市日把确认时点推到下一开市。
+    gate = _validation_deadline(first)
+    waiting = gate is not None and now.astimezone(CN_TZ) < gate
     # 隔夜稿的确认日可能晚于「最近交易日」（9:25 竞价已出、连续竞价未开）。
     # 这种稿走竞价计分，不能被「首见晚于最近交易日」短路成 0 分。
     if (
         not waiting
-        and deadline is None
+        and gate is None
         and session is not None
         and first.date() > session
         and not live
@@ -117,16 +118,16 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
         if isinstance(row, dict):
             stock_rows.append((symbol, row))
     lagged, pre_excess = _preceding_move(stock_rows, first, bull)
-    deadline = _auction_deadline(first)
-    if deadline is not None and now.astimezone(CN_TZ) < deadline:
+    # 还没开盘：验证分是 0，不是扣分。盘面出来之后再按竞价或连续竞价计。
+    if gate is not None and now.astimezone(CN_TZ) < gate:
         return _result(
-            0, False, "无", "无", "等待竞价", deadline.date(), False,
+            0, False, "无", "无", "待开盘验证", gate.date(), False,
             {"pre_return": round(pre_excess, 4)},
-            phase="auction", lagged=lagged, horizon="",
+            phase="auction", lagged=lagged, horizon="", pending=True,
         )
-    if deadline is not None and _has_auction_bars(stock_rows, deadline.date()):
+    if gate is not None and _has_auction_bars(stock_rows, gate.date()):
         return _score_auction(
-            event, tape, stock_rows, first, deadline.date(), bull, session, live, peers or [],
+            event, tape, stock_rows, first, gate.date(), bull, session, live, peers or [],
             lagged, pre_excess,
         )
     if _is_intraday(first):
@@ -295,7 +296,7 @@ def _apply_order_changes(event: dict, tape: dict, result: dict) -> dict:
     changes = tape.get("changes") if isinstance(tape, dict) else None
     if not isinstance(changes, dict) or not changes:
         return result
-    if str(result.get("label") or "") == "等待竞价":
+    if result.get("pending") or str(result.get("label") or "") in {"等待竞价", "待开盘验证"}:
         return result
     first = _first_at(event)
     if first is None:
@@ -359,11 +360,13 @@ def _result(
     phase: str = "session",
     lagged: bool = False,
     horizon: str = "",
+    pending: bool = False,
 ) -> dict:
     return {
         "label": label,
         "session": session.isoformat() if session else None,
         "live": live,
+        "pending": bool(pending),
         "score": round(min(_CONFIRM_MAX, max(0.0, score)), 4),
         "abnormal": abnormal,
         "strength": strength,
@@ -409,13 +412,17 @@ def _auction_deadline(first: datetime) -> datetime | None:
 def _confirm_day(first: datetime) -> date:
     deadline = _auction_deadline(first)
     if deadline is not None:
-        return deadline.date()
-    if first.weekday() >= 5:
+        day = deadline.date()
+    elif first.weekday() >= 5:
         day = first.date() + timedelta(days=1)
         while day.weekday() >= 5:
             day += timedelta(days=1)
-        return day
-    return first.date()
+    else:
+        day = first.date()
+    # 休市日没有这场开盘。稿子归到下一开市日，周一早上才不会把节假日的消息丢掉。
+    if _known_holiday(day):
+        return _next_open_day(day)
+    return day
 
 
 def _is_intraday(first: datetime) -> bool:
@@ -430,6 +437,97 @@ def _next_weekday(day: date) -> date:
     while cursor.weekday() >= 5:
         cursor += timedelta(days=1)
     return cursor
+
+
+_CALENDAR_TTL_S = 1800.0
+_CALENDAR_LOCK = threading.Lock()
+_CALENDAR: tuple[float, frozenset[date] | None] = (0.0, None)
+
+
+def _fuyao_trading_days() -> frozenset[date] | None:
+    """fuyao 交易日集合。没配日历时返回 None，调用方只跳过周末。"""
+    global _CALENDAR
+    now_mono = time.monotonic()
+    with _CALENDAR_LOCK:
+        fetched, cached = _CALENDAR
+        if fetched and now_mono - fetched < _CALENDAR_TTL_S:
+            return cached
+    found: frozenset[date] | None = None
+    try:
+        from app.data_providers import custom as custom_sources
+
+        if custom_sources.is_custom_provider("fuyao"):
+            raw = custom_sources.get_provider("fuyao").trading_days()
+            if raw:
+                found = frozenset(raw)
+    except Exception:  # noqa: BLE001 — 日历不可用时退回周末判断
+        found = None
+    with _CALENDAR_LOCK:
+        if found is None and cached is not None:
+            _CALENDAR = (now_mono, cached)
+            return cached
+        _CALENDAR = (now_mono, found)
+        return found
+
+
+def _known_holiday(day: date) -> bool:
+    """工作日但交易日历明确休市。没有日历时不当休市。
+
+    日历在年底截断之后的工作日不在集合里，不当休市，否则会一路跳到 16 天后。
+    """
+    if day.weekday() >= 5:
+        return False
+    days = _fuyao_trading_days()
+    if not days:
+        return False
+    if day > max(days):
+        return False
+    return day not in days
+
+
+def _clock_day_closed(now: datetime) -> bool:
+    """周末，或交易日历上的休市日。"""
+    local = now.astimezone(CN_TZ)
+    return local.weekday() >= 5 or _known_holiday(local.date())
+
+
+def _next_open_day(day: date) -> date:
+    """day 之后的第一个开市日。没有日历时只跳过周六日。
+
+    最多看 16 天。日历到头或连着休市时，退回下一个工作日，不落在周末。
+    """
+    cursor = day + timedelta(days=1)
+    for _ in range(16):
+        if cursor.weekday() < 5 and not _known_holiday(cursor):
+            return cursor
+        cursor += timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor += timedelta(days=1)
+    return cursor
+
+
+def _prev_open_day(day: date) -> date:
+    """day 之前的最后一个开市日。"""
+    cursor = day - timedelta(days=1)
+    for _ in range(16):
+        if cursor.weekday() < 5 and not _known_holiday(cursor):
+            return cursor
+        cursor -= timedelta(days=1)
+    return cursor
+
+
+def _validation_deadline(first: datetime) -> datetime | None:
+    """盘面验证可以开始的时刻。名义确认日或发布日是已知休市日时，推到下一开市 9:25。"""
+    deadline = _auction_deadline(first)
+    if deadline is None:
+        local = first.astimezone(CN_TZ)
+        if _known_holiday(local.date()):
+            return datetime.combine(_next_open_day(local.date()), dt_time(9, 25), CN_TZ)
+        return None
+    day = deadline.date()
+    if day.weekday() < 5 and not _known_holiday(day):
+        return deadline
+    return datetime.combine(_next_open_day(day), dt_time(9, 25), CN_TZ)
 
 
 def _tape_days(now: datetime, events: list[dict]) -> list[date]:

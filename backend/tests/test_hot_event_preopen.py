@@ -370,7 +370,8 @@ def test_untitled_stock_cluster_still_scores_the_auction():
         },
     ]
     opened = score_confirmation(opening, tape, _at(MONDAY, 9, 31))
-    assert opened["label"] != "等待竞价"
+    assert opened["pending"] is False
+    assert opened["label"] != "待开盘验证"
     assert opened["score"] > 0
 
 
@@ -418,7 +419,8 @@ def test_oct12_replay_shows_cyber_after_the_brief_and_jindan_by_the_open(tmp_pat
     assert waiting is not None
     assert waiting["importance"] == "重大"
     assert waiting["mentions"] >= 2
-    assert waiting["confirmation"]["label"] == "等待竞价"
+    assert waiting["confirmation"]["label"] == "待开盘验证"
+    assert waiting["confirmation"]["pending"] is True
     assert waiting["confirmation"]["score"] == 0
     before_rank = _names(before_move).index(waiting["name"])
 

@@ -19,8 +19,11 @@ function confirmSourceLabel(confirm?: {
   strength?: string
   phase?: string
   lagged?: boolean
+  pending?: boolean
+  label?: string
 } | null): string | undefined {
   if (!confirm) return undefined
+  if (confirm.pending || confirm.label === '待开盘验证') return '待开盘验证'
   if (confirm.lagged && (!confirm.strength || confirm.strength === '无')) return '消息滞后确认'
   if (!confirm.strength || confirm.strength === '无') return undefined
   const name = confirm.phase === 'auction' ? '竞价验证' : '盘面验证'

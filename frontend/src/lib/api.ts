@@ -2467,6 +2467,8 @@ export interface NewsHotConfirmation {
   persistence: '持续' | '短暂' | '无' | string
   phase?: 'auction' | 'intraday' | 'session' | string
   lagged?: boolean
+  /** 收盘后或隔夜消息还没有盘面。为真时不扣分，开盘后再验证。 */
+  pending?: boolean
   horizon?: '主线' | '一日游' | '' | string
   detail?: {
     excess_pct?: number | null
@@ -2632,6 +2634,7 @@ export interface PickerSourceItem {
     live?: boolean
     phase?: string
     lagged?: boolean
+    pending?: boolean
     horizon?: string
   } | null
   mapped_stocks?: string[]

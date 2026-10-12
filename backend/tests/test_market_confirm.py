@@ -2,7 +2,13 @@
 from datetime import date, datetime
 
 from app.market_time import CN_TZ
-from app.news.market_confirm import latest_session_day, load_market_tape, score_confirmation
+from app.news.market_confirm import (
+    _known_holiday,
+    _next_open_day,
+    latest_session_day,
+    load_market_tape,
+    score_confirmation,
+)
 from app.news.service import hot_event_listing, reset_store_for_tests, top_hot_events
 
 NOW = datetime(2026, 10, 10, 8, 30, tzinfo=CN_TZ)
@@ -138,7 +144,8 @@ def test_event_after_the_session_waits_for_the_next_one():
     event["_first"] = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
     scored = score_confirmation(event, _tape(bars), NOW)
     assert scored["score"] == 0
-    assert scored["label"] == "等待竞价"
+    assert scored["label"] == "待开盘验证"
+    assert scored["pending"] is True
     assert scored["phase"] == "auction"
     assert scored["strength"] == "无"
 
@@ -298,7 +305,8 @@ def test_overnight_auction_confirms_after_925_and_not_before():
         datetime(2026, 10, 8, 22, 0, tzinfo=CN_TZ),
     )
     assert early["score"] == 0
-    assert early["label"] == "等待竞价"
+    assert early["label"] == "待开盘验证"
+    assert early["pending"] is True
     assert early["phase"] == "auction"
     assert early["detail"]["auction_open_pct"] is None
 
@@ -443,3 +451,15 @@ def test_new_event_is_confirmed_in_the_same_snapshot(tmp_path, monkeypatch):
     drug = snapshot["events"][0]
     assert any(item.get("key") == "601318.SH" for item in drug["mentioned_stocks"])
     assert drug["confirmation"]["strength"] == "强"
+
+
+def test_next_open_day_after_the_calendar_uses_weekdays(monkeypatch):
+    """日历在年底截断后，更晚的工作日不当休市，下一开市日也不再连跳 16 天。"""
+    monkeypatch.setattr(
+        "app.news.market_confirm._fuyao_trading_days",
+        lambda: frozenset({date(2026, 12, 31)}),
+    )
+    assert _known_holiday(date(2026, 12, 30)) is True
+    assert _known_holiday(date(2027, 1, 1)) is False
+    assert _next_open_day(date(2026, 12, 31)) == date(2027, 1, 1)
+    assert _next_open_day(date(2027, 1, 2)) == date(2027, 1, 4)

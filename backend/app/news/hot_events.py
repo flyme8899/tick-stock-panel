@@ -1,7 +1,10 @@
 """把一个交易日的资讯收成具体事件，而不是宽行业榜。
 
 上一收盘（15:00）之后到下一交易日 9:25 的资讯归入下一交易日，和隔夜竞价是同一窗口。
-周末打开页面时，这场开盘已经有稿就列出这些还在等待竞价的事件；还没有就显示上一个交易日。
+交易日 15:00 起，以及周末和交易日历上的休市日，榜单改看下一场开盘：当天盘中事件
+和收盘后、隔夜的稿放在一起，沿用原来的时间衰减，新消息可以浮上来。上一开市日的
+盘中事件留到下一场 9:25，不在午夜丢掉。还没有盘面的事件标「待开盘验证」，验证分
+记 0，不另扣分。发布时间晚于计算时刻的资讯不进榜。「更新于」是这次计算的时间。
 
 聚类看标题里的主体、动作，以及标题里出现的细概念，再加同一时间窗。正文里抽到、
 但标题没写的概念不参与聚类，避免旁支概念把无关消息粘成一件事。同一主体和动作，
@@ -161,7 +164,10 @@ _TITLE_CACHE_VERSION = 22
 #     168.55）压在 12 位、相邻倒挂 9/996 对。重排不改任何事件的分数、只改
 #     顺序，但 push 的「新进前 N」按名次判断，部署后第一轮会把纯名次变化
 #     误报成新热点，升版本让那一轮只建基线不比较。
-HOT_RULES_VERSION = 3
+# v4: 交易日 15:00 起（以及周末、休市日）榜单改看下一场，盘中事件和收盘后、
+#     隔夜消息放在一起。15:00 整点名次会换一批。push 另记 hot_view，视图一
+#     切换就只建基线；升版本是为了部署后的第一轮也不拿旧快照比较。
+HOT_RULES_VERSION = 4
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -602,12 +608,60 @@ def build_top_hot_events(
     return copy.deepcopy(snapshot)
 
 
-def _active_session_day(now: datetime) -> date:
-    """当前这份榜对应的交易日。周末是下一场开盘，工作日是当天。"""
-    day = now.astimezone(CN_TZ).date()
-    while day.weekday() >= 5:
-        day += timedelta(days=1)
-    return day
+def display_session_day(now: datetime) -> date:
+    """榜单正在看的那场开盘。15:00 起和休市日看下一场。"""
+    return _view_days(now)[0]
+
+
+def display_view_key(now: datetime) -> str:
+    """推送用的视图签名：展示日，加上这份榜从哪一个开市日带起。
+
+    午夜前后展示日相同，但 9:25 会丢掉上一场盘中。只记展示日的话，成员变了
+    也不会重建基线。
+    """
+    display, included = _view_days(now)
+    anchor = included[0] if included else display
+    return f"{display.isoformat()}|{anchor.isoformat()}"
+
+
+def _view_days(now: datetime) -> tuple[date, list[date]]:
+    """展示日，以及要放进这一份榜的交易日。
+
+    开市日 9:25 到 15:00 只看当天。15:00 起把当天盘中和下一场放在一起。
+    下一场 9:25 之前，以及周末和已知休市日，仍带上最近一个开市日的盘中事件。
+    """
+    from app.news.market_confirm import _clock_day_closed, _next_open_day, _prev_open_day
+
+    local = now.astimezone(CN_TZ)
+    closed = _clock_day_closed(local)
+    clock = local.time()
+    if not closed and dt_time(9, 25) <= clock < dt_time(15, 0):
+        return local.date(), [local.date()]
+    if not closed and clock < dt_time(9, 25):
+        display = local.date()
+        anchor = _prev_open_day(local.date())
+    elif closed:
+        display = _next_open_day(local.date())
+        anchor = _prev_open_day(local.date())
+    else:
+        display = _next_open_day(local.date())
+        anchor = local.date()
+    days: list[date] = []
+    cursor = anchor
+    while cursor <= display:
+        if cursor.weekday() < 5:
+            days.append(cursor)
+        cursor += timedelta(days=1)
+    if display not in days:
+        days.append(display)
+    return display, days
+
+
+def _event_session_day(event: dict) -> date | None:
+    first = event.get("_first")
+    if isinstance(first, datetime):
+        return _news_session_day(first)
+    return None
 
 
 def _news_session_day(published: datetime) -> date:
@@ -638,16 +692,18 @@ def _attach_limit_reasons(events: list[dict], chosen: date) -> None:
 def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     today = now.date()
     trading = current_trading_day(now)
-    active = _active_session_day(now)
+    display, included = _view_days(now)
     start = datetime.combine(today - timedelta(days=_LOOKBACK_DAYS), dt_time.min, CN_TZ)
-    end = datetime.combine(today + timedelta(days=1), dt_time.min, CN_TZ)
+    # 查询只到计算时刻。明天 15:00 这种还没发生的时间戳即使字符串序排进来也不用。
+    horizon = datetime.combine(today + timedelta(days=1), dt_time.min, CN_TZ)
+    end = min(horizon, now + timedelta(seconds=1))
     by_day: dict[date, list[dict]] = defaultdict(list)
     for row in store.items_between(start, end):
         published = parse_time(row.get("published_at"))
         if published is None:
             continue
         published = published.astimezone(CN_TZ)
-        # 还没发布的稿不进榜，避免周末提前看到当天更晚的快讯。
+        # 还没发布的稿不进榜。例如一条写成明天 15:00 的记录，不能提前占榜。
         if published > now:
             continue
         row = dict(row)
@@ -657,15 +713,18 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     ranked = {day: _cluster_day(rows, now, blocked=blocked) for day, rows in by_day.items()}
     ranked = {day: events for day, events in ranked.items() if events}
     fallback = False
-    if active in ranked:
-        chosen: date | None = active
-    elif trading in ranked:
-        # 周末还没有隔夜稿时，继续显示上一个交易日，不算回退。
-        chosen = trading
+    present = [day for day in included if day in ranked]
+    if present:
+        chosen: date | None = display
+        events = []
+        for day in included:
+            events.extend(ranked.get(day) or [])
     else:
-        earlier = [day for day in ranked if day < active]
+        earlier = [day for day in ranked if day < display]
         chosen = max(earlier) if earlier else None
         fallback = chosen is not None
+        events = list(ranked[chosen]) if chosen is not None else []
+        included = [chosen] if chosen is not None else []
     if chosen is None:
         return {
             "as_of": None,
@@ -675,8 +734,12 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
             "updated_at": None,
             "events": [],
         }
-    events = ranked[chosen]
-    _attach_limit_reasons(events, chosen)
+    for day in included:
+        if day is None:
+            continue
+        group = [event for event in events if _event_session_day(event) == day]
+        if group:
+            _attach_limit_reasons(group, day)
     # 第一次验证在写要点之前。新进前排的事件这时常常还没有个股或概念。
     mapped_before = {id(event): _confirmation_mapping(event) for event in events}
     from app.news.market_confirm import attach_confirmations
@@ -784,7 +847,11 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
         event.pop("_batch_id", None)
         event.pop("_llm_title_applied", None)
         event.pop("_candidates", None)
-    updated_hm = latest.astimezone(CN_TZ).strftime("%H:%M")
+    # 「更新于」是这次计算的时刻，不是簇里最新一条资讯的时间。
+    # 收盘后最新资讯停在 15:00 时，计算时刻仍会往前走。
+    updated_hm = now.astimezone(CN_TZ).strftime("%H:%M")
+    if latest > now:
+        logger.info("热门事件簇内时间晚于计算时刻 %s", latest.isoformat(timespec="seconds"))
     return {
         "as_of": chosen.isoformat(),
         "trading_day": (chosen if not fallback else trading).isoformat(),
@@ -1371,6 +1438,7 @@ def _confirm_newly_mapped(
 
 
 def _confirmation_points(raw) -> float:
+    """验证分只加不减。待开盘的事件这里是 0，不因为还没盘面再扣一档。"""
     if not isinstance(raw, dict):
         return 0.0
     try:

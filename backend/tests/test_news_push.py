@@ -232,7 +232,8 @@ def test_scheduled_push_once_and_change_respects_cooldown(tmp_path, monkeypatch)
     still_cooling = datetime(2026, 10, 9, 9, 10, tzinfo=CN_TZ)
     grown = [{**rows[0], "score": 4, "story_count": 4}]
     assert tick(still_cooling, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == []
-    later = datetime(2026, 10, 9, 10, 30, tzinfo=CN_TZ)
+    # 9:25 会换视图签名。升温比较留在同一份签名里，避免被基线重置吃掉。
+    later = datetime(2026, 10, 9, 9, 20, tzinfo=CN_TZ)
     assert tick(later, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == ["hot"]
     assert tick(later, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == []
     assert "【热点候选】变化" in sent[1]["markdown"]["text"]
@@ -272,20 +273,124 @@ def test_hot_rules_version_mismatch_drops_the_previous_snapshot(tmp_path, monkey
         "sources": ["cls"],
         "growth": 1.8,
     }]
-    pre = datetime(2026, 10, 9, 8, 46, tzinfo=CN_TZ)
-    assert tick(pre, state=state, opener=opener, trading=True, hot_loader=lambda: rows) == ["hot"]
+    # 9:25 之后视图签名不再变，版本不匹配才是这次不推的原因。
+    pre = datetime(2026, 10, 9, 9, 30, tzinfo=CN_TZ)
+    assert tick(pre, state=state, opener=opener, trading=True, hot_loader=lambda: rows) == []
     assert state.data["hot_rules_version"] == HOT_RULES_VERSION
     # 模拟升级：上一轮快照的规则版本是旧值，分数按旧口径算过。
     state.data["hot_rules_version"] = HOT_RULES_VERSION - 1
     grown = [{**rows[0], "score": 20, "story_count": 5}]
-    later = datetime(2026, 10, 9, 10, 30, tzinfo=CN_TZ)
+    later = datetime(2026, 10, 9, 9, 40, tzinfo=CN_TZ)
     assert tick(later, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == []
-    assert len(sent) == 1  # 口径差没有报成升温
+    assert sent == []  # 口径差没有报成升温
     # 版本一致后，10 倍跳变正常识别。
-    again = datetime(2026, 10, 9, 11, 30, tzinfo=CN_TZ)
+    again = datetime(2026, 10, 9, 9, 50, tzinfo=CN_TZ)
     jumped = [{**rows[0], "score": 40, "story_count": 6}]
     assert tick(again, state=state, opener=opener, trading=True, hot_loader=lambda: jumped) == ["hot"]
     assert "升温" in sent[-1]["markdown"]["text"]
+
+
+def _sector(key: str, score: float, stories: int) -> dict:
+    return {
+        "kind": "sector",
+        "key": key,
+        "name": key,
+        "score": score,
+        "story_count": stories,
+        "sources": ["cls"],
+        "growth": 1.5,
+    }
+
+
+def test_hot_view_switch_at_the_close_does_not_flood(tmp_path, monkeypatch):
+    """15:00 榜单从当天切到下一场时只建基线，不把整批名次变化报成新热点。"""
+    monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)
+    monkeypatch.setattr("app.news.push.push_type_enabled", lambda kind: kind == "hot")
+    monkeypatch.setattr("app.config.settings.dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test")
+    monkeypatch.setattr("app.config.settings.dingtalk_secret", "")
+    monkeypatch.setattr("app.config.settings.news_push_top_n", 5)
+    monkeypatch.setattr("app.config.settings.news_push_min_stories", 2)
+    monkeypatch.setattr("app.config.settings.news_push_score_jump", 0.5)
+    monkeypatch.setattr("app.config.settings.news_push_hot_cooldown_min", 30)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+
+    def opener(request, timeout=10):
+        sent.append(json.loads(request.data.decode()))
+        return None
+
+    morning = datetime(2026, 10, 9, 14, 50, tzinfo=CN_TZ)
+    assert tick(
+        morning, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("半导体", 2, 3)],
+    ) == []
+    assert state.data["hot_view"] == "2026-10-09|2026-10-09"
+    # 升级前的快照没有 hot_view。缺字段也只建基线。
+    state.data.pop("hot_view")
+    assert tick(
+        morning + timedelta(minutes=6), state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("银行", 8, 4)],
+    ) == []
+    assert sent == []
+    assert state.data["hot_view"] == "2026-10-09|2026-10-09"
+
+    at_close = datetime(2026, 10, 9, 15, 6, tzinfo=CN_TZ)
+    assert tick(
+        at_close, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("碳酸锂", 9, 4)],
+    ) == []
+    assert sent == []
+    assert state.data["hot_view"] == "2026-10-12|2026-10-09"
+
+    later = datetime(2026, 10, 9, 15, 12, tzinfo=CN_TZ)
+    assert tick(
+        later, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("碳酸锂", 9, 4), _sector("机器人", 3, 3)],
+    ) == ["hot"]
+    assert "【热点候选】变化" in sent[-1]["markdown"]["text"]
+    assert "机器人" in sent[-1]["markdown"]["text"]
+    assert state.data["hot_view"] == "2026-10-12|2026-10-09"
+
+
+def test_auction_open_drops_prior_intraday_without_a_change_flood(tmp_path, monkeypatch):
+    """9:25 去掉上一场盘中时视图签名变了，只建基线，不把剩下的条目报成新热点。"""
+    monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)
+    monkeypatch.setattr("app.news.push.push_type_enabled", lambda kind: kind == "hot")
+    monkeypatch.setattr("app.config.settings.dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test")
+    monkeypatch.setattr("app.config.settings.dingtalk_secret", "")
+    monkeypatch.setattr("app.config.settings.news_push_top_n", 5)
+    monkeypatch.setattr("app.config.settings.news_push_min_stories", 2)
+    monkeypatch.setattr("app.config.settings.news_push_score_jump", 0.5)
+    monkeypatch.setattr("app.config.settings.news_push_hot_cooldown_min", 30)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+
+    def opener(request, timeout=10):
+        sent.append(json.loads(request.data.decode()))
+        return None
+
+    before = datetime(2026, 10, 12, 9, 10, tzinfo=CN_TZ)
+    assert tick(
+        before, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("半导体", 4, 3), _sector("银行", 3, 3)],
+    ) == []
+    assert state.data["hot_view"] == "2026-10-12|2026-10-09"
+
+    opened = datetime(2026, 10, 12, 9, 26, tzinfo=CN_TZ)
+    assert tick(
+        opened, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("碳酸锂", 9, 4)],
+    ) == []
+    assert sent == []
+    assert state.data["hot_view"] == "2026-10-12|2026-10-12"
+
+    later = datetime(2026, 10, 12, 9, 40, tzinfo=CN_TZ)
+    assert tick(
+        later, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("碳酸锂", 9, 4), _sector("机器人", 3, 3)],
+    ) == ["hot"]
+    assert "机器人" in sent[-1]["markdown"]["text"]
+    assert state.data["hot_view"] == "2026-10-12|2026-10-12"
 
 
 def test_abnormal_and_t_only_after_baseline(tmp_path, monkeypatch):
