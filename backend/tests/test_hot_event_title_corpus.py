@@ -634,7 +634,9 @@ def test_subtitle_repeats_are_dropped_and_listing_keeps_the_field(tmp_path, monk
     listed = hot_event_listing(NOW)
     by_name = {event["name"]: event for event in listed["events"]}
     assert by_name[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
+    assert by_name[oil]["subtitle_source"] == "model"
     assert by_name[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
+    assert by_name[nasdaq]["subtitle_source"] == "model"
     assert "WTI" not in by_name[nasdaq]["subtitle"]
     assert flags and all(flags)
     assert hot_mod._LLM_TITLE_TOKENS >= 4096
@@ -674,7 +676,11 @@ def test_omitted_subtitle_row_is_not_cached_as_miss(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache()
     first = {event["name"]: event for event in top_hot_events(NOW)["events"]}
     assert first[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
+    assert first[oil]["subtitle_source"] == "model"
+    # 模型漏回这一条、正文又只有标题时，要点留空。不能拿另一条的原油要点来填，
+    # 也不能用标题再写一遍，也不能记成永久未采用。
     assert first[nasdaq]["subtitle"] == ""
+    assert first[nasdaq].get("subtitle_source") not in {"model", "fallback"}
     assert not any(item.get("_miss") for item in hot_mod._LLM_CACHE.values() if isinstance(item, dict))
 
     def complete(prompt: str, **_kwargs: object) -> str:
@@ -693,6 +699,7 @@ def test_omitted_subtitle_row_is_not_cached_as_miss(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache(llm=False)
     second = {event["name"]: event for event in top_hot_events(NOW + timedelta(minutes=11))["events"]}
     assert second[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
+    assert second[nasdaq]["subtitle_source"] == "model"
 
 
 def test_same_company_earnings_notes_are_one_event(tmp_path):
@@ -1642,3 +1649,315 @@ def test_single_char_bad_tail_only_applies_when_the_last_word_is_bare():
     assert _ends_mid_clause("苹果和")
     # 多字条目（集体/进行）仍按结尾匹配。
     assert _boundary_reason(_display_original("多股集体"), [], []) == "词中间截断"
+
+
+_BOND = "发改委、财政部下达第四批625亿超长期特别国债支持以旧换新"
+_NUCLEAR = "第三个核电机制电价执行省份"
+_BOND_FACT = "家电以旧换新安排150亿元，汽车报废更新安排200亿元"
+_NUCLEAR_FACT = "广西执行机制电价0.393元每千瓦时，覆盖2026至2030年"
+
+
+def _padded_event(name: str, sentence: str, total: int, subtitle: str = "") -> dict:
+    """正文长度按 `_event_body` 的口径凑整，用来复现线上 563 / 1301 字。"""
+    from app.news.hot_events import _event_body
+
+    sentence = sentence if sentence.endswith("。") else sentence + "。"
+    filler = "细则待公布。"
+    padding_len = total - len(sentence) - 1
+    assert padding_len >= 0
+    padding = (filler * ((padding_len // len(filler)) + 2))[:padding_len]
+    rest = sentence + "\n" + padding
+    assert len(rest) == total
+    event = {
+        "name": name,
+        "subtitle": subtitle,
+        "headline": name,
+        "headlines": [name],
+        "_candidates": [{
+            "source": "cls",
+            "title": name,
+            "text": f"{name}\n{rest}",
+        }],
+    }
+    assert len(_event_body(event)) == total
+    return event
+
+
+def test_blank_model_title_reads_summary_and_drops_placeholders():
+    """title 为空时改读 summary；「无」「暂无」不算写过要点。漏编号仍不按顺序对上。"""
+    event = {
+        "_batch_id": "1",
+        "name": "某公司拟收购某标的股权",
+        "headline": "某公司拟收购某标的股权",
+    }
+    other = {"_batch_id": "2", "name": "另一件事", "headline": "另一件事"}
+    parsed = _parse_title_batch(
+        '{"events":[{"id":"1","title":"","summary":"转让对价3.16亿元"}]}',
+        [event],
+    )
+    assert parsed["1"]["title"] == "转让对价3.16亿元"
+    parsed = _parse_title_batch(
+        '{"events":[{"id":"1","title":"无","summary":"转让对价3.16亿元","importance":"重要"}]}',
+        [event],
+    )
+    assert parsed["1"]["title"] == "转让对价3.16亿元"
+    parsed = _parse_title_batch(
+        '{"events":[{"id":"1","title":"暂无","importance":"重要"}]}',
+        [event],
+    )
+    assert parsed["1"]["title"] == ""
+    assert parsed["1"]["importance"] == "重要"
+    assert _parse_title_batch('{"events":[{"id":"1","title":"没有"}]}', [event]) == {}
+    assert _parse_title_batch(
+        '{"events":[{"title":"转让对价3.16亿元"},{"title":"另一条"}]}',
+        [event, other],
+    ) == {}
+
+
+def test_prompt_tells_the_model_not_to_answer_with_a_placeholder():
+    """空 title 和「无」都要在提示词里明确禁止，重写轮只强调一次。"""
+    from app.news.hot_events import _title_prompt
+
+    event = {
+        "_batch_id": "1",
+        "name": "某公司拟收购某标的股权",
+        "_candidates": [{
+            "source": "cls",
+            "title": "某公司拟收购某标的股权",
+            "text": "某公司拟收购某标的股权\n转让对价3.16亿元。",
+        }],
+    }
+    fresh = _title_prompt([event], retry=False)
+    retry = _title_prompt([event], retry=True)
+    assert "暂无" in fresh
+    assert "上一轮要点不合格" not in fresh
+    assert "一定要写出来，不要留空" in retry
+    assert "不要再回空字符串" in retry
+
+
+def test_partial_empty_titles_retry_once_then_fall_back(monkeypatch):
+    """8 条里只有 2 条写出要点时，不整批重发，只把空的重写一轮，仍空就用正文。
+
+    对应线上「补问切片外未标注条目 8 条，只回来 2 条」，正文 563 和 1301 字仍是空 title。
+    """
+    import json
+
+    from app.news import hot_events as hot_mod
+
+    hot_mod.clear_hot_event_cache()
+    bond = _padded_event(_BOND, _BOND_FACT, 563)
+    nuclear = _padded_event(_NUCLEAR, _NUCLEAR_FACT, 1301)
+    bare = {
+        "name": "航运公司上调运价",
+        "subtitle": "",
+        "headline": "航运公司上调运价",
+        "headlines": ["航运公司上调运价"],
+        "_fp": "bare",
+        "_candidates": [{
+            "source": "cls",
+            "title": "航运公司上调运价",
+            "text": "航运公司上调运价",
+        }],
+    }
+    others = []
+    for index in range(3):
+        name = f"存储芯片厂{index}宣布涨价"
+        event = _padded_event(name, f"涨价幅度达到{index + 3}成，渠道库存已不足", 80)
+        event["_fp"] = f"chip-{index}"
+        others.append(event)
+    titled = {
+        "name": "美联储宣布降息25基点",
+        "subtitle": "",
+        "_fp": "fed",
+        "_candidates": [{
+            "source": "cls",
+            "title": "美联储宣布降息25基点",
+            "text": "美联储宣布降息25基点\n点阵图显示明年还有两次降息。",
+        }],
+    }
+    peer = {
+        "name": "宁德时代回购巩固行业地位",
+        "subtitle": "",
+        "_fp": "catl",
+        "_candidates": [{
+            "source": "cls",
+            "title": "宁德时代回购巩固行业地位",
+            "text": "宁德时代回购巩固行业地位\n回购金额不超过40亿元。",
+        }],
+    }
+    batch = [titled, peer, bond, nuclear, bare, *others]
+    calls: list[tuple[int, bool]] = []
+
+    def fake_request(events, *, retry):
+        calls.append((len(events), retry))
+        rows = []
+        for event in events:
+            title = ""
+            if not retry and event["name"] in {titled["name"], peer["name"]}:
+                title = "市场关注度持续升温"
+            rows.append({
+                "id": event["_batch_id"],
+                "title": title,
+                "importance": "重要",
+            })
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr(hot_mod, "_request_titles", fake_request)
+    hot_mod._label_batch_with_llm(batch, reserve_call=lambda: True)
+    assert calls == [(8, False), (6, True)]
+    assert titled["subtitle"] == "市场关注度持续升温"
+    assert peer["subtitle"] == "市场关注度持续升温"
+    assert bond["subtitle"] == ""
+    assert nuclear["subtitle"] == ""
+    for event in batch:
+        _ensure_shown_name(event)
+    filled = hot_mod._fill_empty_subtitles(batch)
+    assert filled == 5
+    assert titled["subtitle"] == "市场关注度持续升温"
+    assert titled["subtitle_source"] == "model"
+    assert peer["subtitle"] == "市场关注度持续升温"
+    assert peer["subtitle_source"] == "model"
+    assert "150亿" in bond["subtitle"]
+    assert "200亿" in bond["subtitle"]
+    assert bond["subtitle_source"] == "fallback"
+    assert "0.393" in nuclear["subtitle"]
+    assert nuclear["subtitle_source"] == "fallback"
+    assert bare["subtitle"] == ""
+    assert "subtitle_source" not in bare
+    for event in (bond, nuclear, *others):
+        assert event["subtitle"] != event["name"]
+        assert not hot_mod._point_repeats_name(event["name"], event["subtitle"])
+    for event in others:
+        assert event["subtitle_source"] == "fallback"
+        assert "成" in event["subtitle"]
+        assert len(event["subtitle"]) <= 40
+
+
+def test_reported_snapshot_empty_points_drop_from_13_to_1():
+    """按线上快照的形状：前 20 条里 13 条要点为空。正文有新事实的 12 条抽句补上，只剩标题的那条留空。
+
+    含 #1「发改委、财政部…625亿…」（正文 563 字）和 #3「第三个核电机制电价执行省份」
+    （正文 1301 字）。模型 title 留空时，这两条改从正文抽数字句。标题本身不再当要点。
+    """
+    from app.news.hot_events import (
+        _empty_point_count,
+        _event_body,
+        _fill_empty_subtitles,
+        _point_repeats_name,
+    )
+
+    kept = []
+    for index in range(7):
+        kept.append({
+            "name": f"已有要点事件{index}",
+            "subtitle": f"模型已写要点{index}",
+            "subtitle_source": "model",
+            "_candidates": [],
+        })
+    bond = _padded_event(_BOND, _BOND_FACT, 563)
+    nuclear = _padded_event(_NUCLEAR, _NUCLEAR_FACT, 1301)
+    bare = {
+        "name": "航运公司上调运价",
+        "subtitle": "",
+        "_candidates": [{
+            "source": "cls",
+            "title": "航运公司上调运价",
+            "text": "航运公司上调运价",
+        }],
+    }
+    extras = [
+        _padded_event(
+            f"公司{index}宣布回购股份",
+            f"回购金额不超过{index + 11}亿元",
+            90,
+        )
+        for index in range(10)
+    ]
+    kept.extend([bond, nuclear, bare, *extras])
+    assert len(kept) == 20
+    before = _empty_point_count(kept)
+    assert before == 13
+    assert _empty_point_count([{"name": "航运公司上调运价", "subtitle": "航运公司上调运价"}]) == 1
+    assert len(_event_body(bond)) == 563
+    assert len(_event_body(nuclear)) == 1301
+    filled = _fill_empty_subtitles(kept)
+    after = _empty_point_count(kept)
+    assert filled == 12
+    assert after == 1
+    assert "150亿" in bond["subtitle"] and "200亿" in bond["subtitle"]
+    assert bond["subtitle_source"] == "fallback"
+    assert "0.393" in nuclear["subtitle"]
+    assert nuclear["subtitle_source"] == "fallback"
+    assert bare["subtitle"] == ""
+    assert "subtitle_source" not in bare
+    for index in range(7):
+        assert kept[index]["subtitle"] == f"模型已写要点{index}"
+        assert kept[index]["subtitle_source"] == "model"
+    for event in (bond, nuclear, *extras):
+        assert event["subtitle"]
+        assert event["subtitle"] != event["name"]
+        assert not _point_repeats_name(event["name"], event["subtitle"])
+        assert event["subtitle_source"] == "fallback"
+        assert len(event["subtitle"]) <= 40
+
+
+def test_empty_model_output_still_leaves_a_point_on_the_list(tmp_path, monkeypatch, caplog):
+    """整条链路：模型两轮都回空 title。正文有新事实就抽句，只有标题的留空，日志按真空条数记。"""
+    import json
+    import logging
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+    from app.news.service import top_hot_events
+
+    reset_store_for_tests(tmp_path / "empty-points.sqlite")
+    bond_body = _padded_event(_BOND, _BOND_FACT, 563)["_candidates"][0]["text"]
+    ship = "航运公司上调运价"
+    fiscal = "财政部出台以旧换新补贴"
+    fiscal_body = _padded_event(fiscal, "家电补贴安排150亿元", 120)["_candidates"][0]["text"]
+    _insert("bond", _BOND, 9, 10, clean=bond_body)
+    _insert("bond-b", _BOND, 9, 12, source="wscn", clean=bond_body)
+    _insert("ship", ship, 9, 20, clean=ship)
+    _insert("ship-b", ship, 9, 22, source="wscn", clean=ship)
+    _insert("fiscal", fiscal, 9, 30, clean=fiscal_body)
+    _insert("fiscal-b", fiscal, 9, 32, source="wscn", clean=fiscal_body)
+    prompts: list[str] = []
+
+    def empty(prompt: str, **_kwargs: object) -> str:
+        prompts.append(prompt)
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            rows.append({"id": head, "title": "", "importance": "重要"})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", empty)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        events = top_hot_events(NOW)["events"]
+    assert events
+    by_name = {event["name"]: event for event in events}
+    assert "150亿" in by_name[fiscal]["subtitle"]
+    assert by_name[fiscal]["subtitle"] != fiscal
+    assert by_name[fiscal]["subtitle_source"] == "fallback"
+    assert by_name[ship]["subtitle"] == ""
+    assert by_name[ship].get("subtitle_source") not in {"model", "fallback"}
+    if _BOND in by_name:
+        assert "150亿" in by_name[_BOND]["subtitle"]
+        assert by_name[_BOND]["subtitle"] != _BOND
+        assert by_name[_BOND]["subtitle_source"] == "fallback"
+        assert len(by_name[_BOND]["subtitle"]) <= 40
+    shown = events[:20]
+    empty = hot_mod._empty_point_count(shown)
+    assert empty >= 1
+    assert hot_mod._point_is_empty(by_name[ship])
+    assert sum("上一轮要点不合格" in prompt for prompt in prompts) == 1
+    logged = [record.message for record in caplog.records if "要点为空" in record.message]
+    assert logged
+    assert f"要点为空 {empty} 条" in logged[-1]
+    assert "要点为空 0 条" not in logged[-1]
+    assert "兜底前 0 条" not in logged[-1]

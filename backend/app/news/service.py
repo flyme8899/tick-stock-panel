@@ -496,6 +496,9 @@ def public_hot_event(event: dict) -> dict:
         "etfs": etfs,
         "limit_reason": _public_limit_reason(event.get("limit_reason")),
     }
+    subtitle_source = str(event.get("subtitle_source") or "")
+    if payload["subtitle"] and subtitle_source in {"model", "fallback"}:
+        payload["subtitle_source"] = subtitle_source
     summary = str(event.get("summary") or "").strip()
     if summary:
         payload["summary"] = summary
