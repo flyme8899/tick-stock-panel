@@ -102,6 +102,45 @@ def _parse_bool_env(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Docker compose mounts only this directory read-only and points INDUSTRY_MAP_FILES
+# at the parquet inside it. The parent data directory stays on the host.
+# Local runs discover the same table under the repo data directory.
+_DOCKER_INDUSTRY_DIR = Path("/opt/tsp/data/ext_data/ext_hy_ths")
+_DOCKER_INDUSTRY_MAP = _DOCKER_INDUSTRY_DIR / "part.parquet"
+
+
+def _builtin_industry_map_candidates() -> list[Path]:
+    """Paths checked when INDUSTRY_MAP_FILES is unset and the file exists."""
+    candidates = [_DOCKER_INDUSTRY_MAP]
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        marker = parent / "vendor" / "daily_stock_analysis" / "main.py"
+        if marker.is_file():
+            candidates.append(parent / "data" / "ext_data" / "ext_hy_ths" / "part.parquet")
+            break
+    return candidates
+
+
+def _resolve_industry_map_files() -> list[Path]:
+    """Use INDUSTRY_MAP_FILES when set; otherwise any existing Tonghuashun table.
+
+    An explicit empty value, ``off``, or ``none`` disables the built-in path.
+    A missing explicit file is kept so the caller can report it; a missing
+    built-in file is omitted so screening still runs before the table is pulled.
+    """
+    if "INDUSTRY_MAP_FILES" in os.environ:
+        return [Path(item) for item in _parse_csv_env("INDUSTRY_MAP_FILES", [])]
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for path in _builtin_industry_map_candidates():
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.is_file():
+            found.append(path)
+    return found
+
+
 def _parse_csv_env(name: str, default: list[str] | None = None) -> list[str]:
     value = os.getenv(name)
     if value is None:
@@ -328,10 +367,7 @@ class Config:
                 "SNAPSHOT_FALLBACK_MAX_AGE_HOURS"
             ),
             strategies_dir=_resolve_strategies_dir(),
-            industry_map_files=[
-                Path(item)
-                for item in _parse_csv_env("INDUSTRY_MAP_FILES", [])
-            ],
+            industry_map_files=_resolve_industry_map_files(),
             industry_provider=os.getenv("INDUSTRY_PROVIDER", "none"),
             industry_provider_max_boards=max(1, int(os.getenv("INDUSTRY_PROVIDER_MAX_BOARDS", "80"))),
             industry_provider_cache_dir=industry_provider_cache_dir,

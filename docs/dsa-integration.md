@@ -64,6 +64,7 @@ docker compose --profile dsa up -d --build --force-recreate
 | `/app/reports` | 不挂载 | 研报回退文件。同样只在容器层 |
 | `/app/config/.env` | `./.env` | 可写单文件挂载。观察池、定时推送和设置保存都写这份文件。见下文「为什么仍是单文件挂载」 |
 | `/opt/tsp/*.py` | 仓库里的桥接文件 | 只读。`PYTHONDONTWRITEBYTECODE=1`，不会在旁边写 `__pycache__` |
+| `/opt/tsp/data/ext_data/ext_hy_ths` | `./data/ext_data/ext_hy_ths` | 只读。选股读其中的 `part.parquet`。不挂整份 `data/`，避免把 `users.json` 和 `user_data/auth.json` 送进容器 |
 | `/home/dsa` | 不挂载 | `HOME`。AkShare 的 `~/tk.csv`、Longbridge 的 `~/.longbridge`、fontconfig 用户缓存都在这里 |
 | `MPLCONFIGDIR=/home/dsa/.config/matplotlib` | 不挂载 | matplotlib 配置和字体缓存。`XDG_CACHE_HOME`、`XDG_CONFIG_HOME` 也指向 `/home/dsa` |
 | `/tmp` | 不挂载 | `TMPDIR`。分享图、临时目录走这里 |
@@ -116,6 +117,14 @@ TSP 的 app 镜像里没有 `vendor/daily_stock_analysis`。在这个镜像里�
 `scripts/dsa.sh`、`scripts/dsa.ps1` 和 `docker compose --profile dsa` 会在启动 `main.py` 之前装上钩子，只给同名技能的提示末尾追加一段「量化回测参考」。`wave_theory` 等未收录技能保持原文。本地脚本在变量未设置时使用仓库内文件；`.env` 或环境里写成 `off`，或文件缺失时，不追加，也不影响 sidecar 启动。Compose 把该变量固定成容器内的 `/opt/tsp/quant_evidence.yaml`，避免 `.env` 里的宿主机路径进容器；要在 Docker 里关闭，把这一项改成 `off`。证据文件不放进 `vendor/daily_stock_analysis/strategies/`，那个目录会被当成策略加载。
 
 决策仪表盘读取 `GET /api/dsa/quant-evidence` 展示同一份摘要。直接在 vendor 目录里执行 `python main.py` 不会经过这个钩子。
+
+## 选股行业
+
+均衡多因子按行业分散。同花顺表是三级名称，例如 `交通运输-物流-航运` 和 `交通运输-铁路公路-铁路运输`。分桶先按策略里的关键词匹配整段名称；都对不上时，用第一级行业（按 `-`、`－`、`／`、`/` 等切开后的第一段）。中远海控和大秦铁路都是交通运输，因此共用一个名额，而不是各占一桶。`电力设备-光伏设备-…` 这类名称里已经有关键词（光伏）时，仍进原来的关键词桶。
+
+行业来自 TSP 扩展数据 `data/ext_data/ext_hy_ths/part.parquet`。在板块分析里获取「扩展行业」之后才有这份文件。`INDUSTRY_MAP_FILES` 不设置时，本机 sidecar 会使用仓库里已经存在的这份文件。Docker 只把 `./data/ext_data/ext_hy_ths` 只读挂到 `/opt/tsp/data/ext_data/ext_hy_ths`，并把该变量写成 `/opt/tsp/data/ext_data/ext_hy_ths/part.parquet`，避免 `.env` 里的宿主机路径进容器。不挂整份 `data/`，密码哈希和会话令牌留在宿主机。这个目录在服务器上已经存在，属主是运行用户。文件还不存在，或变量写成 `off` 时，选股继续，只是没有这张表。要换别的 CSV、JSON 或 Parquet，在本机设置这个变量（多个文件用逗号分隔）；Docker 里以 compose 的容器路径为准。
+
+sidecar 用 pyarrow 读这份 Parquet。已经建好的 DSA 虚拟环境需要重装依赖，Docker 需要重新构建 `dsa` 镜像。
 
 ## 资讯桥
 

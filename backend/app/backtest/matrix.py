@@ -15,7 +15,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
+from datetime import time as dt_time
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
@@ -29,6 +30,7 @@ import pyarrow.dataset as pads
 from app.backtest.liquidity import release_one_price_boards
 from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
+from app.market_time import CN_TZ, cn_now
 from app.price_limits import (
     MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
     numpy_limit_pct_vectors,
@@ -685,6 +687,69 @@ def build_market_data_matrix(
     )
 
 
+def _live_rewritten_partition_date(now: datetime | None = None) -> date | None:
+    """Beijing day whose daily partition is still being replaced.
+
+    Quote flush rewrites ``date=<today>`` from the 09:15 pre-open through the
+    15:30 close-final deadline on weekdays. Opening that file during the rewrite
+    raises OSError (``Couldn't deserialize thrift`` / ``Page was smaller than
+    expected``). Naive datetimes are Beijing wall time.
+    """
+    current = cn_now() if now is None else now
+    current = (
+        current.replace(tzinfo=CN_TZ)
+        if current.tzinfo is None
+        else current.astimezone(CN_TZ)
+    )
+    if current.weekday() >= 5:
+        return None
+    clock = current.time()
+    if dt_time(9, 15) <= clock <= dt_time(15, 30):
+        return current.date()
+    return None
+
+
+def _skipped_live_partitions(root: Path, now: datetime | None = None) -> frozenset[date]:
+    live = _live_rewritten_partition_date(now)
+    if live is None:
+        return frozenset()
+    partition = root / f"date={live.isoformat()}"
+    if not partition.is_dir():
+        return frozenset()
+    logger.info(
+        "matrix parquet skips live partition date=%s while quotes are still rewriting it",
+        live.isoformat(),
+    )
+    return frozenset({live})
+
+
+def _open_matrix_parquet_dataset(root: Path, *, skip: frozenset[date]) -> pads.Dataset:
+    """Open the hive dataset without a partition that is still being replaced."""
+    partitioning = pads.partitioning(
+        pa.schema([("date", pa.date32())]),
+        flavor="hive",
+    )
+    if not skip:
+        return pads.dataset(str(root), format="parquet", partitioning=partitioning)
+    files: list[str] = []
+    for partition in sorted(root.glob("date=*")):
+        try:
+            partition_date = date.fromisoformat(partition.name.removeprefix("date="))
+        except ValueError:
+            continue
+        if partition_date in skip:
+            continue
+        files.extend(str(path) for path in sorted(partition.rglob("*.parquet")))
+    if not files:
+        raise ValueError("本地指标数据为空，请先在数据页面同步日K并完成指标计算")
+    return pads.dataset(
+        files,
+        format="parquet",
+        partitioning=partitioning,
+        partition_base_dir=str(root),
+    )
+
+
 def load_market_data_matrix_from_parquet(
     parquet_root: Path,
     start: date,
@@ -703,14 +768,76 @@ def load_market_data_matrix_from_parquet(
     source_generation: str | None = None,
     cancel_event: threading.Event | None = None,
 ) -> MarketDataMatrix:
-    """Load a daily market matrix, reusing a covering read-only mmap when possible."""
+    """Load a daily market matrix, reusing a covering read-only mmap when possible.
+
+    During the Beijing quote-flush window, today's still-rewritten partition is
+    left out of the scan. One OSError from a torn parquet read is retried.
+    """
+    try:
+        return _load_market_data_matrix_from_parquet_once(
+            parquet_root,
+            start,
+            end,
+            field_columns=field_columns,
+            symbols=symbols,
+            instruments=instruments,
+            batch_size=batch_size,
+            cache_root=cache_root,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            cache_field_columns=cache_field_columns,
+            cache_max_bytes=cache_max_bytes,
+            profile_generation=profile_generation,
+            source_generation=source_generation,
+            cancel_event=cancel_event,
+        )
+    except OSError as exc:
+        logger.warning("matrix parquet scan failed (%s); retrying once", exc)
+        return _load_market_data_matrix_from_parquet_once(
+            parquet_root,
+            start,
+            end,
+            field_columns=field_columns,
+            symbols=symbols,
+            instruments=instruments,
+            batch_size=batch_size,
+            cache_root=cache_root,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            cache_field_columns=cache_field_columns,
+            cache_max_bytes=cache_max_bytes,
+            profile_generation=profile_generation,
+            source_generation=source_generation,
+            cancel_event=cancel_event,
+        )
+
+
+def _load_market_data_matrix_from_parquet_once(
+    parquet_root: Path,
+    start: date,
+    end: date,
+    *,
+    field_columns: set[str] | frozenset[str],
+    symbols: list[str] | None = None,
+    instruments: pl.DataFrame | None = None,
+    batch_size: int = _ARROW_BATCH_SIZE,
+    cache_root: Path | None = None,
+    coverage_start: date | None = None,
+    coverage_end: date | None = None,
+    cache_field_columns: set[str] | frozenset[str] | None = None,
+    cache_max_bytes: int = _MATRIX_DISK_CACHE_DEFAULT_MAX_BYTES,
+    profile_generation: str = "default",
+    source_generation: str | None = None,
+    cancel_event: threading.Event | None = None,
+) -> MarketDataMatrix:
     _raise_if_matrix_cancelled(cancel_event)
     if start > end:
         raise ValueError("matrix parquet range start must not exceed end")
     root = Path(parquet_root)
     if not root.exists():
         raise ValueError(f"matrix parquet root does not exist: {root}")
-    available_start, available_end = _partition_date_bounds(root)
+    skip = _skipped_live_partitions(root)
+    available_start, available_end = _partition_date_bounds(root, skip=skip)
     if available_start is None or available_end is None:
         raise ValueError("本地指标数据为空，请先在数据页面同步日K并完成指标计算")
     effective_start = max(start, available_start)
@@ -731,15 +858,7 @@ def load_market_data_matrix_from_parquet(
     normalized_symbols = _normalize_symbol_request(symbols)
     instrument_fingerprint = _instrument_fingerprint(instruments).hex()
 
-    partitioning = pads.partitioning(
-        pa.schema([("date", pa.date32())]),
-        flavor="hive",
-    )
-    dataset = pads.dataset(
-        str(root),
-        format="parquet",
-        partitioning=partitioning,
-    )
+    dataset = _open_matrix_parquet_dataset(root, skip=skip)
     _validate_matrix_dataset_schema(dataset)
 
     if cache_root is None:
@@ -766,6 +885,7 @@ def load_market_data_matrix_from_parquet(
             effective_start,
             effective_end,
             include_predecessor=True,
+            skip=skip,
         )
     )
     covering = _find_covering_matrix_cache(
@@ -793,7 +913,12 @@ def load_market_data_matrix_from_parquet(
             logger.warning("invalid matrix disk cache %s: %s", path, exc)
             shutil.rmtree(path, ignore_errors=True)
 
-    build_partitions = _partition_fingerprints(root, build_start, build_end)
+    build_partitions = _partition_fingerprints(
+        root,
+        build_start,
+        build_end,
+        skip=skip,
+    )
     if not build_partitions:
         raise ValueError("matrix parquet range contains no market data")
     cache_path = _matrix_disk_cache_path(
@@ -1569,6 +1694,7 @@ def _partition_fingerprints(
     end: date,
     *,
     include_predecessor: bool = False,
+    skip: frozenset[date] = frozenset(),
 ) -> dict[str, str]:
     selected: list[tuple[date, Path]] = []
     predecessor: tuple[date, Path] | None = None
@@ -1576,6 +1702,8 @@ def _partition_fingerprints(
         try:
             partition_date = date.fromisoformat(partition.name.removeprefix("date="))
         except ValueError:
+            continue
+        if partition_date in skip:
             continue
         if partition_date < start:
             if predecessor is None or partition_date > predecessor[0]:
@@ -1600,13 +1728,19 @@ def _partition_fingerprints(
     return result
 
 
-def _partition_date_bounds(root: Path) -> tuple[date | None, date | None]:
+def _partition_date_bounds(
+    root: Path,
+    *,
+    skip: frozenset[date] = frozenset(),
+) -> tuple[date | None, date | None]:
     earliest: date | None = None
     latest: date | None = None
     for partition in root.glob("date=*"):
         try:
             value = date.fromisoformat(partition.name.removeprefix("date="))
         except ValueError:
+            continue
+        if value in skip:
             continue
         if earliest is None or value < earliest:
             earliest = value

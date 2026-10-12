@@ -336,6 +336,23 @@ def _risk_profile(profile: dict[str, object] | None) -> dict[str, float]:
     return result
 
 
+# Tonghuashun paths look like "交通运输-物流-航运". Keyword buckets often miss
+# the full path, so two names in the same top-level industry became two buckets.
+_INDUSTRY_LEVEL_SEPARATORS = ("－", "—", "–", "／", "/", "｜", "|", ">")
+
+
+def _first_level_industry(label: str) -> str:
+    """Return the top-level industry, splitting on '-' and similar separators."""
+    text = str(label or "").strip()
+    if not text:
+        return ""
+    normalized = text
+    for separator in _INDUSTRY_LEVEL_SEPARATORS:
+        normalized = normalized.replace(separator, "-")
+    first = normalized.split("-", 1)[0].strip()
+    return first or text
+
+
 def _portfolio_bucket(
     sector: str,
     theme: str = "",
@@ -347,7 +364,8 @@ def _portfolio_bucket(
     for bucket, needles in bucket_map.items():
         if any(needle in text for needle in needles):
             return bucket
-    return sector
+    # No keyword hit: share a bucket with the same first-level industry.
+    return _first_level_industry(sector) or sector
 
 
 def _portfolio_buckets(custom_buckets: object = None) -> dict[str, tuple[str, ...]]:
