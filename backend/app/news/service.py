@@ -420,7 +420,8 @@ def public_hot_event(event: dict) -> dict:
             "key": key,
             "name": str(stock.get("name") or key),
             "mentions": mentions,
-            "direction": direction if direction in {"利好", "利空"} else "利好",
+            # 无信号事件出口就是空方向：前端 `item.direction &&` 不渲染标签。
+            "direction": direction if direction in {"利好", "利空"} else "",
         }
         if asset_kind_of(key, row["name"]) == "etf":
             etfs.append(row)

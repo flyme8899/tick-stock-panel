@@ -110,7 +110,9 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
             0, False, "无", "无", "尚无首见之后的盘面", session, False, {},
         )
     symbols = _event_symbols(event, tape)
-    direction = str(event.get("direction") or "利好")
+    # 方向留空（中性）时不改 bull 口径：这里只做事前行情检测，不生产用户可见
+    # 的方向标签。默认利好已由 hot_events 侧改为留空。
+    direction = str(event.get("direction") or "")
     bull = direction != "利空"
     stock_rows = []
     for symbol in symbols:
@@ -302,7 +304,7 @@ def _apply_order_changes(event: dict, tape: dict, result: dict) -> dict:
     if first is None:
         return result
     session = _session_date(tape)
-    bull = str(event.get("direction") or "利好") != "利空"
+    bull = str(event.get("direction") or "") != "利空"
     wanted = _ORDER_BULL if bull else _ORDER_BEAR
     hit = False
     for symbol in _event_symbols(event, tape):

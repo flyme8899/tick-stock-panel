@@ -197,12 +197,16 @@ def test_enrich_verifies_and_skips_new_broad_names(tmp_path: Path) -> None:
         {
             "concepts": ["固态电池概念", "白酒"],
             "direction": "利好",
+            "name": "贵州茅台股价创历史新高",
+            "headlines": ["贵州茅台：前三季度净利润同比增长"],
             "mentioned_stocks": [{"key": "600519.SH", "name": "贵州茅台"}],
             "mapping": [{"name": "固态电池概念", "kind": "concept", "direction": "利好"}],
         },
         {
             "concepts": [],
             "direction": "利好",
+            "name": "宁德时代概念股集体大涨",
+            "headlines": ["宁德时代放量拉升"],
             "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
         },
     ]
@@ -218,6 +222,76 @@ def test_enrich_verifies_and_skips_new_broad_names(tmp_path: Path) -> None:
     members = _members(tmp_path, ["固态电池概念"], date.fromisoformat(_DAY))
     assert members["固态电池概念"][0] == "600519.SH"
     assert "300750.SZ" in members["固态电池概念"]
+
+
+def test_enrich_skips_limit_theme_for_stock_absent_from_titles(tmp_path: Path) -> None:
+    """涨停题材只补股票名在事件标题里出现过的事件。
+
+    线上实测双写残差：早报目录行的上游 stocks 混进弱相关个股（东百集团进了
+    「证监会座谈会」簇，15 个成员没有一条讲收购），涨停题材把「光芯片收购」
+    补进该簇，概念与成员完全脱节。股票名不在任何成员标题里，题材就没有
+    锚定资格 —— 本例用 fixture 里的宁德时代：涨停题材命中，但股票名不在
+    事件标题里，enriched 必须为空。
+    """
+    store.write_rows(tmp_path, "ths", _DAY, parse_ths_pool(_load("ths_pool.json"), _DAY) or [])
+    events = [
+        {
+            "concepts": [],
+            "direction": "",
+            "name": "证监会召开资本市场和金融形势专家座谈会，听取意见建议",
+            "headlines": ["证监会召开资本市场和金融形势专家座谈会"],
+            "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
+        },
+    ]
+    apply_limit_reasons(events, tmp_path, _DAY)
+    # 股票被锚定校验挡在最外面，verified/enriched 都空，事件压根不写
+    # limit_reason 键 —— 概念列表保持原样。
+    assert "limit_reason" not in events[0]
+    assert events[0]["concepts"] == []
+
+
+def test_enrich_anchors_stock_by_short_name_or_code(tmp_path: Path) -> None:
+    """锚定校验支持简称与 6 位代码，别把该补的题材误挡。
+
+    标题常写简称（「威领」而非「*ST威领」）或代码（「300750」）。只看全名会把
+    这些正确场景挡掉，所以去掉 ST/XD 前缀的正名和 6 位代码也算锚定。
+    """
+    store.write_rows(tmp_path, "ths", _DAY, parse_ths_pool(_load("ths_pool.json"), _DAY) or [])
+    # 简称命中：股票带 *ST 前缀，标题只写去前缀的名字。
+    short_hit = {
+        "concepts": [],
+        "direction": "",
+        "name": "威领股份要约收购结果出炉",
+        "headlines": ["威领股份要约收购结果出炉"],
+        "mentioned_stocks": [{"key": "300750.SZ", "name": "*ST威领"}],
+    }
+    # 代码命中：标题只写 6 位代码。
+    code_hit = {
+        "concepts": [],
+        "direction": "",
+        "name": "300750盘中涨停",
+        "headlines": ["300750盘中涨停"],
+        "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
+    }
+    apply_limit_reasons([short_hit, code_hit], tmp_path, _DAY)
+    # 两只都锚定成功，涨停题材（fixture 里宁德时代对应固态电池概念）应被补上。
+    assert short_hit["limit_reason"]["enriched"] == ["固态电池概念"]
+    assert code_hit["limit_reason"]["enriched"] == ["固态电池概念"]
+
+
+def test_enrich_code_anchor_requires_digit_boundary(tmp_path: Path) -> None:
+    """6 位代码要前后非数字，「600000 吨」这类金额数量不该被当成代码锚定。"""
+    store.write_rows(tmp_path, "ths", _DAY, parse_ths_pool(_load("ths_pool.json"), _DAY) or [])
+    # 标题里的 7 位数字（6000001）包含 6 位子串，但没有数字边界 → 不该锚定。
+    digits = {
+        "concepts": [],
+        "direction": "",
+        "name": "某公司成交额达3007500万元",
+        "headlines": ["某公司成交额达3007500万元"],
+        "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
+    }
+    apply_limit_reasons([digits], tmp_path, _DAY)
+    assert "limit_reason" not in digits
 
 
 def test_limit_board_sentiment_route(tmp_path, monkeypatch) -> None:
