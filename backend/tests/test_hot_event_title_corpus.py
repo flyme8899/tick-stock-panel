@@ -1094,3 +1094,238 @@ def test_retry_round_prompt_asks_to_fill_from_body():
     assert "一定要写出来，不要留空" in retry
     fresh = _title_prompt(events, retry=False)
     assert "上一轮要点不合格" not in fresh
+
+
+def test_event_body_keeps_single_line_flash_news():
+    """单行快讯（没有换行）也要能取到正文，不能按「没有第 2 行」判空。
+
+    财联社/华尔街见闻/路透/彭博的快讯大量是**一行到底**（`【标题】正文……`
+    或 `导语。正文……` 全挤在一行）。早先的取文逻辑写死「第 1 行是标题、
+    第 2 行起是正文」，`len(lines) > 1` 不成立就直接返回空串 —— 一整段实质
+    正文被当成「无正文」丢掉，要点只能留空。实测交易日 421 条里「单行且
+    >60 字」的占 42%（cls 68/91、wscn 37/76、reuters 21/26、bloomberg 18/19），
+    线上展示前 20 的要点覆盖率因此掉到 10/20。
+    """
+    from app.news.hot_events import _event_body
+
+    name = "碳酸锂主力合约跌破11万关口"
+    event = {
+        "name": name,
+        "_candidates": [{
+            "source": "cls",
+            "title": name,
+            "text": (
+                "【碳酸锂主力合约跌破11万关口】财联社10月12日电，碳酸锂主力合约"
+                "跌破11万关口，日内跌幅超7%，为去年12月22日以来首次。"
+            ),
+        }],
+    }
+    body = _event_body(event)
+    assert body
+    # 方括号里的标题被剥掉，后面的事实留下来。
+    assert "日内跌幅超7%" in body
+    assert not body.startswith("【")
+
+
+def test_event_body_keeps_single_line_without_brackets():
+    """没有方括号的单行快讯：导语即正文，整行留用。"""
+    from app.news.hot_events import _event_body
+
+    name = "风电设备板块震荡反弹 天顺风能涨停"
+    event = {
+        "name": name,
+        "_candidates": [{
+            "source": "wscn",
+            "title": name,
+            "text": (
+                "风电设备板块震荡反弹，天顺风能涨停，双一科技涨超10%，"
+                "威力传动、振宏股份、日月股份跟涨。"
+            ),
+        }],
+    }
+    body = _event_body(event)
+    assert body
+    assert "双一科技" in body
+
+
+def test_event_body_single_line_pure_notice_still_blank():
+    """单行且整句就是标题的公告，仍然返回空串 —— 修复不能把「无料」也放进来。"""
+    from app.news.hot_events import _event_body
+
+    name = "新奥股份关于控股子公司回购绿色优先票据的公告"
+    event = {
+        "name": name,
+        "_candidates": [{
+            "source": "notice",
+            "title": name,
+            "text": f"新奥股份:{name}",
+        }],
+    }
+    assert _event_body(event) == ""
+
+
+def test_event_body_single_line_short_headline_still_blank():
+    """单行就是一句无延伸的行情播报，取不出新事实时保持留空。"""
+    from app.news.hot_events import _event_body
+
+    name = "美股期货走高，标普500指数期货上涨0.2%，纳斯达克100指数期货上涨0.5%"
+    event = {
+        "name": name,
+        "_candidates": [{
+            "source": "wscn",
+            "title": name,
+            "text": "美股期货走高，标普500指数期货上涨0.2%，纳斯达克100指数期货上涨0.5%。",
+        }],
+    }
+    assert _event_body(event) == ""
+
+
+def test_event_body_keeps_text_when_first_line_is_not_a_title():
+    """多行但首行不是标题（导语在首行）时，不能连正文一起丢掉。"""
+    from app.news.hot_events import _event_body
+
+    name = "工信部总工程师: 纵深推进“人工智能+制造”"
+    first = (
+        "在第26届工博会开幕式上，工信部总工程师王卫明表示，将纵深推进"
+        "“人工智能+制造”，打造产业创新驱动引擎。"
+    )
+    event = {
+        "name": name,
+        "_candidates": [{
+            "source": "cls",
+            "title": name,
+            "text": first + "\n一是加强关键技术攻关。\n二是培育标杆应用场景。",
+        }],
+    }
+    body = _event_body(event)
+    assert body
+    assert "工博会" in body
+
+
+def test_miss_cache_expires_so_later_attempt_can_retry():
+    """`_miss` 缓存要能过期，不能把一次偶发失败永久钉死。
+
+    上游网关偶发整批空 title、正文侧改善后本可以写出来 —— 这些情况都需要在
+    窗口过后重问一次。早先 `_cached_title_usable` 对 `_miss` 恒返回 True，
+    条目一旦被记 miss 就再也不会被问，线上表现为「切片里明明有正文，却仍拿
+    不到要点」。
+    """
+    import time
+
+    from app.news import hot_events as hot_mod
+
+    key = "title-v" + str(hot_mod._TITLE_CACHE_VERSION) + ":deadbeef"
+    # 刚记下的 miss：窗口内仍然认它，不重复问。
+    hot_mod._LLM_CACHE[key] = {"_miss": True, "_miss_at": time.monotonic()}
+    assert hot_mod._cached_title_usable(hot_mod._LLM_CACHE[key]) is True
+
+    # 超过窗口：不再认，允许重问。
+    hot_mod._LLM_CACHE[key] = {
+        "_miss": True,
+        "_miss_at": time.monotonic() - hot_mod._MISS_TTL_S - 1,
+    }
+    assert hot_mod._cached_title_usable(hot_mod._LLM_CACHE[key]) is False
+
+    # 老缓存没有 _miss_at 字段：按已过期处理，让它重问拿正确结果。
+    hot_mod._LLM_CACHE[key] = {"_miss": True}
+    assert hot_mod._cached_title_usable(hot_mod._LLM_CACHE[key]) is False
+
+
+def test_purge_drops_expired_miss_and_old_versions():
+    """清理缓存的函数要同时丢掉过期 _miss 与旧版本键。"""
+    import time
+
+    from app.news import hot_events as hot_mod
+
+    hot_mod._LLM_CACHE.clear()
+    ver = hot_mod._TITLE_CACHE_VERSION
+    fresh_key = f"title-v{ver}:aaa"
+    stale_key = f"title-v{ver}:bbb"
+    old_key = f"title-v{ver - 1}:ccc"
+    hot_mod._LLM_CACHE[fresh_key] = {"_miss": True, "_miss_at": time.monotonic()}
+    hot_mod._LLM_CACHE[stale_key] = {
+        "_miss": True, "_miss_at": time.monotonic() - hot_mod._MISS_TTL_S - 1,
+    }
+    hot_mod._LLM_CACHE[old_key] = {"title": "旧版本缓存"}
+
+    hot_mod._purge_stale_title_cache()
+
+    assert fresh_key in hot_mod._LLM_CACHE
+    assert stale_key not in hot_mod._LLM_CACHE
+    assert old_key not in hot_mod._LLM_CACHE
+    hot_mod._LLM_CACHE.clear()
+
+
+def test_event_body_accepts_candidate_whose_title_differs_from_rewritten_name():
+    """主标题是跨源重写的，候选原标题对不上它，也要认这条正文。
+
+    线上事故：聚类后的展示主标题由模型/清洗重写（「顿汉布什获4份海外订单合计
+    1.1亿美元」），候选原标题是完整的一句话（「【冰轮环境】子公司顿汉布什近期
+    收到4份海外数据中心冷源装备采购订单…」）。早先拿候选标题比主标题算 bigram
+    Jaccard，两条各自只有 0.185，远低于 0.5 —— 正文取成空串、要点留空。实测
+    交易日被这样漏掉 8 条，前 20 覆盖率卡在 13/20。
+    """
+    from app.news.hot_events import _event_body
+
+    name = "顿汉布什获4份海外订单合计1.1亿美元"
+    peer = "【冰轮环境】子公司顿汉布什近期收到4份海外数据中心冷源装备采购订单"
+    event = {
+        "name": name,
+        "headline": peer,
+        "_candidates": [{
+            "source": "zsxq",
+            "title": peer,
+            "text": peer + "，包括一体式风冷磁悬浮机组、风冷螺杆机组及高压离心冷水"
+                            "机组等，合计金额约1.1亿美元，交付时间为2027年。",
+        }],
+    }
+    body = _event_body(event)
+    assert body
+    assert "1.1亿美元" in body
+    assert "2027年" in body
+
+
+def test_event_body_rejects_candidate_from_another_event():
+    """簇里混进别的新闻时，不能拿它的正文来编要点。
+
+    簇内的候选一般讲同一件事；但 ``_can_merge`` 靠主体+时间窗聚合，偶尔会把
+    措辞相近的另一件事并进来（实测「中信证券…」的要点写成了同簇「沃勒…」那句）。
+    这时候选标题与簇内其它候选对不上，就不该采纳它。
+    """
+    from app.news.hot_events import _event_body
+
+    name = "中信证券：用景气和供给出清来应对高利率密切跟踪AI投资周期拐点"
+    peer = "中信证券：用景气和供给出清来应对高利率"
+    intruder = {
+        "source": "cls",
+        "title": "美联储理事沃勒表示预计还需加息两次",
+        "text": "美联储理事沃勒表示，若通胀黏性超预期，预计还需加息两次。",
+    }
+    event = {
+        "name": name,
+        "headline": name,
+        "headlines": [peer],
+        "_candidates": [
+            {"source": "cls", "title": peer,
+             "text": peer + "，当前海外利率高企，建议以业绩确定性为核心。"},
+            intruder,
+        ],
+    }
+    body = _event_body(event)
+    assert body
+    assert "沃勒" not in body
+
+
+
+
+def test_miss_ttl_is_shorter_than_hot_refresh_period():
+    """`_miss` 的存活窗口必须短于热点刷新周期。
+
+    缓存键是簇成员标题的 sha1，簇不变就一直命中。窗口若长于刷新周期，一次偶发
+    空返回会在接连两个周期里被跳过，前 20 要点覆盖率连续两轮都上不去。线上实测
+    600 秒（>300 秒刷新）时正是如此。
+    """
+    from app.news.hot_events import _MISS_TTL_S
+    from app.news.hot_snapshot import HOT_REFRESH_SECONDS
+
+    assert _MISS_TTL_S < HOT_REFRESH_SECONDS
