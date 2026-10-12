@@ -12,6 +12,7 @@ import pytest
 from app.market_time import CN_TZ
 from app.news.dingtalk import signed_url
 from app.news.host_collector import send_dingtalk
+from app.news.hot_events import HOT_RULES_VERSION
 from app.news.push import (
     PushState,
     _cached_live_rows,
@@ -238,6 +239,53 @@ def test_scheduled_push_once_and_change_respects_cooldown(tmp_path, monkeypatch)
     assert "本次变化" in sent[1]["markdown"]["text"]
     assert "升温" in sent[1]["markdown"]["text"]
     assert "半导体" in sent[1]["markdown"]["text"]
+
+
+def test_hot_rules_version_mismatch_drops_the_previous_snapshot(tmp_path, monkeypatch):
+    """口径版本不匹配时，上一轮快照只建基线、不比较分数（PR #97 评审）。
+
+    升级计分/准入规则后，旧快照的分数是新口径算不出来的。直接比较会把
+    importance 20→130 这类口径差报成「升温」。版本不匹配 → previous 作废；
+    版本一致后同样的跳变正常识别。
+    """
+    monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)
+    monkeypatch.setattr("app.news.push.push_type_enabled", lambda kind: kind == "hot")
+    monkeypatch.setattr("app.config.settings.dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test")
+    monkeypatch.setattr("app.config.settings.dingtalk_secret", "")
+    monkeypatch.setattr("app.config.settings.news_push_top_n", 5)
+    monkeypatch.setattr("app.config.settings.news_push_min_stories", 2)
+    monkeypatch.setattr("app.config.settings.news_push_score_jump", 0.5)
+    monkeypatch.setattr("app.config.settings.news_push_hot_cooldown_min", 30)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+
+    def opener(request, timeout=10):
+        sent.append(json.loads(request.data.decode()))
+        return None
+
+    rows = [{
+        "kind": "sector",
+        "key": "半导体",
+        "name": "半导体",
+        "score": 2,
+        "story_count": 3,
+        "sources": ["cls"],
+        "growth": 1.8,
+    }]
+    pre = datetime(2026, 10, 9, 8, 46, tzinfo=CN_TZ)
+    assert tick(pre, state=state, opener=opener, trading=True, hot_loader=lambda: rows) == ["hot"]
+    assert state.data["hot_rules_version"] == HOT_RULES_VERSION
+    # 模拟升级：上一轮快照的规则版本是旧值，分数按旧口径算过。
+    state.data["hot_rules_version"] = HOT_RULES_VERSION - 1
+    grown = [{**rows[0], "score": 20, "story_count": 5}]
+    later = datetime(2026, 10, 9, 10, 30, tzinfo=CN_TZ)
+    assert tick(later, state=state, opener=opener, trading=True, hot_loader=lambda: grown) == []
+    assert len(sent) == 1  # 口径差没有报成升温
+    # 版本一致后，10 倍跳变正常识别。
+    again = datetime(2026, 10, 9, 11, 30, tzinfo=CN_TZ)
+    jumped = [{**rows[0], "score": 40, "story_count": 6}]
+    assert tick(again, state=state, opener=opener, trading=True, hot_loader=lambda: jumped) == ["hot"]
+    assert "升温" in sent[-1]["markdown"]["text"]
 
 
 def test_abnormal_and_t_only_after_baseline(tmp_path, monkeypatch):

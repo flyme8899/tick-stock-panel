@@ -6,22 +6,31 @@ from datetime import datetime
 from app.market_time import CN_TZ
 from app.news.hot_events import (
     _apply_llm,
+    _boundary_reason,
     _cleaned_display_ok,
     _cleaned_headline,
     _clip_at_boundary,
+    _compact,
+    _DATE_LIKE_OPENING,
     _display_clause_ok,
     _display_gate_reason,
     _display_original,
+    _ends_mid_clause,
     _ensure_shown_name,
     _fallback_title_ok,
     _first_credible_title,
     _first_original_title,
     _headline_tier,
+    _is_commentary,
     _keyword_title,
     _llm_title_ok,
     _llm_title_reject_reason,
+    _measure_tail_after_number,
     _original_reject_reason,
     _parse_title_batch,
+    _recover_truncated_title,
+    _resync_importance_score,
+    _segment,
     _subtitle_reject_reason,
 )
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
@@ -1329,3 +1338,307 @@ def test_miss_ttl_is_shorter_than_hot_refresh_period():
     from app.news.hot_snapshot import HOT_REFRESH_SECONDS
 
     assert _MISS_TTL_S < HOT_REFRESH_SECONDS
+
+
+def test_date_opening_titles_are_not_list_markers():
+    """「10月以来…」是日期不是编号清单。「以数字开头」只拦「1. 」「2）」这类。
+
+    线上实测被误杀 6 条，其中「10月以来逾80家A股上市公司获机构调研」是正常
+    机构调研新闻，只因为标题以日期开头就整条丢掉。
+    """
+    assert _original_reject_reason("10月以来逾80家A股上市公司获机构调研") == ""
+    assert _original_reject_reason("1. 财政部发布增量政策") == "以数字开头"
+    assert _original_reject_reason("32财政部发布2026年上半年中") == "以数字开头"
+    assert _original_reject_reason("2）橡胶价格大涨") == "以数字开头"
+
+
+def test_date_opening_covers_months_days_years_and_wire_prefixes():
+    """日期开头的四种形态都放行；技术指标碎片和编号清单仍拦（PR #97 评审）。
+
+    「N日」单独出现只认「N日讯 / N日晚间 / N日早间 / N日以来」——「5日均线」
+    「3日偏离」是技术指标碎片，不是日期。「2026年…」四位年份不再被误杀。
+    """
+    for title in (
+        "10月以来逾80家A股上市公司获机构调研",
+        "12月3日召开重要会议",
+        "2026年经济工作定调",
+        "30日讯美联储宣布降息",
+        "3日晚间多家公司发布公告",
+        "3日以来多地出台新政",
+    ):
+        assert _DATE_LIKE_OPENING.match(title), title
+    for title in ("5日均线突破年线", "3日偏离度扩大"):
+        assert not _DATE_LIKE_OPENING.match(title), title
+        assert _original_reject_reason(title) == "以数字开头", title
+
+
+def test_single_char_tail_is_not_a_cutoff_without_a_longer_peer():
+    """jieba 把未登录词切成单字不等于标题被截断，只有簇里有更长前缀才判。
+
+    实测 4/4 抽样全错：「俄罗斯制裁法」「易方达创新高」「三大指数集体低开」
+    都是完整句子，老代码一律判「词中间截断」；「报114600元/吨」的量词「吨」
+    前一个词是「元」不是数字，量词兜底也失效。
+    """
+    for whole in ("俄罗斯制裁法", "易方达创新高", "三大指数集体低开", "报114600元/吨"):
+        assert _boundary_reason(whole, [whole]) == "", whole
+    # 同簇有另一条更长、且以本条整体开头的标题时，才敢断这是被切剩的半句
+    # （与 _is_harmful_cutoff 同一口径）。
+    cut = "风险可控从容应"
+    assert _boundary_reason(cut, [cut, "风险可控从容应对"]) == "词中间截断"
+    assert _boundary_reason(cut, [cut]) == ""
+    # 没有更长 peer 时也不靠截断上屏：「缺少主体或动作」照样拦。
+    assert _display_gate_reason(cut) == "缺少主体或动作"
+
+
+def test_single_source_cutoff_is_caught_by_the_body_prefix():
+    """单源簇没有同簇长 peer 时，本条自己的正文开头也是截断证据（PR #97 评审）。
+
+    来源自己截断的标题只留下正文开头半句。末词是单字、且标题是某条候选正文
+    的前缀切片时判「词中间截断」。完整短标题不走这条分支 —— 「半导体大涨」
+    的末词是整词，即便正文以它开头也不误判。
+    """
+    cut = "风险可控从容应"
+    assert _boundary_reason(cut, [cut], ["风险可控从容应对，市场情绪保持稳定"]) == "词中间截断"
+    # 没有正文可依时保持「无证据不判」，由「缺少主体或动作」等兜底。
+    assert _boundary_reason(cut, [cut], []) == ""
+    whole = "半导体大涨"
+    assert _boundary_reason(whole, [whole], ["半导体大涨。资金流入超10亿"]) == ""
+
+
+def test_measure_tail_only_looks_at_the_last_two_words():
+    """量词兜底只回看末尾前两个词，不往前扫全文（PR #97 评审）。
+
+    「沪深300指数早盘走低成」：末词「成」是量词，但数字隔了整个句子的距离，
+    这是被截断的尾巴，不能因为标题里出现过指数代码就放行。「报114600元/吨」
+    （「元」量词链式）和「2成」（数字紧邻）仍要放行。
+    """
+    for whole in ("报114600元/吨", "上证50收涨2成", "某产品报13.1元"):
+        words = _segment(whole)
+        assert _measure_tail_after_number(words, words[-1]), whole
+        assert _boundary_reason(whole, [whole]) == "", whole
+    # 数字隔得远的截断尾巴：量词兜底不生效。整条 boundary 仍为空是「无更长
+    # peer 默认不判截断」的既定设计，这种尾巴由「缺少主体或动作」等兜底。
+    words = _segment("沪深300指数早盘走低成")
+    assert not _measure_tail_after_number(words, words[-1])
+    # 「300万股成」与修复目标「114600元/吨」结构同构（数字+量词+量词），
+    # 规则上不可区分，固有代价；「成」结尾另有 _ends_abruptly 等判据兜底。
+    words = _segment("某公司回购超过300万股成")
+    assert _measure_tail_after_number(words, words[-1])
+
+
+def test_policy_line_with_trailing_commentary_is_not_commentary():
+    """国务院级政策句尾挂了点评不被连坐；纯点评、研报口吻和叙事句仍拦。
+
+    「要求」「实施」「印发」不在 _split_headline 的动词表里，老代码把整条
+    政策当成点评丢掉。豁免要求句里有国务院这类具名主体，且主体和动作站得住
+    —— 「数据印证需求正在回暖」没有具名主体，仍是叙事句。
+    """
+    policy = "中共中央、国务院要求全面实施\"人工智能+\"行动 分析师看好AI算力方向"
+    assert _is_commentary(policy) is False
+    assert _display_gate_reason(policy) == ""
+    assert _is_commentary("分析师看好AI安全 趋势明确") is True
+    assert _is_commentary("数据印证需求正在回暖") is True
+    assert _is_commentary("建议关注AI算力方向标的") is True
+
+
+def test_brokerage_commentary_is_not_exempted_by_the_policy_carveout():
+    """券商和外资机构的点评不能蹭政策的豁免（PR #97 评审）。
+
+    豁免要求句里有「具名主体」。_explicit_entities 只认央行部委和国家领导人，
+    券商、外资行不在词表里 —— 「中信证券看好…」的 _has_gate_subject_action 可能
+    成立（词性兜底认出券商主体），但没有具名主体，仍是点评。这条测试锁住边界：
+    将来谁往 _ORG_SUBJECTS/_LEADERS 里加了券商名，这里会红。
+    """
+    for title in (
+        "中信证券看好AI算力方向",
+        "摩根士丹利称黄金值得关注",
+        "高盛推荐布局新能源板块",
+    ):
+        assert _is_commentary(title) is True, title
+        assert _display_gate_reason(title) == "不是具体事件", title
+
+
+def test_importance_resync_keeps_score_in_step_with_the_label():
+    """_apply_llm 改掉 importance 后，_resync_importance_score 只对齐这一项和总分。
+
+    写要点在排序之后，breakdown/score 还是规则级别算的 —— 实测前 20 名里 16 条
+    标签和分数对不上（标签「一般」而 breakdown.importance=130）。其余分项不重算：
+    mapping 会随 concepts/stocks 变，一起算会让名次跟着写没写过要点漂移。
+    """
+    event = {
+        "importance": "一般",
+        "breakdown": {
+            "importance": 20,
+            "confirmation": 10.0,
+            "mapping": 30.0,
+            "freshness": 12.5,
+            "heat": 5.0,
+        },
+        "score": 77.5,
+    }
+    _apply_llm(event, {"importance": "重大"})
+    assert event["importance"] == "重大"
+    # 修复前：标签已是「重大」，breakdown 还是「一般」的分。
+    assert event["breakdown"]["importance"] == 20
+    _resync_importance_score(event)
+    assert event["breakdown"]["importance"] == 130
+    assert event["score"] == round(130 + 10.0 + 30.0 + 12.5 + 5.0, 4)
+    # 其余分项保持写要点前的值。
+    assert event["breakdown"]["confirmation"] == 10.0
+    assert event["breakdown"]["mapping"] == 30.0
+    assert event["breakdown"]["freshness"] == 12.5
+    assert event["breakdown"]["heat"] == 5.0
+    # 已经对齐时不动（幂等）。
+    snapshot = dict(event["breakdown"])
+    _resync_importance_score(event)
+    assert event["breakdown"] == snapshot
+
+
+def test_llm_importance_leaves_score_consistent(tmp_path, monkeypatch):
+    """端到端：模型级别覆盖规则级别后，上榜事件的分数必须和 breakdown 对得上。"""
+    import json
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+    from app.news.hot_events import _IMPORTANCE_POINTS
+
+    reset_store_for_tests(tmp_path / "importance-resync.sqlite")
+    fed = "美联储宣布降息25基点"
+    oil = "WTI原油期货上涨报91.85美元"
+    _insert("fed", fed, 9, 10)
+    _insert("fed-b", fed, 9, 12, source="wscn")
+    _insert("oil", oil, 9, 11)
+    _insert("oil-b", oil, 9, 13, source="wscn")
+
+    def fake(prompt: str, **_kwargs: object) -> str:
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            # 模型把两条都标成「重大」，覆盖规则级别。
+            rows.append({"id": head, "title": "", "importance": "重大"})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", fake)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    events = top_hot_events(NOW)["events"]
+    assert events
+    for event in events:
+        breakdown = event["breakdown"]
+        label = str(event["importance"])
+        assert label in _IMPORTANCE_POINTS
+        assert breakdown["importance"] == _IMPORTANCE_POINTS[label], label
+        assert event["score"] == round(sum(breakdown.values()), 4), label
+
+
+def test_wire_flash_body_opening_with_the_title_is_not_a_cutoff():
+    """wire 快讯的正文常以标题句开头，末词单字 + 正文前缀不等于截断。
+
+    「…苦水难咽」：jieba 把未登录词「难咽」切成单字「咽」，老规则借「标题是
+    正文前缀」判它词中间截断（PR #97 调查里 score 163 的事件就这样被丢）。
+    正文紧随标题的是另一句（「中国政府频频…」），标题其实是完整句。
+    """
+    title = "关税加伊朗战事反噬 美国制造商苦水难咽"
+    text = (
+        "关税加伊朗战事反噬 美国制造商苦水难咽。"
+        "中国政府频频对贸易伙伴挥舞关税大棒，美国制造商苦水难咽。"
+    )
+    assert _boundary_reason(_compact(title), [title], [text]) == ""
+    assert _first_original_title([("wscn", title)], [text]) == (
+        "关税加伊朗战事反噬美国制造商苦水难咽"
+    )
+    # 正文用日期接下一句时同样不是截断（PR #97 测试语料里的「俄罗斯制裁法」）。
+    title2 = "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法"
+    text2 = (
+        "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法。"
+        "10月9日，美国总统特朗普表示，战争结束后油价将会下跌。"
+    )
+    assert _boundary_reason(_compact(title2), [title2], [text2]) == ""
+    # 对照组：末词被切掉的仍然拦截（「从容应」后面正文接着「对」）。
+    cut = "风险可控从容应"
+    assert _boundary_reason(cut, [cut], ["风险可控从容应对，市场情绪保持稳定"]) == "词中间截断"
+
+
+def test_repeated_headline_in_the_body_still_counts_as_cutoff():
+    """源按固定字数截断标题、完整句在正文里重复出现时，仍然判截断。
+
+    「…以便实现能源停」：标题末词「停」是单字，正文第一行就是这条被截的
+    标题、第二行才是完整句「…能源停火。」。正文里标题的第二次出现后面紧跟
+    「火」——「停火」是词，标题确实被从词中间切开了。
+    """
+    cut = "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停"
+    text = (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停\n"
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火。"
+    )
+    assert _boundary_reason(_compact(cut), [cut], [text]) == "词中间截断"
+
+
+def test_continuation_particle_after_the_title_means_mid_phrase_cut():
+    """jieba 词典漏收的词组靠续接虚词兜底。
+
+    「…估值可能约」+「为30亿美元」：「约为」不在词典里、逐字分词切不开，
+    但中文正文不会用「为」开头写新句子——出现即说明标题断在短语中间。
+    """
+    cut = "亚马逊公司正在洽谈收购人工智能初创公司DecartAI，该交易的估值可能约"
+    text = (
+        "亚马逊公司正在洽谈收购人工智能初创公司DecartAI，该交易的估值可能约\n"
+        "亚马逊公司正在洽谈收购人工智能初创公司DecartAI，该交易的估值可能约为30亿美元。"
+    )
+    assert _boundary_reason(_compact(cut), [cut], [text]) == "词中间截断"
+
+
+def test_truncated_title_is_recovered_from_the_body():
+    """标题被源截成半句、正文留着完整句时，捡回完整句（PR #97 调查）。
+
+    句级补全优先；正文把截断标题又重复一遍时（句级会连重复标题一起捞回来），
+    退到词级补全，只把切断的词补完。没有截断证据时不恢复。
+    """
+    cut = "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停"
+    text = (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停\n"
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火。"
+    )
+    assert _recover_truncated_title(cut, [text]).endswith("以便实现能源停火")
+    cut2 = "恒力重工（松发股份）今日调整点"
+    text2 = (
+        "恒力重工（松发股份）今日调整点评恒力重工（松发股份）今日调整点评"
+        "#点评：公司今日股价调整主要受市场情绪影响。"
+    )
+    assert _recover_truncated_title(cut2, [text2]) == "恒力重工（松发股份）今日调整点评"
+    assert _recover_truncated_title("半导体大涨", ["半导体大涨。资金流入超10亿"]) == ""
+
+
+def test_first_original_title_uses_the_recovered_full_sentence():
+    """端到端：截断标题的完整句从正文捡回后当主标题（PR #97 调查）。"""
+    cut = "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停"
+    text = (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停\n"
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火。"
+    )
+    rows = [("glh", cut)]
+    assert _first_original_title(rows, [text]) == (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火"
+    )
+
+
+def test_single_char_bad_tail_only_applies_when_the_last_word_is_bare():
+    """坏尾表单字条目（和/资/中）不误杀完整词尾（PR #97 调查）。
+
+    「压力缓和」「千亿投资」的末词是双字整词，坏尾字只是词的一部分——
+    修复前 score 166 的事件（排名第 10）就这样被丢。只有末词被切成单字
+    功能词收尾（jieba 从「苹果和」切出的「和」）才算截断。
+    """
+    for whole in (
+        "有色金属行业周报：非农不及预期加息预期退潮，短期金属估值压力缓和",
+        "“十五五”北京城市副中心将继续保持每年千亿投资",
+    ):
+        assert _boundary_reason(_display_original(whole), [], []) == ""
+        assert not _ends_mid_clause(whole)
+    assert _boundary_reason(_display_original("苹果和"), [], []) == "词中间截断"
+    assert _ends_mid_clause("苹果和")
+    # 多字条目（集体/进行）仍按结尾匹配。
+    assert _boundary_reason(_display_original("多股集体"), [], []) == "词中间截断"

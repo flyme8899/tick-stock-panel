@@ -24,7 +24,7 @@
 上一收盘之后到下一交易日 9:30，同一股票或同一细概念、并且是同一个动作的稿并成一件，不再卡 6 小时。
 提价、涨价函、上调价格和涨价算同一个提价动作。公司提价至少是重要；写了幅度或再次提价就是重大。
 隔夜和周末的新鲜度从该交易日 9:00 起算；簇里还有更晚的稿时，从最晚那条起算。
-寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。要点缓存版本仍是 v19。
+寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。要点缓存版本是 v20。
 半截标题并回完整事件，提及次数跟着走。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社、经济日报），券商「招商电新…称」，以及研报文件名里的日期戳和 #。第一句太短或没有主体时，把叹号后面的下一句留下。引号没合上时不在引号里截断。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
@@ -117,6 +117,9 @@ _LLM_TITLE_MAX = 48
 _SUBTITLE_MAX = 40
 # 清理后的回退标题如果停在这些残词上，不能拿来顶替没通过的模型标题。
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
+# 标题是正文前缀时，正文紧随标题的虚词只可能是短语中间续接（「可能约」+「为30亿」），
+# 中文正文不用这些字开头写新句子。用来兜底 jieba 词典漏收的词组（约为/着的/了）。
+_CONTINUATION_CHARS = frozenset("为的着了与及或并而则以于和")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
 # 半截标题对照用。第一句通常到不了这么长；再长仍整句保留，页面两行截断。
@@ -130,7 +133,25 @@ _TITLE_DISPLAY_MAX = 80
 # v19: 取文改成「候选与同簇候选比对」（见 _candidate_in_event）。早先拿候选
 #      标题去比跨源重写过的主标题（Jaccard≥0.5），主标题措辞与任何候选都对不上，
 #      被漏掉的 8 条事件正文一条都取不到；v18 把它们的失败写进了 _miss。
-_TITLE_CACHE_VERSION = 19
+# v20: 标题准入 4 处误杀修复 + importance 覆盖后分数对齐（见 _resync_importance_score）。
+#      缓存里存着旧口径 importance 的要点作废重问，push 也靠 HOT_RULES_VERSION
+#      识别新旧快照，避免部署后第一轮把口径差报成「升温」。
+# v21: 标题准入再修误伤并放开截断恢复（_recover_truncated_title，PR #97 复审
+#      Nit）。恢复出的标题会改变指纹、自然重问，但旧口径写下的 _miss 缓存
+#      （「此事件没有合格原标题」）不会——被误判截断而丢弃标题的事件会被旧
+#      _miss 一直压着。升版本把旧 _miss 一并作废（PR #97 复审，2026-10-12）。
+_TITLE_CACHE_VERSION = 21
+# 热门计分/准入口径版本。改 _score_event 的计分、_original_reject_reason 的准入或
+# _resync_importance_score 的同步方式时 +1。push 比较前后两轮快照前校验它：
+# 版本不匹配说明上一轮快照的分数是新口径算不出来的，只建基线不比较，否则
+# importance 20→130 这类口径差会被当成升温跳变（PR #97 评审）。
+# v2: 标题准入再修两处误伤并放开截断恢复（2026-10-12）——①「标题是正文
+#     前缀即判截断」误杀 wire 完整句标题（末词被切成单字），改成逐出现处做
+#     词边界判定；② _CLOSED_TAILS 闭环检查排在悬空字后面永不可达，「压力缓和」
+#     这类末字悬空、末两字整词的完整标题被判半句；③源把标题截成半句时，从
+#     正文完整句恢复（_recover_truncated_title）。真实数据重放：空标题事件
+#     535→499（救回 36 条）。旧口径算不出这些分数，快照只建基线不比较。
+HOT_RULES_VERSION = 2
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -160,6 +181,13 @@ _GATE_HEDGES = ("可能", "或许", "还会", "几次", "多次", "预计", "有
 # 数字后面的单字量词是写完了，不是把词切断。例如 13.1元。
 _MEASURE_TAILS = frozenset("元吨点股成倍")
 _CN_NUMERALS = frozenset("一二三四五六七八九十百千万两")
+# 以数字开头、但其实是日期的标题：「10月以来…」「12月3日…」「2026年…」都是正常新闻。
+# 「以数字开头」这条门槛本来要拦的是「1. 」「2）」这类编号清单。
+# 「N日」单独出现时只认「N日讯 / N日晚间 / N日早间 / N日以来」——「5日均线」
+# 「3日偏离」这类技术指标碎片不是日期，仍按编号拦（PR #97 评审）。
+_DATE_LIKE_OPENING = re.compile(
+    r"^(?:\d{1,2}\s*月(?:\d{1,2}\s*[日号])?|\d{4}\s*年|\d{1,2}\s*日[讯早晚以])"
+)
 # 词典词性里能当主体的标记。普通名词不算，避免「数据」混进去。
 _POS_ENTITY_FLAGS = frozenset({"ns", "nr", "nt", "nz", "j"})
 _POS_ENTITY_MARKS = ("价格", "股价", "公司", "股份", "集团", "指数", "电网", "机场", "银行")
@@ -350,8 +378,29 @@ _GLUE_FOLLOWUPS = frozenset({
 })
 _DANGLING_FINAL = frozenset("的了和与及等把被将已正而或但之以为于对从在超")
 # 以这些字结尾时，只有最后两个字是完整词才算没截断。
+# 悬空字作整词尾很常见（缓和/投资/集中），PR #97 调查里「压力缓和」
+# 「千亿投资」两条高分事件曾被误判成半句（2026-10-12 补齐）。
 _CLOSED_TAILS = {
     "政": frozenset({"新政", "政府", "财政", "行政", "市政", "内政", "党政", "军政"}),
+    "和": frozenset({"缓和", "融合", "温和", "饱和", "柔和", "祥和", "协和", "顺和"}),
+    "资": frozenset({
+        "投资", "资金", "资产", "资源", "薪资", "工资", "融资", "资讯",
+        "资格", "资料", "合资", "集资", "耗资", "出资", "增资", "注资",
+    }),
+    "中": frozenset({"集中", "其中", "适中", "命中", "文中", "盘中", "战中"}),
+    "的": frozenset({"目的", "标的", "有的"}),
+    "了": frozenset({"了解", "了断"}),
+    "已": frozenset({"而已"}),
+    "而": frozenset({"然而"}),
+    "但": frozenset({"不但"}),
+    "在": frozenset({"存在", "实在", "内在", "潜在"}),
+    "对": frozenset({"绝对", "面对"}),
+    "从": frozenset({"无从", "服从", "依从"}),
+    "将": frozenset({"即将"}),
+    "等": frozenset({"同等", "平等", "高等"}),
+    "为": frozenset({"行为", "作为", "人为"}),
+    "于": frozenset({"出于", "位于", "属于", "等于", "高于", "低于", "归于", "至于"}),
+    "及": frozenset({"波及", "提及", "顾及", "来不及"}),
 }
 _SOURCE_HEADS = (
     "财联社", "华尔街见闻", "证券时报", "上海证券报", "中国证券报",
@@ -659,6 +708,12 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     _label_with_llm(_events_for_titles(events))
     for event in events:
         _ensure_shown_name(event)
+    # 写要点会经 _apply_llm 改掉 importance（模型给的级别），而 breakdown/score
+    # 还是上面按规则级别算的。这里只把 importance 这一项和总分对齐，其余分项
+    # 不动：mapping 会随 concepts/stocks 变，一起重算就会让名次跟着写没写过
+    # 要点漂移，打破上面「前 20 必有要点」的保证。
+    for event in events:
+        _resync_importance_score(event)
     # 过滤会改变成员但不重排：名次以上一步为准，保证「前 20 有要点」成立。
     kept = [event for event in events if _keep_shown_event(event)]
     if not kept:
@@ -1169,6 +1224,37 @@ def _score_event(event: dict, now: datetime) -> None:
         "heat": round(heat_bonus, 4),
     }
     event["score"] = round(importance + confirmation + mapping + freshness + heat_bonus, 4)
+
+
+def _resync_importance_score(event: dict) -> None:
+    """importance 被 _apply_llm 改写成模型级别后，只把这一项和总分对齐。
+
+    写要点（_label_with_llm）会经 _apply_llm 用模型给的级别覆盖 importance，
+    而 breakdown/score 还是写要点前按规则级别算的 —— 实测前 20 名里 16 条的
+    标签和分数对不上（标签「一般」而 breakdown.importance=130）。
+    这里只补 importance 一项和总分：mapping 会随 concepts/stocks 变，
+    连它一起重算会让名次跟着「写没写过要点」漂移，打破 _compute 里
+    「前 20 必有要点」的保证，所以其余分项保持写要点前的值。
+    """
+    label = str(event.get("importance") or "一般")
+    if label not in _IMPORTANCE_POINTS:
+        label = "一般"
+        event["importance"] = label
+    breakdown = event.get("breakdown")
+    if not isinstance(breakdown, dict):
+        return
+    importance = _IMPORTANCE_POINTS[label]
+    if float(breakdown.get("importance") or 0.0) == float(importance):
+        return
+    breakdown["importance"] = importance
+    event["score"] = round(
+        importance
+        + float(breakdown.get("confirmation") or 0.0)
+        + float(breakdown.get("mapping") or 0.0)
+        + float(breakdown.get("freshness") or 0.0)
+        + float(breakdown.get("heat") or 0.0),
+        4,
+    )
 
 
 def _confirmation_mapping(event: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -2733,10 +2819,14 @@ def _ends_abruptly(text: str) -> bool:
     if not text:
         return True
     last = text[-1]
-    if last in _DANGLING_FINAL:
-        return True
+    # 闭环词先判：「压力缓和」「千亿投资」的末字是悬空字，但最后两个字是
+    # 完整词，不是半句（PR #97 调查，2026-10-12；此前 _CLOSED_TAILS 因排在
+    # _DANGLING_FINAL 后面永不可达，注释说的「只有最后两个字是完整词才算
+    # 没截断」一直没生效）。
     allowed = _CLOSED_TAILS.get(last)
-    return allowed is not None and text[-2:] not in allowed
+    if allowed is not None:
+        return text[-2:] not in allowed
+    return last in _DANGLING_FINAL
 
 
 def _subject_text(before: str) -> str:
@@ -2908,7 +2998,7 @@ def _ends_mid_clause(text: str) -> bool:
     body = _compact(text)
     if not body:
         return True
-    if any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
+    if _fallback_tail_reason(body):
         return True
     return _ends_abruptly(body)
 
@@ -3207,6 +3297,15 @@ def _is_commentary(text: str) -> bool:
     """侧面佐证、看好、关注、建议这类说法，没有主体和动作时不是事件。"""
     body = _compact(text)
     if not body or not any(cue in body for cue in _COMMENTARY_CUES):
+        return False
+    # 「要求」「实施」「印发」这类政策动词不在 _split_headline 的动词表里，
+    # 切分拿不到动作。于是「中共中央、国务院要求全面实施"人工智能+"行动…
+    # 分析师看好…」整条被当成点评丢掉 —— 那是国务院级政策，只因句尾挂了
+    # 一句点评就被连坐。豁免要同时满足两点：句里有国务院这类具名主体
+    # （「数据印证需求正在回暖」这种叙事句没有），且主体和动作站得住
+    # （_has_gate_subject_action 含词性和政策兜底）。实测它能把政策类
+    # （放行）和纯点评/研报口吻（仍拦）分开。
+    if _explicit_entities(body) and _has_gate_subject_action(body):
         return False
     lead, action, _obj = _split_headline(body)
     return not (action and _subject_ok(lead))
@@ -3612,10 +3711,19 @@ def _headline_blocked(source: str, title: str) -> bool:
     return bool(cleaned and _report_chatter(cleaned))
 
 
-def _original_reject_reason(title: str, sources: list[str] | None = None) -> str:
-    """原标题门槛。不卡 20 字。寒暄、纯点评、研报标签和空标题仍然丢掉。"""
+def _original_reject_reason(
+    title: str,
+    sources: list[str] | None = None,
+    texts: list[str] | None = None,
+) -> str:
+    """原标题门槛。不卡 20 字。寒暄、纯点评、研报标签和空标题仍然丢掉。
+
+    texts 是本事件候选的正文。单源簇没有同簇长 peer 时，标题若是某条正文的
+    开头切片，同样是来源自己截断的证据（见 _cut_off_by_source_text）。
+    """
     text = _compact(str(title or ""))
     blobs = [str(item) for item in (sources or []) if str(item).strip()]
+    bodies = [str(item) for item in (texts or []) if str(item).strip()]
     if not text or text == "事件":
         return "空标题"
     if any(mark in text for mark in _CHATTER_MARKS) or any(mark in text for mark in _NARRATIVE_MARKS):
@@ -3624,7 +3732,9 @@ def _original_reject_reason(title: str, sources: list[str] | None = None) -> str
         return "省略号"
     if _BROKER_NOTE.match(text) or _BROKER_TEAM_LEAD.match(text):
         return "券商前缀"
-    if text[0].isdigit():
+    # 「10月以来逾80家A股上市公司获机构调研」是正常标题。这条门槛本来拦的是
+    # 「1. 」「2）」这类编号清单，日期开头（10月/12日）不该连坐。
+    if text[0].isdigit() and not _DATE_LIKE_OPENING.match(text):
         return "以数字开头"
     if _is_commentary(text) or _watch_or_list_fragment(text) or _misordered_title(text):
         return "不是具体事件"
@@ -3638,7 +3748,7 @@ def _original_reject_reason(title: str, sources: list[str] | None = None) -> str
     name_reason = _title_name_reject_reason(text)
     if name_reason:
         return name_reason
-    boundary = _boundary_reason(text, blobs)
+    boundary = _boundary_reason(text, blobs, bodies)
     if boundary:
         return boundary
     if blobs and _dropped_signing_party(text, "\n".join(blobs)):
@@ -3713,14 +3823,183 @@ def _trailing_latin_fragment(text: str, blobs: list[str]) -> bool:
     return False
 
 
-def _boundary_reason(text: str, blobs: list[str]) -> str:
+def _measure_tail_after_number(words: list[str], last: str) -> bool:
+    """元/吨、成/股：量词紧跟数字或另一个量词，不是词被切断。
+
+    「报114600元/吨」切出来是「114600」「元」「/」「吨」四个词，只看前一个词
+    末字是「元」不是数字，老代码在这里误判「词中间截断」。只回看末尾前两个词：
+    见到以数字或中文数字结尾的（「2成」的「2」），或量词字结尾的（「元/吨」
+    的「元」），就放行。不往前扫全文 —— 「沪深300指数早盘走低成」这种截断
+    尾巴不该因为标题里出现过指数代码就放行（PR #97 评审实测）。
+    """
+    if last not in _MEASURE_TAILS:
+        return False
+    for word in reversed(words[:-1][-2:]):
+        if not word:
+            continue
+        tail = word[-1]
+        if tail.isdigit() or tail in _CN_NUMERALS or tail in _MEASURE_TAILS:
+            return True
+    return False
+
+
+def _cut_off_by_longer_peer(body: str, blobs: list[str]) -> bool:
+    """同簇里有没有另一条更长、且以本条整体开头的标题。有才敢判词中间截断。
+
+    jieba 对未登录词本就会切成单字：「俄罗斯制裁法」「易方达创新高」
+    「三大指数集体低开」都是完整句子，老代码一律判「词中间截断」，
+    实测 4/4 抽样全错。改成与 _is_harmful_cutoff 同一口径 —— 只有簇里
+    另有一条更长、以本条整体开头（说明本条是被切剩的半句）时才判。
+    """
+    for blob in blobs or []:
+        other = _compact(str(blob or ""))
+        if len(other) > len(body) and other.startswith(body):
+            return True
+    return False
+
+
+def _sentence_completion(text: str, start: int) -> str:
+    """text 里 start 处到下一个句末标点（或全文结尾）为止的片段（不含标点）。"""
+    if start >= len(text):
+        return ""
+    m = re.search(r"[。！？；]", text[start:])
+    if not m:
+        return text[start:]
+    return text[start:start + m.start()]
+
+
+def _word_spans_tail(body: str, tail_text: str) -> bool:
+    """tail_text 紧随 body 的那个字，与 body 末字是否构成同一个词。
+
+    「…能源停」+「火…」→「停火」是词，标题被从词中间截断；
+    「…苦水难咽」+「中国政府频频…」→「咽」「中」各是各的词，标题是完整句，
+    只是正文恰好在标题后面接着写（wire 快讯的常见形态）。
+    词典漏收录的组合（「可能约」+「为30亿美元」）靠续接虚词兜底：中文正文
+    不会用「为/的/了」这类虚词开头写新句子，它们出现就意味着标题断在短语中间。
+    """
+    if len(tail_text) <= len(body):
+        return False
+    nxt = tail_text[len(body)]
+    window = _compact(body[-1] + nxt + tail_text[len(body) + 1:len(body) + 3])
+    jieba = _jieba()[0]
+    pos = 0
+    for word in jieba.cut(window, HMM=False):
+        token = str(word)
+        if not token.strip():
+            continue
+        if pos == 0 and len(token) >= 2 and token[0] == body[-1]:
+            return True
+        pos += len(token)
+    return nxt in _CONTINUATION_CHARS
+
+
+def _cut_off_by_source_text(body: str, texts: list[str] | None) -> bool:
+    """本条自己的候选正文里，有没有更长的、以本条整体开头的文本。
+
+    单源簇没有同簇长 peer 可比，来源自己截断的标题（只留下正文开头半句）
+    会漏过。正文在手时，标题是某条正文的前缀切片同样是截断证据
+    （PR #97 评审）。只在末词是单字时调用。
+
+    但「标题是正文前缀」不等于截断（PR #97 调查，2026-10-12）：wire 快讯
+    的正文常常就以标题句开头，「…苦水难咽。中国政府频频…」里标题是完整句。
+    逐出现处看紧随标题的字与标题末字是否构成同一个词（停+火、约+为）——
+    构成才是来源把词切断了；边界干净就放行。源按固定字数截断标题时，全文
+    常在正文里重复出现（「…能源停」+ 完整句「…能源停火。」），所以标题的
+    每次出现都要查，真截断交给 _recover_truncated_title 捡完整句。
+    """
+    for raw in texts or []:
+        text = _compact(str(raw or ""))
+        if len(text) <= len(body) or not text.startswith(body):
+            continue
+        pos = text.find(body)
+        while pos != -1:
+            if _word_spans_tail(body, text[pos:]):
+                return True
+            pos = text.find(body, pos + 1)
+    return False
+
+
+def _complete_cut_word(body: str, tail_text: str) -> str:
+    """把被切断的末词补完：逐字加长到分词器切出完整词为止。
+
+    正文把截断标题又重复一遍时（「…调整点」+「评恒力重工…调整点评#点评：…」），
+    句级补全会连重复的标题一起捞回来。这时候只需要把切断的那个词补上：
+    「…调整点」+「评」→「…调整点评」。
+    """
+    for k in range(1, 7):
+        if len(tail_text) <= len(body) + k:
+            break
+        candidate = body + tail_text[len(body):len(body) + k]
+        words = _segment(candidate)
+        if words and len(words[-1]) >= 2 and not words[-1][-1].isdigit():
+            return candidate
+    return ""
+
+
+def _recover_truncated_title(cleaned: str, texts: list[str] | None) -> str:
+    """标题被源截成半句时，从候选正文里找回完整句。
+
+    源常把标题按固定字数截断（「…以便实现能源停」其实是「…能源停火」），
+    而正文里留着完整句。标题某次出现处紧随的字与末字构成同一个词时，两条
+    补全路子都试，取最短的：
+    1. 句级 —— 补到句末标点；补语里不能又出现整条标题（那是正文把标题重复
+       了一遍，捞回来会是垃圾）；
+    2. 词级 —— 只把被切断的那个词补完（「…调整点」+「评」→「…调整点评」），
+       句级捞不回干净句子时用它。
+    补出来的标题再走一遍原标题门槛（PR #97 调查，2026-10-12）。
+    """
+    body = _compact(cleaned)
+    if len(body) < 8:
+        return ""
+    best = ""
+    for raw in texts or []:
+        text = _compact(str(raw or ""))
+        pos = text.find(body)
+        while pos != -1:
+            tail = text[pos:]
+            if _word_spans_tail(body, tail):
+                candidates = []
+                completion = _sentence_completion(text, pos + len(body))
+                if 0 < len(completion) <= 30 and body not in completion:
+                    candidates.append(body + completion)
+                word_done = _complete_cut_word(body, tail)
+                if word_done:
+                    candidates.append(word_done)
+                for candidate in candidates:
+                    if not best or len(candidate) < len(best):
+                        best = candidate
+            pos = text.find(body, pos + 1)
+    if not best or best == body:
+        return ""
+    return _display_original(best) or best
+
+
+def _fallback_tail_reason(body: str) -> bool:
+    """坏尾词表是否命中。单字条目（和/与/资/的/中）只在整个末词就是它时才算：
+
+    「压力缓和」「千亿投资」的末词是完整双字词，坏尾字只是词的一部分，
+    不是截断（PR #97 调查，2026-10-12：score 166 的事件因此被丢）。
+    只有末词被切成单字功能词收尾（jieba 从「苹果和」切出的「和」）才算。
+    多字条目（集体/进行）仍按结尾匹配。
+    """
+    if not any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
+        return False
+    words = _segment(body)
+    if not words:
+        return True
+    if len(words[-1]) >= 2:
+        return any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS if len(tail) >= 2)
+    return True
+
+
+def _boundary_reason(text: str, blobs: list[str], texts: list[str] | None = None) -> str:
     body = _compact(text)
     if not body:
         return "空标题"
     if (
         _ends_split_verb(body)
         or _ends_mid_number(body)
-        or any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS)
+        or _fallback_tail_reason(body)
     ):
         return "词中间截断"
     if _trailing_latin_fragment(body, blobs):
@@ -3737,10 +4016,16 @@ def _boundary_reason(text: str, blobs: list[str]) -> str:
         pair = prev + last
         if pair in _PRICE_NARRATIVE or pair in _ACTIONS or pair in _GATE_EXTRA_VERBS:
             return ""
-        # 13.1元、六成：量词跟在数字后面，不是把「从容应对」切成「应」。
-        if last in _MEASURE_TAILS and prev and (prev[-1].isdigit() or prev[-1] in _CN_NUMERALS):
+        # 13.1元、六成、114600元/吨：量词跟在数字后面，不是把「从容应对」切成「应」。
+        if _measure_tail_after_number(words, last):
             return ""
-        return "词中间截断"
+        # 单字收尾不等于截断，见 _cut_off_by_longer_peer。
+        if _cut_off_by_longer_peer(body, blobs):
+            return "词中间截断"
+        # 单源簇没有同簇长 peer 时，本条自己的正文开头也是截断证据。
+        if _cut_off_by_source_text(body, texts):
+            return "词中间截断"
+        return ""
     return ""
 
 
@@ -3868,7 +4153,8 @@ def _display_gate_reason(title: str, sources: list[str] | None = None) -> str:
         return "含括号"
     if _BROKER_NOTE.match(text) or _BROKER_TEAM_LEAD.match(text):
         return "券商前缀"
-    if text[0].isdigit():
+    # 日期开头（10月/12日）不是编号清单，见 _DATE_LIKE_OPENING。
+    if text[0].isdigit() and not _DATE_LIKE_OPENING.match(text):
         return "以数字开头"
     if _cut_glued_sentence(text) != text:
         return "粘连了下一句"
@@ -3910,8 +4196,11 @@ def _candidate_rows(event: dict) -> list[tuple[str, str]]:
     return [("", text) for text in _event_title_sources(event)]
 
 
-def _first_original_title(rows: list[tuple[str, str]]) -> str:
-    """按来源档次试新闻原标题。研报和群聊跳过。最可信的一条不合格，就试下一条。"""
+def _first_original_title(rows: list[tuple[str, str]], texts: list[str] | None = None) -> str:
+    """按来源档次试新闻原标题。研报和群聊跳过。最可信的一条不合格，就试下一条。
+
+    texts 是本事件候选的正文，单源簇里拿来当截断证据（见 _cut_off_by_source_text）。
+    """
     ordered = sorted(enumerate(rows), key=lambda item: (_headline_tier(item[1][0], item[1][1]), item[0]))
     blobs = [title for _source, title in rows]
     passing: list[str] = []
@@ -3921,7 +4210,14 @@ def _first_original_title(rows: list[tuple[str, str]]) -> str:
         cleaned = _display_original(title)
         if not cleaned or cleaned in passing:
             continue
-        if _original_reject_reason(cleaned, blobs):
+        reason = _original_reject_reason(cleaned, blobs, texts)
+        if reason == "词中间截断":
+            # 源把标题截成半句时，正文里可能留着完整句，捡回来再试一次。
+            recovered = _recover_truncated_title(cleaned, texts)
+            if recovered and not _original_reject_reason(recovered, blobs, texts):
+                passing.append(recovered)
+            continue
+        if reason:
             continue
         passing.append(cleaned)
     for candidate in passing:
@@ -3947,10 +4243,23 @@ def _awaiting_news_title(event: dict) -> bool:
     return any(_headline_blocked(source, title) for source, title in rows)
 
 
+def _candidate_texts(event: dict) -> list[str]:
+    """候选正文。单源簇里拿来当标题截断的证据（见 _cut_off_by_source_text）。"""
+    rows = event.get("_candidates")
+    if not isinstance(rows, list):
+        return []
+    return [
+        str(row.get("text") or "")
+        for row in rows
+        if isinstance(row, dict) and str(row.get("text") or "").strip()
+    ]
+
+
 def _ensure_shown_name(event: dict) -> None:
     """主标题优先用新闻原标题。没有时，严格门槛通过的模型标题顶上，否则留空。"""
     rows = _candidate_rows(event)
-    original = _first_original_title(rows)
+    texts = _candidate_texts(event)
+    original = _first_original_title(rows, texts)
     subtitle = str(event.get("subtitle") or "")
     if original:
         event["name"] = original
@@ -4196,7 +4505,7 @@ def _keep_shown_event(event: dict) -> bool:
         return False
     name = str(event.get("name") or "")
     blobs = [title for _source, title in _candidate_rows(event)]
-    return _original_reject_reason(name, blobs) == ""
+    return _original_reject_reason(name, blobs, _candidate_texts(event)) == ""
 
 
 def _subtitle_has_source_prefix(text: str) -> bool:
