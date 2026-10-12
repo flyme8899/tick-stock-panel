@@ -1811,6 +1811,22 @@ def test_jinshi_dateline_is_stripped_from_the_headline():
     assert "电价" in price
 
 
+def test_trailing_source_dateline_is_stripped_from_the_headline():
+    """句尾的「来源+日期+讯/电」也要去掉，例如「下调至9%金十数据10月12日讯」。"""
+    shown = _display_original("OPEC+宣布将产量下调至9%金十数据10月12日讯")
+    assert shown.endswith("下调至9%")
+    assert "金十" not in shown
+    assert "10月12日讯" not in shown
+    year = _display_original("原油产量下调至9%金十数据2026年10月12日讯")
+    assert "下调至9%" in year
+    assert "金十" not in year
+    wire = _display_original("原油产量下调至9%新华社10月12日电")
+    assert wire.endswith("下调至9%")
+    assert "新华社" not in wire
+    price = _display_original("10月12日电价下调至9%")
+    assert "电价" in price
+
+
 def test_partial_empty_titles_retry_once_then_fall_back(monkeypatch):
     """8 条里只有 2 条写出要点时，不整批重发，只把空的重写一轮。
 

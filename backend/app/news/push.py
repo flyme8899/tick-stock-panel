@@ -52,6 +52,8 @@ _CHANGE_MARKS = {"new": "新进", "jump": "升温"}
 _KIND_LABELS = {"event": "事件", "sector": "板块", "stock": "个股", "etf": "ETF"}
 
 HOT_CHECK_S = 300
+# 一次新进超过这个数，多半是基线空了或榜单整批换血，只更新基线不推。
+HOT_NEW_BURST = 8
 INTRADAY_CHECK_S = 180
 SLOT_WINDOW = timedelta(minutes=20)
 RATE_LIMIT = 20
@@ -822,6 +824,49 @@ def _open_slot(now: datetime, state: PushState, day: str) -> str | None:
     return None
 
 
+def _coerce_hot_load(loaded) -> tuple[list[dict], str | None]:
+    """测试直接给行列表；正式加载给带 status 的字典。"""
+    if isinstance(loaded, dict):
+        rows = loaded.get("rows") or []
+        status = loaded.get("status")
+        return list(rows), (str(status) if status else None)
+    if not loaded:
+        return [], None
+    return list(loaded), None
+
+
+def _hot_load_usable(rows: list[dict], status: str | None) -> bool:
+    """空结果、正在计算、或缺事件的半成品都不能覆盖上一轮基线。
+
+    重启后事件快照还在算时，板块/个股/ETF 仍可能从资讯库读出来。把这份半截
+    或空列表存进去之后，`[]` 不是 None，下一轮完整榜会整批变成「新进」。
+    """
+    if status in {"computing", "partial"}:
+        return False
+    return bool(rows)
+
+
+def _store_hot_baseline(
+    state: PushState,
+    *,
+    stamp: float,
+    snapshot: list[dict],
+    day: str,
+    view: str,
+    digest: str | None = None,
+    slot: str | None = None,
+) -> None:
+    state.data["last_hot_check"] = stamp
+    state.data["hot_snapshot"] = snapshot
+    state.data["hot_rules_version"] = HOT_RULES_VERSION
+    state.data["hot_day"] = day
+    state.data["hot_view"] = view
+    if digest is not None:
+        state.data["hot_digest"] = digest
+    if slot:
+        state.data["slots"][f"{day}:{slot}"] = stamp
+
+
 def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loader) -> bool:
     open_day = _is_trading(now) if trading is None else trading
     if not open_day:
@@ -835,7 +880,15 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     if slot is None and state.cooling("hot", stamp):
         state.data["last_hot_check"] = stamp
         return False
-    rows = (loader or _load_hot)()
+    rows, status = _coerce_hot_load((loader or _load_hot)())
+    if not _hot_load_usable(rows, status):
+        logger.info(
+            "热点快照未就绪（%s，%s 条），保留上一轮基线",
+            status or "空",
+            len(rows),
+        )
+        state.data["last_hot_check"] = stamp
+        return False
     snapshot = _snapshot_rows(rows)
     previous = state.data.get("hot_snapshot")
     if previous is not None and state.data.get("hot_day") != day:
@@ -866,11 +919,16 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         if changed:
             heading = "【热点候选】变化"
     if heading is None:
-        state.data["last_hot_check"] = stamp
-        state.data["hot_snapshot"] = snapshot
-        state.data["hot_rules_version"] = HOT_RULES_VERSION
-        state.data["hot_day"] = day
-        state.data["hot_view"] = view
+        _store_hot_baseline(state, stamp=stamp, snapshot=snapshot, day=day, view=view)
+        return False
+    new_count = sum(1 for item in changed if item.get("reason") == "new")
+    if new_count > HOT_NEW_BURST:
+        logger.info(
+            "热点候选一次新进 %s 条，超过 %s，只更新基线",
+            new_count,
+            HOT_NEW_BURST,
+        )
+        _store_hot_baseline(state, stamp=stamp, snapshot=snapshot, day=day, view=view)
         return False
     limit = top_n()
     events = [row for row in snapshot if row["kind"] == "event"][:limit]
@@ -893,13 +951,9 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     digest = _hot_digest(day, packed[1])
     if state.data.get("hot_digest") == digest:
         logger.info("钉钉热点候选内容与上次相同，跳过 %s", heading)
-        state.data["last_hot_check"] = stamp
-        state.data["hot_snapshot"] = snapshot
-        state.data["hot_rules_version"] = HOT_RULES_VERSION
-        state.data["hot_day"] = day
-        state.data["hot_view"] = view
-        if slot:
-            state.data["slots"][f"{day}:{slot}"] = stamp
+        _store_hot_baseline(
+            state, stamp=stamp, snapshot=snapshot, day=day, view=view, slot=slot,
+        )
         return False
     if not _send("hot", packed[0], packed[1], opener, stamp, state):
         return False
@@ -909,14 +963,9 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         heading,
         "、".join(_hot_names(changed, events, sectors, stocks, etfs)),
     )
-    state.data["last_hot_check"] = stamp
-    state.data["hot_snapshot"] = snapshot
-    state.data["hot_rules_version"] = HOT_RULES_VERSION
-    state.data["hot_day"] = day
-    state.data["hot_view"] = view
-    state.data["hot_digest"] = digest
-    if slot:
-        state.data["slots"][f"{day}:{slot}"] = stamp
+    _store_hot_baseline(
+        state, stamp=stamp, snapshot=snapshot, day=day, view=view, digest=digest, slot=slot,
+    )
     state.cool_until("hot", stamp, hot_cooldown_s())
     return True
 
@@ -1042,10 +1091,14 @@ def _detail_lookup(kind: str, fresh) -> dict:
     return {(symbol, reason): labels.get(reason, reason) for symbol, reason in fresh}
 
 
-def _load_hot() -> list[dict]:
+def _load_hot() -> dict:
+    """带上事件快照 status。正在计算时板块候选仍可能有数，调用方不能拿去当基线。"""
     from app.news.service import hot_candidates, hot_event_listing
+    listing = hot_event_listing(limit=top_n())
+    raw_status = listing.get("status")
+    status = str(raw_status) if raw_status else None
     rows = []
-    for event in hot_event_listing(limit=top_n())["events"]:
+    for event in listing["events"]:
         rows.append({
             "kind": "event",
             "key": event["key"],
@@ -1074,7 +1127,13 @@ def _load_hot() -> list[dict]:
                 "sources": list(item.sources),
                 "growth": item.growth,
             })
-    return rows
+    settled = status in {"ready", "stale"}
+    has_events = any(row["kind"] == "event" for row in rows)
+    # 事件列表还没落地时，后面的板块/个股/ETF 只是半截榜。
+    if status == "computing" or (not settled and not has_events):
+        marked = "computing" if status == "computing" else "partial"
+        return {"rows": rows, "status": marked}
+    return {"rows": rows, "status": status or "ready"}
 
 
 def _attach_refs(

@@ -177,7 +177,9 @@ _TITLE_CACHE_VERSION = 22
 #     （加息/关税/制裁/收紧）被退潮、回落、降温等修饰时翻成利好，此前一律判
 #     利空——线上实测「加息预期退潮」等 4 例全判反。方向影响 _MAPPING_DIRECTION
 #     计分，分数因此变动，旧快照算不出新分，升版本只建基线不比较。
-HOT_RULES_VERSION = 6
+# v7: 句尾电头也剥掉（「下调至9%金十数据10月12日讯」，2026-10-12）。此前只认
+#     开头。展示标题一变，旧快照和下一轮榜对不上，部署后第一轮只建基线不比较。
+HOT_RULES_VERSION = 7
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -491,6 +493,14 @@ _SOURCE_DATELINE = re.compile(
     r"(?:\d{4}\s*年\s*)?\d{1,2}\s*月\s*\d{1,2}\s*日\s*讯"
     r")"
     r"[，,：:\s]*"
+)
+# 粘在句尾的同一类电头，例如「下调至9%金十数据10月12日讯」。必须带上来源名，
+# 没有来源的「日电」要留给「电价」。
+_TRAILING_SOURCE_DATELINE = re.compile(
+    r"(?:" + _SOURCE_ALT + r")\s*"
+    r"(?:\d{4}\s*年\s*)?"
+    r"\d{1,2}\s*月\s*\d{1,2}\s*日\s*"
+    r"(?:电|讯)\s*$"
 )
 _SOURCE_LABEL = re.compile(
     r"^(?:(?:" + _SOURCE_ALT + r")(?:报道|快讯|讯|电)?|快讯|突发|独家|刚刚)[：:|｜]"
@@ -2996,6 +3006,7 @@ def _strip_source_prefix(text: str, *, keep_quotes: bool = False) -> str:
             if updated != body:
                 body = updated.lstrip("，。！？、；：")
                 changed = True
+    body = _TRAILING_SOURCE_DATELINE.sub("", body)
     body = _BROKER_TEAM_TAIL.sub("", body)
     body = _REUTERS_TAIL.sub("", body)
     body = _BROKEN_BRACKET.sub("", body)

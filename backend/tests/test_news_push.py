@@ -14,10 +14,12 @@ from app.news.dingtalk import signed_url
 from app.news.host_collector import send_dingtalk
 from app.news.hot_events import HOT_RULES_VERSION
 from app.news.push import (
+    HOT_NEW_BURST,
     PushState,
     _cached_live_rows,
     _live_rows,
     _load_abnormal,
+    _load_hot,
     _load_t,
     abnormal_signals,
     count_rule_edges,
@@ -391,6 +393,115 @@ def test_auction_open_drops_prior_intraday_without_a_change_flood(tmp_path, monk
     ) == ["hot"]
     assert "机器人" in sent[-1]["markdown"]["text"]
     assert state.data["hot_view"] == "2026-10-12|2026-10-12"
+
+
+def _enable_hot(monkeypatch) -> None:
+    monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)
+    monkeypatch.setattr("app.news.push.push_type_enabled", lambda kind: kind == "hot")
+    monkeypatch.setattr(
+        "app.config.settings.dingtalk_webhook_url",
+        "https://oapi.dingtalk.com/robot/send?access_token=test",
+    )
+    monkeypatch.setattr("app.config.settings.dingtalk_secret", "")
+    monkeypatch.setattr("app.config.settings.news_push_top_n", 5)
+    monkeypatch.setattr("app.config.settings.news_push_min_stories", 2)
+    monkeypatch.setattr("app.config.settings.news_push_score_jump", 0.5)
+    monkeypatch.setattr("app.config.settings.news_push_hot_cooldown_min", 30)
+
+
+def _collect(sent: list):
+    def opener(request, timeout=10):
+        sent.append(json.loads(request.data.decode()))
+        return None
+
+    return opener
+
+
+def test_restart_empty_snapshot_then_full_board_does_not_push(tmp_path, monkeypatch):
+    """重启后先遇到空快照，再遇到第一份完整榜，不能推「变化」。
+
+    空结果或正在计算的半截榜若被写成基线，下一轮完整榜会整批变成新进。
+    """
+    _enable_hot(monkeypatch)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+    board = [_sector("半导体", 2, 3), _sector("银行", 3, 3)]
+    restarted = datetime(2026, 10, 12, 9, 30, tzinfo=CN_TZ)
+    assert tick(
+        restarted, state=state, opener=_collect(sent), trading=True,
+        hot_loader=lambda: {"rows": [], "status": "computing"},
+    ) == []
+    assert "hot_snapshot" not in state.data
+    assert sent == []
+
+    later = restarted + timedelta(minutes=6)
+    assert tick(
+        later, state=state, opener=_collect(sent), trading=True,
+        hot_loader=lambda: board,
+    ) == []
+    assert sent == []
+    assert [row["key"] for row in state.data["hot_snapshot"]] == ["半导体", "银行"]
+
+    # 已经有基线之后，计算中的半截榜（只有板块）也不能覆盖它。
+    partial = restarted + timedelta(minutes=12)
+    assert tick(
+        partial, state=state, opener=_collect(sent), trading=True,
+        hot_loader=lambda: {"rows": [_sector("机器人", 9, 4)], "status": "computing"},
+    ) == []
+    assert [row["key"] for row in state.data["hot_snapshot"]] == ["半导体", "银行"]
+    again = restarted + timedelta(minutes=18)
+    assert tick(
+        again, state=state, opener=_collect(sent), trading=True,
+        hot_loader=lambda: board,
+    ) == []
+    assert sent == []
+
+
+def test_load_hot_marks_computing_snapshot_partial(monkeypatch):
+    """事件快照还在算时，板块候选有数也要标成 computing，不能当完整榜。"""
+    monkeypatch.setattr(
+        "app.news.service.hot_event_listing",
+        lambda limit=20: {"events": [], "status": "computing"},
+    )
+    monkeypatch.setattr(
+        "app.news.service.hot_candidates",
+        lambda kind, limit: [SimpleNamespace(
+            kind=kind, key="半导体", name="半导体", score=2, story_count=3,
+            sources=["cls"], growth=1.5,
+        )],
+    )
+    loaded = _load_hot()
+    assert loaded["status"] == "computing"
+    assert loaded["rows"]
+    assert {row["kind"] for row in loaded["rows"]} == {"sector", "stock", "etf"}
+
+
+def test_hot_new_burst_sets_baseline_without_push(tmp_path, monkeypatch):
+    """一次新进超过上限时只换基线，不把整批名单推出去。单独一条新进仍会推。"""
+    _enable_hot(monkeypatch)
+    monkeypatch.setattr("app.config.settings.news_push_top_n", 20)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+    start = datetime(2026, 10, 12, 9, 30, tzinfo=CN_TZ)
+    assert tick(
+        start, state=state, opener=_collect(sent), trading=True,
+        hot_loader=lambda: [_sector("半导体", 2, 3)],
+    ) == []
+    burst = [_sector(f"板块{index}", 2, 3) for index in range(HOT_NEW_BURST + 1)]
+    assert tick(
+        start + timedelta(minutes=6), state=state, opener=_collect(sent), trading=True,
+        hot_loader=lambda: burst,
+    ) == []
+    assert sent == []
+    assert [row["key"] for row in state.data["hot_snapshot"]] == [row["key"] for row in burst]
+
+    added = [*burst, _sector("新能源", 3, 3)]
+    assert tick(
+        start + timedelta(minutes=12), state=state, opener=_collect(sent), trading=True,
+        hot_loader=lambda: added,
+    ) == ["hot"]
+    assert "新能源" in sent[-1]["markdown"]["text"]
+    assert "【热点候选】变化" in sent[-1]["markdown"]["text"]
 
 
 def test_abnormal_and_t_only_after_baseline(tmp_path, monkeypatch):
