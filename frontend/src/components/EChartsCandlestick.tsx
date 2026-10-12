@@ -356,6 +356,26 @@ interface Props {
   addedDate?: string | null
   /** 带 markerId 的买卖点悬停。点为空表示离开标记。 */
   onMarkerHover?: (markerId: string | null, point?: { x: number; y: number }) => void
+  /** 右侧筹码柱。有宽度就留出边距；bins 到达后再画。 */
+  chip?: ChipOverlay | null
+  /** 十字线所在交易日。离开图表时为 null。 */
+  onHoverDate?: (date: string | null) => void
+}
+
+export interface ChipBinPoint {
+  price: number
+  ratio: number
+  profit?: boolean
+}
+
+export interface ChipOverlay {
+  width: number
+  bins?: ChipBinPoint[]
+  close?: number | null
+  avgCost?: number | null
+  cost90Low?: number | null
+  cost90High?: number | null
+  accuracy?: number | null
 }
 
 // 序列颜色 (双主题通用); 画布轴/网格/文字等主题相关色走 CT() 动态取
@@ -602,6 +622,74 @@ function buildMarkPointData(
   return markPointData
 }
 
+function buildChipSeries(chip: ChipOverlay | null | undefined): any | null {
+  const bins = chip?.bins?.filter(bin => bin.ratio > 0) ?? []
+  if (!chip || chip.width <= 0 || bins.length === 0) return null
+  const strip = Math.max(8, chip.width - 4)
+  const maxRatio = bins.reduce((peak, bin) => Math.max(peak, bin.ratio), 0) || 1
+  const accuracy = chip.accuracy && chip.accuracy > 0 ? chip.accuracy : 0.01
+  return {
+    name: '筹码',
+    type: 'custom',
+    xAxisIndex: 0,
+    yAxisIndex: 0,
+    silent: true,
+    animation: false,
+    clip: false,
+    z: 2,
+    data: [0],
+    renderItem: (params: any, api: any) => {
+      const coord = params.coordSys
+      if (!coord) return
+      const x0 = coord.x + coord.width + 4
+      const yOf = (price: number) => api.coord([0, price])[1] as number
+      const children: any[] = []
+      if (chip.cost90Low != null && chip.cost90High != null) {
+        const yHigh = yOf(chip.cost90High)
+        const yLow = yOf(chip.cost90Low)
+        const top = Math.max(coord.y, Math.min(yHigh, yLow))
+        const bottom = Math.min(coord.y + coord.height, Math.max(yHigh, yLow))
+        if (bottom > top) {
+          children.push({
+            type: 'rect',
+            shape: { x: x0, y: top, width: strip, height: bottom - top },
+            style: { fill: 'rgba(245, 158, 11, 0.16)' },
+          })
+        }
+      }
+      for (const bin of bins) {
+        const yTop = yOf(bin.price + accuracy)
+        const yBottom = yOf(bin.price)
+        const top = Math.max(coord.y, Math.min(yTop, yBottom))
+        const bottom = Math.min(coord.y + coord.height, Math.max(yTop, yBottom))
+        if (bottom - top < 0.4) continue
+        const profit = chip.close != null ? chip.close >= bin.price : !!bin.profit
+        children.push({
+          type: 'rect',
+          shape: {
+            x: x0,
+            y: top,
+            width: Math.max(1, (bin.ratio / maxRatio) * strip),
+            height: Math.max(1, bottom - top),
+          },
+          style: { fill: profit ? '#C74040' : '#2D9B65' },
+        })
+      }
+      if (chip.avgCost != null && chip.avgCost > 0) {
+        const y = yOf(chip.avgCost)
+        if (y >= coord.y && y <= coord.y + coord.height) {
+          children.push({
+            type: 'line',
+            shape: { x1: x0, y1: y, x2: x0 + strip, y2: y },
+            style: { stroke: '#D97706', lineWidth: 1.5 },
+          })
+        }
+      }
+      return { type: 'group', children }
+    },
+  }
+}
+
 function buildOption(
   data: OHLC[],
   dates: string[],
@@ -617,6 +705,7 @@ function buildOption(
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
   addedDate: string | null | undefined,
+  chip?: ChipOverlay | null,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -625,7 +714,8 @@ function buildOption(
 
   // ====== 布局计算 ======
   const left = 60
-  const right = 20
+  const chipWidth = chip && chip.width > 0 ? chip.width : 0
+  const right = chipWidth > 0 ? 8 + chipWidth : 20
   const topPad = 8
   const candleBottomPad = 22
 
@@ -795,6 +885,9 @@ function buildOption(
     series.push(maLine('ma20', THEME.ma20, 'MA20'))
     series.push(maLine('ma60', THEME.ma60, 'MA60'))
   }
+
+  const chipSeries = buildChipSeries(chip)
+  if (chipSeries) series.push(chipSeries)
 
   // 加入自选日标注: 蓝色竖虚线从该根K线的下沿连到主图底端的「自选」标签。
   // 用 custom series 而非 markLine: 两端要贴网格底边, 而 y 轴随 dataZoom 动态定界,
@@ -984,6 +1077,8 @@ export function EChartsCandlestick({
   volumeCompare = { enabled: true, days: 1 },
   addedDate,
   onMarkerHover,
+  chip,
+  onHoverDate,
 }: Props) {
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -996,6 +1091,8 @@ export function EChartsCandlestick({
   onPriceDoubleClickRef.current = onPriceDoubleClick
   const onMarkerHoverRef = useRef(onMarkerHover)
   onMarkerHoverRef.current = onMarkerHover
+  const onHoverDateRef = useRef(onHoverDate)
+  onHoverDateRef.current = onHoverDate
   // 主题: buildOption/信息栏内部通过 CT() 动态取调色板, 这里只负责切换时触发重建
   const theme = useTheme()
 
@@ -1181,7 +1278,10 @@ export function EChartsCandlestick({
     // The outer chart surface stays under the pointer when the info bar wraps and
     // pushes the canvas down, so hover visibility cannot oscillate at that boundary.
     const handlePointerEnter = () => { if (setHoverActive(true)) writeInfoBar() }
-    const handlePointerLeave = () => { if (setHoverActive(false)) writeInfoBar() }
+    const handlePointerLeave = () => {
+      if (setHoverActive(false)) writeInfoBar()
+      onHoverDateRef.current?.(null)
+    }
     hoverEl.addEventListener('mouseenter', handlePointerEnter)
     hoverEl.addEventListener('mouseleave', handlePointerLeave)
 
@@ -1203,6 +1303,7 @@ export function EChartsCandlestick({
       if (foundIdx < 0) return
       const idxChanged = infoIdxRef.current !== foundIdx
       if (idxChanged) infoIdxRef.current = foundIdx
+      if (idxChanged) onHoverDateRef.current?.(d[foundIdx].date)
       // 竖虚线命中 K 线即悬停成立: 切股后竖虚线重画而鼠标没离开图表区, 等不到 mouseenter, 靠这里复显
       const hoverResumed = setHoverActive(true)
       if (idxChanged || hoverResumed) writeInfoBar()
@@ -1329,6 +1430,7 @@ export function EChartsCandlestick({
       linkedPrice,
       volumeCompare,
       addedDate,
+      chip,
     )
 
     chart.setOption(option, true)
@@ -1346,7 +1448,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chip, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

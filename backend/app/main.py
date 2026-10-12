@@ -17,6 +17,7 @@ from app.api import (
     alerts,
     analysis,
     backtest,
+    chip,
     data,
     ext_data,
     events,
@@ -626,6 +627,7 @@ async def auth_middleware(request: Request, call_next):
 app.include_router(core_router)
 app.include_router(auth_api.router)
 app.include_router(kline.router)
+app.include_router(chip.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
 app.include_router(backtest.router)

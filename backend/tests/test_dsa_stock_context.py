@@ -259,3 +259,73 @@ def test_stock_context_and_sniper_routes_use_feed_token(monkeypatch):
         denied = asyncio.run(auth_middleware(_request(path, header="nope"), _ok))
         assert allowed.status_code == 200
         assert denied.status_code == 404
+
+
+def test_chip_section_lists_profit_and_trapped_zones():
+    payload = render_context(
+        symbol="300829.SZ",
+        now=NOW,
+        events=[],
+        red_news=[],
+        flow_rows=[],
+        quote=None,
+        chip={
+            "computable": True,
+            "date": "2026-10-09",
+            "benefit_ratio": 0.5,
+            "avg_cost": 12.03,
+            "avg_cost_bias": 0.097,
+            "concentration_90": 0.1115,
+            "concentration_70": 0.0815,
+            "trapped_zones": [{"low": 13.2, "high": 13.4, "share": 0.12}],
+        },
+    )
+    text = payload["text"]
+    assert "获利比例: 50.00%" in text
+    assert "平均成本: 12.03" in text
+    assert "上方套牢区: 13.2-13.4 占 12.00%" in text
+    assert "本地计算（东财算法）" in text
+    assert "估算" in text
+    assert "chip" not in payload["missing"]
+
+
+def test_chip_section_is_omitted_unless_the_caller_asks():
+    payload = render_context(
+        symbol="300829.SZ", now=NOW, events=[], red_news=[], flow_rows=[], quote=None,
+    )
+    assert "筹码分布" not in payload["text"]
+
+
+def test_missing_chip_is_labeled_missing():
+    payload = render_context(
+        symbol="300829.SZ", now=NOW, events=[], red_news=[], flow_rows=[], quote=None, chip=None,
+    )
+    assert "状态: 缺失" in payload["text"]
+    assert "本地计算（东财算法）" in payload["text"]
+    assert "chip" in payload["missing"]
+
+
+def test_load_context_keeps_chip_when_other_sections_fail(monkeypatch):
+    def boom(symbol, now):
+        raise RuntimeError("hot")
+
+    monkeypatch.setattr(stock_context, "_load_events", boom)
+    monkeypatch.setattr(stock_context, "_load_red_news", lambda symbol: [])
+    monkeypatch.setattr(stock_context, "_load_flow", lambda symbol, events: {"rows": [], "sector": None, "concepts": []})
+    monkeypatch.setattr(stock_context, "_load_bars", lambda repo, symbol, now: None)
+    monkeypatch.setattr(stock_context, "_load_event_lines", lambda symbol: [])
+    monkeypatch.setattr(stock_context, "_load_ima_lines", lambda symbol: [])
+    monkeypatch.setattr(stock_context, "_load_chip", lambda symbol: {
+        "computable": True,
+        "date": "2026-10-09",
+        "benefit_ratio": 0.42,
+        "avg_cost": 10.0,
+        "avg_cost_bias": -0.01,
+        "concentration_90": 0.2,
+        "concentration_70": 0.1,
+        "trapped_zones": [{"low": 11.0, "high": 12.0, "share": 0.2}],
+    })
+    payload = stock_context.load_context("300829", now=NOW, repo=None)
+    assert "42.00%" in payload["text"]
+    assert "上方套牢区" in payload["text"]
+    assert "业绩预增" not in payload["text"]

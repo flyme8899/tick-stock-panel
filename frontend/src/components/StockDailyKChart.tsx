@@ -1,13 +1,15 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { type KlineRow } from '@/lib/api'
+import { api, type ChipDistribution, type KlineRow } from '@/lib/api'
 import { klineDailyQueryOptions } from '@/lib/kline'
+import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
   EChartsCandlestick,
   OVERLAY_INDICATORS,
   SUB_CHARTS,
   type ChartMarker,
+  type ChipOverlay,
   type ChartPriceLine,
   type ChartRange,
   type OHLC,
@@ -53,6 +55,23 @@ interface Props {
 
 function isValidRow(r: any): boolean {
   return r && r.date != null && r.open != null && r.close != null
+}
+
+function isChipPayload(data: unknown): data is ChipDistribution {
+  return !!data && typeof data === 'object' && Array.isArray((data as ChipDistribution).bins)
+}
+
+function useChipStripWidth(): number {
+  const [narrow, setNarrow] = useState(false)
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia('(max-width: 639px)')
+    const apply = () => setNarrow(media.matches)
+    apply()
+    media.addEventListener?.('change', apply)
+    return () => media.removeEventListener?.('change', apply)
+  }, [])
+  return narrow ? 48 : 72
 }
 
 export function toOHLC(rows: KlineRow[]): OHLC[] {
@@ -155,6 +174,11 @@ export function StockDailyKChart({
   const [showMarkers, setShowMarkers] = useState(true)
   // 形态标签默认关闭，且不写入本地存储：首次进入和刷新后都是关的，要手动打开
   const [showPatternMarkers, setShowPatternMarkers] = useState(false)
+  // 筹码柱默认打开。分布随悬停日期现算，不写入本地存储。
+  const [showChip, setShowChip] = useState(true)
+  const [hoveredDate, setHoveredDate] = useState<string | null>(null)
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const chipStripWidth = useChipStripWidth()
   // 加入自选日标注（与「异动」标记相互独立）
   const [showAddedMark, setShowAddedMark] = useState(true)
   const [volumeCompare, setVolumeCompare] = useState<VolumeCompareConfig>(() =>
@@ -166,6 +190,32 @@ export function StockDailyKChart({
   const kline = useQuery({ ...klineDailyQueryOptions(symbol, dateRange, extColumns), enabled: !!symbol })
 
   const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
+  const latestDate = rows.length > 0 ? rows[rows.length - 1].date : null
+  const chipDate = hoveredDate ?? latestDate
+  const chipQuery = useQuery({
+    queryKey: QK.chip(symbol, chipDate ?? ''),
+    queryFn: () => api.chipDistribution(symbol, chipDate),
+    enabled: showChip && !!symbol && !!chipDate,
+    staleTime: 5 * 60_000,
+    placeholderData: (previous, previousQuery) => {
+      if (!isChipPayload(previous)) return undefined
+      if (previousQuery?.queryKey?.[1] !== symbol) return undefined
+      return previous
+    },
+  })
+  const chipView = isChipPayload(chipQuery.data) ? chipQuery.data : null
+  const chipOverlay = useMemo<ChipOverlay | null>(() => {
+    if (!showChip) return null
+    return {
+      width: chipStripWidth,
+      bins: chipView?.computable ? chipView.bins : undefined,
+      close: chipView?.close,
+      avgCost: chipView?.avg_cost,
+      cost90Low: chipView?.cost_90_low,
+      cost90High: chipView?.cost_90_high,
+      accuracy: chipView?.accuracy,
+    }
+  }, [chipStripWidth, chipView, showChip])
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
   const patternMarkers = useMemo(
@@ -180,6 +230,19 @@ export function StockDailyKChart({
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
+  }, [])
+
+  useEffect(() => {
+    setHoveredDate(null)
+  }, [symbol])
+
+  useEffect(() => () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+  }, [])
+
+  const onHoverDate = useCallback((date: string | null) => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current)
+    hoverTimer.current = setTimeout(() => setHoveredDate(date), 80)
   }, [])
 
   const updateVolumeCompare = useCallback((patch: Partial<VolumeCompareConfig>) => {
@@ -203,7 +266,7 @@ export function StockDailyKChart({
   return (
     <div className={className} style={{ minHeight: chartHeight }}>
       {showIndicatorControls && rows.length > 0 && (
-        <div className="flex items-center gap-1.5 px-1 pb-0.5">
+        <div className="flex flex-wrap items-center gap-1.5 px-1 pb-0.5">
           {SUB_CHARTS.map(ind => (
             <ChartPill
               key={ind.key}
@@ -272,6 +335,19 @@ export function StockDailyKChart({
               onClick={() => setShowPatternMarkers(v => !v)}
             />
           )}
+            <ChartPill
+              active={showChip}
+              label="筹码"
+              activeClass="text-[#C74040] bg-[#C74040]/10"
+              title={showChip ? '隐藏筹码分布。本地计算（东财算法），估算' : '显示筹码分布。本地计算（东财算法），估算'}
+              onClick={() => setShowChip(v => !v)}
+            />
+            {showChip && chipView?.computable && chipView.benefit_ratio != null && (
+              <span className="text-[10px] font-mono text-muted whitespace-nowrap">
+                获利 {(chipView.benefit_ratio * 100).toFixed(1)}%
+                {chipView.avg_cost != null ? ` 成本 ${chipView.avg_cost.toFixed(2)}` : ''}
+              </span>
+            )}
             {/* 激活色与图表里的 ADDED_DATE_COLOR 一致; Tailwind 只认字面量类名, 故写死色值 */}
             {showMarkerToggle && addedDate && (
               <ChartPill
@@ -309,6 +385,8 @@ export function StockDailyKChart({
           activeIndicators={activeIndicators}
           volumeCompare={volumeCompare}
           addedDate={showAddedMark ? addedDate : null}
+          chip={chipOverlay}
+          onHoverDate={onHoverDate}
         />
       )}
     </div>

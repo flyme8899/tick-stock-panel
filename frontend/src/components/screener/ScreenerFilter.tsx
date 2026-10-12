@@ -4,6 +4,18 @@ import { api, type CandlePatternInfo } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { BOARDS, getBoardType } from '@/lib/board'
 
+function passesRatio(raw: unknown, min: string, max: string): boolean {
+  const bound = (text: string) => text === '' ? null : Number(text)
+  const lo = bound(min)
+  const hi = bound(max)
+  if (lo == null && hi == null) return true
+  if (raw == null || raw === '' || Number.isNaN(Number(raw))) return false
+  const value = Number(raw) * 100
+  if (lo != null && value < lo) return false
+  if (hi != null && value > hi) return false
+  return true
+}
+
 // ===== 筛选类型 =====
 
 export interface ScreenerFilter {
@@ -21,6 +33,14 @@ export interface ScreenerFilter {
   volRatioMin: string    // 量比最小
   rsiMin: string
   rsiMax: string
+  benefitMin: string
+  benefitMax: string
+  costBiasMin: string
+  costBiasMax: string
+  conc90Min: string
+  conc90Max: string
+  conc70Min: string
+  conc70Max: string
   boards: string[]       // 板块筛选: 空数组=不筛选, 否则只保留选中的板块
   excludeST: boolean     // 是否排除 ST/*ST/退市股
   patternId: string      // 蜡烛形态 id，空=不筛
@@ -37,6 +57,10 @@ export const defaultFilter: ScreenerFilter = {
   floatCapMin: '', floatCapMax: '',
   volRatioMin: '',
   rsiMin: '', rsiMax: '',
+  benefitMin: '', benefitMax: '',
+  costBiasMin: '', costBiasMax: '',
+  conc90Min: '', conc90Max: '',
+  conc70Min: '', conc70Max: '',
   boards: [],
   excludeST: false,
   patternId: '',
@@ -64,6 +88,10 @@ export function countActiveFilters(f: ScreenerFilter): number {
   if (f.floatCapMin || f.floatCapMax) n++
   if (f.volRatioMin) n++
   if (f.rsiMin || f.rsiMax) n++
+  if (f.benefitMin || f.benefitMax) n++
+  if (f.costBiasMin || f.costBiasMax) n++
+  if (f.conc90Min || f.conc90Max) n++
+  if (f.conc70Min || f.conc70Max) n++
   if (f.boards.length > 0) n++
   if (f.excludeST) n++
   if (f.patternId) n++
@@ -119,6 +147,11 @@ export function applyFilter(
     const rsi = r.rsi_14 ?? 0
     if (v(f.rsiMin) != null && rsi < v(f.rsiMin)!) return false
     if (v(f.rsiMax) != null && rsi > v(f.rsiMax)!) return false
+    // 筹码比率在结果里是 0–1，筛选框按百分数。空值通不过已填写的条件。
+    if (!passesRatio(r.benefit_ratio, f.benefitMin, f.benefitMax)) return false
+    if (!passesRatio(r.avg_cost_bias, f.costBiasMin, f.costBiasMax)) return false
+    if (!passesRatio(r.concentration_90, f.conc90Min, f.conc90Max)) return false
+    if (!passesRatio(r.concentration_70, f.conc70Min, f.conc70Max)) return false
     return true
   })
 }
@@ -166,7 +199,9 @@ export function FilterPanel({ value, onChange, onClose, onReset }: {
     'priceMin' | 'priceMax' | 'changePctMin' | 'changePctMax' |
     'momentum5dMin' | 'momentum5dMax' | 'amountMin' |
     'marketCapMin' | 'marketCapMax' | 'floatCapMin' | 'floatCapMax' |
-    'volRatioMin' | 'rsiMin' | 'rsiMax'>
+    'volRatioMin' | 'rsiMin' | 'rsiMax' |
+    'benefitMin' | 'benefitMax' | 'costBiasMin' | 'costBiasMax' |
+    'conc90Min' | 'conc90Max' | 'conc70Min' | 'conc70Max'>
   const fields: { label: string; min: NumKey; max: NumKey; unit: string; step?: string }[] = [
     { label: '现价',      min: 'priceMin',      max: 'priceMax',      unit: '元', step: '0.1' },
     { label: '涨跌幅',    min: 'changePctMin',   max: 'changePctMax',  unit: '%' },
@@ -176,6 +211,10 @@ export function FilterPanel({ value, onChange, onClose, onReset }: {
     { label: '流通市值',  min: 'floatCapMin',    max: 'floatCapMax',   unit: '亿', step: '10' },
     { label: '量比',      min: 'volRatioMin',    max: 'volRatioMin',   unit: '', step: '0.1' },
     { label: 'RSI14',     min: 'rsiMin',         max: 'rsiMax',        unit: '', step: '1' },
+    { label: '获利比例',  min: 'benefitMin',     max: 'benefitMax',    unit: '%', step: '1' },
+    { label: '成本偏离',  min: 'costBiasMin',    max: 'costBiasMax',   unit: '%', step: '0.1' },
+    { label: '90集中度',  min: 'conc90Min',      max: 'conc90Max',     unit: '%', step: '0.1' },
+    { label: '70集中度',  min: 'conc70Min',      max: 'conc70Max',     unit: '%', step: '0.1' },
   ]
 
   return (

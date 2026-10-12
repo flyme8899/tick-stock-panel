@@ -41,6 +41,17 @@ def _refresh_candle_patterns(data_dir: Path) -> None:
     except Exception:  # noqa: BLE001 — 形态旁路失败不让盘后管道失败
         logger.warning("candle pattern refresh failed", exc_info=True)
 
+
+def _refresh_chip(data_dir: Path) -> dict:
+    """enriched 落盘后重算最近交易日的筹码。失败只记日志，不让盘后管道失败。"""
+    try:
+        from app.chip.jobs import refresh_latest
+
+        return refresh_latest(data_dir)
+    except Exception:  # noqa: BLE001 — 筹码是估算旁路
+        logger.warning("chip refresh failed", exc_info=True)
+        return {"date": None, "rows": 0, "error": "failed"}
+
 ProgressCb = Callable[..., None]
 
 
@@ -524,6 +535,9 @@ def run_now(
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
     _refresh_candle_patterns(repo.store.data_dir)
+    chip_summary = _refresh_chip(repo.store.data_dir)
+    if chip_summary.get("rows"):
+        logger.info("chip_daily: %s rows on %s", chip_summary.get("rows"), chip_summary.get("date"))
 
     # Step 2.1: 数据充足性可见化 (#303) — 空库首跑/仅当日实时覆写 1 天的库,
     # 均线/动量/量比等指标暖机不足, 管道各 stage 都"成功"但选股会静默全 0。
@@ -786,6 +800,8 @@ def run_now(
         "daily_days": new_daily_days,
         "adj_factor_symbols": len(affected_symbols),
         "enriched_days": written_enriched,
+        "chip_rows": chip_summary.get("rows", 0),
+        "chip_date": chip_summary.get("date"),
         "index_count": index_count,
         "index_daily_rows": written_index_daily,
         "etf_count": etf_count,

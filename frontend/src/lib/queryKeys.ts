@@ -91,6 +91,8 @@ export const QK = {
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   klineLatest:          (symbol: string) => ['kline-latest', symbol] as const,
+  // 筹码按悬停日现算，不进 SSE 行情失效。
+  chip:                 (symbol: string, date: string) => ['chip', symbol, date] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   researchReports:      (symbol: string) => ['research-reports', symbol] as const,
   klineMinute:          (symbol: string, date: string) =>

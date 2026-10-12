@@ -160,6 +160,7 @@ def render_context(
     quote: dict | None,
     event_lines: Any = _OMIT,
     ima_lines: Any = _OMIT,
+    chip: Any = _OMIT,
 ) -> dict[str, Any]:
     """拼一段有长度上限的上下文。events/news/flow/quote 为 None 表示没读到。"""
     local_now = now.astimezone(CN_TZ)
@@ -179,6 +180,8 @@ def render_context(
         extra = _ima_section(ima_lines, missing)
         if extra:
             sections.append(extra)
+    if chip is not _OMIT:
+        sections.append(_chip_section(chip, missing))
     text = _fit(_HEADER, sections)
     return {
         "symbol": symbol,
@@ -222,6 +225,7 @@ def load_context(symbol: str, *, now: datetime | None = None, repo=None) -> dict
     bars, _bars_ok = _capture(lambda: _load_bars(repo, code, moment))
     event_lines, event_ok = _capture(lambda: _load_event_lines(code))
     ima_lines, ima_ok = _capture(lambda: _load_ima_lines(code))
+    chip, chip_ok = _capture(lambda: _load_chip(code))
     quote = quote_from_rows(bars, moment) if bars is not None else None
     events = None if events_pack is None else events_pack.get("events")
     flow_rows = None if flow_pack is None else flow_pack.get("rows")
@@ -238,6 +242,7 @@ def load_context(symbol: str, *, now: datetime | None = None, repo=None) -> dict
         quote=quote if bars is not None else None,
         event_lines=None if not event_ok else event_lines,
         ima_lines=None if not ima_ok else ima_lines,
+        chip=None if not chip_ok else chip,
     )
 
 
@@ -483,6 +488,35 @@ def _industry_rank(root, code: str, industry_by_code, latest_ranks) -> dict | No
     }
 
 
+def _load_chip(symbol: str) -> dict | None:
+    """最近交易日的筹码汇总。没有日 K 时返回 None，上下文写成缺失。"""
+    if not symbol:
+        return None
+    from app.chip.query import context_payload
+    from app.config import settings
+
+    return context_payload(settings.data_dir, symbol)
+
+
+def _chip_section(chip, missing) -> str:
+    source = "来源: 本地计算（东财算法），估算"
+    if not isinstance(chip, dict) or not chip.get("computable"):
+        missing.append("chip")
+        return f"## 筹码分布\n状态: 缺失\n{source}"
+    lines = [
+        "## 筹码分布",
+        source,
+        f"日期: {chip.get('date') or '缺失'}",
+        f"获利比例: {_plain_pct(chip.get('benefit_ratio'))}",
+        f"平均成本: {_price(chip.get('avg_cost'))}",
+        f"平均成本偏离: {_pct(_optional_float(chip.get('avg_cost_bias')))}",
+        f"90集中度: {_plain_pct(chip.get('concentration_90'))}",
+        f"70集中度: {_plain_pct(chip.get('concentration_70'))}",
+        f"上方套牢区: {_trapped_zone_text(chip.get('trapped_zones'))}",
+    ]
+    return "\n".join(lines)
+
+
 def _load_bars(repo, symbol: str, now: datetime) -> list[dict] | None:
     if repo is None or not symbol:
         return None
@@ -671,6 +705,45 @@ def _pct(value: float | None) -> str:
     if value is None:
         return "缺失"
     return f"{value * 100:+.2f}%"
+
+
+def _plain_pct(value: Any) -> str:
+    number = _optional_float(value)
+    if number is None:
+        return "缺失"
+    return f"{number * 100:.2f}%"
+
+
+def _price(value: Any) -> str:
+    number = _optional_float(value)
+    if number is None:
+        return "缺失"
+    return f"{number:.2f}"
+
+
+def _optional_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
+
+
+def _trapped_zone_text(zones: Any) -> str:
+    if not isinstance(zones, list) or not zones:
+        return "无明显密集套牢区"
+    parts: list[str] = []
+    for zone in zones[:3]:
+        if not isinstance(zone, dict):
+            continue
+        share = _optional_float(zone.get("share"))
+        share_text = "占比缺失" if share is None else f"{share * 100:.2f}%"
+        parts.append(f"{zone.get('low')}-{zone.get('high')} 占 {share_text}")
+    return "；".join(parts) if parts else "无明显密集套牢区"
 
 
 def _ratio_text(value: float | None) -> str:
