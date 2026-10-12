@@ -12,7 +12,7 @@ import { api, type MarketSnapshotRow, type OverviewDimensionRankItem, type Overv
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { dimensionKindForSourceField, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { cn } from '@/lib/cn'
-import { cnSignal } from '@/lib/signals'
+import { monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -368,9 +368,11 @@ const _SOURCE_BADGE: Record<string, string> = {
   price: 'bg-emerald-400/10 text-emerald-400',
   market: 'bg-purple-500/10 text-purple-400',
   sector: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-300',
-}
-const _SOURCE_LABEL: Record<string, string> = {
-  strategy: '策略', signal: '信号', price: '价格', market: '异动', sector: '板块',
+  abnormal: 'bg-orange-500/10 text-orange-500 dark:text-orange-400',
+  volume_delta: 'bg-rose-500/10 text-rose-400 dark:text-rose-300',
+  date: 'bg-violet-500/10 text-violet-500 dark:text-violet-300',
+  ladder: 'bg-amber-500/10 text-amber-500',
+  paper: 'bg-sky-400/10 text-sky-500 dark:text-sky-300',
 }
 const _SEVERITY_BAR: Record<string, string> = {
   info: 'bg-accent/40', warn: 'bg-warning', critical: 'bg-danger',
@@ -454,7 +456,7 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
                       </span>
                       {sname
                         ? <span className="truncate text-[9px] font-medium text-amber-400">「{sname}」</span>
-                        : ev.message && <span className="truncate text-[9px] text-muted">{ev.message}</span>}
+                        : ev.message && <span className="truncate text-[9px] text-muted">{monitorDisplayText(ev.message)}</span>}
                       <span className="flex-1" />
                       <span className="text-[8px] text-muted/50 shrink-0 font-mono">
                         {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
@@ -462,7 +464,7 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
                     </div>
                   ) : (
                     <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
-                      <span className="truncate text-[9px] text-muted">{ev.message}</span>
+                      <span className="truncate text-[9px] text-muted">{monitorDisplayText(ev.message)}</span>
                       <span className="flex-1" />
                       <span className="text-[8px] text-muted/50 shrink-0 font-mono">
                         {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
@@ -472,7 +474,7 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
                   {ev.signals && ev.signals.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {ev.signals.map(signal => (
-                        <span key={signal} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{cnSignal(signal, customNames)}</span>
+                        <span key={signal} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{monitorTagLabel(signal, customNames)}</span>
                       ))}
                     </div>
                   )}
@@ -481,10 +483,10 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
                 <>
                   <div className="mt-0.5 flex items-center gap-1.5">
                     <span className={cn('shrink-0 rounded px-1 py-px text-[8px] font-medium', _SOURCE_BADGE[ev.source] ?? 'bg-elevated text-muted')}>
-                      {_SOURCE_LABEL[ev.source] ?? ev.source}
+                      {monitorTagLabel(ev.source, customNames)}
                     </span>
                     {ev.message && (
-                      <span className="text-[9px] text-muted truncate flex-1">{ev.message}</span>
+                      <span className="text-[9px] text-muted truncate flex-1">{monitorDisplayText(ev.message)}</span>
                     )}
                     <span className="text-[8px] text-muted/50 shrink-0 font-mono">
                       {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
@@ -493,7 +495,7 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
                   {ev.signals && ev.signals.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
                       {ev.signals.map((s, j) => (
-                        <span key={j} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{cnSignal(s, customNames)}</span>
+                        <span key={j} className="rounded bg-accent/8 px-1 py-px text-[8px] text-accent/80">{monitorTagLabel(s, customNames)}</span>
                       ))}
                     </div>
                   )}

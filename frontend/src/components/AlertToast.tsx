@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Bell, TrendingUp, TrendingDown, X } from 'lucide-react'
 import type { AlertEvent } from '@/lib/api'
 import { fmtPct, fmtPrice } from '@/lib/format'
-import { cnSignal } from '@/lib/signals'
+import { monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { cn } from '@/lib/cn'
 import { playNotificationSound } from '@/lib/notificationSound'
@@ -84,20 +84,27 @@ export function dismiss(id: number) {
 const SEVERITY_BAR: Record<string, string> = {
   info: 'bg-accent', warn: 'bg-warning', critical: 'bg-danger',
 }
-const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
-  strategy:  { label: '策略',   cls: 'bg-amber-400/15 text-amber-400' },
-  signal:    { label: '信号',   cls: 'bg-accent/15 text-accent' },
-  price:     { label: '价格',   cls: 'bg-emerald-400/15 text-emerald-400' },
-  market:    { label: '异动',   cls: 'bg-purple-500/15 text-purple-400' },
-  sector:    { label: '板块',   cls: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300' },
-  abnormal:  { label: '异动边缘', cls: 'bg-orange-500/15 text-orange-500 dark:text-orange-400' },
-  pool_entry: { label: '进入', cls: 'bg-danger/15 text-danger' },
-  pool_exit:   { label: '移出', cls: 'bg-bear/15 text-bear' },
-  buy_signal: { label: '买入', cls: 'bg-danger/15 text-danger' },
-  sell_signal: { label: '卖出', cls: 'bg-bear/15 text-bear' },
-  new_entry: { label: '进入', cls: 'bg-danger/15 text-danger' },
-  dropped:   { label: '移出', cls: 'bg-bear/15 text-bear' },
-  paper:     { label: '模拟盘', cls: 'bg-sky-400/15 text-sky-500 dark:text-sky-300' },
+const SOURCE_BADGE_CLASS: Record<string, string> = {
+  strategy: 'bg-amber-400/15 text-amber-400',
+  signal: 'bg-accent/15 text-accent',
+  price: 'bg-emerald-400/15 text-emerald-400',
+  market: 'bg-purple-500/15 text-purple-400',
+  sector: 'bg-cyan-500/15 text-cyan-700 dark:text-cyan-300',
+  abnormal: 'bg-orange-500/15 text-orange-500 dark:text-orange-400',
+  abnormal_up: 'bg-orange-500/15 text-orange-500 dark:text-orange-400',
+  abnormal_down: 'bg-orange-500/15 text-orange-500 dark:text-orange-400',
+  volume_delta: 'bg-rose-500/15 text-rose-400 dark:text-rose-300',
+  date: 'bg-violet-500/15 text-violet-500 dark:text-violet-300',
+  date_reminder: 'bg-violet-500/15 text-violet-500 dark:text-violet-300',
+  ladder: 'bg-amber-500/15 text-amber-500',
+  pool_entry: 'bg-danger/15 text-danger',
+  pool_exit: 'bg-bear/15 text-bear',
+  buy_signal: 'bg-danger/15 text-danger',
+  sell_signal: 'bg-bear/15 text-bear',
+  new_entry: 'bg-danger/15 text-danger',
+  dropped: 'bg-bear/15 text-bear',
+  paper: 'bg-sky-400/15 text-sky-500 dark:text-sky-300',
+  paper_fill: 'bg-sky-400/15 text-sky-500 dark:text-sky-300',
 }
 
 // ===== 容器 — 挂在 Layout =====
@@ -137,7 +144,8 @@ export function AlertToastContainer() {
           const ev = item.alert
           const sev = SEVERITY_BAR[ev.severity ?? 'info'] ?? SEVERITY_BAR.info
           const badgeKey = (ev.source === 'strategy' && ev.type) ? ev.type : ev.source
-          const badge = SOURCE_BADGE[badgeKey] ?? { label: badgeKey, cls: 'bg-elevated text-muted' }
+          const badgeCls = SOURCE_BADGE_CLASS[badgeKey] ?? SOURCE_BADGE_CLASS[ev.source] ?? 'bg-elevated text-muted'
+          const badgeLabel = monitorTagLabel(badgeKey, customNames)
           const pct = ev.change_pct ?? 0
           const isStrategy = ev.source === 'strategy'
           const sname = isStrategy ? strategyName(ev.message ?? '') : ''
@@ -167,8 +175,8 @@ export function AlertToastContainer() {
 
               {/* 顶行: 分类标签 + 代码/名称 + 涨跌幅 + 关闭 */}
               <div className="flex items-center gap-2">
-                <span className={cn('shrink-0 rounded px-1 py-px text-[9px] font-medium', badge.cls)}>
-                  {badge.label}
+                <span className={cn('shrink-0 rounded px-1 py-px text-[9px] font-medium', badgeCls)}>
+                  {badgeLabel}
                 </span>
                 {ev.symbol && <span className="font-mono text-xs font-medium text-foreground shrink-0">{ev.symbol}</span>}
                 {ev.name && <span className="text-xs text-secondary truncate flex-1">{ev.name}</span>}
@@ -194,20 +202,20 @@ export function AlertToastContainer() {
                       </span>
                       {sname
                         ? <span className="truncate text-[11px] font-medium text-amber-400">「{sname}」</span>
-                        : ev.message && <span className="truncate text-[10px] text-muted">{ev.message}</span>}
+                        : ev.message && <span className="truncate text-[10px] text-muted">{monitorDisplayText(ev.message)}</span>}
                       <span className="flex-1" />
                       {ev.price != null && <span className="text-[10px] font-mono text-muted shrink-0">{fmtPrice(ev.price)}</span>}
                     </div>
                   ) : (
                     <div className="mt-1 flex min-w-0 items-center gap-1.5 pl-0.5">
                       <Bell className={cn('h-3 w-3 shrink-0', sev.replace('bg-', 'text-'))} />
-                      <span className="truncate text-[11px] text-foreground/70">{ev.message}</span>
+                      <span className="truncate text-[11px] text-foreground/70">{monitorDisplayText(ev.message)}</span>
                     </div>
                   )}
                   {ev.signals && ev.signals.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1 pl-0.5">
                       {ev.signals.map(signal => (
-                        <span key={signal} className="rounded bg-accent/8 px-1 py-px text-[9px] text-accent/80">{cnSignal(signal, customNames)}</span>
+                        <span key={signal} className="rounded bg-accent/8 px-1 py-px text-[9px] text-accent/80">{monitorTagLabel(signal, customNames)}</span>
                       ))}
                     </div>
                   )}
@@ -216,7 +224,7 @@ export function AlertToastContainer() {
                 <div className="mt-1 flex items-center gap-1.5 pl-0.5">
                   <Bell className={cn('h-3 w-3 shrink-0', sev.replace('bg-', 'text-'))} />
                   {/* message 已含「条件摘要 · 现价 · 涨跌幅」(后端生成), 直接展示避免重复 */}
-                  {ev.message && <span className="text-[11px] text-foreground/70 truncate flex-1">{ev.message}</span>}
+                  {ev.message && <span className="text-[11px] text-foreground/70 truncate flex-1">{monitorDisplayText(ev.message)}</span>}
                 </div>
               )}
 

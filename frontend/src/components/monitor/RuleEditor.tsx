@@ -188,12 +188,15 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       // name 为空时用默认名
       if (!d.name.trim()) {
         const base = TYPE_DEFAULT_NAME[d.type] ?? '监控规则'
+        const abnormalDays = d.abnormal_window && d.abnormal_window !== 'any'
+          ? /^(\d+)d$/i.exec(d.abnormal_window)?.[1]
+          : ''
         d.name = d.type === 'sector' && d.sector_scope === 'all_a'
           ? `${base} · 全A`
           : d.type === 'sector' && d.sector_targets?.length
           ? `${base} · ${d.sector_targets[0].name}${d.sector_targets.length > 1 ? ` 等${d.sector_targets.length}个` : ''}`
           : d.type === 'abnormal'
-          ? `${base} · 接近度≥${d.threshold_pct ?? 70}%${d.abnormal_window && d.abnormal_window !== 'any' ? ` (${d.abnormal_window.toUpperCase()})` : ''}`
+          ? `${base} · 接近度≥${d.threshold_pct ?? 70}%${abnormalDays ? ` (${abnormalDays}日)` : ''}`
           : d.scope === 'watchlist_group' && selectedGroup
           ? `${base} · 分组「${selectedGroup.name}」`
           : d.scope === 'symbols' && d.symbols.length > 0

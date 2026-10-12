@@ -12,7 +12,7 @@ import { QK } from '@/lib/queryKeys'
 import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { cn } from '@/lib/cn'
-import { cnSignal } from '@/lib/signals'
+import { abnormalWindowLabel, monitorBadgeText, monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS, strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -50,11 +50,12 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
  * 渲染策略类消息 — 策略名黄色、进入红/移出绿 (A 股红涨绿跌惯例)、其余白色。
  */
 function renderMessage(source: string, message: string) {
+  const text = monitorDisplayText(message)
   if (source !== 'strategy') {
-    return <span className="text-secondary">{message}</span>
+    return <span className="text-secondary">{text}</span>
   }
-  const m = message.match(/^(策略「)([^」]+)(」)(新入选|进入|移出)( .*)$/)
-  if (!m) return <span className="text-foreground">{message}</span>
+  const m = text.match(/^(策略「)([^」]+)(」)(新入选|进入|移出)( .*)$/)
+  if (!m) return <span className="text-foreground">{text}</span>
   const [, pre, strategyName, mid, direction, post] = m
   return (
     <>
@@ -489,15 +490,15 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             </span>
                             {sname
                               ? <span className="text-[11px] font-medium text-amber-400">「{sname}」</span>
-                              : ev.message && <span className="truncate text-[10px] text-muted">{ev.message}</span>}
+                              : ev.message && <span className="truncate text-[10px] text-muted">{monitorDisplayText(ev.message)}</span>}
                           </div>
                         ) : (
-                          <div className="mt-1 truncate text-[11px] text-muted">{ev.message}</div>
+                          <div className="mt-1 truncate text-[11px] text-muted">{monitorDisplayText(ev.message)}</div>
                         )}
                         {ev.signals && ev.signals.length > 0 && (
                           <div className="mt-1.5 flex flex-wrap gap-1">
                             {ev.signals.map((signal: string) => (
-                              <span key={signal} className="rounded bg-accent/8 px-1.5 py-0.5 text-[9px] text-accent/70">{cnSignal(signal, customNames)}</span>
+                              <span key={signal} className="rounded bg-accent/8 px-1.5 py-0.5 text-[9px] text-accent/70">{monitorTagLabel(signal, customNames)}</span>
                             ))}
                           </div>
                         )}
@@ -567,7 +568,8 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             // 优先用规则名 (如 "策略监控 · 空中加油" → "空中加油"); 退回到 type 标签
                             const rn = ev.rule_name ?? ''
                             const dotIdx = rn.indexOf(' · ')
-                            return dotIdx >= 0 ? rn.slice(dotIdx + 3) : (rn || (TYPE_LABEL[ev.source] ?? ev.source))
+                            const shown = dotIdx >= 0 ? rn.slice(dotIdx + 3) : rn
+                            return monitorBadgeText(shown, ev.type || ev.source, customNames)
                           })()}
                         </span>
                       </div>
@@ -576,7 +578,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                         <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px]">
                           <span className="text-muted">命中</span>
                           {ev.signals.map((s: string, j: number) => (
-                            <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">{cnSignal(s, customNames)}</span>
+                            <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">{monitorTagLabel(s, customNames)}</span>
                           ))}
                           {ev.price != null && (
                             <>
@@ -593,9 +595,9 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             <span key={ci} className="inline-flex items-center gap-0.5">
                               {ci > 0 && <span className="text-secondary">{ev.logic === 'or' ? '或' : '且'}</span>}
                               {c.op === 'truth' ? (
-                                <span className="text-accent/80">{cnSignal(c.field, customNames)}</span>
+                                <span className="text-accent/80">{monitorTagLabel(c.field, customNames)}</span>
                               ) : (
-                                <span className="text-foreground/80 font-mono">{cnSignal(c.field, customNames)}{c.op}{c.value}</span>
+                                <span className="text-foreground/80 font-mono">{monitorTagLabel(c.field, customNames)}{c.op}{c.value}</span>
                               )}
                             </span>
                           ))}
@@ -620,9 +622,9 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             <span key={ci} className="inline-flex items-center gap-0.5">
                               {ci > 0 && <span>{ev.logic === 'or' ? '或' : '且'}</span>}
                               {c.op === 'truth' ? (
-                                <span>{cnSignal(c.field, customNames)}</span>
+                                <span>{monitorTagLabel(c.field, customNames)}</span>
                               ) : (
-                                <span className="font-mono">{cnSignal(c.field, customNames)}{c.op}{c.value}</span>
+                                <span className="font-mono">{monitorTagLabel(c.field, customNames)}{c.op}{c.value}</span>
                               )}
                             </span>
                           ))}
@@ -839,7 +841,7 @@ function RulesList({ rulesQuery, onEdit }: {
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold', SOURCE_BADGE_STYLE[r.type] ?? 'bg-elevated text-muted')}>
-                    {TYPE_LABEL[r.type]}
+                    {TYPE_LABEL[r.type] ?? monitorTagLabel(r.type)}
                   </span>
                   {r.lot_id && (
                     <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold bg-emerald-400/10 text-emerald-500" title="由「持仓提醒」页托管, 请在持仓提醒页修改或删除">批次</span>
@@ -974,7 +976,7 @@ function RulesList({ rulesQuery, onEdit }: {
                     接近度 ≥ {r.threshold_pct ?? 70}%
                   </span>
                   <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
-                    {r.abnormal_window && r.abnormal_window !== 'any' ? `${r.abnormal_window.toUpperCase()} 窗口` : '全部窗口'}
+                    {abnormalWindowLabel(r.abnormal_window)}
                   </span>
                   <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-secondary">
                     {r.direction === 'up' ? '涨势偏离' : r.direction === 'down' ? '跌势偏离' : '涨跌双向'}
@@ -1026,9 +1028,9 @@ function RulesList({ rulesQuery, onEdit }: {
                       <span key={i} className="inline-flex items-center gap-0.5">
                         {i > 0 && <span className="text-secondary">{r.logic === 'and' ? '且' : '或'}</span>}
                         {c.op === 'truth' ? (
-                          <span className="text-accent/80">{cnSignal(c.field, customNames)}</span>
+                          <span className="text-accent/80">{monitorTagLabel(c.field, customNames)}</span>
                         ) : (
-                          <span className="text-foreground/80 font-mono">{cnSignal(c.field, customNames)}{c.op}{c.value}</span>
+                          <span className="text-foreground/80 font-mono">{monitorTagLabel(c.field, customNames)}{c.op}{c.value}</span>
                         )}
                       </span>
                     ))}

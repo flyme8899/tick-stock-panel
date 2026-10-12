@@ -5,7 +5,7 @@ import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2,
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
-import { cnSignal } from '@/lib/signals'
+import { monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { fmtPct, cnDateFromUtc } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
@@ -476,12 +476,12 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                 {/* 右: 消息 + 信号标签 */}
                 <div className="flex items-center gap-2 flex-wrap min-w-0">
                   {triggerInfo.message && (
-                    <span className="text-[11px] text-foreground/70 truncate">{triggerInfo.message}</span>
+                    <span className="text-[11px] text-foreground/70 truncate">{monitorDisplayText(triggerInfo.message)}</span>
                   )}
                   {triggerInfo.signals && triggerInfo.signals.length > 0 && (
                     <div className="flex items-center gap-1 flex-wrap">
                       {triggerInfo.signals.map((s, j) => (
-                        <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent/80">{cnSignal(s, customNames)}</span>
+                        <span key={j} className="rounded bg-accent/10 px-1.5 py-0.5 text-[9px] text-accent/80">{monitorTagLabel(s, customNames)}</span>
                       ))}
                     </div>
                   )}
