@@ -11,8 +11,10 @@ from app.news.hot_events import (
     _cleaned_headline,
     _concept_relevant,
     _dictionary_concepts,
+    _direction_for,
     _display_gate_reason,
     _ensure_shown_name,
+    _explicit_target_direction,
     _fallback_title_ok,
     _fine_concept,
     _is_section_label,
@@ -774,7 +776,7 @@ def test_bad_production_strings_are_absent_from_the_hot_list(tmp_path):
 
 
 def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_path, monkeypatch):
-    """模型一次写完展示标题；没有概念的事件只能回填词典里的名称。"""
+    """模型一次写完展示标题；词典概念必须在标题里对得上，不能凭名单贴上。"""
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
 
@@ -837,7 +839,8 @@ def test_llm_batch_rewrites_production_titles_and_fills_dictionary_concepts(tmp_
     assert "橡胶价格大涨超六成" not in names
     assert "IEA下调原油供需预期" in names
     ship = next(event for event in events if "航运" in event["name"])
-    assert ship["concepts"] == ["石油"]
+    assert ship["concepts"] == []
+    assert "石油" not in ship["concepts"]
     assert "苹果" not in ship["concepts"]
 
     def echo(prompt: str, **_kwargs: object) -> str:
@@ -1734,3 +1737,118 @@ def test_same_party_merges_across_the_trading_day(tmp_path):
     assert sum(1 for event in events if "回购" in event["name"]) == 1
     huawei = [event for event in events if "盘古" in event["name"]]
     assert len(huawei) == 2
+
+
+_APPLE_CUT = "大摩——苹果公司(AAPL.US)：已经开始削减iPhone零部件订单"
+_TESLA_PT = "杰富瑞将特斯拉目标价从350美元上调至400美元"
+
+
+def test_negative_actions_are_bearish_and_cluster_concepts_stay_on_the_title(tmp_path, monkeypatch):
+    """削减订单是利空；同簇或模型带上的石油/油服、海外市场不能贴到特斯拉目标价。"""
+    assert _direction_for(_APPLE_CUT, "订单") == "利空"
+    assert _direction_for(_TESLA_PT, "上调") == "利好"
+    for title, action in (
+        ("主力砸单离场", "砸单"),
+        ("公司取消年度订单", "订单"),
+        ("股价暴跌", "暴跌"),
+        ("OPEC宣布减产", "宣布"),
+        ("光伏组件厂下调报价", "下调"),
+        ("碳酸锂厂商宣布砸价", "宣布"),
+    ):
+        assert _direction_for(title, action) == "利空"
+    assert _direction_for("英伟达追加订单传闻", "追加") == "利好"
+    smash = "碳酸锂厂商宣布砸价，利好下游电池"
+    assert _direction_for(smash, "宣布") == "利空"
+    assert _explicit_target_direction("电池", smash) == "利好"
+    assert _explicit_target_direction("碳酸锂", smash) == ""
+    assert _explicit_target_direction("电池", "碳酸锂厂商宣布砸价") == ""
+
+    reset_store_for_tests(tmp_path / "direction-tags.sqlite")
+    _insert_rich(
+        "apple",
+        _APPLE_CUT,
+        9,
+        10,
+        sectors=["苹果产业链", "石油", "油服"],
+    )
+    _insert_rich(
+        "tesla",
+        _TESLA_PT,
+        9,
+        20,
+        sectors=["特斯拉", "石油", "油服"],
+        stocks=[("TSLA", "特斯拉")],
+    )
+    _insert_rich(
+        "tesla-oil",
+        "特斯拉产业链跟随原油价格上调",
+        9,
+        30,
+        sectors=["石油", "油服"],
+    )
+    _insert_rich(
+        "smash",
+        smash,
+        9,
+        40,
+        sectors=["碳酸锂", "电池"],
+    )
+    _insert("cut-order", "公司取消年度订单", 45)
+
+    events = top_hot_events(NOW)["events"]
+    apple = next(event for event in events if "削减" in event["name"] or "iPhone" in event["name"])
+    assert "削减" in apple["name"]
+    assert apple["direction"] == "利空"
+    assert "石油" not in apple["concepts"]
+    assert "油服" not in apple["concepts"]
+    assert all(item["direction"] == "利空" for item in apple["mapping"])
+
+    tesla = next(event for event in events if "杰富瑞" in event["name"] or "400美元" in event["name"])
+    assert "上调" in tesla["name"]
+    assert tesla["direction"] == "利好"
+    assert tesla["category"] != "海外市场/央行"
+    assert "石油" not in tesla["concepts"]
+    assert "油服" not in tesla["concepts"]
+    assert "特斯拉" in tesla["concepts"] or any(
+        stock["name"] == "特斯拉" for stock in tesla["mentioned_stocks"]
+    )
+
+    smashed = next(event for event in events if "砸价" in event["name"])
+    assert smashed["direction"] == "利空"
+    battery = next(item for item in smashed["mapping"] if item["name"] == "电池")
+    lithium = next(item for item in smashed["mapping"] if item["name"] == "碳酸锂")
+    assert battery["direction"] == "利好"
+    assert lithium["direction"] == "利空"
+
+    assert next(event for event in events if "取消" in event["name"])["direction"] == "利空"
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    def wrong(prompt: str, **_kwargs: object) -> str:
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            rows.append({
+                "id": head,
+                "title": "补充要点",
+                "concepts": ["石油", "油服"],
+                "category": "海外市场/央行",
+                "direction": "利好",
+            })
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", wrong)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    labeled = top_hot_events(NOW + timedelta(minutes=11))["events"]
+    apple = next(event for event in labeled if "削减" in event["name"] or "iPhone" in event["name"])
+    tesla = next(event for event in labeled if "杰富瑞" in event["name"] or "400美元" in event["name"])
+    assert apple["direction"] == "利空"
+    assert "石油" not in apple["concepts"] and "油服" not in apple["concepts"]
+    assert tesla["direction"] == "利好"
+    assert tesla["category"] != "海外市场/央行"
+    assert "石油" not in tesla["concepts"] and "油服" not in tesla["concepts"]

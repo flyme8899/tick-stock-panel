@@ -1122,7 +1122,8 @@ def test_hot_event_llm_title_is_cached_and_keyword_title_remains_without_model(t
     assert named["events"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
     assert named["events"][0]["subtitle"] == "华为发布新模型"
     assert named["events"][0]["concepts"] == ["昇腾"]
-    assert named["events"][0]["category"] == "地缘政治"
+    # 标题里没有制裁、冲突这类词，模型不能把分类改成地缘政治。
+    assert named["events"][0]["category"] == "科技与产业"
     assert named["events"][0]["direction"] == "利空"
     assert named["events"][0]["importance"] == "重大"
     assert named["events"][0]["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利空"}]

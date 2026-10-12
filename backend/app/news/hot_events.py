@@ -42,8 +42,12 @@
 奖项、文体、体育这类和资本市场无关、又没有 A 股映射的事件不进列表。
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
-概念必须对得上标题里的主体：伊朗、中东映射到中东，不能因为都出现了「冲突」就标成俄乌。
-「俄乌冲突快报」这类栏目名不是概念。事件自己没有概念时，模型只能从这张词典里选。词典没写到的无关概念仍然丢掉。
+概念必须对得上这条事件自己的展示标题：同簇其他稿上的概念，以及只在其他稿里出现的词典触发词，不贴过来。
+伊朗、中东映射到中东，不能因为都出现了「冲突」就标成俄乌。
+「俄乌冲突快报」这类栏目名不是概念。事件自己没有概念时，模型只能从这张词典里选，而且触发词必须出现在这条标题里。词典没写到的无关概念仍然丢掉。
+利好利空也只看这条标题，不靠同簇多数票，模型不能把已经判定的负面动作改成利好。
+削减、砸单、砸价、下调、取消、暴跌、减产先于订单和发布，这些动作是利空。
+只有标题写明利好某个名字（例如利好下游电池）时，那个受益方才标利好；没有这些词时仍默认利好。
 同一时间窗里，财政部、国务院这类国内政策主体即使一个写发布、一个写出台，也并成一件事。
 """
 from __future__ import annotations
@@ -302,6 +306,11 @@ _STOP = frozenset({
     "走强", "走弱", "午后", "盘中", "持续", "继续", "相关", "中国", "美国",
     "国内", "海外", "全球", "多家", "有关", "A股", "港股",
 })
+# 两个字就能对上的行情套话。不能靠「美元」「价格」把石油概念贴到目标价上调上。
+_CONCEPT_LINK_SKIP = _GENERIC_TOKENS | _STOP | _CONCEPT_GLUE | frozenset({
+    "美元", "目标", "价格", "预期", "上调", "下调", "美股", "发布", "订单",
+    "全球", "同比", "环比",
+})
 _CLAUSE = re.compile(r"[，。！？、；：:\n]")
 # 半句话常见的起笔。完整标题不会从这些词开始。
 _FRAGMENT_LEADS = (
@@ -320,6 +329,7 @@ _TIME_PREFIX = re.compile(r"^(?:昨夜|昨晚|今日|昨日|今天|昨天|日前
 _PRICE_NARRATIVE = (
     "大涨", "大跌", "上涨", "下跌", "暴涨", "暴跌",
     "走强", "走弱", "走高", "走低", "飙升", "跳水",
+    "砸价", "砸单",
 )
 # 聚类停用词里的国别可以当标题主体。这里只挡「公司」「市场」这种没有对象的词。
 _NOT_SUBJECT = frozenset({
@@ -1007,9 +1017,12 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         concept_counts.update(dict.fromkeys(item["concepts"], 1))
     focus_titles = [str(item.get("title") or "") for item in focused]
     subjects = _subject_set(name, focused)
+    # 概念、分类、方向只看展示标题和同一句原文，不看同簇里另一条稿。
+    story = _story_texts(name, focus_titles)
+    story_blob = "\n".join(story)
     concepts = _merge_mapped_concepts(
-        _relevant_concepts(concept_counts, focus_titles, subjects),
-        "\n".join([name, *focus_titles]),
+        _relevant_concepts(concept_counts, story, _subject_set(name, [])),
+        story_blob,
     )
     rejected = [label for label in concept_counts if label not in concepts and label not in BROAD_SECTORS]
     stocks: dict[str, dict] = {}
@@ -1034,10 +1047,9 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         for hit in stocks.values()
     ]
     mentioned.sort(key=lambda item: (-item["mentions"], -item["source_count"], item["name"]))
-    blob = "\n".join(focus_titles)
     action = _mode([item["action"] for item in focused if item["action"]])
-    category = _category_for(blob, action)
-    direction = _direction_for(blob, action)
+    category = _category_for(story_blob, action)
+    direction = _direction_for(story_blob, action)
     for hit in mentioned:
         hit["direction"] = direction
     item_ids = [str(item["item_id"]) for item in members]
@@ -1057,7 +1069,7 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         if len(headlines) >= 3:
             break
     headline = headlines[0] if headlines else ""
-    return {
+    event = {
         "key": f"ev_{digest}",
         "name": name,
         "category": category,
@@ -1091,6 +1103,8 @@ def _event_from(members: list[dict], now: datetime) -> dict:
         "_first": first,
         "_fp": hashlib.sha1("\n".join(item["title"] for item in members).encode("utf-8")).hexdigest(),
     }
+    _annotate_directions(event, story_blob)
+    return event
 
 
 def _rank_events(events: list[dict], now: datetime, *, grade: bool) -> list[dict]:
@@ -1819,7 +1833,7 @@ def _headline_maps_concept(name: str, blob: str) -> bool:
     for size in range(min(len(name) - 1, 6), 1, -1):
         for start in range(0, len(name) - size + 1):
             token = name[start:start + size]
-            if token in _GENERIC_TOKENS or token in _STOP or token in _CONCEPT_GLUE:
+            if token in _CONCEPT_LINK_SKIP:
                 continue
             if token in blob:
                 return True
@@ -1866,6 +1880,24 @@ def _dictionary_concepts(blob: str) -> list[str]:
     if fiscal and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策")):
         add(("基建", "地方债"))
     return found
+
+
+def _concept_grounded(name: str, text: str) -> bool:
+    """词典概念必须写在这条标题里，或它的触发词就在这条标题里。"""
+    blob = text or ""
+    if name and name in blob:
+        return True
+    for keys, concepts in _SUBJECT_CONCEPTS:
+        if name in concepts and all(key in blob for key in keys):
+            return True
+    if name in {"基建", "地方债"}:
+        fiscal = "财政部" in blob or (
+            "财政" in blob and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策"))
+        )
+        return bool(
+            fiscal and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策"))
+        )
+    return False
 
 
 def _merge_mapped_concepts(concepts: list[str], blob: str) -> list[str]:
@@ -2308,15 +2340,123 @@ def _category_for(text: str, action: str) -> str:
     return _ACTION_CATEGORY.get(action, "科技与产业")
 
 
-def _direction_for(text: str, action: str) -> str:
+def _category_allowed(category: str, text: str, action: str) -> bool:
+    """模型给的分类必须和这条标题对得上，不能把别的簇的海外市场贴过来。"""
+    if category not in CATEGORY_NAMES:
+        return False
+    if category == _category_for(text, action):
+        return True
+    for name, cues in _CATEGORY_CUES:
+        if name == category:
+            return any(cue in (text or "") for cue in cues)
+    return False
+
+
+# 负面动作先于「订单」「发布」。削减订单是利空，不是因为出现了订单就算利好。
+_BEAR_VERBS = (
+    "削减", "砸单", "砸价", "下调", "取消", "暴跌", "减产",
+    "砍单", "下修", "大跌", "下跌", "跳水", "走弱", "走低", "降价",
+    "停产", "召回", "制裁", "立案", "收紧", "加息",
+    "关税", "冲突", "战争",
+)
+_BULL_VERBS = (
+    "上调", "涨价", "提价", "上涨", "大涨", "暴涨", "飙升", "走强", "走高",
+    "回购", "获批", "降息", "降准", "补贴", "中标",
+    "签约", "签署", "签订", "追加", "增长", "新增",
+)
+
+
+def _earliest_verb(text: str, verbs: tuple[str, ...]) -> int:
+    found = -1
+    for verb in verbs:
+        index = text.find(verb)
+        if index >= 0 and (found < 0 or index < found):
+            found = index
+    return found
+
+
+def _story_texts(name: str, titles: list[str]) -> list[str]:
+    """只留和展示标题是同一句的原文。同簇里另一条稿不参与方向和概念。"""
+    anchor = _compact(name)
+    kept: list[str] = []
+    if not anchor:
+        for title in titles:
+            compact = _compact(str(title or ""))
+            if compact and compact not in kept:
+                kept.append(compact)
+        return kept
+    kept.append(anchor)
+    for title in titles:
+        compact = _compact(str(title or ""))
+        if not compact or compact in kept:
+            continue
+        if (
+            anchor in compact
+            or compact in anchor
+            or _headline_similarity(anchor, compact) >= _SIMILARITY_MIN
+        ):
+            kept.append(compact)
+    return kept
+
+
+def _direction_signal(text: str, action: str) -> str:
+    """有明确动作时返回利好或利空。对不上则返回空，调用方再默认利好。"""
     blob = text or ""
+    bear_at = _earliest_verb(blob, _BEAR_VERBS)
+    bull_at = _earliest_verb(blob, _BULL_VERBS)
+    if bear_at >= 0 and (bull_at < 0 or bear_at <= bull_at):
+        return "利空"
+    if bull_at >= 0:
+        return "利好"
     if any(cue in blob for cue in _BEAR_CUES):
         return "利空"
     if any(cue in blob for cue in _BULL_CUES):
         return "利好"
     if action in {"降价", "下调", "立案", "停产", "召回", "制裁", "收紧", "加息"}:
         return "利空"
-    return "利好"
+    return ""
+
+
+def _direction_for(text: str, action: str) -> str:
+    return _direction_signal(text, action) or "利好"
+
+
+def _explicit_target_direction(name: str, text: str) -> str:
+    """标题写明利好或利空某个名字时才分开标。砸价本身不自动利好下游。"""
+    label = _compact(str(name or ""))
+    body = _compact(text or "")
+    if len(label) < 2 or label not in body:
+        return ""
+    for mark in ("利好", "受益"):
+        if (
+            f"{mark}{label}" in body
+            or f"{mark}下游{label}" in body
+            or f"{mark}下游的{label}" in body
+            or f"{label}{mark}" in body
+            or f"{label}将{mark}" in body
+        ):
+            return "利好"
+    for mark in ("利空", "拖累"):
+        if f"{mark}{label}" in body or f"{label}{mark}" in body or f"{label}将{mark}" in body:
+            return "利空"
+    return ""
+
+
+def _annotate_directions(event: dict, text: str) -> None:
+    direction = str(event.get("direction") or "")
+    if direction not in {"利好", "利空"}:
+        direction = "利好"
+        event["direction"] = direction
+    for item in event.get("mapping") or []:
+        if not isinstance(item, dict):
+            continue
+        explicit = _explicit_target_direction(str(item.get("name") or ""), text)
+        item["direction"] = explicit or direction
+    for stock in event.get("mentioned_stocks") or []:
+        if not isinstance(stock, dict):
+            continue
+        explicit = _explicit_target_direction(str(stock.get("name") or ""), text)
+        stock["direction"] = explicit or direction
 
 
 def _mode(values: list[str]) -> str:
@@ -4651,12 +4791,24 @@ def _apply_llm(event: dict, parsed: dict) -> None:
         event["subtitle"] = title
     else:
         event["subtitle"] = ""
+    anchor_name = str(event.get("name") or "")
+    story_titles = [str(event.get("headline") or "")]
+    story_titles.extend(str(item) for item in (event.get("headlines") or []))
+    story = _story_texts(anchor_name, story_titles)
+    story_blob = "\n".join(story) or anchor_name
+    _lead, action, _obj = _parse_phrase(story_blob)
     category = str(parsed.get("category") or "")
-    if category in CATEGORY_NAMES:
+    if _category_allowed(category, story_blob, action):
         event["category"] = category
-    direction = str(parsed.get("direction") or "")
-    if direction in {"利好", "利空"}:
-        event["direction"] = direction
+    # 负面动作已经是利空时，模型不能改回利好。规则没锁死时仍采用模型给的方向。
+    signal = _direction_signal(story_blob, action)
+    hinted = str(parsed.get("direction") or "")
+    if signal == "利空":
+        event["direction"] = "利空"
+    elif hinted in {"利好", "利空"}:
+        event["direction"] = hinted
+    elif signal:
+        event["direction"] = signal
     importance = str(parsed.get("importance") or "")
     if importance == "琐碎":
         importance = "一般"
@@ -4665,48 +4817,39 @@ def _apply_llm(event: dict, parsed: dict) -> None:
     had_concepts = any(str(name).strip() for name in (event.get("concepts") or []))
     if had_concepts:
         for name in parsed.get("concepts") or []:
-            if name not in event["concepts"] and len(event["concepts"]) < _CONCEPT_LIMIT:
+            if (
+                name not in event["concepts"]
+                and len(event["concepts"]) < _CONCEPT_LIMIT
+                and _concept_grounded(str(name), story_blob)
+            ):
                 event["concepts"].append(name)
-        texts = [str(event.get("name") or ""), str(event.get("headline") or "")]
-        texts.extend(str(item) for item in (event.get("headlines") or []))
         event["concepts"] = _merge_mapped_concepts(
             _relevant_concepts(
                 Counter({str(name): 1 for name in event.get("concepts") or []}),
-                texts,
-                _subject_set(str(event.get("name") or ""), []),
+                story,
+                _subject_set(anchor_name, []),
             ),
-            "\n".join(texts),
+            story_blob,
         )
     else:
         allowed = set(_dictionary_names())
         picked: list[str] = []
         for name in parsed.get("concepts") or []:
-            if name in allowed and name not in picked:
+            if name in allowed and name not in picked and _concept_grounded(str(name), story_blob):
                 picked.append(str(name))
             if len(picked) >= _CONCEPT_LIMIT:
                 break
         event["concepts"] = picked
-    directions = parsed.get("concept_directions") or {}
     event["mapping"] = [
-        {
-            "name": name,
-            "kind": "concept",
-            "direction": directions.get(name) or event.get("direction") or "利好",
-        }
+        {"name": name, "kind": "concept", "direction": event.get("direction") or "利好"}
         for name in event["concepts"]
     ]
-    if direction in {"利好", "利空"}:
-        for stock in event.get("mentioned_stocks") or []:
-            stock["direction"] = direction
     known = {item["key"] for item in event.get("mentioned_stocks") or []}
     known_names = {item["name"] for item in event.get("mentioned_stocks") or []}
     for stock in parsed.get("stocks") or []:
         code = str(stock.get("code") or "").strip()
         name = str(stock.get("name") or "").strip()
         key = code or name
-        direct = str(stock.get("direction") or event.get("direction") or "利好")
-        if direct not in {"利好", "利空"}:
-            direct = "利好"
         if not key or key in known or name in known_names:
             continue
         known.add(key)
@@ -4715,5 +4858,6 @@ def _apply_llm(event: dict, parsed: dict) -> None:
             "name": name or key,
             "mentions": 1,
             "source_count": 1,
-            "direction": direct,
+            "direction": event.get("direction") or "利好",
         })
+    _annotate_directions(event, story_blob)
