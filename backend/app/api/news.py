@@ -44,6 +44,10 @@ class PushTest(BaseModel):
     confirm: bool = False
 
 
+class MxHotUpdate(BaseModel):
+    enabled: bool
+
+
 @router.get("/hot")
 def hot(
     kind: str = Query("all", pattern="all|stock|sector|etf|event"),
@@ -157,6 +161,20 @@ def update_push(body: PushUpdate):
         return set_push_prefs(enabled=body.enabled, types=body.types)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/mx-hot")
+def mx_hot_state():
+    from app.news.mx_hot import status
+
+    return status()
+
+
+@router.put("/mx-hot")
+def update_mx_hot(body: MxHotUpdate):
+    from app.news.mx_hot import set_enabled
+
+    return set_enabled(body.enabled)
 
 
 @router.post("/push/test")

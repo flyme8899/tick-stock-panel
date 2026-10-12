@@ -129,6 +129,17 @@ def wait_hot_refresh(timeout: float = 2.0) -> bool:
     return True
 
 
+def _memory_top_key() -> str:
+    with _LOCK:
+        current = _MEMORY
+    if not isinstance(current, dict):
+        return ""
+    events = current.get("events")
+    if not isinstance(events, list) or not events or not isinstance(events[0], dict):
+        return ""
+    return str(events[0].get("key") or "")
+
+
 def _compute_held() -> None:
     try:
         _compute_once()
@@ -137,14 +148,22 @@ def _compute_held() -> None:
 
 
 def _compute_once() -> None:
+    import time
+
     from app.news.hot_events import build_top_hot_events
     from app.news.service import get_store
 
-    import time
-
     global _LAST_COST_S
     started = time.monotonic()
+    # 榜首要等这份快照排完才知道。补全写进即将发布的结果，失败也不挡住发布。
+    previous_top = _memory_top_key()
     snapshot = build_top_hot_events(cn_now(), get_store(), refresh=True)
+    try:
+        from app.news.mx_hot import enrich_snapshot
+
+        enrich_snapshot(snapshot, previous_top)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("妙想热点补全未能写入快照: %s", type(exc).__name__)
     _LAST_COST_S = time.monotonic() - started
     publish_hot_snapshot(snapshot, persist=True)
 

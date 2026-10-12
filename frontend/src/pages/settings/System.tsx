@@ -4,9 +4,9 @@
  * 独立于实时监控, 放置影响整体应用行为的开关项。
  */
 import { useState, useCallback, useEffect, useRef } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info, ExternalLink, CheckCircle2, Download, ZoomIn, Minus, Plus, Sparkles } from 'lucide-react'
+import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info, ExternalLink, CheckCircle2, Download, ZoomIn, Minus, Plus, Sparkles, Newspaper } from 'lucide-react'
 import { usePreferences, useVersion } from '@/lib/useSharedQueries'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -27,6 +27,16 @@ export function SettingsSystemPanel() {
   const [saving, setSaving] = useState(false)
 
   const screenerAutoRun = prefs?.screener_auto_run ?? true
+  const mxHot = useQuery({
+    queryKey: QK.newsMxHot,
+    queryFn: () => api.newsMxHot(),
+  })
+  const saveMxHot = useMutation({
+    mutationFn: (enabled: boolean) => api.newsSetMxHot(enabled),
+    onSuccess: (data) => {
+      qc.setQueryData(QK.newsMxHot, data)
+    },
+  })
   const [extTpl, setExtTpl] = useState(() => loadStockExternalTemplate())
   const [clearing, setClearing] = useState(false)
 
@@ -147,6 +157,27 @@ export function SettingsSystemPanel() {
           disabled={saving}
           onChange={(v) => save({ screener_auto_run: v })}
         />
+      </section>
+
+      <section className="rounded-card border border-border bg-surface p-5 mt-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Newspaper className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-medium text-foreground">热门事件</h3>
+        </div>
+        <ToggleRow
+          label="妙想补全榜首热点"
+          desc="新热点第一次冲上榜首时检索权威报道。每天默认 25 次，与资金流妙想配额分开。"
+          checked={mxHot.data?.enabled ?? false}
+          disabled={mxHot.isLoading || mxHot.data?.locked || saveMxHot.isPending}
+          onChange={(value) => saveMxHot.mutate(value)}
+        />
+        <p className="text-[11px] text-muted">
+          {mxHot.data?.summary || '超时、失败或额度用尽时保持原事件。'}
+          {mxHot.data ? ` 今日已用 ${mxHot.data.used}/${mxHot.data.budget}。` : ''}
+          {mxHot.data?.locked ? ' 当前由环境变量 NEWS_MX_HOT_ENABLED 锁定。' : ''}
+          {mxHot.data && !mxHot.data.configured ? ' 未配置 MX_APIKEY 时不会请求。' : ''}
+        </p>
+        {mxHot.isError && <p className="mt-1 text-[11px] text-danger">妙想补全状态加载失败</p>}
       </section>
 
       <section className="rounded-card border border-border bg-surface p-5 mt-6">

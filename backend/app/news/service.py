@@ -458,7 +458,7 @@ def public_hot_event(event: dict) -> dict:
         for part in ("importance", "confirmation", "mapping", "freshness", "heat")
     }
     confirmation = _public_confirmation(event.get("confirmation"))
-    return {
+    payload = {
         "key": str(event.get("key") or ""),
         "name": str(event.get("name") or ""),
         "category": str(event.get("category") or ""),
@@ -482,6 +482,43 @@ def public_hot_event(event: dict) -> dict:
         "etfs": etfs,
         "limit_reason": _public_limit_reason(event.get("limit_reason")),
     }
+    summary = str(event.get("summary") or "").strip()
+    if summary:
+        payload["summary"] = summary
+    mx_sources = _public_mx_sources(event.get("mx_sources"))
+    if mx_sources:
+        payload["sources"] = mx_sources
+    return payload
+
+
+def _http_url(value) -> str:
+    """只把 http(s) 链接交给页面，避免检索结果里的其它 scheme 被当成可点链接。"""
+    text = str(value or "").strip()
+    if text.startswith("https://") or text.startswith("http://"):
+        return text
+    return ""
+
+
+def _public_mx_sources(raw) -> list[dict]:
+    """妙想权威稿。旧快照没有这个字段时当空列表，页面不展示。"""
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for item in raw[:3]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        source = str(item.get("source") or "").strip()
+        if not title and not source:
+            continue
+        rows.append({
+            "title": title,
+            "source": source,
+            "url": _http_url(item.get("url")),
+            "authority": str(item.get("authority") or "").strip(),
+            "date": str(item.get("date") or "").strip(),
+        })
+    return rows
 
 
 def _public_limit_reason(raw) -> dict:
