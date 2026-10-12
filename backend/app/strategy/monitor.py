@@ -451,11 +451,14 @@ class MonitorRuleEngine:
             tuple(sorted(str(symbol) for symbol in rule.get("symbols", []))),
             rule.get("sector"),
             rule.get("sector_kind"),
+            rule.get("sector_scope"),
             tuple(sorted(str(target.get("key")) for target in rule.get("sector_targets", []))),
             rule.get("sector_trigger"),
             rule.get("direction"),
             rule.get("threshold_pct"),
             rule.get("window_minutes"),
+            rule.get("min_valid_count"),
+            rule.get("min_coverage_pct"),
             rule.get("abnormal_window"),
             rule.get("remind_date"),
             rule.get("lead_days"),
@@ -814,7 +817,7 @@ class MonitorRuleEngine:
         targets_by_key: dict[str, dict] = {}
         windows: set[int] = set()
         for rule in rules:
-            for target in rule.get("sector_targets", []):
+            for target in self._sector_eval_targets(rule):
                 if target.get("key"):
                     targets_by_key[str(target["key"])] = target
             if rule.get("sector_trigger") == "momentum":
@@ -843,7 +846,7 @@ class MonitorRuleEngine:
         threshold = float(rule.get("threshold_pct", 1.0)) / 100
         window = int(rule.get("window_minutes", 5))
 
-        for target in rule.get("sector_targets", []):
+        for target in self._sector_eval_targets(rule):
             target_key = str(target.get("key") or "")
             snapshot = snapshots.get(target_key)
             if not snapshot or not snapshot.get("valid"):
@@ -910,6 +913,23 @@ class MonitorRuleEngine:
                     logger.warning("alert handler failed: %s", exc)
         return events
 
+    def _sector_eval_targets(self, rule: dict) -> list[dict]:
+        """全A 是单条全市场聚合, 不展开具体板块, 也不占 20 个名额。"""
+        if rule.get("sector_scope") == "all_a":
+            if self._sector_monitor_service is None:
+                return []
+            min_valid = int(rule.get("min_valid_count") or 5)
+            min_coverage = float(rule.get("min_coverage_pct") or 80) / 100
+            key = self._sector_monitor_service.all_a_snapshot_key(min_valid, min_coverage)
+            return [{
+                "key": key,
+                "kind": "all_a",
+                "name": "全A",
+                "min_valid_count": min_valid,
+                "min_coverage": min_coverage,
+            }]
+        return [target for target in rule.get("sector_targets", []) if target.get("key")]
+
     @staticmethod
     def _sector_message(
         snapshot: dict,
@@ -919,21 +939,23 @@ class MonitorRuleEngine:
         window: int,
         value: float | None,
     ) -> str:
-        kind_label = {
-            "index": "指数", "concept": "概念", "industry": "行业",
-        }.get(snapshot.get("kind"), "板块")
+        kind = snapshot.get("kind")
+        if kind == "all_a":
+            title = "全A"
+        else:
+            kind_label = {
+                "index": "指数", "concept": "概念", "industry": "行业",
+            }.get(kind, "板块")
+            title = f"{kind_label}「{snapshot.get('name')}」"
         current = float(snapshot.get("change_pct") or 0)
         if trigger == "momentum":
             action = "快速拉升" if direction == "up" else "快速下跌"
-            head = (
-                f"{kind_label}「{snapshot.get('name')}」{window}分钟{action} "
-                f"{float(value or 0) * 100:+.2f}%"
-            )
+            head = f"{title}{window}分钟{action} {float(value or 0) * 100:+.2f}%"
         else:
             action = "涨幅上穿" if direction == "up" else "跌幅下穿"
-            head = f"{kind_label}「{snapshot.get('name')}」{action} {threshold * 100:.2f}%"
+            head = f"{title}{action} {threshold * 100:.2f}%"
         parts = [head, f"当前 {current * 100:+.2f}%"]
-        if snapshot.get("kind") != "index":
+        if kind != "index":
             parts.append(f"上涨 {snapshot.get('up_count', 0)}/{snapshot.get('valid_count', 0)}")
             parts.append(f"覆盖 {float(snapshot.get('coverage_ratio') or 0) * 100:.0f}%")
             leader = snapshot.get("leader") or {}

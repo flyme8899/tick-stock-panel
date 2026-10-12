@@ -945,6 +945,8 @@ export interface MonitorCondition {
 export type StrategyNotifyEvent = 'buy_signal' | 'sell_signal' | 'pool_entry' | 'pool_exit'
 
 export type SectorKind = 'index' | 'concept' | 'industry'
+/** 告警事件里的全市场等权聚合, 不是板块目录里的一类对象 */
+export type SectorEventKind = SectorKind | 'all_a'
 
 export interface SectorMonitorTarget {
   key: string
@@ -1033,10 +1035,16 @@ export interface MonitorRule {
   group_id?: string | null
   sector?: string | null
   sector_kind?: SectorKind | null
+  /** targets=勾选具体对象; all_a=全市场等权, 与具体对象互斥且不受 20 个上限 */
+  sector_scope?: 'targets' | 'all_a'
   sector_targets?: SectorMonitorTarget[]
   sector_trigger?: 'change_pct' | 'momentum'
   threshold_pct?: number
   window_minutes?: 1 | 3 | 5 | 10 | 15
+  /** 全A: 有行情的成分不少于该只数才触发 */
+  min_valid_count?: number
+  /** 全A: 行情覆盖率百分数, 80 表示 80% */
+  min_coverage_pct?: number
   /** abnormal 专属: 关注窗口 (any=全部) */
   abnormal_window?: 'any' | '3d' | '10d' | '30d'
   strategy_id?: string | null
@@ -1265,6 +1273,8 @@ export interface MonitorRuleOptions {
     reason: string
   }
   sector_targets: Record<SectorKind, SectorMonitorTarget[]>
+  /** 全A 分母: 行业与概念成分去重后的只数 */
+  all_a_member_count?: number
 }
 
 export interface AlertEvent {
@@ -1283,7 +1293,7 @@ export interface AlertEvent {
   strategy_id?: string
   conditions?: MonitorCondition[]
   logic?: 'and' | 'or'
-  sector_kind?: SectorKind
+  sector_kind?: SectorEventKind
   sector_key?: string
   sector_name?: string
   sector_source_field?: string

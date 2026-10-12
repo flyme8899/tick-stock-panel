@@ -41,6 +41,7 @@ LADDER_METRICS = {"sealed_vol", "sealed_amount"}
 # ladder 规则: 方向 (up=涨停炸板预警, down=跌停翘板预警)
 LADDER_DIRECTIONS = {"up", "down"}
 SECTOR_KINDS = {"index", "concept", "industry"}
+SECTOR_SCOPES = {"targets", "all_a"}
 SECTOR_TRIGGERS = {"change_pct", "momentum"}
 SECTOR_WINDOWS = {1, 3, 5, 10, 15}
 # abnormal 规则 (异动边缘): 接近度方向 / 关注窗口
@@ -190,16 +191,26 @@ def validate(rule: dict) -> None:
         kind = rule.get("sector_kind")
         if kind not in SECTOR_KINDS:
             raise ValueError(f"sector_kind 必须是 {SECTOR_KINDS} 之一")
+        scope = rule.get("sector_scope") or "targets"
+        if scope not in SECTOR_SCOPES:
+            raise ValueError("sector_scope 必须是 targets 或 all_a")
         targets = rule.get("sector_targets")
-        if not isinstance(targets, list) or not targets:
-            raise ValueError("板块监控至少选择一个监控对象")
-        if len(targets) > 20:
-            raise ValueError("板块监控对象最多 20 个")
-        for target in targets:
-            if not isinstance(target, dict) or not target.get("key") or not target.get("name"):
-                raise ValueError("板块监控对象格式错误")
-            if target.get("kind") != kind:
-                raise ValueError("板块监控对象类型必须一致")
+        if scope == "all_a":
+            if kind == "index":
+                raise ValueError("全A 仅适用于概念题材或行业板块")
+            if isinstance(targets, list) and targets:
+                raise ValueError("全A 与具体板块互斥，请清空已选监控对象")
+            _validate_all_a_gates(rule)
+        else:
+            if not isinstance(targets, list) or not targets:
+                raise ValueError("板块监控至少选择一个监控对象")
+            if len(targets) > 20:
+                raise ValueError("板块监控对象最多 20 个")
+            for target in targets:
+                if not isinstance(target, dict) or not target.get("key") or not target.get("name"):
+                    raise ValueError("板块监控对象格式错误")
+                if target.get("kind") != kind:
+                    raise ValueError("板块监控对象类型必须一致")
         if rule.get("sector_trigger") not in SECTOR_TRIGGERS:
             raise ValueError(f"sector_trigger 必须是 {SECTOR_TRIGGERS} 之一")
         if rule.get("direction") not in LADDER_DIRECTIONS:
@@ -325,6 +336,21 @@ def validate(rule: dict) -> None:
         raise ValueError("cooldown_seconds 必须是非负整数")
 
 
+def _validate_all_a_gates(rule: dict) -> None:
+    """全A 的有效成分数与覆盖率按百分数配置, 缺省与单个板块相同 (5 只 / 80%)。"""
+    min_valid = rule.get("min_valid_count", 5)
+    if isinstance(min_valid, bool) or not isinstance(min_valid, int) or not 1 <= min_valid <= 20000:
+        raise ValueError("全A 有效成分门槛必须是 1 到 20000 的整数")
+    coverage = rule.get("min_coverage_pct", 80)
+    if (
+        isinstance(coverage, bool)
+        or not isinstance(coverage, (int, float))
+        or not math.isfinite(float(coverage))
+        or not 0 < float(coverage) <= 100
+    ):
+        raise ValueError("全A 行情覆盖率必须大于 0 且不超过 100%")
+
+
 def normalize(rule: dict) -> dict:
     """补全默认字段,返回规范化后的规则 (不校验)。"""
     r = dict(rule)
@@ -341,7 +367,10 @@ def normalize(rule: dict) -> dict:
         r["group_id"] = None
     r.setdefault("sector", None)
     r.setdefault("sector_kind", None)
+    r.setdefault("sector_scope", "targets")
     r.setdefault("sector_targets", [])
+    r.setdefault("min_valid_count", 5)
+    r.setdefault("min_coverage_pct", 80.0)
     r.setdefault("sector_trigger", "change_pct")
     r.setdefault("threshold_pct", 70.0 if r.get("type") == "abnormal" else 1.0)
     r.setdefault("window_minutes", 5)
@@ -380,6 +409,8 @@ def normalize(rule: dict) -> dict:
         r["scope"] = "all"
         r["symbols"] = []
         r["group_id"] = None
+        if r.get("sector_scope") not in SECTOR_SCOPES:
+            r["sector_scope"] = "targets"
     # date 专属默认字段 (日期提醒): 纯日历窗口, 无行情条件, 每天至多一次
     if r.get("type") == "date":
         r["conditions"] = []

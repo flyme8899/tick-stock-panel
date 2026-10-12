@@ -88,10 +88,15 @@ class RuleModel(BaseModel):
     group_id: str | None = None
     sector: str | None = None
     sector_kind: str | None = None  # index | concept | industry
+    # targets=勾选具体对象 (最多 20); all_a=全市场等权, 与具体对象互斥
+    sector_scope: str = "targets"
     sector_targets: list[SectorTargetModel] = []
     sector_trigger: str = "change_pct"  # change_pct | momentum
     threshold_pct: float = 1.0
     window_minutes: int = 5
+    # 全A 门槛: 有效成分只数 / 行情覆盖率百分数 (80 = 80%)
+    min_valid_count: int = 5
+    min_coverage_pct: float = 80.0
     strategy_id: str | None = None
     direction: str = "entry"  # entry | exit | both | (sector/ladder/abnormal: up|down|both)
     notify_events: list[str] | None = None
@@ -159,6 +164,7 @@ def get_options(request: Request):
     sector_targets = sector_service.list_targets() if sector_service is not None else {
         "index": [], "concept": [], "industry": [],
     }
+    all_a_member_count = sector_service.all_a_member_count() if sector_service is not None else 0
     return {
         "threshold_fields": threshold_fields,
         "builtin_signals": builtin_signals,
@@ -198,6 +204,7 @@ def get_options(request: Request):
             getattr(request.app.state, "capabilities", None),
         ),
         "sector_targets": sector_targets,
+        "all_a_member_count": all_a_member_count,
     }
 
 
@@ -236,6 +243,10 @@ def list_rules(request: Request):
     if sector_service is not None:
         for rule in rules:
             if rule.get("type") != "sector":
+                continue
+            if rule.get("sector_scope") == "all_a":
+                if sector_service.all_a_member_count() <= 0:
+                    rule["runtime_warning"] = "全A 成分数据为空, 规则不会触发"
                 continue
             missing = sector_service.missing_target_keys(rule.get("sector_targets", []))
             unavailable = sector_service.unavailable_target_keys(rule.get("sector_targets", []))
