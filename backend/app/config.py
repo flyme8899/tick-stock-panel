@@ -202,6 +202,8 @@ class Settings(BaseSettings):
     news_zsxq_files_max_total_mb: str = ""
     # true 时正文写入研报库后删除 PDF。留空则保留文件，另有天数和总量上限。
     news_zsxq_files_delete_after: str = ""
+    # 扫描版 PDF 每轮 OCR 上限。0 关闭。北京时间 09:15–15:05 不跑。
+    news_zsxq_ocr_max_per_round: str = ""
     news_etf_flow_enabled: str = ""
     # ETF 申赎表格的视觉模型。和上面的 ai_api_key / ai_model 分开，避免把文本模型当成视觉模型。
     vision_ai_api_key: str = ""

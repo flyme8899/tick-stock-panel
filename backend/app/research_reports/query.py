@@ -28,6 +28,11 @@ def ima_for_symbol(data_dir: Path, symbol: str, *, limit: int = 20) -> list[dict
     return ima_store.for_code(data_dir, symbol, limit=limit)
 
 
+def ima_search(data_dir: Path, text: str, *, limit: int = 20) -> list[dict]:
+    """全文库检索。没有股票代码、标成行业/综合的研报也会出现。"""
+    return ima_store.search(data_dir, text, limit=limit)
+
+
 def industry(data_dir: Path, *, limit: int = 30) -> list[dict]:
     rows: list[dict] = []
     for day in reversed(store.list_dates(data_dir, "industry")):

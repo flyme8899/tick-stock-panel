@@ -20,6 +20,12 @@ def health() -> dict:
     return query.health(_dir())
 
 
+@router.get("/search")
+def search(q: str = Query("", max_length=80), limit: int = Query(20, ge=1, le=50)) -> dict:
+    """按标题、摘要、正文和标签搜全文库，包括没有个股映射的行业/综合研报。"""
+    return {"query": q, "reports": query.ima_search(_dir(), q, limit=limit)}
+
+
 @router.get("/stock/{symbol}")
 def stock(symbol: str, limit: int = Query(20, ge=1, le=50)) -> dict:
     try:

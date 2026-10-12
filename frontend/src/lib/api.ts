@@ -1443,6 +1443,8 @@ export interface ImaResearchReport {
   summary: string
   body: string
   source_note: string
+  /** 没有个股映射时为「行业/综合」。 */
+  tag?: string
   symbols: { symbol: string; name: string; code: string }[]
 }
 
@@ -3488,6 +3490,12 @@ export const api = {
   researchForStock: (symbol: string, limit = 20) =>
     request<{ symbol: string; reports: ResearchReport[]; ima_reports?: ImaResearchReport[] }>(
       `/api/research/stock/${encodeURIComponent(symbol)}?limit=${limit}`,
+    ),
+
+  /** 全文库检索。没有股票代码、标成行业/综合的研报也会返回。 */
+  researchSearch: (query: string, limit = 20) =>
+    request<{ query: string; reports: ImaResearchReport[] }>(
+      `/api/research/search?q=${encodeURIComponent(query)}&limit=${limit}`,
     ),
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {

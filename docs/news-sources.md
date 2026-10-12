@@ -110,11 +110,21 @@ ima 券商研报另外要 `IMA_RESEARCH_KB_ID`（个人知识库 ID，不写进�
 
 全文、券商、发布日、标题和提及个股写在 `data/research/ima_reports.sqlite`，保留 60 天。个股页和 DSA 个股分析读这张表。热门事件和 DSA 情报桥只收标题和不超过 160 字的摘要，每轮最多 24 篇，有提及个股的优先。不要把长正文写入资讯库。健康页显示这个来源的状态，以及最近一轮写入全文表的篇数。
 
-SEC 8-K 还要 `SEC_USER_AGENT`，字符串里必须有联系邮箱，例如 `TSP-News ops@example.com`。没有邮箱时来源保持未配置，不会请求 sec.gov。这一批外文源没有 API key。
+SEC 8-K 还要 `SEC_USER_AGENT`，字符串里必须有联系邮箱。值里有空格，写进 `.env` 时要加引号，例如 `SEC_USER_AGENT="TSP-News ops@example.com"`。不加引号时，有的加载器会把邮箱截掉，来源保持未配置，不会请求 sec.gov。这一批外文源没有 API key。
 
 钉钉群号和知识星球号留空表示未配置，对应来源无法开启。知识星球可以只填一个号，也可以一次填多个。`NEWS_ZSXQ_GROUPS` 非空时不再读 `NEWS_ZSXQ_GROUP_ID`。名称会写进每条资讯，热点和推送显示成「知识星球·名称」。每个星球各记一个进度游标，补历史时同一起点套到全部星球。标题像复盘、舆情或汇总的帖子仍会入库，但不会按正文编号拆成多条热点，个股热度也只看标题。
 
 帖子附件里的 PDF 会进同一张研报全文表 `data/research/ima_reports.sqlite`，供个股页和 DSA 使用。来源名是「知识星球·星球名」，标题用文件名去掉扩展名，并记下原帖编号和发布时间。只下载 `.pdf`；mp3、xlsx 只把文件名、大小和哈希留在收件箱。按 `file_id` 和哈希去重。单文件默认不超过 30MB，每一轮最多 8 个，相邻下载至少间隔 1 秒。下载或抽正文失败不影响帖子文本入库，下一轮再试。签名链接不落盘、不写日志。PDF 放在 `data/research/zsxq_files/`，默认保留 60 天或总量 2048MB；`NEWS_ZSXQ_FILES_DELETE_AFTER=true` 时正文入库后删除文件。`NEWS_ZSXQ_FILES_ENABLED=false` 关闭下载。热门事件仍只看帖子标题和摘要，不读 PDF 正文。
+
+抽正文先用 pypdf。它抛错（例如 `PdfReadError: Could not read Boolean object`）或得到空文本时，再跑 `pdftotext -layout`，然后 pdfminer.six。仍然没有文字层的，用 OCR 读前 3 页：`pdftoppm` 转图片，`tesseract` 语言包 `chi_sim+eng`。机器上没有 tesseract 时，若安装了 `rapidocr-onnxruntime`，改用它识别这几页图片。OCR 进程带 `nice -n 19`。北京时间 09:15–15:05 不跑 OCR，文件留在索引里，原因是 `ocr-deferred`，收盘后再试，这几轮不计入放弃次数，也不占用本轮下载名额。每一轮 OCR 份数由 `NEWS_ZSXQ_OCR_MAX_PER_ROUND` 限制，默认 5，写成 0 则关闭 OCR。每份 OCR 的耗时写在采集日志里。
+
+没有识别出股票代码的全文也入库，标签是「行业/综合」，不写个股映射。个股页按代码查不到它们。`GET /api/research/search?q=` 按标题、摘要、正文、券商和标签检索，可以搜到这些研报。
+
+此前因正文为空或无法读取而放弃的 PDF，用下面的参数重新排队。下载失败、超限和不是 PDF 的不会因此重试。本地文件还在时直接再抽，不重新下载：
+
+```bash
+python scripts/news_host_collector.py --data-dir ./data --requeue-failed-files
+```
 
 ```ini
 NEWS_DWS_GROUP_ID=
@@ -153,17 +163,17 @@ python scripts/news_host_collector.py --data-dir ./data --backfill-files-since 2
 
 这条定时器不是容器调度的重复。容器里的轮询对钉钉和知识星球只调用 `collect_inbox()`，读取 `data/news/inbox`。容器内没有 `dws` / `zsxq-cli`，登录态在宿主机的 `~/.dws` 等目录。停掉 `tsp-news-collector.timer` 之后，这两路资讯不再入库。
 
-采集脚本启动时检查 Python 版本，低于 3.10 会直接退出。面板和容器仍用 Python 3.11。推荐把 `~/.venvs/tsp-collector` 建在 3.11 上，不要长期留在系统自带的 3.10。虚拟环境里至少要有 `pydantic` 和 `pydantic-settings`，因为脚本会导入 `app.config`。抽研报 PDF 正文还要在这个虚拟环境里安装 `pypdf`，只装在面板环境里不够。systemd 单元的 `ReadWritePaths` 必须包含 `data/research`（全文表和 PDF）以及 `data/news`（收件箱）。`data/research` 不存在时先 `mkdir -p data/research data/news`，否则 `ProtectSystem=strict` 下附件写不进去。
+采集脚本启动时检查 Python 版本，低于 3.10 会直接退出。面板和容器仍用 Python 3.11。推荐把 `~/.venvs/tsp-collector` 建在 3.11 上，不要长期留在系统自带的 3.10。虚拟环境里至少要有 `pydantic` 和 `pydantic-settings`，因为脚本会导入 `app.config`。抽研报 PDF 正文还要在这个虚拟环境里安装 `pypdf` 和 `pdfminer.six`，只装在面板环境里不够。扫描件 OCR 是可选的：系统包 `poppler-utils`（提供 `pdftotext` 和 `pdftoppm`）、`tesseract-ocr`、`tesseract-ocr-eng`、`tesseract-ocr-chi-sim`。不想装 tesseract 时，可以改用 Python 包 `rapidocr-onnxruntime`，仍然需要 `pdftoppm` 把前 3 页转成图片。systemd 单元的 `ReadWritePaths` 必须包含 `data/research`（全文表和 PDF）以及 `data/news`（收件箱）。`data/research` 不存在时先 `mkdir -p data/research data/news`，否则 `ProtectSystem=strict` 下附件写不进去。
 
 Ubuntu 可以用 deadsnakes：
 
 ```bash
 sudo add-apt-repository -y ppa:deadsnakes/ppa
 sudo apt-get update
-sudo apt-get install -y python3.11 python3.11-venv
+sudo apt-get install -y python3.11 python3.11-venv poppler-utils tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim
 rm -rf ~/.venvs/tsp-collector
 python3.11 -m venv ~/.venvs/tsp-collector
-~/.venvs/tsp-collector/bin/pip install pydantic pydantic-settings pypdf
+~/.venvs/tsp-collector/bin/pip install pydantic pydantic-settings pypdf pdfminer.six
 ```
 
 或者用 uv：
@@ -172,7 +182,7 @@ python3.11 -m venv ~/.venvs/tsp-collector
 uv python install 3.11
 rm -rf ~/.venvs/tsp-collector
 uv venv --python 3.11 ~/.venvs/tsp-collector
-uv pip install --python ~/.venvs/tsp-collector/bin/python pydantic pydantic-settings pypdf
+uv pip install --python ~/.venvs/tsp-collector/bin/python pydantic pydantic-settings pypdf pdfminer.six
 ```
 
 `ProtectSystem=strict` 下，`data/news` 和 `data/research` 都必须属于该服务用户，并且都要写在单元的 `ReadWritePaths` 里。前者是收件箱，后者是研报 PDF 和全文表。dws 大约每 2 小时刷新一次令牌；`ProtectHome` 只读时还要放开 `~/.dws`、`~/.local/share/dws-cli`、`~/.config/zsxq-cli`、`~/.local/share/zsxq-cli`。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。

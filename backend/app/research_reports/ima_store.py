@@ -2,6 +2,7 @@
 
 和东财研报 parquet 分开：那边只有标题和 PDF 地址，个股列表会整段读进内存。
 长正文放在这里，按 media_id 去重，按代码查提及个股。热门事件不读这张表。
+没有识别出股票代码的全文也留在这张表里，标签是「行业/综合」，不写 mentions。
 """
 from __future__ import annotations
 
@@ -23,7 +24,8 @@ CREATE TABLE IF NOT EXISTS reports (
     body TEXT NOT NULL,
     summary TEXT NOT NULL,
     source_note TEXT NOT NULL,
-    ingested_at TEXT NOT NULL
+    ingested_at TEXT NOT NULL,
+    tag TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_ima_reports_date ON reports(publish_date);
 CREATE TABLE IF NOT EXISTS mentions (
@@ -39,6 +41,8 @@ CREATE INDEX IF NOT EXISTS idx_ima_mentions_code ON mentions(code);
 _lock = threading.Lock()
 _BODY_API_LIMIT = 8000
 RETENTION_DAYS = 60
+# 没有个股映射的研报用这个标签，搜索能命中，个股页不会把它算成某只股票。
+INDUSTRY_TAG = "行业/综合"
 
 
 def db_path(data_dir: Path) -> Path:
@@ -56,7 +60,31 @@ def _connect(data_dir: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    _ensure_tag(conn)
     return conn
+
+
+def _ensure_tag(conn: sqlite3.Connection) -> None:
+    """旧库没有 tag 列。补上之后，把没有 mentions 的历史全文标成行业/综合。"""
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(reports)")}
+    if "tag" in cols:
+        return
+    try:
+        conn.execute("ALTER TABLE reports ADD COLUMN tag TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(reports)")}
+        if "tag" in cols:
+            return
+        raise
+    conn.execute(
+        """
+        UPDATE reports
+        SET tag = ?
+        WHERE media_id NOT IN (SELECT media_id FROM mentions)
+        """,
+        (INDUSTRY_TAG,),
+    )
+    conn.commit()
 
 
 def known_ids(data_dir: Path, media_ids: list[str]) -> set[str]:
@@ -100,14 +128,18 @@ def insert_report(data_dir: Path, row: dict) -> bool:
             str(item.get("name") or "")[:80],
             str(item.get("code") or "")[:16],
         ))
+    tag = str(row.get("tag") or "").strip()[:40]
+    if not symbols and not tag:
+        tag = INDUSTRY_TAG
     with _lock:
         conn = _connect(data_dir)
         try:
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO reports (
-                    media_id, broker, publish_date, title, body, summary, source_note, ingested_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    media_id, broker, publish_date, title, body, summary,
+                    source_note, ingested_at, tag
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     media_id,
@@ -118,6 +150,7 @@ def insert_report(data_dir: Path, row: dict) -> bool:
                     str(row.get("summary") or "")[:200],
                     str(row.get("source_note") or "")[:500],
                     str(row.get("ingested_at") or ""),
+                    tag,
                 ),
             )
             inserted = cur.rowcount == 1
@@ -169,7 +202,7 @@ def for_code(data_dir: Path, code: str, *, limit: int = 20) -> list[dict]:
             rows = conn.execute(
                 """
                 SELECT r.media_id, r.broker, r.publish_date, r.title, r.body,
-                       r.summary, r.source_note
+                       r.summary, r.source_note, r.tag
                 FROM reports r
                 JOIN mentions m ON m.media_id = r.media_id
                 WHERE m.code = ?
@@ -178,6 +211,51 @@ def for_code(data_dir: Path, code: str, *, limit: int = 20) -> list[dict]:
                 LIMIT ?
                 """,
                 (wanted, int(limit)),
+            ).fetchall()
+            found = []
+            for row in rows:
+                symbols = conn.execute(
+                    """
+                    SELECT symbol, name, code FROM mentions
+                    WHERE media_id = ? ORDER BY symbol
+                    """,
+                    (row["media_id"],),
+                ).fetchall()
+                found.append(_public(row, symbols))
+            return found
+        finally:
+            conn.close()
+
+
+def _like_pattern(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def search(data_dir: Path, query: str, *, limit: int = 20) -> list[dict]:
+    """按标题、摘要、正文、券商和标签检索。没有个股映射的行业/综合研报也能命中。"""
+    text = str(query or "").strip()[:80]
+    if not text or not db_path(data_dir).exists():
+        return []
+    capped = min(50, max(1, int(limit)))
+    pattern = _like_pattern(text)
+    with _lock:
+        conn = _connect(data_dir)
+        try:
+            rows = conn.execute(
+                """
+                SELECT media_id, broker, publish_date, title, body, summary,
+                       source_note, tag
+                FROM reports
+                WHERE title LIKE ? ESCAPE '\\'
+                   OR summary LIKE ? ESCAPE '\\'
+                   OR body LIKE ? ESCAPE '\\'
+                   OR broker LIKE ? ESCAPE '\\'
+                   OR tag LIKE ? ESCAPE '\\'
+                ORDER BY publish_date DESC, ingested_at DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, pattern, pattern, pattern, capped),
             ).fetchall()
             found = []
             for row in rows:
@@ -248,6 +326,7 @@ def _public(row: sqlite3.Row, symbols: list[sqlite3.Row]) -> dict:
         "summary": row["summary"] or "",
         "body": body,
         "source_note": row["source_note"] or "",
+        "tag": str(row["tag"] or ""),
         "symbols": [
             {"symbol": item["symbol"], "name": item["name"] or "", "code": item["code"] or ""}
             for item in symbols
