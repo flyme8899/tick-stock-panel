@@ -9,7 +9,7 @@ import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { extendMinuteTail } from '@/lib/minuteTailExtend'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
-import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
+import { fmtPrice, fmtPct, fmtBigNum, fmtSignedFlow, flowClock, priceColorClass, formatExtNumber } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
@@ -43,7 +43,7 @@ import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primitives'
 import { getSignals, signalCls, getSortValue, getIntradaySortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
-import { useQuoteStatus, useCapabilities, usePreferences } from '@/lib/useSharedQueries'
+import { useQuoteStatus, useCapabilities, usePreferences, useIntradayFundFlow } from '@/lib/useSharedQueries'
 import {
   type ColumnConfig,
   BUILTIN_COLUMNS,
@@ -478,6 +478,8 @@ const StockCard = React.memo(function StockCard({
   groups,
   onToggleMember,
   groupChangePending,
+  mainNet,
+  flowClockLabel,
 }: {
   r: any
   candleRows: KlineRow[]
@@ -497,6 +499,9 @@ const StockCard = React.memo(function StockCard({
   groups: WatchlistGroup[]
   onToggleMember: (symbol: string, groupId: string, member: boolean) => void
   groupChangePending: boolean
+  /** 盘中主力净流入，单位元。没有快照时为 null，卡片显示 —。 */
+  mainNet: number | null
+  flowClockLabel: string
 }) {
   const board = boardTag(r.symbol)
   const price = r.rt_price ?? r.close
@@ -596,6 +601,10 @@ const StockCard = React.memo(function StockCard({
 
         {/* 第三行: 指标 */}
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-muted leading-relaxed">
+          <span title={mainNet != null && flowClockLabel ? `盘中主力净流入 ${flowClockLabel}` : '盘中主力净流入，还没有今日快照'}>
+            主力
+            <span className={`font-mono ml-0.5 ${priceColorClass(mainNet)}`}>{fmtSignedFlow(mainNet)}</span>
+          </span>
           <span title="换手率">换手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span></span>
           <span title="量比">量比<span className="font-mono ml-0.5">{fmtPrice(r.vol_ratio_5d)}</span></span>
           <span title="RSI14">RSI<span className="font-mono ml-0.5">{r.rsi_14 != null ? r.rsi_14.toFixed(1) : '—'}</span></span>
@@ -1045,6 +1054,21 @@ export function Watchlist() {
 
   const listEntries = list.data?.symbols ?? []
   const allSymbols = listEntries.map(s => s.symbol)
+  const intradayFlow = useIntradayFundFlow(allSymbols)
+  const flowByCode = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const item of intradayFlow.data?.items ?? []) {
+      if (item.main_net == null || !item.code) continue
+      map.set(item.code, item.main_net)
+    }
+    return map
+  }, [intradayFlow.data])
+  const flowCaptured = flowClock(intradayFlow.data?.captured_at)
+  const mainNetOf = useCallback((symbol: string): number | null => {
+    const code = symbol.split('.')[0] ?? ''
+    const amount = flowByCode.get(code)
+    return amount == null ? null : amount
+  }, [flowByCode])
   const rows = enriched.data?.rows ?? []
   const groupBySymbol = useMemo(
     () => new Map(listEntries.map(entry => [entry.symbol, entry.group_ids ?? []])),
@@ -1220,8 +1244,11 @@ export function Watchlist() {
     if (col.source.type === 'builtin' && col.source.key === 'intraday') {
       return getIntradaySortValue(r, minuteData[r.symbol])
     }
+    if (col.source.type === 'builtin' && col.source.key === 'main_net_intraday') {
+      return mainNetOf(r.symbol)
+    }
     return getSortValue(r, col)
-  }, [minuteData])
+  }, [minuteData, mainNetOf])
   const { sort, toggle: handleSortToggle, sortRows } = useTableSort(getWatchlistSortValue)
 
   const sortedRows = useMemo(
@@ -1326,6 +1353,8 @@ export function Watchlist() {
       groups={groups}
       onToggleMember={handleToggleMember}
       groupChangePending={addGroupMember.isPending || removeGroupMember.isPending}
+      mainNet={mainNetOf(r.symbol)}
+      flowClockLabel={flowCaptured}
     />
   )
 
@@ -1810,6 +1839,17 @@ export function Watchlist() {
                 }
                 if (key === 'pct') {
                   return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPct(pct)}</td>
+                }
+                if (key === 'main_net_intraday') {
+                  const net = mainNetOf(r.symbol)
+                  const title = net != null && flowCaptured
+                    ? `盘中即时 ${flowCaptured}`
+                    : '盘中即时，还没有今日快照'
+                  return (
+                    <td className={`${numCls} ${priceColorClass(net)}`} title={title}>
+                      {fmtSignedFlow(net)}
+                    </td>
+                  )
                 }
                 if (key === 'amount') {
                   return <td className={`${numCls} text-secondary`}>{fmtBigNum(r.rt_amount ?? r.amount)}</td>

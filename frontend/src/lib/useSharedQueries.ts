@@ -10,6 +10,21 @@ import { QK } from './queryKeys'
 
 // ===== 全局共享 =====
 
+/**
+ * 盘中个股主力净流入。自选和个股详情共用同一查询键（按代码排序）。
+ * 后端约 6 分钟落一份快照，这里 60 秒看一次本地接口，不打外部源。
+ */
+export function useIntradayFundFlow(symbols: readonly string[]) {
+  const symbolsKey = [...symbols].filter(Boolean).sort().join(',')
+  return useQuery({
+    queryKey: QK.fundFlowIntraday(symbolsKey),
+    queryFn: () => api.fundFlowIntraday(symbolsKey ? symbolsKey.split(',') : []),
+    enabled: symbolsKey.length > 0,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  })
+}
+
 /** 能力检测 — Layout / Data / Keys 共用 */
 export function useCapabilities() {
   return useQuery({

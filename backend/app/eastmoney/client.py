@@ -140,6 +140,20 @@ class EastMoneyLimiter:
             self._next = self._clock() + self.min_interval_s + max(0.0, self._jitter())
             return response
 
+    def pace(self) -> None:
+        """占用一次最小间隔，不发请求。
+
+        同花顺个股即时资金流按页打 ``10jqka.com.cn``，主机不在东财白名单里。
+        仍要和 ``get`` 共用 ``_next``，避免两路叠在一起超过配置的速率。
+        不看东财熔断：同花顺没被东财 403 挡住。
+        """
+        with self._lock:
+            now = self._clock()
+            wait = self._next - now
+            if wait > 0:
+                self._sleep(wait)
+            self._next = self._clock() + self.min_interval_s + max(0.0, self._jitter())
+
     def _send(
         self,
         url: str,

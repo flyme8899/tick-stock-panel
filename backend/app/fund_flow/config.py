@@ -1,7 +1,8 @@
 """资金进出开关。
 
 代码默认全部关闭：环境变量没设置时不调度、不出网。``.env.example`` 里为本
-HK 部署写了打开值，复制过去才会拉数。
+HK 部署写了打开值，复制过去才会拉数。例外是盘中个股即时资金流：总开关打开
+且 ``FUND_FLOW_STOCK_INTRADAY`` 未设置时默认拉取，写成 false 才停。
 """
 from __future__ import annotations
 
@@ -23,6 +24,19 @@ def enabled() -> bool:
 
 def stock_enabled() -> bool:
     return enabled() and _flag("FUND_FLOW_STOCK")
+
+
+def stock_intraday_enabled() -> bool:
+    """盘中个股即时资金流。总开关打开时默认开，显式写成 false 才关。
+
+    未设置和空字符串都算开。写了别的值（false / 0 / no / off）才关，避免拼错时继续出网。
+    """
+    if not enabled():
+        return False
+    raw = os.environ.get("FUND_FLOW_STOCK_INTRADAY")
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() in _ON
 
 
 def sector_enabled() -> bool:

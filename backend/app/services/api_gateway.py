@@ -51,6 +51,7 @@ _RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/fund-flow/health", "read:analysis"),
     ("GET", "/api/fund-flow/board", "read:analysis"),
     ("GET", "/api/fund-flow/stock/", "read:analysis"),
+    ("GET", "/api/fund-flow/intraday", "read:analysis"),
     ("GET", "/api/fund-flow/sectors", "read:analysis"),
     ("GET", "/api/fund-flow/margin", "read:analysis"),
     ("GET", "/api/fund-flow/etf-shares", "read:analysis"),

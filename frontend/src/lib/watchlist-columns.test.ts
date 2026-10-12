@@ -95,3 +95,13 @@ describe('watchlist columns: 自选加入信息列', () => {
     expect(merged.map(c => c.id).slice(-2)).toEqual(['builtin:added_at', 'builtin:pct_since_added'])
   })
 })
+
+describe('watchlist columns: 盘中主力净流入', () => {
+  it('默认显示，并归入资金分组', () => {
+    const col = BUILTIN_COLUMNS.find(c => c.source.type === 'builtin' && c.source.key === 'main_net_intraday')
+    expect(col?.visible).toBe(true)
+    expect(col?.label).toBe('主力净流入')
+    const group = COLUMN_GROUPS.find(g => g.id === 'flow')
+    expect(group?.keys).toContain('main_net_intraday')
+  })
+})

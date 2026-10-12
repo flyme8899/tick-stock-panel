@@ -11,9 +11,13 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlparse
 
 from app.eastmoney.client import EastMoneyLimiter, _host_allowed, get_limiter
 from app.selection_fields.timeouts import REQUEST_TIMEOUT
+
+# 同花顺资金流分页。opt-in 线程里这些 GET 先占用东财同一把间隔，再走原来的 requests。
+_PACED_SUFFIXES = ("10jqka.com.cn",)
 
 _lock = threading.Lock()
 _local = threading.local()
@@ -72,12 +76,24 @@ class _Response:
             raise RuntimeError(f"eastmoney HTTP {self.status_code}")
 
 
+def _paced_host(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == suffix or host.endswith("." + suffix) for suffix in _PACED_SUFFIXES)
+
+
 def _patched(self: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
     limiter = _limiter
     original = _original
     opted_in = _thread_depth() > 0
     if opted_in and kwargs.get("timeout") is None:
         kwargs["timeout"] = REQUEST_TIMEOUT
+    if (
+        opted_in
+        and limiter is not None
+        and str(method).upper() == "GET"
+        and _paced_host(str(url))
+    ):
+        limiter.pace()
     if (
         opted_in
         and limiter is not None

@@ -37,6 +37,7 @@ EXPECTED_OPEN_ENDPOINTS: set[str] = {
     "GET /api/fund-flow/board",
     "GET /api/fund-flow/etf-shares",
     "GET /api/fund-flow/health",
+    "GET /api/fund-flow/intraday",
     "GET /api/fund-flow/margin",
     "GET /api/fund-flow/sectors",
     "GET /api/fund-flow/stock/{symbol}",

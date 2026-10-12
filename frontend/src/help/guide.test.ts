@@ -36,6 +36,8 @@ describe('help topics', () => {
       '30 只',
       'FUND_FLOW_ENABLED',
       '3 分钟',
+      '6 分钟',
+      'FUND_FLOW_STOCK_INTRADAY',
       '16:30',
       '并集',
       '交集',

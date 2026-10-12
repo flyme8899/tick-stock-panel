@@ -2366,6 +2366,19 @@ export interface SectorRotationUniverseItem {
   excluded?: boolean
 }
 
+export interface FundFlowIntradayItem {
+  code: string
+  name?: string | null
+  /** 主力净流入，单位元。缺失的代码不会出现在 items 里。 */
+  main_net: number | null
+}
+
+export interface FundFlowIntraday {
+  trade_date: string | null
+  captured_at: string | null
+  items: FundFlowIntradayItem[]
+}
+
 export interface FundFlowAmountRow {
   trade_date?: string | null
   name?: string | null
@@ -4641,6 +4654,12 @@ export const api = {
     }),
 
   fundFlowBoard: () => request<FundFlowBoard>('/api/fund-flow/board'),
+  fundFlowIntraday: (symbols: string[]) => {
+    const q = new URLSearchParams()
+    if (symbols.length > 0) q.set('symbols', symbols.join(','))
+    const qs = q.toString()
+    return request<FundFlowIntraday>(`/api/fund-flow/intraday${qs ? `?${qs}` : ''}`)
+  },
 
   newsHot: (kind: 'all' | 'stock' | 'sector' | 'etf' | 'event' = 'all') =>
     request<NewsHotResponse>(

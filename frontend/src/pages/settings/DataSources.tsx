@@ -754,6 +754,10 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
           </div>
         </div>
 
+        <p className="mb-4 text-[11px] leading-relaxed text-muted">
+          个股资金即时流向不走上面的行情源。同花顺全市场快照在交易日连续竞价（北京时间 9:30–11:30、13:00–15:00）每 6 分钟拉一次，请求走共用限流，单次连接 10 秒、读取 30 秒。总开关打开时默认开启，<span className="font-mono">FUND_FLOW_STOCK_INTRADAY=false</span> 可关掉。午休和收盘后不拉。
+        </p>
+
         <div className="mb-4 rounded-lg border border-border bg-elevated/40 px-3 py-2.5 text-[11px] leading-relaxed text-muted">
           筹码分布为<span className="text-secondary">本地计算（东财算法）</span>
           ，用本机前复权日 K 估算获利比例和成本区间，结果是估算，不是交易所持仓成本。

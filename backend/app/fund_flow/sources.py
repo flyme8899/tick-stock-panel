@@ -230,6 +230,12 @@ def live_clients(data_dir: Path | None = None) -> SourceClients:
         return payload
 
     def ak_call(name: str, **kwargs: Any):
+        # 同花顺个股资金流（含「即时」）走共用限流：东财间隔、缺省超时、失败退避在调用方。
+        # 其它 akshare 函数保持原请求，避免把两融、ETF 也改到这把锁上。
+        if name == "stock_fund_flow_individual":
+            from app.eastmoney.akshare_gate import call_akshare
+
+            return call_akshare(name, **kwargs)
         import akshare as ak
 
         fn = getattr(ak, name)
