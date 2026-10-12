@@ -20,7 +20,7 @@
 展示主标题是簇里最可信的新闻原标题，只去掉来源前缀、括号、券商组名，以及开头的「报道」「据报道」「消息称」。
 第一句完整时停在句号、分号、叹号、问号或全文结束处，不在 40 字或逗号处截开。第一句太短或没有主体时，把下一句留下。引号没合上时不在引号里截断。公司名后面的冒号留下公司名，后面的顿号按原文保留。
 模型写一句话要点放在副标题。要点只丢掉空的、替换符或乱码、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。数字、百分号和斜杠不算乱码。和主标题相同或已经包含在主标题里的要点不重复显示。
-模型回了空 title 或「无」时先重写一轮。仍空就从正文抽一句带数字或机构名、且和主标题不重复的话。抽不到就留空，不用标题再写一遍。模型写的要点标 subtitle_source 为 model，正文兜底的标 fallback。
+模型回了空 title 或「无」时先重写一轮。仍空只从「展示标题对应的那一条成员」里抽一句，并且这句要和标题有共同的主体或数字。早报、汇总里的别条不算。对不上就留空。模型写的要点标 subtitle_source 为 model，正文兜底的标 fallback。
 来源优先：公司公告和交易所，然后新华社、央视、证监会这类官方稿，再是财联社、华尔街见闻和格隆汇，然后外媒。
 知识星球、ima、钉钉里带「更新」「建议」「把握机会」「1e+」或编号列表的研报标题，不当主标题。
 公司或主题已经写清楚、并且过了原标题门槛的，可以用清理后的原标题。多主题晨报按条拆开，不再整篇丢掉。
@@ -482,8 +482,15 @@ _STRONG_MARKET = (
     "回购", "收购", "立案", "制裁", "定调", "政策",
     *_PRICE_NARRATIVE,
 )
+# 「金十数据10月12日讯」「金十数据2026年10月12日讯」，以及方括号剥掉来源名后
+# 剩下的「10月12日讯」。没有来源名时只认「讯」，避免「10月12日电价」被切成「价」。
 _SOURCE_DATELINE = re.compile(
-    r"^(?:" + _SOURCE_ALT + r")(?:\d{1,2}月\d{1,2}日)?(?:电|讯)[，,]?"
+    r"^(?:"
+    r"(?:" + _SOURCE_ALT + r")\s*(?:\d{4}\s*年\s*)?(?:\d{1,2}\s*月\s*\d{1,2}\s*日\s*)?(?:电|讯)"
+    r"|"
+    r"(?:\d{4}\s*年\s*)?\d{1,2}\s*月\s*\d{1,2}\s*日\s*讯"
+    r")"
+    r"[，,：:\s]*"
 )
 _SOURCE_LABEL = re.compile(
     r"^(?:(?:" + _SOURCE_ALT + r")(?:报道|快讯|讯|电)?|快讯|突发|独家|刚刚)[：:|｜]"
@@ -874,15 +881,14 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
 
 
 def _log_suspect_event_pairs(events: list[dict]) -> None:
-    """概念集合完全相同、成员却零重叠的事件对，打 warning 供监控。
+    """概念集合完全相同、至少两个概念、成员却零重叠的事件对，记一条 info。
 
     线上实测案例（2026-10-12 20:06 快照）：「证监会召开资本市场和金融形势
     专家座谈会」与「上交所向东百集团下发监管工作函」两条事件 concepts 同为
     东百集团收购题材（光芯片收购/光探测芯片/商业零售）、item_ids 零重叠、
     breakdown 逐项相同（124.5506）——概念与成员完全脱节的聚合层双写残差。
-    正常计算里这是低频事件（同批同档 + 同一组涨停题材也会撞），所以只告警
-    不拦截：warning 带两个 key、成员数和共同概念，监控侧按条数与案例定位，
-    确认根因后再升级成断言。
+    只共享一个概念的组合太多（一次刷新能打出上百条），不算这次要盯的残差。
+    不拦截，info 带两个 key、成员数和共同概念，确认根因后再升级成断言。
     """
     by_concepts: dict[tuple[str, ...], list[dict]] = {}
     for event in events:
@@ -891,7 +897,7 @@ def _log_suspect_event_pairs(events: list[dict]) -> None:
             for name in (event.get("concepts") or [])
             if str(name).strip()
         ))
-        if not concepts:
+        if len(concepts) < 2:
             continue
         by_concepts.setdefault(concepts, []).append(event)
     for concepts, group in by_concepts.items():
@@ -903,7 +909,7 @@ def _log_suspect_event_pairs(events: list[dict]) -> None:
                 ids_second = set(second.get("item_ids") or [])
                 if ids_first & ids_second:
                     continue
-                logger.warning(
+                logger.info(
                     "热门事件概念撞车：%s(%d成员) 与 %s(%d成员) 概念同为 %s"
                     " 但成员零重叠",
                     first.get("key"), len(ids_first),
@@ -3446,7 +3452,7 @@ def _hint(now: datetime, trading: date, chosen: date, fallback: bool, updated_hm
     if fallback:
         return f"暂无{_month_day(trading)}数据，显示{_month_day(chosen)}{clock}"
     if _auction_still_ahead(now, chosen):
-        pending = f"交易日 {_month_day(chosen)} · 等待竞价" if chosen != now.date() else "等待竞价"
+        pending = f"交易日 {_month_day(chosen)} · 待开盘验证" if chosen != now.date() else "待开盘验证"
         return f"{pending}{clock}"
     if chosen != now.date():
         return f"交易日 {_month_day(chosen)}{clock}"
@@ -5070,11 +5076,59 @@ def _point_chunks(body: str) -> list[str]:
     return chunks
 
 
+def _member_uses_headline(title: str, name: str) -> bool:
+    """成员标题是不是事件正在展示的那一条，而不是汇总里顺带写到的一句。"""
+    if not title or not name:
+        return False
+    candidates = (
+        _compact(title),
+        _compact(_display_original(title) or ""),
+        _compact(_cleaned_headline(title) or ""),
+    )
+    for text in candidates:
+        if not text:
+            continue
+        if text == name:
+            return True
+        shorter, longer = (text, name) if len(text) <= len(name) else (name, text)
+        if shorter in longer and len(shorter) >= 6 and len(longer) - len(shorter) <= max(4, len(shorter) // 5):
+            return True
+    return False
+
+
+def _headline_member_body(event: dict) -> str:
+    """兜底只读展示标题对应的那一条成员。早报里的其它条不拿来抽句。"""
+    name = _compact(str(event.get("name") or ""))
+    if not name:
+        return ""
+    matched: list[dict] = []
+    for row in event.get("_candidates") or []:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if title and _member_uses_headline(title, name):
+            matched.append(row)
+    if not matched:
+        return ""
+    chosen = matched[0]
+    for row in matched:
+        if _compact(_display_original(str(row.get("title") or "")) or "") == name:
+            chosen = row
+            break
+    text = str(chosen.get("text") or "").strip()
+    if not text:
+        return ""
+    body = _body_from_text(name, text)
+    if not body or _body_repeats_title(name, body):
+        return ""
+    return _strip_repeated_lead(name, body)
+
+
 def _key_sentence(name: str, body: str) -> str:
     """从正文里挑一句带数字或机构、且主标题没写过的话。
 
     模型把 title 留空时用。优先标题里没有的数字，其次新出现的机构名。
-    和主标题重复、过长、寒暄、来源前缀的不要。
+    和主标题重复、过长、寒暄、来源前缀的不要。两边都有实体却对不上的也不要。
     """
     if not body:
         return ""
@@ -5087,6 +5141,8 @@ def _key_sentence(name: str, body: str) -> str:
         if _subtitle_reject_reason(text, source):
             continue
         if _point_repeats_name(name, text):
+            continue
+        if not _shares_subject_or_number(name, text):
             continue
         novel_numbers = _subtitle_numbers(text) - _subtitle_numbers(name)
         novel_entities = [item for item in _explicit_entities(text) if item not in name]
@@ -5103,10 +5159,12 @@ def _key_sentence(name: str, body: str) -> str:
 
 
 def _fallback_subtitle(event: dict) -> str:
-    """模型没有可用要点时，从正文抽一句和主标题不同的话。抽不到就留空。"""
+    """模型没有可用要点时，只从展示标题那一条成员里抽一句。抽不到就留空。"""
     name = _compact(str(event.get("name") or ""))
-    point = _key_sentence(name, _event_body(event))
+    point = _key_sentence(name, _headline_member_body(event))
     if not point or _point_repeats_name(name, point):
+        return ""
+    if not _shares_subject_or_number(name, point):
         return ""
     return point
 

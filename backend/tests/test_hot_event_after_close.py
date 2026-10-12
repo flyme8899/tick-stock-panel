@@ -105,7 +105,7 @@ def test_list_switches_at_1500_and_ignores_future_timestamps(tmp_path):
     assert after["trading_day"] == "2026-10-12"
     assert after["fallback"] is False
     assert after["updated_at"] == "15:01"
-    assert after["hint"] == "交易日 10月12日 · 等待竞价 · 更新于 15:01"
+    assert after["hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 15:01"
     assert "工信部出台算力补贴" in found
     assert "平安银行回购股份" in found
     assert "碳酸锂报价继续上涨" in found
@@ -149,7 +149,7 @@ def test_weekend_keeps_friday_intraday_and_marks_overnight_pending(tmp_path):
     sat = _by_name(saturday)
     assert saturday["as_of"] == "2026-10-12"
     assert saturday["updated_at"] == "08:30"
-    assert saturday["hint"] == "交易日 10月12日 · 等待竞价 · 更新于 08:30"
+    assert saturday["hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 08:30"
     assert "工信部出台算力补贴" in sat
     assert "碳酸锂报价继续上涨" in sat
     assert "橡胶价格大涨超预期" not in sat
@@ -223,7 +223,7 @@ def test_holiday_preview_waits_for_the_next_open(tmp_path, monkeypatch):
     found = _by_name(preview)
     assert preview["as_of"] == "2026-10-08"
     assert preview["updated_at"] == "11:00"
-    assert "等待竞价" in preview["hint"]
+    assert "待开盘验证" in preview["hint"]
     assert "工信部出台算力补贴" in found
     assert "碳酸锂报价继续上涨" in found
     assert "平安银行回购股份" in found
