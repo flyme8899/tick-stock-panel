@@ -936,6 +936,21 @@ def get_minute_batch(request: Request, body: dict):
     )
 
 
+def _minute_chart_payload(symbol: str, payload: dict) -> dict:
+    """分时响应补上与日 K 买卖点相同的 t_trade. 失败时 marks 为空, K 线照常返回."""
+    from app.services.trade_marks import t_trade_from_bars
+
+    day = payload.get("date")
+    rows = payload.get("rows")
+    payload["t_trade"] = t_trade_from_bars(
+        rows if isinstance(rows, list) else [],
+        symbol=symbol,
+        day=str(day)[:10] if day else None,
+        prev_close=payload.get("prev_close"),
+    )
+    return payload
+
+
 @router.get("/minute-range")
 def get_minute_range(
     request: Request,
@@ -998,11 +1013,11 @@ def get_minute_range(
             .to_dicts()
         )
         if rows:
-            sessions.append({
+            sessions.append(_minute_chart_payload(symbol, {
                 "date": trade_date.isoformat(),
                 "prev_close": previous_closes.get(trade_date),
                 "rows": rows,
-            })
+            }))
 
     return _gzip_payload(
         request,
@@ -1075,14 +1090,14 @@ def get_minute(
         ).get(trade_date)
         return _gzip_payload(
             request,
-            {
+            _minute_chart_payload(symbol, {
                 "symbol": symbol, "name": stock_name, "stock_info": stock_info,
                 "date": str(trade_date), "rows": df.to_dicts(),
                 "source": "live" if not df.is_empty() else "none",
                 "asset_type": asset_type,
                 "price_limit": price_limit,
                 "prev_close": prev_close,
-            },
+            }),
             pref_key="minute_batch_compress",
         )
 
@@ -1107,12 +1122,12 @@ def get_minute(
                 )
             return _gzip_payload(
                 request,
-                {
+                _minute_chart_payload(symbol, {
                     "symbol": symbol, "name": stock_name, "stock_info": stock_info,
                     "date": str(trade_date), "rows": live_df.to_dicts(),
                     "source": "live", "asset_type": asset_type,
                     "price_limit": price_limit, "prev_close": prev_close,
-                },
+                }),
                 pref_key="minute_batch_compress",
             )
 
@@ -1140,13 +1155,13 @@ def get_minute(
     if is_complete:
         return _gzip_payload(
             request,
-            {
+            _minute_chart_payload(symbol, {
                 "symbol": symbol, "name": stock_name, "stock_info": stock_info,
                 "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
                 "asset_type": asset_type,
                 "price_limit": price_limit,
                 "prev_close": prev_close,
-            },
+            }),
             pref_key="minute_batch_compress",
         )
 
@@ -1161,14 +1176,14 @@ def get_minute(
         )
     return _gzip_payload(
         request,
-        {
+        _minute_chart_payload(symbol, {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": live_df.to_dicts(),
             "source": "live" if not live_df.is_empty() else "none",
             "asset_type": asset_type,
             "price_limit": price_limit,
             "prev_close": prev_close,
-        },
+        }),
         pref_key="minute_batch_compress",
     )
 

@@ -113,6 +113,60 @@ def test_minute_without_live_keeps_local_first(monkeypatch):
     # 本地 30 根 >= expected(30)*0.9 → 完整, 走本地
     assert body["source"] == "local"
     assert body["rows"][0]["close"] == 10.0
+    assert isinstance(body["t_trade"]["marks"], list)
+    assert body["t_trade"]["date"] == "2026-08-26"
+
+
+def test_minute_live_rows_carry_the_same_t_trade_marks(monkeypatch):
+    _patch_market(monkeypatch, in_session=True)
+    import app.api.kline as kline_api
+
+    def _fake_fetch(symbol, trade_date, asset_type="stock", *, capset, raw_basis=False):
+        del symbol, trade_date, asset_type, capset, raw_basis
+        return pl.DataFrame({
+            "datetime": [datetime(2026, 8, 26, 9, 35), datetime(2026, 8, 26, 9, 36)],
+            "open": [10.0, 10.4],
+            "high": [10.0, 10.4],
+            "low": [10.0, 10.4],
+            "close": [10.0, 10.4],
+            "volume": [1000.0, 1.0],
+            "amount": [1_000_000.0, 1040.0],
+        })
+
+    monkeypatch.setattr(kline_api.kline_sync, "fetch_minute_single", _fake_fetch)
+    resp = _client().get("/api/kline/minute", params={"symbol": "600000.SH", "live": 1})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "live"
+    mark = body["t_trade"]["marks"][0]
+    assert mark["time"] == "09:36"
+    assert mark["side"] == "sell"
+    assert mark["date"] == "2026-08-26"
+    assert mark["price"] == pytest.approx(10.4)
+
+
+def test_minute_without_bars_returns_empty_marks(monkeypatch):
+    _patch_market(monkeypatch, in_session=False)
+    import app.api.kline as kline_api
+
+    class _EmptyRepo(_FakeRepo):
+        def get_minute(self, symbol, trade_date, asset_type="stock") -> pl.DataFrame:
+            del symbol, trade_date, asset_type
+            return pl.DataFrame({"datetime": [], "close": []})
+
+    def _empty(*_args, **_kwargs):
+        return pl.DataFrame({"datetime": [], "close": []})
+
+    monkeypatch.setattr(kline_api.kline_sync, "fetch_minute_single", _empty)
+    app = FastAPI()
+    app.include_router(router)
+    app.state.repo = _EmptyRepo()
+    app.state.capabilities = CapabilitySet({Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits()})
+    resp = TestClient(app).get("/api/kline/minute", params={"symbol": "600000.SH", "date": "2026-08-26"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rows"] == []
+    assert body["t_trade"]["marks"] == []
 
 
 def test_minute_live_param_falls_back_to_local_off_session(monkeypatch):

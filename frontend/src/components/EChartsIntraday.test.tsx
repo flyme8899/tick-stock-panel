@@ -113,6 +113,46 @@ it('regular stock: adaptive y-axis still clamps to the limit band', async () => 
   expect(axis.max).toBeCloseTo(22, 6)
 })
 
+it('draws buy and sell marks on the matching minute and skips unknown times', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const host = document.createElement('div')
+  const root = createRoot(host)
+  cleanup = async () => { await act(async () => root.unmount()) }
+  await act(async () => root.render(
+    <EChartsIntraday
+      data={rows}
+      date={daily.date}
+      prevClose={120}
+      tradeMarks={[
+        {
+          date: daily.date, time: '09:30', side: 'buy', style: 'triangle', color: '#F04438',
+          tip: '策略信号 · 买入 119.10', price: 119.1, source: 'strategy',
+        },
+        {
+          date: daily.date, time: '11:20', side: 'sell', style: 'dot', color: '#12B76A',
+          tip: '做T提醒 · 高于分时均价 118.25', price: 118.25, source: 't', label: 'T',
+        },
+        {
+          date: daily.date, time: '08:00', side: 'buy', style: 'circle', color: '#F04438',
+          tip: '模拟成交 · 买入 119.00', price: 119, source: 'paper', label: 'B',
+        },
+      ]}
+    />,
+  ))
+  const option = chart.setOption.mock.calls.at(-1)?.[0]
+  const points = option.series[0].markPoint.data
+  expect(points.map((item: { symbol: string; coord: [string, number]; itemStyle: { color: string }; tip: string }) => (
+    [item.symbol, item.coord[0], item.itemStyle.color, item.tip]
+  ))).toEqual([
+    ['triangle', '09:30', '#F04438', '策略信号 · 买入 119.10'],
+    ['circle', '11:20', '#12B76A', '做T提醒 · 高于分时均价 118.25'],
+  ])
+  await act(async () => root.render(<EChartsIntraday data={rows} date={daily.date} tradeMarks={[]} />))
+  const cleared = chart.setOption.mock.calls.at(-1)?.[0]
+  expect(cleared.series[0].markPoint).toBeUndefined()
+})
+
 it('listing day without prevClose anchors y-axis with scale, not zero', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })

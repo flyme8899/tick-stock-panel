@@ -3,7 +3,10 @@ import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, MinuteKlineSession } from '@/lib/api'
 import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
+import { intradayMarkPoints, type IntradayTradeMark } from '@/lib/trade-marks'
 import { useChartTheme } from '@/lib/theme'
+
+const EMPTY_MARKS: IntradayTradeMark[] = []
 
 const COLORS = {
   up: '#C74040',
@@ -20,6 +23,8 @@ interface Props {
   height?: number
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   priceLines?: { value: number; label?: string; color?: string }[]
+  /** 买卖点。对不上当天分钟时跳过，不报错。 */
+  tradeMarks?: IntradayTradeMark[]
 }
 
 interface InfoPoint {
@@ -147,6 +152,7 @@ export function EChartsMultiDayIntraday({
   height = 420,
   onPriceDoubleClick,
   priceLines = [],
+  tradeMarks = EMPTY_MARKS,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -158,6 +164,7 @@ export function EChartsMultiDayIntraday({
   const modelRef = useRef(model)
   modelRef.current = model
   const [info, setInfo] = useState<InfoPoint | null>(model.latest)
+  const [markTip, setMarkTip] = useState<{ text: string; x: number; y: number } | null>(null)
   const theme = useChartTheme()
 
   useEffect(() => {
@@ -186,7 +193,24 @@ export function EChartsMultiDayIntraday({
         const point = current.pointByIndex.get(index)
         if (point) setInfo(point)
       })
-      chart.on('globalout', () => setInfo(modelRef.current.latest))
+      chart.on('globalout', () => {
+        setInfo(modelRef.current.latest)
+        setMarkTip(null)
+      })
+      chart.on('mouseover', (params: any) => {
+        if (params?.componentType !== 'markPoint') return
+        const text = params.data?.tip
+        if (!text) return
+        const ev = params.event
+        setMarkTip({
+          text: String(text),
+          x: typeof ev?.offsetX === 'number' ? ev.offsetX : 8,
+          y: typeof ev?.offsetY === 'number' ? ev.offsetY : 8,
+        })
+      })
+      chart.on('mouseout', (params: any) => {
+        if (params?.componentType === 'markPoint') setMarkTip(null)
+      })
 
       const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
         const pixel: [number, number] = [event.offsetX, event.offsetY]
@@ -208,10 +232,23 @@ export function EChartsMultiDayIntraday({
       chart.getZr().on('dblclick', handlePriceDoubleClick)
     }
 
-    const monitoredPrices = priceLines
-      .map(line => line.value)
-      .filter(value => Number.isFinite(value) && value > 0)
+    const monitoredPrices = [
+      ...priceLines.map(line => line.value),
+      ...tradeMarks.map(mark => mark.price ?? Number.NaN),
+    ].filter(value => Number.isFinite(value) && value > 0)
     const allPriceValues = [...model.priceValues, ...monitoredPrices]
+    const closeByX = new Map<string, number>()
+    for (const [index, point] of model.pointByIndex) {
+      const category = model.categories[index]
+      if (category) closeByX.set(category, point.row.close)
+    }
+    const markPoints = intradayMarkPoints(tradeMarks, mark => {
+      const x = `${mark.date} ${mark.time}`
+      const y = mark.price ?? closeByX.get(x) ?? null
+      if (!closeByX.has(x) && mark.price == null) return null
+      if (!model.categories.includes(x) || y == null || !Number.isFinite(y)) return null
+      return { x, y }
+    })
     const minPrice = allPriceValues.length > 0 ? Math.min(...allPriceValues) : 0
     const maxPrice = allPriceValues.length > 0 ? Math.max(...allPriceValues) : 1
     const padding = Math.max((maxPrice - minPrice) * 0.08, maxPrice * 0.002)
@@ -258,12 +295,17 @@ export function EChartsMultiDayIntraday({
       }]
     })
     const markLineData = [...boundaryData, ...monitorLineData]
-    if (priceSeries.length > 0 && markLineData.length > 0) {
-      priceSeries[0].markLine = {
-        symbol: 'none',
-        silent: true,
-        animation: false,
-        data: markLineData,
+    if (priceSeries.length > 0 && (markLineData.length > 0 || markPoints.length > 0)) {
+      if (markLineData.length > 0) {
+        priceSeries[0].markLine = {
+          symbol: 'none',
+          silent: true,
+          animation: false,
+          data: markLineData,
+        }
+      }
+      if (markPoints.length > 0) {
+        priceSeries[0].markPoint = { data: markPoints, animation: false }
       }
     }
     const averageSeries: any[] = model.dayRanges.map(({ start, session, averages }) => {
@@ -390,11 +432,13 @@ export function EChartsMultiDayIntraday({
       ],
     }
     chart.setOption(option, true)
-  }, [height, model, priceLines, theme])
+  }, [height, model, priceLines, theme, tradeMarks])
 
   useEffect(() => () => {
     chartRef.current?.off('updateAxisPointer')
     chartRef.current?.off('globalout')
+    chartRef.current?.off('mouseover')
+    chartRef.current?.off('mouseout')
     if (priceDoubleClickHandlerRef.current) {
       chartRef.current?.getZr().off('dblclick', priceDoubleClickHandlerRef.current)
     }
@@ -431,7 +475,20 @@ export function EChartsMultiDayIntraday({
         </div>
         <div className="shrink-0 text-[10px] text-muted">{sessions.length} 个交易日 · {rowCount} 分钟</div>
       </div>
-      <div ref={containerRef} className="w-full" style={{ height: height - 40, cursor: 'crosshair' }} />
+      <div className="relative w-full" style={{ height: height - 40 }}>
+        <div ref={containerRef} className="h-full w-full" style={{ cursor: 'crosshair' }} />
+        {markTip && (
+          <div
+            className="pointer-events-none absolute z-20 max-w-[9.5rem] whitespace-pre-line break-words rounded border border-border bg-surface/95 px-1.5 py-1 text-[10px] leading-snug text-foreground shadow"
+            style={{
+              left: Math.max(4, Math.min(markTip.x + 10, Math.max(4, (containerRef.current?.clientWidth ?? 280) - 148))),
+              top: Math.max(4, markTip.y - 28),
+            }}
+          >
+            {markTip.text}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

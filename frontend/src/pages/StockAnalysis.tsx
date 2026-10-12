@@ -283,7 +283,9 @@ function StockAnalysisChart({
                     height={280}
                     prevClose={prev?.close}
                     vwapBand={overlay.vwapBand}
-                    tMarks={overlay.tMarks}
+                    priceLines={overlay.minutePriceLines}
+                    tradeMarks={overlay.minuteMarks}
+                    showT={overlay.showT}
                   />
                 </div>
               )}

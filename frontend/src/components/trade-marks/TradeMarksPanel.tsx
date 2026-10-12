@@ -9,15 +9,19 @@ import {
   dsaLines,
   fillMarkers,
   formatForward,
+  intradayTradeMarks,
   markerDetails,
   strategyMarkers,
   TRADE_BUY,
   TRADE_SELL,
+  type IntradayTradeMark,
   type TradeMarkDetail,
   type TradeTMark,
 } from '@/lib/trade-marks'
 
 export interface TradeMarkOverlayPrefs {
+  /** 日K和分时共用。关掉后两边都不画买卖点。 */
+  show: boolean
   strategy: boolean
   t: boolean
   dsa: boolean
@@ -26,6 +30,7 @@ export interface TradeMarkOverlayPrefs {
 }
 
 export const DEFAULT_TRADE_MARK_OVERLAY: TradeMarkOverlayPrefs = {
+  show: true,
   strategy: true,
   t: true,
   dsa: true,
@@ -40,6 +45,10 @@ export interface TradeMarksChartBindings {
   vwapBand: number | null
   tMarks: TradeTMark[]
   showT: boolean
+  /** 分时图用的短标签价位线，含外部监控线。 */
+  minutePriceLines: ChartPriceLine[]
+  /** 策略、模拟成交和做T，已按开关滤好。分时图再按日期落点。 */
+  minuteMarks: IntradayTradeMark[]
 }
 
 interface Props {
@@ -49,6 +58,8 @@ interface Props {
   intradayDate?: string | null
   extraMarkers?: ChartMarker[]
   extraPriceLines?: ChartPriceLine[]
+  /** 与分时轮询同间隔。历史日和 15:30 后不再请求。 */
+  refetchIntervalMs?: number
   children: (overlay: TradeMarksChartBindings) => ReactNode
 }
 
@@ -58,6 +69,20 @@ const TOGGLES: { key: keyof Pick<TradeMarkOverlayPrefs, 'strategy' | 't' | 'dsa'
   { key: 'dsa', label: 'DSA价位' },
   { key: 'paper', label: '模拟盘成交' },
 ]
+
+function loadOverlayPrefs(): TradeMarkOverlayPrefs {
+  const saved = storage.tradeMarkOverlay.get(DEFAULT_TRADE_MARK_OVERLAY)
+  // 旧偏好没有总开关，缺省视为打开，和四个来源的默认一致。
+  return { ...DEFAULT_TRADE_MARK_OVERLAY, ...saved, show: saved.show !== false }
+}
+
+function beijingClock(): { day: string; hhmm: string } {
+  const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
+  const hhmm = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(new Date())
+  return { day, hhmm }
+}
 
 function fmtPrice(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '—'
@@ -85,11 +110,10 @@ export function TradeMarksOverlay({
   intradayDate,
   extraMarkers,
   extraPriceLines,
+  refetchIntervalMs,
   children,
 }: Props) {
-  const [prefs, setPrefs] = useState<TradeMarkOverlayPrefs>(() => (
-    storage.tradeMarkOverlay.get(DEFAULT_TRADE_MARK_OVERLAY)
-  ))
+  const [prefs, setPrefs] = useState<TradeMarkOverlayPrefs>(loadOverlayPrefs)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [point, setPoint] = useState<{ x: number; y: number } | null>(null)
   const pinnedRef = useRef(false)
@@ -102,7 +126,7 @@ export function TradeMarksOverlay({
     })
   }, [])
 
-  const anyOn = prefs.strategy || prefs.t || prefs.dsa || prefs.paper
+  const anyOn = prefs.show && (prefs.strategy || prefs.t || prefs.dsa || prefs.paper)
   const strategyParam = prefs.strategy && prefs.strategyId ? prefs.strategyId : ''
   const intraday = intradayDate ?? ''
   const query = useQuery({
@@ -115,6 +139,13 @@ export function TradeMarksOverlay({
     }),
     enabled: !!symbol && !!start && !!end && anyOn,
     staleTime: 60_000,
+    refetchInterval: () => {
+      if (!refetchIntervalMs || refetchIntervalMs <= 0) return false
+      const now = beijingClock()
+      if (intraday && intraday < now.day) return false
+      if (now.hhmm >= '15:30') return false
+      return refetchIntervalMs
+    },
   })
 
   useEffect(() => {
@@ -125,20 +156,36 @@ export function TradeMarksOverlay({
 
   const data = query.data
   const strategies = data?.strategies ?? []
-  const showStrategyMarks = prefs.strategy && !!prefs.strategyId
+  const showStrategyMarks = prefs.show && prefs.strategy && !!prefs.strategyId
+  const showDsa = prefs.show && prefs.dsa
+  const showPaper = prefs.show && prefs.paper
+  const showT = prefs.show && prefs.t
   const markers = useMemo(() => [
     ...(extraMarkers ?? []),
     ...strategyMarkers(data?.markers ?? [], showStrategyMarks),
-    ...fillMarkers(data?.fills ?? [], prefs.paper),
-  ], [data?.fills, data?.markers, extraMarkers, prefs.paper, showStrategyMarks])
+    ...fillMarkers(data?.fills ?? [], showPaper),
+  ], [data?.fills, data?.markers, extraMarkers, showPaper, showStrategyMarks])
   const priceLines = useMemo(() => [
     ...(extraPriceLines ?? []),
-    ...dsaLines(data?.levels ?? [], prefs.dsa),
-  ], [data?.levels, extraPriceLines, prefs.dsa])
+    ...dsaLines(data?.levels ?? [], showDsa),
+  ], [data?.levels, extraPriceLines, showDsa])
+  const minutePriceLines = useMemo(() => [
+    ...(extraPriceLines ?? []),
+    ...dsaLines(data?.levels ?? [], showDsa, true),
+  ], [data?.levels, extraPriceLines, showDsa])
   const tMarks = useMemo(
-    () => (prefs.t ? data?.t_trade?.marks ?? [] : []),
-    [data?.t_trade?.marks, prefs.t],
+    () => (showT ? data?.t_trade?.marks ?? [] : []),
+    [data?.t_trade?.marks, showT],
   )
+  const minuteMarks = useMemo(() => intradayTradeMarks({
+    markers: data?.markers,
+    fills: data?.fills,
+    tMarks: data?.t_trade?.marks,
+    showStrategy: showStrategyMarks,
+    showPaper,
+    showT,
+    tDate: data?.t_trade?.date,
+  }), [data?.fills, data?.markers, data?.t_trade?.date, data?.t_trade?.marks, showPaper, showStrategyMarks, showT])
   const details = useMemo(
     () => markerDetails(data?.markers ?? [], data?.fills ?? []),
     [data?.fills, data?.markers],
@@ -169,15 +216,25 @@ export function TradeMarksOverlay({
   return (
     <div>
       <div className="mb-1.5 flex items-center gap-1.5 overflow-x-auto pb-0.5">
-        <span className="shrink-0 text-[10px] text-muted">买卖点</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={prefs.show}
+          onClick={() => update({ show: !prefs.show })}
+          className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-medium ${
+            prefs.show ? 'bg-accent/20 text-accent' : 'bg-elevated text-muted hover:text-secondary'
+          }`}
+        >
+          买卖点
+        </button>
         {TOGGLES.map(item => (
           <button
             key={item.key}
             type="button"
             onClick={() => update({ [item.key]: !prefs[item.key] })}
             className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-mono ${
-              prefs[item.key] ? 'bg-accent/20 text-accent' : 'bg-elevated text-muted hover:text-secondary'
-            }`}
+              prefs.show && prefs[item.key] ? 'bg-accent/20 text-accent' : 'bg-elevated text-muted hover:text-secondary'
+            } ${prefs.show ? '' : 'opacity-50'}`}
           >
             {item.label}
           </button>
@@ -208,9 +265,11 @@ export function TradeMarksOverlay({
             markers,
             priceLines,
             onMarkerHover,
-            vwapBand: prefs.t ? (data?.t_trade?.band ?? 0.015) : null,
+            vwapBand: showT ? (data?.t_trade?.band ?? 0.015) : null,
             tMarks,
-            showT: prefs.t,
+            showT,
+            minutePriceLines,
+            minuteMarks,
           })}
           {card && (
             <div
@@ -226,7 +285,7 @@ export function TradeMarksOverlay({
           {card && <div className="mt-2 md:hidden">{card}</div>}
         </div>
 
-        {prefs.strategy && (
+        {prefs.show && prefs.strategy && (
           <aside className="w-full shrink-0 rounded border border-border/70 bg-surface/50 p-2.5 xl:w-[280px]">
             <div className="text-xs font-medium text-foreground">该策略在本股历史表现</div>
             {!prefs.strategyId ? (

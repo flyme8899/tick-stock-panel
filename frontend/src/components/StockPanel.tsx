@@ -216,6 +216,7 @@ export function StockPanel({
           intradayDate={selectedDate}
           extraMarkers={markers}
           extraPriceLines={priceLines}
+          refetchIntervalMs={refetchIntervalMs}
         >
           {overlay => renderCharts(overlay)}
         </TradeMarksOverlay>
@@ -267,10 +268,11 @@ export function StockPanel({
               onPriceHover={setLinkedPrice}
               onPriceDoubleClick={onPriceDoubleClick}
               currentPrice={rows[rows.length - 1]?.close}
-              priceLines={overlay?.priceLines ?? priceLines}
+              priceLines={overlay?.minutePriceLines ?? priceLines}
               refetchIntervalMs={refetchIntervalMs}
               vwapBand={overlay?.showT ? overlay.vwapBand : null}
-              tMarks={overlay?.showT ? overlay.tMarks : undefined}
+              tradeMarks={overlay?.minuteMarks}
+              showT={overlay?.showT}
             />
           </div>
         )}

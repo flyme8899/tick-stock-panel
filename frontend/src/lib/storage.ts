@@ -177,8 +177,9 @@ export const storage = {
   /** 数据页画像卡片顺序 (卡片key 数组, 长度=卡片总数) */
   dataCardOrder: kv<string[]>('data-card-order'),
 
-  /** 个股买卖点叠加：四个来源开关和选中的策略 */
+  /** 个股买卖点叠加：总开关、四个来源和选中的策略。日K与分时共用。 */
   tradeMarkOverlay: kv<{
+    show: boolean
     strategy: boolean
     t: boolean
     dsa: boolean
