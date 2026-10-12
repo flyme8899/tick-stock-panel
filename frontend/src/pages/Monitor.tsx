@@ -454,16 +454,16 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                             return (
                               <button
                                 onClick={() => handlePreviewEvent(ev)}
-                                className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
-                                title="点击查看日K"
+                                className="inline-flex min-w-min max-w-full flex-1 items-center gap-1.5 overflow-hidden rounded px-1 -mx-1 transition-colors hover:bg-elevated/50 cursor-pointer"
+                                title={ev.name ? `${ev.name} · 点击查看日K` : '点击查看日K'}
                               >
-                                <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{ev.symbol}</span>
+                                <span className="shrink-0 font-mono text-xs font-medium text-foreground hover:text-accent">{ev.symbol}</span>
                                 {board && (
-                                  <span className={`inline-flex items-center justify-center h-3.5 w-3.5 rounded text-[8px] font-bold leading-none border ${board.color}`}>
+                                  <span className={`shrink-0 inline-flex items-center justify-center h-3.5 w-3.5 rounded text-[8px] font-bold leading-none border ${board.color}`}>
                                     {board.label}
                                   </span>
                                 )}
-                                {ev.name && <span className="text-xs text-secondary truncate max-w-[8rem] hover:text-foreground">{ev.name}</span>}
+                                {ev.name && <span data-alert-name="" className="min-w-[4.5em] w-0 flex-1 truncate text-xs text-secondary hover:text-foreground">{ev.name}</span>}
                               </button>
                             )
                           })()}
@@ -538,16 +538,16 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                           return (
                             <button
                               onClick={() => handlePreviewEvent(ev)}
-                              className="inline-flex items-center gap-1.5 rounded hover:bg-elevated/50 px-1 -mx-1 transition-colors cursor-pointer"
-                              title="点击查看日K"
+                              className="inline-flex min-w-min max-w-full flex-1 items-center gap-1.5 overflow-hidden rounded px-1 -mx-1 transition-colors hover:bg-elevated/50 cursor-pointer"
+                              title={ev.name ? `${ev.name} · 点击查看日K` : '点击查看日K'}
                             >
-                              <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{ev.symbol}</span>
+                              <span className="shrink-0 font-mono text-xs font-medium text-foreground hover:text-accent">{ev.symbol}</span>
                               {board && (
-                                <span className={`inline-flex items-center justify-center h-3.5 w-3.5 rounded text-[8px] font-bold leading-none border ${board.color}`}>
+                                <span className={`shrink-0 inline-flex items-center justify-center h-3.5 w-3.5 rounded text-[8px] font-bold leading-none border ${board.color}`}>
                                   {board.label}
                                 </span>
                               )}
-                              {ev.name && <span className="text-xs text-secondary truncate max-w-[8rem] hover:text-foreground">{ev.name}</span>}
+                              {ev.name && <span data-alert-name="" className="min-w-[4.5em] w-0 flex-1 truncate text-xs text-secondary hover:text-foreground">{ev.name}</span>}
                             </button>
                           )
                         })()}
@@ -836,8 +836,8 @@ function RulesList({ rulesQuery, onEdit }: {
               <div className={cn('absolute left-0 top-0 h-full w-0.5', r.enabled ? 'bg-accent/50' : 'bg-border')} />
 
               {/* 第一行: 分类标签 + 名称 + 操作按钮 */}
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex min-w-0 items-center gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5">
                   <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold', SOURCE_BADGE_STYLE[r.type] ?? 'bg-elevated text-muted')}>
                     {TYPE_LABEL[r.type]}
                   </span>
@@ -851,33 +851,33 @@ function RulesList({ rulesQuery, onEdit }: {
                   {r.scope === 'symbols' && r.symbols.length > 0 ? (
                     <button
                       onClick={() => setPreviewSymbol(r.symbols[0])}
-                      className="inline-flex items-center gap-1 min-w-0 hover:bg-elevated/50 rounded px-0.5 transition-colors cursor-pointer"
-                      title={`查看 ${r.symbols[0]} 日K`}
+                      className="inline-flex min-w-min max-w-full flex-1 items-center gap-1 overflow-hidden rounded px-0.5 transition-colors hover:bg-elevated/50 cursor-pointer"
+                      title={symbolNames[r.symbols[0]] ? `${symbolNames[r.symbols[0]]} · 查看 ${r.symbols[0]} 日K` : `查看 ${r.symbols[0]} 日K`}
                     >
-                      <span className="font-mono text-xs font-medium text-foreground hover:text-accent">{r.symbols[0]}</span>
-                      {symbolNames[r.symbols[0]] && <span className="text-xs text-secondary truncate">{symbolNames[r.symbols[0]]}</span>}
+                      <span className="shrink-0 font-mono text-xs font-medium text-foreground hover:text-accent">{r.symbols[0]}</span>
+                      {symbolNames[r.symbols[0]] && <span data-alert-name="" className="min-w-[4.5em] w-0 flex-1 truncate text-xs text-secondary">{symbolNames[r.symbols[0]]}</span>}
                     </button>
                   ) : r.scope === 'watchlist_group' && r.group_id ? (
                     (() => {
                       const meta = groupMeta[r.group_id]
                       if (!meta) {
-                        return <span className="text-xs text-warning truncate" title={r.name}>分组已删除</span>
+                        return <span className="min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-xs text-warning" title={r.name}>分组已删除</span>
                       }
                       return (
                         <Link
                           to={`/watchlist?group=${r.group_id}`}
-                          className="inline-flex min-w-0 items-center gap-1.5 rounded px-0.5 transition-colors hover:bg-elevated/50 cursor-pointer"
+                          className="inline-flex min-w-min max-w-full flex-1 items-center gap-1.5 overflow-hidden rounded px-0.5 transition-colors hover:bg-elevated/50 cursor-pointer"
                           title={`「${meta.name}」分组 · 当前 ${meta.count} 只 · 点击查看分组`}
                         >
                           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${resolveWatchlistGroupColor(meta.color).dot}`} />
-                          <span className="truncate text-xs font-medium text-foreground hover:text-accent">{meta.name}</span>
+                          <span className="min-w-[4.5em] w-0 flex-1 truncate text-xs font-medium text-foreground hover:text-accent">{meta.name}</span>
                           <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted">{meta.count}只</span>
                           <span className="shrink-0 text-[9px] text-muted/60">· 分组作用域</span>
                         </Link>
                       )
                     })()
                   ) : (
-                    <h3 className={cn('text-xs font-medium truncate', r.enabled ? 'text-foreground' : 'text-muted')}>{displayName}</h3>
+                    <h3 className={cn('min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-xs font-medium', r.enabled ? 'text-foreground' : 'text-muted')}>{displayName}</h3>
                   )}
                   {!r.enabled && <span className="shrink-0 text-[9px] text-secondary">· 停用</span>}
                 </div>

@@ -284,44 +284,45 @@ export function RankColumn({ title, rows, tone, onStockClick, onDimensionClick, 
             sourceField: r.source_field!,
           })}
           title={clickable ? `查看「${r.name}」成分股` : undefined}
-          className={`grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md px-1.5 py-1 border transition-colors ${
+          className={`grid grid-cols-[14px_minmax(0,1fr)_auto] items-start gap-x-1 gap-y-0.5 rounded-md px-1.5 py-1 border transition-colors ${
             isActive ? 'border-accent/30 bg-accent/10' : 'border-transparent bg-elevated/40'
           } ${clickable ? 'cursor-pointer hover:border-accent/40 hover:bg-elevated/70' : 'hover:border-border/60'}`}
         >
-          <span className="text-center font-mono text-[9px] text-muted">{idx + 1}</span>
-          <div className="min-w-0">
-            <div className="truncate text-[11px] text-foreground" title={r.name}>
-              {r.name}
-              {clickable && <span className="ml-1 text-[8px] text-muted/50">↗</span>}
-            </div>
-            <div className="mt-0.5 flex items-center gap-1">
-              <span className="shrink-0 font-mono text-[9px] text-muted">{r.count}只</span>
-              <span className="text-muted">·</span>
-              {r.leader?.symbol ? (
-                <button
-                  onClick={(e) => { e.stopPropagation(); onStockClick?.(r.leader!.symbol!, r.leader!.name ?? undefined) }}
-                  className="truncate text-[10px] font-medium text-secondary hover:text-accent cursor-pointer transition-colors"
-                  title={r.leader?.symbol ?? undefined}
-                >{r.leader?.name ?? '—'}</button>
-              ) : (
-                <span className="truncate text-[10px] text-muted">{r.leader?.name ?? '—'}</span>
-              )}
-              {r.leader?.change_pct != null && (
-                <span className={`shrink-0 font-mono text-[9px] tabular-nums ${pctClass(r.leader.change_pct)}`}>
-                  {fmtStockPct(r.leader.change_pct)}
-                </span>
-              )}
-              {r.leader?.symbol && (() => {
-                const board = boardTag(r.leader!.symbol!)
-                return board ? (
-                  <span className={`shrink-0 inline-flex items-center justify-center h-3 px-1 rounded text-[8px] font-bold leading-none border ${board.color}`}>
-                    {board.label}
-                  </span>
-                ) : null
-              })()}
-            </div>
+          <span className="pt-0.5 text-center font-mono text-[9px] text-muted">{idx + 1}</span>
+          <div className="min-w-0 truncate pt-px text-[11px] text-foreground" title={r.name}>
+            {r.name}
+            {clickable && <span className="ml-1 text-[8px] text-muted/50">↗</span>}
           </div>
-          <div className={`font-mono text-[10px] font-semibold ${pctClass(r.avg_pct)}`}>{fmtStockPct(r.avg_pct)}</div>
+          <div className={`shrink-0 pt-0.5 font-mono text-[10px] font-semibold ${pctClass(r.avg_pct)}`}>{fmtStockPct(r.avg_pct)}</div>
+          {/* 龙头单独成行并占满列宽。名称下限约 4 个全角字，涨跌幅和北/创徽标空间不够时换行，避免窄屏把名字裁成半个字。 */}
+          <div data-leader-line className="col-span-3 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5">
+            <span className="shrink-0 font-mono text-[9px] text-muted">{r.count}只</span>
+            <span className="shrink-0 text-muted">·</span>
+            {r.leader?.symbol ? (
+              <button
+                type="button"
+                data-leader-name=""
+                onClick={(e) => { e.stopPropagation(); onStockClick?.(r.leader!.symbol!, r.leader!.name ?? undefined) }}
+                className="min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-left text-[10px] font-medium text-secondary hover:text-accent cursor-pointer transition-colors"
+                title={[r.leader?.name, r.leader?.symbol].filter(Boolean).join(' ')}
+              >{r.leader?.name ?? '—'}</button>
+            ) : (
+              <span data-leader-name="" className="min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-left text-[10px] text-muted" title={r.leader?.name ?? undefined}>{r.leader?.name ?? '—'}</span>
+            )}
+            {r.leader?.change_pct != null && (
+              <span className={`shrink-0 font-mono text-[9px] tabular-nums ${pctClass(r.leader.change_pct)}`}>
+                {fmtStockPct(r.leader.change_pct)}
+              </span>
+            )}
+            {r.leader?.symbol && (() => {
+              const board = boardTag(r.leader!.symbol!)
+              return board ? (
+                <span className={`shrink-0 inline-flex items-center justify-center h-3 px-1 rounded text-[8px] font-bold leading-none border ${board.color}`}>
+                  {board.label}
+                </span>
+              ) : null
+            })()}
+          </div>
         </div>
         )
       })}
@@ -342,7 +343,7 @@ export function HotRankCard({ title, rank, configUrl, onStockClick, onDimensionC
     <section className="rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
       <SectionTitle icon={Flame} title={title} hint="领涨/领跌 · 点击板块看成分股" />
       {hasData ? (
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
           <RankColumn title="领涨" rows={rank?.leading ?? []} tone="bull" onStockClick={onStockClick} onDimensionClick={onDimensionClick} activeSymbol={activeSymbol} />
           <RankColumn title="领跌" rows={rank?.lagging ?? []} tone="bear" onStockClick={onStockClick} onDimensionClick={onDimensionClick} activeSymbol={activeSymbol} />
         </div>
@@ -416,31 +417,34 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
               className={`relative overflow-hidden rounded-md border pl-2.5 pr-2 py-1.5 transition-colors ${ev.symbol && ev.symbol === activeSymbol ? 'border-accent/40 bg-accent/5' : 'border-border/40 bg-surface/60 hover:border-border hover:bg-surface'}`}
             >
               <div className={cn('absolute left-0 top-0 h-full w-0.5', sev)} />
-              {/* 第一行: 代码 + 名称 + 价格 + 涨跌幅 (点击代码/名称弹日K) */}
-              <div className="flex items-center gap-1.5">
+              {/* 第一行: 代码 + 名称 + 价格 + 涨跌幅。名称至少约 4 个全角字，价格/涨跌幅不够放时换行，避免卡片 overflow 把名字裁成半个字。 */}
+              <div data-alert-line className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
                 <button
                   onClick={() => isSector ? navigate('/monitor') : ev.symbol && onStockClick(ev, alertNav)}
-                  title={isSector ? '在监控中心查看板块告警' : ev.symbol ? `查看 ${ev.symbol} 日K` : undefined}
-                  className={`inline-flex items-center gap-1 min-w-0 shrink-0 rounded hover:bg-elevated/60 transition-colors -mx-0.5 px-0.5 ${isSector || ev.symbol ? 'cursor-pointer' : 'cursor-default'}`}
+                  title={isSector ? '在监控中心查看板块告警' : ev.symbol ? `查看 ${ev.name ? `${ev.name} ` : ''}${ev.symbol} 日K` : undefined}
+                  className={`inline-flex min-w-min max-w-full flex-1 items-center gap-1 overflow-hidden rounded hover:bg-elevated/60 transition-colors -mx-0.5 px-0.5 ${isSector || ev.symbol ? 'cursor-pointer' : 'cursor-default'}`}
                 >
-                  <span className="font-mono text-[10px] font-medium text-foreground/80 hover:text-accent">{ev.symbol?.replace(/\.(SH|SZ|BJ)$/, '')}</span>
+                  <span className="shrink-0 font-mono text-[10px] font-medium text-foreground/80 hover:text-accent">{ev.symbol?.replace(/\.(SH|SZ|BJ)$/, '')}</span>
                   {ev.symbol && (() => {
                     const board = boardTag(ev.symbol)
                     return board && (
-                      <span className={`inline-flex items-center justify-center h-3 w-3 rounded text-[7px] font-bold leading-none border ${board.color}`}>
+                      <span className={`shrink-0 inline-flex items-center justify-center h-3 w-3 rounded text-[7px] font-bold leading-none border ${board.color}`}>
                         {board.label}
                       </span>
                     )
                   })()}
-                  {ev.name && <span className="text-[10px] text-secondary truncate max-w-[5rem] hover:text-foreground">{ev.name}</span>}
+                  {ev.name && <span data-alert-name="" className="min-w-[4.5em] w-0 flex-1 truncate text-[10px] text-secondary hover:text-foreground">{ev.name}</span>}
                 </button>
-                <span className="flex-1" />
-                {ev.price != null && (
-                  <span className="text-[10px] font-mono text-foreground/60 shrink-0">{fmtPrice(ev.price)}</span>
-                )}
-                {ev.change_pct != null && (
-                  <span className={cn('text-[10px] font-mono font-medium shrink-0 w-12 text-right', pct >= 0 ? 'text-danger' : 'text-bear')}>
-                    {fmtPct(pct)}
+                {(ev.price != null || ev.change_pct != null) && (
+                  <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                    {ev.price != null && (
+                      <span className="text-[10px] font-mono text-foreground/60">{fmtPrice(ev.price)}</span>
+                    )}
+                    {ev.change_pct != null && (
+                      <span className={cn('text-[10px] font-mono font-medium w-12 text-right', pct >= 0 ? 'text-danger' : 'text-bear')}>
+                        {fmtPct(pct)}
+                      </span>
+                    )}
                   </span>
                 )}
               </div>
@@ -448,23 +452,21 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
               {isStrategy ? (
                 <>
                   {ev.symbol ? (
-                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                    <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
                       <span className={cn('shrink-0 text-[9px] font-medium', eventMeta.className)}>
                         {eventMeta.action}
                       </span>
                       {sname
-                        ? <span className="truncate text-[9px] font-medium text-amber-400">「{sname}」</span>
-                        : ev.message && <span className="truncate text-[9px] text-muted">{ev.message}</span>}
-                      <span className="flex-1" />
-                      <span className="text-[8px] text-muted/50 shrink-0 font-mono">
+                        ? <span className="min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-[9px] font-medium text-amber-400">「{sname}」</span>
+                        : ev.message && <span className="min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-[9px] text-muted">{ev.message}</span>}
+                      <span className="ml-auto text-[8px] text-muted/50 shrink-0 font-mono">
                         {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
                       </span>
                     </div>
                   ) : (
-                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
-                      <span className="truncate text-[9px] text-muted">{ev.message}</span>
-                      <span className="flex-1" />
-                      <span className="text-[8px] text-muted/50 shrink-0 font-mono">
+                    <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                      <span className="min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-[9px] text-muted">{ev.message}</span>
+                      <span className="ml-auto text-[8px] text-muted/50 shrink-0 font-mono">
                         {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
                       </span>
                     </div>
@@ -479,14 +481,14 @@ export function MonitorWidget({ onStockClick, activeSymbol }: {
                 </>
               ) : (
                 <>
-                  <div className="mt-0.5 flex items-center gap-1.5">
+                  <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
                     <span className={cn('shrink-0 rounded px-1 py-px text-[8px] font-medium', _SOURCE_BADGE[ev.source] ?? 'bg-elevated text-muted')}>
                       {_SOURCE_LABEL[ev.source] ?? ev.source}
                     </span>
                     {ev.message && (
-                      <span className="text-[9px] text-muted truncate flex-1">{ev.message}</span>
+                      <span className="min-w-[4.5em] max-w-full flex-[1_1_4.5em] truncate text-[9px] text-muted">{ev.message}</span>
                     )}
-                    <span className="text-[8px] text-muted/50 shrink-0 font-mono">
+                    <span className="ml-auto text-[8px] text-muted/50 shrink-0 font-mono">
                       {ev.ts ? new Date(ev.ts).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}
                     </span>
                   </div>
