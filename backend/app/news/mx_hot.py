@@ -7,9 +7,14 @@
 ``FUND_FLOW_MX_MAX_CALLS`` 不是同一份，也不读那份配置。
 
 超时、非 200、空结果和解析失败只记日志，事件保持原样，异常不抛给快照和 API。
+摘要、来源和方向只看北京时间近 3 个自然日（含当天）的稿：先按日期新近，再按权威度。
+没有新稿时不改摘要和方向。来源在这个窗口里优先带跳转链接的条目。
 方向只在权威稿（authorityLevel 以 L1 开头）给出明确利好或利空时才改，
 判定复用热门事件的 ``_direction_signal``（否定句、削减订单先于「订单」）。
 对不上事件、或信号不确定时，不改方向和个股。
+
+缓存文件带 ``CACHE_VERSION``。旧版本（包括还没有版本号的文件）不再展示，
+也不再为同一事件重新请求，避免部署后把今天已经查过的榜首再打一遍接口。
 """
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ import logging
 import os
 import re
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import httpx
@@ -37,6 +42,15 @@ _MARKS = re.compile(r"[\s，。！？、；：\"'“”]+")
 _TAGS = re.compile(r"<[^>]+>")
 _LOCK = threading.Lock()
 _MISSING_KEY_LOGGED = False
+_STALE_LOGGED: set[str] = set()
+# 含当天在内的 3 个北京时间自然日。取 3 天是为了盖住隔夜稿，更早的高权威旧闻不进入判断。
+_RECENT_DAYS = 3
+# 抬高后，旧文件既不套用也不再请求。今天已经落盘的结果会在下次快照刷新时从榜首消失。
+CACHE_VERSION = 2
+_FULL_DATE = re.compile(
+    r"(?P<y>\d{4})\s*[-/.年]\s*(?P<m>\d{1,2})\s*[-/.月]\s*(?P<d>\d{1,2})"
+)
+_MONTH_DAY = re.compile(r"(?<!\d)(?P<m>\d{1,2})\s*[-/.月]\s*(?P<d>\d{1,2})日?")
 
 SUMMARY = (
     "只在新热点第一次冲上榜首时检索权威报道，补到事件来源和摘要。"
@@ -221,9 +235,15 @@ def event_query(event: dict) -> str:
     return f"{lead}{action}".strip()[:80]
 
 
-def apply_articles(event: dict, items: list[dict], *, lexicon=None) -> None:
-    """把权威条目写入摘要和来源。只有 L1 且方向明确时才改方向和个股。"""
-    ranked = sorted(_coerce_items(items), key=_authority_rank)
+def apply_articles(
+    event: dict,
+    items: list[dict],
+    *,
+    lexicon=None,
+    now: datetime | None = None,
+) -> None:
+    """近 3 日稿写入摘要和来源。只有 L1 且方向明确时才改方向和个股。"""
+    ranked = _select_recent(items, now)
     if not ranked:
         return
     _write_summary_and_sources(event, ranked)
@@ -257,9 +277,12 @@ def _enrich(
         return
     root = cache_root(data_dir)
     day = _trading_day(snapshot, now)
-    cached = _read_cache(root, day, key)
-    if cached is not None:
-        apply_articles(event, cached, lexicon=lexicon)
+    state, cached = _read_cache(root, day, key)
+    if state == "stale":
+        _note_stale(day, key)
+        return
+    if state == "hit":
+        apply_articles(event, cached, lexicon=lexicon, now=now)
         return
     if key == str(previous_top_key or "").strip():
         return
@@ -279,7 +302,7 @@ def _enrich(
         return
     items = _coerce_items(found)
     _write_cache(root, day, key, query, items)
-    apply_articles(event, items, lexicon=lexicon)
+    apply_articles(event, items, lexicon=lexicon, now=now)
 
 
 def _top_event(snapshot: dict) -> dict | None:
@@ -311,6 +334,14 @@ def _note_missing_key() -> None:
         return
     _MISSING_KEY_LOGGED = True
     logger.info("妙想热点补全未配置 MX_APIKEY，已跳过")
+
+
+def _note_stale(day: str, key: str) -> None:
+    token = f"{day}:{key}"
+    if token in _STALE_LOGGED:
+        return
+    _STALE_LOGGED.add(token)
+    logger.info("妙想热点缓存版本已过期，不再展示也不再请求")
 
 
 def _budget_path(root: Path) -> Path:
@@ -350,26 +381,30 @@ def _cache_path(root: Path, day: str, key: str) -> Path:
     return root / day / f"{safe}.json"
 
 
-def _read_cache(root: Path, day: str, key: str) -> list[dict] | None:
+def _read_cache(root: Path, day: str, key: str) -> tuple[str, list[dict]]:
+    """返回 hit、stale 或 miss。stale 表示旧版本，调用方不得再请求。"""
     path = _cache_path(root, day, key)
     if not path.is_file():
-        return None
+        return "miss", []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         logger.warning("妙想热点缓存无法读取")
-        return None
+        return "miss", []
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         logger.warning("妙想热点缓存格式无效")
-        return None
-    return [item for item in payload["items"] if isinstance(item, dict)]
+        return "miss", []
+    if payload.get("v") != CACHE_VERSION:
+        return "stale", []
+    items = [item for item in payload["items"] if isinstance(item, dict)]
+    return "hit", items
 
 
 def _write_cache(root: Path, day: str, key: str, query: str, items: list[dict]) -> None:
     try:
         _atomic_json(
             _cache_path(root, day, key),
-            {"query": query, "items": items},
+            {"v": CACHE_VERSION, "query": query, "items": items},
         )
     except OSError:
         logger.warning("妙想热点缓存未能落盘")
@@ -425,6 +460,72 @@ def _authority_rank(item: dict) -> tuple[int, str]:
     return (9, level)
 
 
+def _beijing_today(now: datetime | None) -> date:
+    moment = now or cn_now()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=CN_TZ)
+    return moment.astimezone(CN_TZ).date()
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _article_day(raw: str, today: date) -> date | None:
+    """稿件日期按北京时间自然日。带时区的时间先换到北京时间再取日期。"""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if "T" in text or text.endswith("Z"):
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=CN_TZ)
+            return parsed.astimezone(CN_TZ).date()
+    found = _FULL_DATE.search(text)
+    if found:
+        return _safe_date(int(found["y"]), int(found["m"]), int(found["d"]))
+    found = _MONTH_DAY.search(text)
+    if not found:
+        return None
+    month = int(found["m"])
+    day = int(found["d"])
+    candidate = _safe_date(today.year, month, day)
+    if candidate is None:
+        return None
+    # 只有月日、且落在今天之后时，当作上一年，避免 1 月把去年 12 月稿当成未来。
+    if (candidate - today).days > 0:
+        return _safe_date(today.year - 1, month, day)
+    return candidate
+
+
+def _select_recent(items: list[dict], now: datetime | None) -> list[dict]:
+    """丢掉窗口外和无法识别日期的稿，先新后旧，同一天再比权威度。"""
+    today = _beijing_today(now)
+    ranked: list[tuple[int, tuple[int, str], dict]] = []
+    for item in _coerce_items(items):
+        day = _article_day(str(item.get("date") or ""), today)
+        if day is None:
+            continue
+        age = (today - day).days
+        if age < 0 or age >= _RECENT_DAYS:
+            continue
+        ranked.append((age, _authority_rank(item), item))
+    ranked.sort(key=lambda row: (row[0], row[1]))
+    return [row[2] for row in ranked]
+
+
+def _has_jump_url(item: dict) -> bool:
+    url = str(item.get("url") or "").strip()
+    return url.startswith("https://") or url.startswith("http://")
+
+
 def _is_l1(item: dict) -> bool:
     return str(item.get("authority") or "").upper().startswith("L1")
 
@@ -456,8 +557,11 @@ def _write_summary_and_sources(event: dict, ranked: list[dict]) -> None:
     name = _flat(str(event.get("name") or ""))
     if summary and _flat(summary) != name:
         event["summary"] = summary
+    # 摘要仍按日期和权威度。来源另把带链接的排前面，无链接的只用来补满三条。
+    ordered = [item for item in ranked if _has_jump_url(item)]
+    ordered.extend(item for item in ranked if not _has_jump_url(item))
     sources = []
-    for item in ranked[:3]:
+    for item in ordered[:3]:
         title = str(item.get("title") or "").strip()
         source = str(item.get("source") or "").strip()
         if not title and not source:
@@ -575,3 +679,4 @@ def _load_lexicon():
 def reset_for_tests() -> None:
     global _MISSING_KEY_LOGGED
     _MISSING_KEY_LOGGED = False
+    _STALE_LOGGED.clear()
