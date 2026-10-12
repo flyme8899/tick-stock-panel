@@ -151,7 +151,13 @@ _TITLE_CACHE_VERSION = 21
 #     这类末字悬空、末两字整词的完整标题被判半句；③源把标题截成半句时，从
 #     正文完整句恢复（_recover_truncated_title）。真实数据重放：空标题事件
 #     535→499（救回 36 条）。旧口径算不出这些分数，快照只建基线不比较。
-HOT_RULES_VERSION = 2
+# v3: 模型改判后按展示分重排（_compute 里 _resync_importance_score 之后，
+#     2026-10-12）。此前名次按 LLM 改判前的规则分排、score 字段用改判后的
+#     展示分，榜单倒挂——服务器快照实测全场最高分（碳酸锂期货暴跌9%，
+#     168.55）压在 12 位、相邻倒挂 9/996 对。重排不改任何事件的分数、只改
+#     顺序，但 push 的「新进前 N」按名次判断，部署后第一轮会把纯名次变化
+#     误报成新热点，升版本让那一轮只建基线不比较。
+HOT_RULES_VERSION = 3
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -699,13 +705,16 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     # 把没写过的挤到后面去；而「谁该写要点」又是按排序切的前 80 名决定的，
     # 两者互为因果 —— 实测最终前 20 名里有 12 条的名次落在切片之外，永远拿
     # 不到要点（点开是空白）。改成一个方向的流程：排序 → 切片 → 写要点 →
-    # 只做过滤不再重排，前 20 名一定在切片内。
+    # 按展示分重排（见下面 _resync 之后）→ 过滤，前 20 名一定有要点。
     #
     # 切片前先重排一次：_absorb_cutoff_events 把半截簇并进宿主后 heat/mentions
     # 变了，沿用合并前的顺序会让个别该进前 20 的事件沉下去。
     events = _rank_events(events, now, grade=False)
     # 竞价分已经算进名次。股票映射或重要、但还没有原标题的簇，优先占用切片名额。
     _label_with_llm(_events_for_titles(events))
+    # 哪些条目这一轮真的问过模型。_ensure_shown_name 会把 _llm_title_applied
+    # 弹掉，先记下来；下面补问切片外条目时靠它区分「没问过」和「问过但留空」。
+    labeled = {id(event) for event in events if event.get("_llm_title_applied")}
     for event in events:
         _ensure_shown_name(event)
     # 写要点会经 _apply_llm 改掉 importance（模型给的级别），而 breakdown/score
@@ -714,7 +723,14 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     # 要点漂移，打破上面「前 20 必有要点」的保证。
     for event in events:
         _resync_importance_score(event)
-    # 过滤会改变成员但不重排：名次以上一步为准，保证「前 20 有要点」成立。
+    # 展示分对齐了模型级别，顺序却还是规则分那一版。模型改判一次最多 ±110 分
+    # （重大 130 vs 琐事 0），足以把深位事件抬进前 20 —— 服务器快照实测：
+    # #12「碳酸锂期货暴跌9%」展示分 168.55 是全场最高，却压在 #2（105.13）
+    # 后面，相邻倒挂 9/996 对。按展示分重排一次：只改顺序、不重跑
+    # _score_event（mapping 会随写要点补的 concepts/stocks 变，重算就等于把
+    # 名次綁回「写没写过要点」）。
+    events.sort(key=_event_sort_key)
+    # 过滤只减成员、不重排：名次以展示分为准。
     kept = [event for event in events if _keep_shown_event(event)]
     if not kept:
         return {
@@ -725,6 +741,26 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
             "updated_at": None,
             "events": [],
         }
+    # 重排可能把切片外事件（没有模型标签，展示分=规则分）送进前 _TITLE_LIMIT。
+    # 结构性上它们低于切片截止分：切片切在盘面验证之后，切片外事件的分数已被
+    # 切片线卡死，切片后没有路径再涨分（服务器数据重放：前 20 门槛 150.2 vs
+    # 切片外最高 108.2，42 分裕度）。但裕度不是定律 —— 缺标签的补问一轮，
+    # 把「前 20 必有要点」补回来。补问只增信息（_apply_llm 不重算 mapping
+    # 分），排完这一次就是终版，不会再来一轮。
+    # 首轮一条都没问到（上游空响应/降级）时不补问：问了也是同样结果，白费额度。
+    unlabeled = [
+        event for event in kept[:_TITLE_LIMIT]
+        if id(event) not in labeled
+    ]
+    if labeled and unlabeled:
+        _label_with_llm(unlabeled)
+        for event in unlabeled:
+            _ensure_shown_name(event)
+            _resync_importance_score(event)
+        kept.sort(key=_event_sort_key)
+        # 补问是裕度的保险不是常规路径，正常情况下这条日志不出现；出现即说明
+        # 重排真的把切片外条目送进了前 _TITLE_LIMIT，条数进监控。
+        logger.info("热门事件重排后补问切片外未标注条目 %d 条", len(unlabeled))
     # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上，不改已经排好的顺序。
     _confirm_newly_mapped(kept, now, mapped_before)
     latest = max(event.pop("_latest") for event in kept)
@@ -1171,6 +1207,24 @@ def _event_from(members: list[dict], now: datetime) -> dict:
     return event
 
 
+def _event_sort_key(item: dict) -> tuple:
+    """榜单排序键：总分、重要性、映射、新鲜度、热度、名称。
+
+    规则排序（_rank_events）和模型改判后的重排（_compute 里 _resync 之后）
+    共用它 —— 两处必须是同一把尺。曾经不是：名次按 LLM 改判前的规则分排，
+    score 字段却是改判后的展示分，榜单出现 #12 的 168 分压在 #2 的 105 分
+    上面这种倒挂（服务器快照实测相邻倒挂 9/996 对）。
+    """
+    return (
+        -float(item["score"]),
+        -_IMPORTANCE_POINTS.get(str(item.get("importance")), 0),
+        -float(item["breakdown"]["mapping"]),
+        -float(item["breakdown"]["freshness"]),
+        -float(item["heat"]),
+        str(item["name"]),
+    )
+
+
 def _rank_events(events: list[dict], now: datetime, *, grade: bool) -> list[dict]:
     """按重要性、映射、新鲜度、热度排序。只有第一次按规则分级时丢掉琐碎小事。"""
     kept = []
@@ -1181,14 +1235,7 @@ def _rank_events(events: list[dict], now: datetime, *, grade: bool) -> list[dict
         if grade and _drop_minor(event):
             continue
         kept.append(event)
-    kept.sort(key=lambda item: (
-        -float(item["score"]),
-        -_IMPORTANCE_POINTS.get(str(item.get("importance")), 0),
-        -float(item["breakdown"]["mapping"]),
-        -float(item["breakdown"]["freshness"]),
-        -float(item["heat"]),
-        str(item["name"]),
-    ))
+    kept.sort(key=_event_sort_key)
     return kept
 
 
