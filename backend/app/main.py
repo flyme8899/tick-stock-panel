@@ -254,7 +254,7 @@ async def _application_lifespan(app: FastAPI):
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
 
-    # 多源资讯采集。来源默认关闭，线程只在开关打开后出网。
+    # 多源资讯采集。除格隆汇默认打开外，来源默认关闭，线程只在开关打开后出网。
     try:
         from app.news.scheduler import NewsScheduler
         news_scheduler = NewsScheduler()

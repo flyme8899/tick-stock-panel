@@ -26,7 +26,7 @@ from app.news.dingtalk import send_markdown
 logger = logging.getLogger(__name__)
 
 PRIVATE_SOURCES = frozenset({"dws", "zsxq", "ima"})
-LINK_SOURCES = frozenset({"cls", "wscn"})
+LINK_SOURCES = frozenset({"cls", "wscn", "glh"})
 ABNORMAL_SIGNALS = frozenset({
     "limit_up", "broken", "recovery", "limit_down", "new_high", "new_low",
 })

@@ -1,0 +1,109 @@
+{
+  "statusCode": 200,
+  "message": "",
+  "totalCount": 0,
+  "result": [
+    {
+      "id": 2706040,
+      "title": "兆易创新入股高性能芯片公司蓝芯算力",
+      "createTimestamp": 1791780247,
+      "updateTimestamp": 1791780247,
+      "content": "格隆汇10月12日｜据企查查，近日，蓝芯算力（深圳）科技有限公司发生工商变更，新增兆易创新、太平科创等为股东，同时注册资本增至2543.73万元。公开信息显示，蓝芯算力是一家专注于为数据中心应用场景设计高性能芯片的公司。",
+      "contentPrefix": "格隆汇10月12日｜",
+      "relatedStocks": [
+        {
+          "market": "SH",
+          "code": "603986",
+          "name": "兆易创新",
+          "canClick": true
+        },
+        {
+          "market": "HK",
+          "code": "03986",
+          "name": "兆易创新",
+          "canClick": true
+        }
+      ],
+      "pictures": [],
+      "relatedArticles": null,
+      "source": {
+        "name": null,
+        "link": null
+      },
+      "level": 0,
+      "route": "https://www.gelonghui.com/live/2706040"
+    },
+    {
+      "id": 2706033,
+      "title": "香港交易所新增12只每周及月度股票期权类别",
+      "createTimestamp": 1791779913,
+      "updateTimestamp": 1791779913,
+      "content": "格隆汇10月12日｜香港交易及结算所有限公司今天（星期一）宣布，将于2026年11月9日新增12只股票期权类别。是次推出的新股票期权将于首个交易日起同时提供每周及月度到期合约，进一步扩大投资者选择，让市场参与者可按其交易及风险管理需要选择最合适的到期合约。股票期权是香港交易所增长最快的衍生产品之一，2026年首9个月的日均成交量为899,056张合约，较去年同期上升1.4%并创出期内纪录新高。",
+      "contentPrefix": "格隆汇10月12日｜",
+      "relatedStocks": [
+        {
+          "market": "HK",
+          "code": "00388",
+          "name": "香港交易所",
+          "canClick": true
+        }
+      ],
+      "pictures": [],
+      "relatedArticles": null,
+      "source": {
+        "name": null,
+        "link": null
+      },
+      "level": 0,
+      "route": "https://www.gelonghui.com/live/2706033"
+    },
+    {
+      "id": 2706031,
+      "title": "力合科技：公司GC-MS设备已用于半导体车间AMC有机物监测",
+      "createTimestamp": 1791779669,
+      "updateTimestamp": 1791779669,
+      "content": "格隆汇10月12日｜力合科技在互动平台表示，公司气相色谱-质谱联用仪(GC-MS)已应用于半导体车间空气AMC挥发性有机物监测。相关半导体领域业务尚在拓展阶段。",
+      "contentPrefix": "格隆汇10月12日｜",
+      "relatedStocks": [
+        {
+          "market": "SZ",
+          "code": "300800",
+          "name": "力合科技",
+          "canClick": true
+        }
+      ],
+      "pictures": [],
+      "relatedArticles": null,
+      "source": {
+        "name": null,
+        "link": null
+      },
+      "level": 0,
+      "route": "https://www.gelonghui.com/live/2706031"
+    },
+    {
+      "id": 2706028,
+      "title": "杰富瑞上调马拉松原油目标价至433美元",
+      "createTimestamp": 1791779580,
+      "updateTimestamp": 1791779580,
+      "content": "格隆汇10月12日｜杰富瑞将马拉松原油的目标价从413美元上调至433美元。",
+      "contentPrefix": "格隆汇10月12日｜",
+      "relatedStocks": [
+        {
+          "market": "US",
+          "code": "MPC",
+          "name": "马拉松原油",
+          "canClick": true
+        }
+      ],
+      "pictures": [],
+      "relatedArticles": null,
+      "source": {
+        "name": null,
+        "link": null
+      },
+      "level": 0,
+      "route": "https://www.gelonghui.com/live/2706028"
+    }
+  ]
+}

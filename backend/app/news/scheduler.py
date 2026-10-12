@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime
 from datetime import time as dt_time
 
 from app.market_time import cn_now
-from app.news.collectors import FOREIGN_RSS_SOURCES, FOREIGN_SLOW_SOURCES, REDDIT_MIN_GAP
+from app.news.collectors import (
+    FOREIGN_RSS_SOURCES,
+    FOREIGN_SLOW_SOURCES,
+    GLH_BACKOFF_CAP,
+    GLH_POLL_SECONDS,
+    REDDIT_MIN_GAP,
+)
 from app.news.config import BACKGROUND_SOURCES, SOURCE_ORDER, source_enabled
 from app.news.etf_flow import etf_wait_seconds
 from app.news.hot_snapshot import HOT_REFRESH_SECONDS
@@ -16,12 +23,19 @@ from app.news.service import backfill_mentions, collect_inbox, get_lexicon, run_
 logger = logging.getLogger(__name__)
 
 
+def outbound_paused(source: str) -> bool:
+    """格隆汇默认打开。测试进程不因此请求 gelonghui.com。"""
+    return source == "glh" and bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
 def interval_seconds(source: str, now: datetime | None = None) -> int:
     now = now or cn_now()
     clock = now.timetz().replace(tzinfo=None)
     weekday = now.weekday() < 5
     trading = weekday and dt_time(9, 15) <= clock <= dt_time(15, 5)
     daytime = dt_time(8, 0) <= clock <= dt_time(22, 0)
+    if source == "glh":
+        return GLH_POLL_SECONDS
     if source in {"cls", "wscn"}:
         if trading:
             return 45
@@ -44,12 +58,17 @@ def interval_seconds(source: str, now: datetime | None = None) -> int:
 
 
 def next_delay(source: str, result: dict | None = None, now: datetime | None = None) -> int:
-    """Reddit 用采集返回的 retry_after。其余来源仍走固定间隔。"""
+    """Reddit 和格隆汇用采集返回的 retry_after。其余来源仍走固定间隔。"""
     if source == "reddit":
         raw = (result or {}).get("retry_after")
         if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
             return min(raw, 3600)
         return REDDIT_MIN_GAP
+    if source == "glh":
+        raw = (result or {}).get("retry_after")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 1:
+            return min(raw, GLH_BACKOFF_CAP)
+        return GLH_POLL_SECONDS
     return interval_seconds(source, now)
 
 
@@ -93,7 +112,11 @@ class NewsScheduler:
             now = cn_now()
             stamp = now.timestamp()
             for source in SOURCE_ORDER:
-                if source in BACKGROUND_SOURCES or not source_enabled(source):
+                if (
+                    outbound_paused(source)
+                    or source in BACKGROUND_SOURCES
+                    or not source_enabled(source)
+                ):
                     continue
                 due = self._next.get(source, 0)
                 if stamp < due:
@@ -109,7 +132,7 @@ class NewsScheduler:
                         self._next[source] = stamp + etf_wait_seconds(
                             now, pending=bool(result.get("pending")),
                         )
-                    elif source == "reddit":
+                    elif source in {"reddit", "glh"}:
                         result = run_due(source) or {}
                         self._next[source] = stamp + next_delay(source, result, now)
                     else:
