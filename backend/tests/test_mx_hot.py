@@ -10,6 +10,7 @@ import pytest
 from app.market_time import CN_TZ
 from app.news.extract import Lexicon
 from app.news.mx_hot import (
+    CACHE_VERSION,
     apply_articles,
     enrich_snapshot,
     event_query,
@@ -97,6 +98,7 @@ def test_cache_hit_does_not_call(isolated):
     path = isolated / "news" / "mx_hot" / "2026-10-12" / "ev_a.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({
+        "v": CACHE_VERSION,
         "query": "华为发布新模型",
         "items": [_article(content="缓存摘要")],
     }, ensure_ascii=False), encoding="utf-8")
@@ -211,7 +213,9 @@ def test_empty_result_is_cached_without_changing_event(isolated, monkeypatch):
     assert calls == ["华为发布新模型"]
     assert "summary" not in snapshot["events"][0]
     cache = isolated / "news" / "mx_hot" / "2026-10-12" / "ev_a.json"
-    assert json.loads(cache.read_text(encoding="utf-8"))["items"] == []
+    stored = json.loads(cache.read_text(encoding="utf-8"))
+    assert stored["v"] == CACHE_VERSION
+    assert stored["items"] == []
 
     enrich_snapshot(_event(), "ev_other", searcher=search, now=_NOW)
     assert calls == ["华为发布新模型"]
@@ -279,7 +283,7 @@ def test_cut_orders_override_and_negation_does_not():
         title="苹果削减零部件订单，利空立讯精密",
         content="公司已经开始削减订单",
         url="https://example.com/cut",
-    )], lexicon=lexicon)
+    )], lexicon=lexicon, now=_NOW)
     assert event["direction"] == "利空"
     assert event["mentioned_stocks"][0]["direction"] == "利空"
     added = event["mentioned_stocks"][1]
@@ -303,7 +307,7 @@ def test_cut_orders_override_and_negation_does_not():
     apply_articles(negated, [_article(
         title="苹果不会削减零部件订单",
         content="公司否认将削减订单",
-    )], lexicon=Lexicon([]))
+    )], lexicon=Lexicon([]), now=_NOW)
     assert negated["direction"] == "利好"
     assert negated["mentioned_stocks"][0]["direction"] == "利好"
     assert len(negated["mentioned_stocks"]) == 1
@@ -318,7 +322,12 @@ def test_unrelated_or_lower_authority_does_not_retag():
         "mentioned_stocks": [],
         "mapping": [],
     }
-    apply_articles(event, [_article(title="股价暴跌", content="市场大跌")], lexicon=Lexicon([]))
+    apply_articles(
+        event,
+        [_article(title="股价暴跌", content="市场大跌")],
+        lexicon=Lexicon([]),
+        now=_NOW,
+    )
     assert event["direction"] == "利好"
 
     mixed = {
@@ -337,7 +346,7 @@ def test_unrelated_or_lower_authority_does_not_retag():
             source="博客",
         ),
         _article(title="华为发布新模型", content="新华社确认发布进展", source="新华社"),
-    ], lexicon=Lexicon([]))
+    ], lexicon=Lexicon([]), now=_NOW)
     assert mixed["direction"] == "利好"
     assert mixed["summary"] == "新华社确认发布进展"
     assert mixed["mx_sources"][0]["authority"] == "L1-media"
@@ -358,10 +367,161 @@ def test_only_l2_enriches_text_but_not_direction():
         content="低权威说削减",
         authority="L2-web",
         source="博客",
-    )], lexicon=Lexicon([]))
+    )], lexicon=Lexicon([]), now=_NOW)
     assert event["direction"] == "利好"
     assert event["summary"] == "低权威说削减"
     assert event["mx_sources"][0]["authority"] == "L2-web"
+
+
+def test_old_high_authority_does_not_crowd_out_same_day():
+    event = {
+        "key": "ev_us",
+        "name": "美股三大指数集体收涨",
+        "headline": "美股三大指数集体收涨",
+        "direction": "利好",
+        "mentioned_stocks": [],
+        "mapping": [],
+    }
+    apply_articles(event, [
+        _article(
+            title="美股三大指数集体收涨",
+            content="八月证券时报",
+            date="2026-08-20",
+            authority="L1-1",
+            source="证券时报网",
+            url="",
+        ),
+        _article(
+            title="美股三大指数集体收涨",
+            content="九月证券时报",
+            date="2026-09-02",
+            authority="L1-1",
+            source="证券时报网",
+            url="",
+        ),
+        _article(
+            title="美股三大指数集体收涨",
+            content="超出三天窗口",
+            date="2026-10-09",
+            authority="L1-1",
+            source="证券时报网",
+            url="https://example.com/1009",
+        ),
+        _article(
+            title="美股三大指数集体收涨",
+            content="月日旧稿",
+            date="08-09",
+            authority="L1-1",
+            source="证券时报网",
+            url="https://example.com/0809",
+        ),
+        _article(
+            title="美股三大指数集体收涨",
+            content="隔夜稿",
+            date="2026-10-10",
+            authority="L2-web",
+            source="隔夜来源",
+            url="https://example.com/1010",
+        ),
+        _article(
+            title="美股三大指数集体收涨",
+            content="昨日稿",
+            date="2026-10-11",
+            authority="L1-media",
+            source="昨日来源",
+            url="https://example.com/1011",
+        ),
+        _article(
+            title="美股三大指数集体收涨",
+            content="当日无链接",
+            date="2026-10-12",
+            authority="L1-1",
+            source="新华社",
+            url="",
+        ),
+        _article(
+            title="美股三大指数集体收涨",
+            content="当日有链接",
+            date="2026-10-12 08:30:00",
+            authority="L2-web",
+            source="界面新闻",
+            url="https://example.com/1012",
+        ),
+    ], now=_NOW)
+    assert event["summary"] == "当日无链接"
+    assert [item["source"] for item in event["mx_sources"]] == ["界面新闻", "昨日来源", "隔夜来源"]
+    assert [item["url"] for item in event["mx_sources"]] == [
+        "https://example.com/1012",
+        "https://example.com/1011",
+        "https://example.com/1010",
+    ]
+    assert event["direction"] == "利好"
+
+
+def test_old_articles_do_not_change_direction():
+    def fresh_event() -> dict:
+        return {
+            "key": "ev_apple",
+            "name": "苹果削减零部件订单",
+            "headline": "苹果削减零部件订单",
+            "direction": "利好",
+            "mapping": [],
+            "mentioned_stocks": [],
+        }
+
+    article = dict(
+        title="苹果削减零部件订单",
+        content="公司已经开始削减订单",
+        authority="L1-1",
+        source="证券时报网",
+        url="",
+    )
+    stale = fresh_event()
+    apply_articles(stale, [_article(**article, date="2026-08-09")], now=_NOW)
+    assert stale["direction"] == "利好"
+    assert "summary" not in stale
+    assert "mx_sources" not in stale
+
+    current = fresh_event()
+    apply_articles(current, [_article(**article, date="2026-10-12")], now=_NOW)
+    assert current["direction"] == "利空"
+    assert current["summary"] == "公司已经开始削减订单"
+
+
+def test_stale_cache_is_hidden_and_not_refetched(isolated):
+    path = isolated / "news" / "mx_hot" / "2026-10-12" / "ev_a.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "query": "美股三大指数集体收涨",
+        "items": [
+            _article(
+                title="美股三大指数集体收涨",
+                content="八月旧稿",
+                date="2026-08-09",
+                authority="L1-1",
+                source="证券时报网",
+                url="",
+            ),
+            _article(
+                title="美股三大指数集体收涨",
+                content="今日收涨",
+                date="2026-10-12",
+            ),
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    calls = []
+    snapshot = _event(name="美股三大指数集体收涨")
+    enrich_snapshot(
+        snapshot,
+        "ev_other",
+        searcher=lambda query: calls.append(query) or [_article(content="新请求")],
+        now=_NOW,
+    )
+    assert calls == []
+    assert used_today(now=_NOW) == 0
+    assert "summary" not in snapshot["events"][0]
+    assert "mx_sources" not in snapshot["events"][0]
+    assert path.is_file()
 
 
 def test_public_event_exposes_optional_sources():
