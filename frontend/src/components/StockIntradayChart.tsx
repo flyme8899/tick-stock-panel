@@ -6,6 +6,7 @@ import { QK } from '@/lib/queryKeys'
 import { klineMinuteQueryOptions, minuteRefetchInterval } from '@/lib/kline'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
 import type { DailySummary } from '@/lib/intraday-chart'
+import { intradayTradeMarks, preferBarTMarks, type IntradayTradeMark } from '@/lib/trade-marks'
 
 interface Props {
   symbol: string
@@ -21,7 +22,9 @@ interface Props {
   /** 自动刷新间隔(ms)。undefined/0 = 不轮询(默认)。个股对话框盘中实时刷新时传入。 */
   refetchIntervalMs?: number
   vwapBand?: number | null
-  tMarks?: { time: string; side: 'buy' | 'sell' | 'neutral'; price?: number | null }[]
+  /** 日K买卖点里的策略、模拟成交和做T。分时响应里的做T会盖过同日缓存。 */
+  tradeMarks?: IntradayTradeMark[]
+  showT?: boolean
 }
 
 export function StockIntradayChart({
@@ -37,7 +40,8 @@ export function StockIntradayChart({
   priceLines,
   refetchIntervalMs,
   vwapBand,
-  tMarks,
+  tradeMarks,
+  showT = false,
 }: Props) {
   const qc = useQueryClient()
   const [minuteDismissed, setMinuteDismissed] = useState(false)
@@ -60,6 +64,19 @@ export function StockIntradayChart({
   })
 
   const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
+  const drawnMarks = useMemo(() => {
+    const base = (tradeMarks ?? []).filter(mark => !date || mark.date === date)
+    if (!showT) return base.filter(mark => mark.source !== 't')
+    const block = minute.data?.t_trade
+    if (!block) return base
+    const barMarks = intradayTradeMarks({
+      tMarks: block.marks ?? [],
+      showT: true,
+      date,
+      tDate: block.date || date,
+    })
+    return preferBarTMarks(base, barMarks, [date || block.date || ''])
+  }, [date, minute.data?.t_trade, showT, tradeMarks])
   // source=none 表示本地无数据且 TickFlow 也拉不到 (停牌/复牌延迟/非交易日)
   // 此时不弹"是否获取"询问窗, 只做静态提示, 避免误导用户去拉明知拉不到的数据
   const sourceIsNone = minute.data?.source === 'none'
@@ -141,7 +158,7 @@ export function StockIntradayChart({
           currentPrice={currentPrice}
           priceLines={priceLines}
           vwapBand={vwapBand}
-          tMarks={tMarks}
+          tradeMarks={drawnMarks}
         />
       )}
     </div>

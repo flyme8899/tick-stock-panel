@@ -4,7 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
-import type { TradeSignalsResponse } from '@/lib/trade-marks'
+import type { TradeSignalsResponse, TradeTBlock } from '@/lib/trade-marks'
 
 const BASE = ''
 
@@ -266,6 +266,8 @@ export interface MinuteKlineSession {
   date: string
   prev_close: number | null
   rows: MinuteKlineRow[]
+  /** 与日K买卖点同一套做T字段。没有时前端不画。 */
+  t_trade?: TradeTBlock
 }
 
 export interface PriceLimitInfo {
@@ -3107,6 +3109,7 @@ export const api = {
       asset_type?: 'stock' | 'etf' | 'index'
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
+      t_trade?: TradeTBlock
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
