@@ -7,6 +7,23 @@ from __future__ import annotations
 
 from src.services.screening.models import Pick
 
+# Labels that show up when a snapshot has no Chinese industry. They must not
+# count as a real bucket, and they must not block the mapping-table value.
+_UNUSABLE_INDUSTRY = {
+    "",
+    "-",
+    "--",
+    "other",
+    "unknown",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "未分类",
+    "未知",
+    "其他",
+}
+
 _DEFAULT_RISK_PROFILE = {
     "chase_change_pct": 8.0,
     "chase_points": 4.0,
@@ -247,6 +264,40 @@ def _risk_level(points: float, max_penalty: float) -> str:
     return "low"
 
 
+def limit_picks_per_industry(
+    picks: list[Pick],
+    *,
+    max_same_sector: int = 1,
+    profile: dict[str, object] | None = None,
+) -> list[Pick]:
+    """Drop later picks that would exceed the per-bucket cap.
+
+    Walks the current score order. A pick with no usable industry is kept and
+    does not share a bucket with other unlabeled names. Callers that attached
+    industry from the mapping table therefore get a real cap; a blank industry
+    column cannot collapse the whole shortlist into one group.
+    """
+    if not picks:
+        return picks
+    portfolio_profile = profile or {}
+    limit = max(int(portfolio_profile.get("max_same_bucket", max_same_sector)), 1)
+    counts: dict[str, int] = {}
+    kept: list[Pick] = []
+    for pick in picks:
+        sector = _canonical_sector(_pick_sector(pick))
+        if not sector:
+            kept.append(pick)
+            continue
+        bucket = _portfolio_bucket(sector, pick.llm_theme, buckets=portfolio_profile.get("buckets"))
+        if counts.get(bucket, 0) >= limit:
+            continue
+        counts[bucket] = counts.get(bucket, 0) + 1
+        kept.append(pick)
+    for index, pick in enumerate(kept, start=1):
+        pick.rank = index
+    return kept
+
+
 def _canonical_sector(label: str) -> str:
     cleaned = str(label or "").strip()[:40]
     if not cleaned:
@@ -269,7 +320,12 @@ def _canonical_sector(label: str) -> str:
 
 
 def _pick_sector(pick: Pick) -> str:
-    return pick.llm_sector or pick.industry
+    # Diversification follows the industry mapping table. The LLM sector is
+    # only a fallback when that field is missing or unusable.
+    industry = str(pick.industry or "").strip()
+    if industry and industry.casefold() not in _UNUSABLE_INDUSTRY:
+        return industry
+    return pick.llm_sector or industry
 
 
 def _risk_profile(profile: dict[str, object] | None) -> dict[str, float]:
