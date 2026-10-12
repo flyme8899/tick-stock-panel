@@ -57,6 +57,7 @@ from app.news.collectors import (
     wscn_params,
 )
 from app.news.config import (
+    BACKGROUND_SOURCES,
     SOURCE_LABELS,
     SOURCE_ORDER,
     llm_extract_enabled,
@@ -708,8 +709,15 @@ def health_payload() -> dict:
             "items_ingested": row["items_ingested"] if row else 0,
         })
     from app.event_context.query import health_sources
+    from app.research_reports.ima_store import health_extra
 
     sources.extend(health_sources())
+    extra = health_extra(Path(settings.data_dir))
+    if extra:
+        for source in sources:
+            if source["id"] == "ima_research":
+                source.update(extra)
+                break
     return {"sources": sources, "as_of": cn_now().isoformat(timespec="seconds")}
 
 
@@ -921,8 +929,8 @@ def run_due(source: str) -> dict:
         return collect_reuters()
     if source in FOREIGN_FEEDS:
         return collect_foreign(source)
-    if source in {"research", "notice"}:
-        # 研报由打板线程写入，公告由事件上下文线程写入，不在这套轮询里打东财。
+    if source in BACKGROUND_SOURCES:
+        # 东财研报、公告、ima 券商全文各自有后台线程，不在这套轮询里出网。
         return {"inserted": 0, "duplicate": 0, "skipped": True}
     return {}
 

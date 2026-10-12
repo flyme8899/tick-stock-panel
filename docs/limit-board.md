@@ -90,3 +90,5 @@ data/research/state.json
 | GET | `/api/research/industry` | 行业研报，默认 30 条 |
 
 个股分析页读 `/api/research/stock/{symbol}`。热门事件把 `source=research` 的资讯和其他来源一起聚类。
+
+同一接口另有 `ima_reports`：个人 ima 知识库里提及该股的券商研报，带正文。全文不在东财 parquet 里，落在 `data/research/ima_reports.sqlite`。调度、签名链接和热门事件只收短摘要的约定见 [多源资讯](./news-sources.md)。

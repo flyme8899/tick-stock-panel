@@ -159,6 +159,7 @@ def render_context(
     concept_ranks: list[dict] | None = None,
     quote: dict | None,
     event_lines: Any = _OMIT,
+    ima_lines: Any = _OMIT,
 ) -> dict[str, Any]:
     """拼一段有长度上限的上下文。events/news/flow/quote 为 None 表示没读到。"""
     local_now = now.astimezone(CN_TZ)
@@ -172,6 +173,10 @@ def render_context(
     ]
     if event_lines is not _OMIT:
         extra = _event_context_section(event_lines, missing)
+        if extra:
+            sections.append(extra)
+    if ima_lines is not _OMIT:
+        extra = _ima_section(ima_lines, missing)
         if extra:
             sections.append(extra)
     text = _fit(_HEADER, sections)
@@ -216,6 +221,7 @@ def load_context(symbol: str, *, now: datetime | None = None, repo=None) -> dict
     flow_pack, _flow_ok = _capture(lambda: _load_flow(code, (events_pack or {}).get("events") or []))
     bars, _bars_ok = _capture(lambda: _load_bars(repo, code, moment))
     event_lines, event_ok = _capture(lambda: _load_event_lines(code))
+    ima_lines, ima_ok = _capture(lambda: _load_ima_lines(code))
     quote = quote_from_rows(bars, moment) if bars is not None else None
     events = None if events_pack is None else events_pack.get("events")
     flow_rows = None if flow_pack is None else flow_pack.get("rows")
@@ -231,6 +237,7 @@ def load_context(symbol: str, *, now: datetime | None = None, repo=None) -> dict
         concept_ranks=None if flow_pack is None else flow_pack.get("concepts"),
         quote=quote if bars is not None else None,
         event_lines=None if not event_ok else event_lines,
+        ima_lines=None if not ima_ok else ima_lines,
     )
 
 
@@ -347,6 +354,29 @@ def _load_event_lines(symbol: str) -> list[str]:
     from app.event_context.query import context_lines
 
     return context_lines(Path(settings.data_dir), symbol)
+
+
+def _load_ima_lines(symbol: str) -> list[str]:
+    from pathlib import Path
+
+    from app.config import settings
+    from app.research_reports.ima_store import context_lines
+
+    return context_lines(Path(settings.data_dir), symbol)
+
+
+def _ima_section(lines, missing) -> str | None:
+    if lines is None:
+        missing.append("ima_research")
+        return "## 券商研报\n状态: 缺失"
+    if not lines:
+        return None
+    body = "\n".join(f"- {_clip(line, 120)}" for line in lines[:3])
+    return (
+        "## 券商研报\n状态: 可用\n"
+        "下面是知识库研报的标题和短摘要，写入「消息面」时保留券商和标题。\n"
+        f"{body}"
+    )
 
 
 def _event_context_section(lines, missing) -> str | None:
