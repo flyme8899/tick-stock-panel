@@ -10,6 +10,7 @@ from app.news.hot_events import (
     _cleaned_display_ok,
     _cleaned_headline,
     _clip_at_boundary,
+    _DATE_LIKE_OPENING,
     _display_clause_ok,
     _display_gate_reason,
     _display_original,
@@ -22,9 +23,11 @@ from app.news.hot_events import (
     _keyword_title,
     _llm_title_ok,
     _llm_title_reject_reason,
+    _measure_tail_after_number,
     _original_reject_reason,
     _parse_title_batch,
     _resync_importance_score,
+    _segment,
     _subtitle_reject_reason,
 )
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
@@ -1346,6 +1349,26 @@ def test_date_opening_titles_are_not_list_markers():
     assert _original_reject_reason("2）橡胶价格大涨") == "以数字开头"
 
 
+def test_date_opening_covers_months_days_years_and_wire_prefixes():
+    """日期开头的四种形态都放行；技术指标碎片和编号清单仍拦（PR #97 评审）。
+
+    「N日」单独出现只认「N日讯 / N日晚间 / N日早间 / N日以来」——「5日均线」
+    「3日偏离」是技术指标碎片，不是日期。「2026年…」四位年份不再被误杀。
+    """
+    for title in (
+        "10月以来逾80家A股上市公司获机构调研",
+        "12月3日召开重要会议",
+        "2026年经济工作定调",
+        "30日讯美联储宣布降息",
+        "3日晚间多家公司发布公告",
+        "3日以来多地出台新政",
+    ):
+        assert _DATE_LIKE_OPENING.match(title), title
+    for title in ("5日均线突破年线", "3日偏离度扩大"):
+        assert not _DATE_LIKE_OPENING.match(title), title
+        assert _original_reject_reason(title) == "以数字开头", title
+
+
 def test_single_char_tail_is_not_a_cutoff_without_a_longer_peer():
     """jieba 把未登录词切成单字不等于标题被截断，只有簇里有更长前缀才判。
 
@@ -1364,6 +1387,42 @@ def test_single_char_tail_is_not_a_cutoff_without_a_longer_peer():
     assert _display_gate_reason(cut) == "缺少主体或动作"
 
 
+def test_single_source_cutoff_is_caught_by_the_body_prefix():
+    """单源簇没有同簇长 peer 时，本条自己的正文开头也是截断证据（PR #97 评审）。
+
+    来源自己截断的标题只留下正文开头半句。末词是单字、且标题是某条候选正文
+    的前缀切片时判「词中间截断」。完整短标题不走这条分支 —— 「半导体大涨」
+    的末词是整词，即便正文以它开头也不误判。
+    """
+    cut = "风险可控从容应"
+    assert _boundary_reason(cut, [cut], ["风险可控从容应对，市场情绪保持稳定"]) == "词中间截断"
+    # 没有正文可依时保持「无证据不判」，由「缺少主体或动作」等兜底。
+    assert _boundary_reason(cut, [cut], []) == ""
+    whole = "半导体大涨"
+    assert _boundary_reason(whole, [whole], ["半导体大涨。资金流入超10亿"]) == ""
+
+
+def test_measure_tail_only_looks_at_the_last_two_words():
+    """量词兜底只回看末尾前两个词，不往前扫全文（PR #97 评审）。
+
+    「沪深300指数早盘走低成」：末词「成」是量词，但数字隔了整个句子的距离，
+    这是被截断的尾巴，不能因为标题里出现过指数代码就放行。「报114600元/吨」
+    （「元」量词链式）和「2成」（数字紧邻）仍要放行。
+    """
+    for whole in ("报114600元/吨", "上证50收涨2成", "某产品报13.1元"):
+        words = _segment(whole)
+        assert _measure_tail_after_number(words, words[-1]), whole
+        assert _boundary_reason(whole, [whole]) == "", whole
+    # 数字隔得远的截断尾巴：量词兜底不生效。整条 boundary 仍为空是「无更长
+    # peer 默认不判截断」的既定设计，这种尾巴由「缺少主体或动作」等兜底。
+    words = _segment("沪深300指数早盘走低成")
+    assert not _measure_tail_after_number(words, words[-1])
+    # 「300万股成」与修复目标「114600元/吨」结构同构（数字+量词+量词），
+    # 规则上不可区分，固有代价；「成」结尾另有 _ends_abruptly 等判据兜底。
+    words = _segment("某公司回购超过300万股成")
+    assert _measure_tail_after_number(words, words[-1])
+
+
 def test_policy_line_with_trailing_commentary_is_not_commentary():
     """国务院级政策句尾挂了点评不被连坐；纯点评、研报口吻和叙事句仍拦。
 
@@ -1377,6 +1436,23 @@ def test_policy_line_with_trailing_commentary_is_not_commentary():
     assert _is_commentary("分析师看好AI安全 趋势明确") is True
     assert _is_commentary("数据印证需求正在回暖") is True
     assert _is_commentary("建议关注AI算力方向标的") is True
+
+
+def test_brokerage_commentary_is_not_exempted_by_the_policy_carveout():
+    """券商和外资机构的点评不能蹭政策的豁免（PR #97 评审）。
+
+    豁免要求句里有「具名主体」。_explicit_entities 只认央行部委和国家领导人，
+    券商、外资行不在词表里 —— 「中信证券看好…」的 _has_gate_subject_action 可能
+    成立（词性兜底认出券商主体），但没有具名主体，仍是点评。这条测试锁住边界：
+    将来谁往 _ORG_SUBJECTS/_LEADERS 里加了券商名，这里会红。
+    """
+    for title in (
+        "中信证券看好AI算力方向",
+        "摩根士丹利称黄金值得关注",
+        "高盛推荐布局新能源板块",
+    ):
+        assert _is_commentary(title) is True, title
+        assert _display_gate_reason(title) == "不是具体事件", title
 
 
 def test_importance_resync_keeps_score_in_step_with_the_label():

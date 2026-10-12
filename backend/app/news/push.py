@@ -22,6 +22,7 @@ from app.news.config import (
     webhook_configured,
 )
 from app.news.dingtalk import send_markdown
+from app.news.hot_events import HOT_RULES_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -839,6 +840,11 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     previous = state.data.get("hot_snapshot")
     if previous is not None and state.data.get("hot_day") != day:
         previous = None
+    # 计分/准入口径升级后，上一轮快照的分数是新口径算不出来的。版本不匹配时
+    # 只建基线不比较 —— 否则部署后第一轮会把口径差（importance 20→130 就是
+    # 6.5 倍跳变）全报成「升温」（PR #97 评审）。
+    if previous is not None and state.data.get("hot_rules_version") != HOT_RULES_VERSION:
+        previous = None
     verified_only = push_type_saved("hot_verified")
     eligible = _eligible_hot_rows(snapshot, verified_only=verified_only)
     eligible_prev = _eligible_hot_rows(previous, verified_only=verified_only)
@@ -857,6 +863,7 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     if heading is None:
         state.data["last_hot_check"] = stamp
         state.data["hot_snapshot"] = snapshot
+        state.data["hot_rules_version"] = HOT_RULES_VERSION
         state.data["hot_day"] = day
         return False
     limit = top_n()
@@ -882,6 +889,7 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         logger.info("钉钉热点候选内容与上次相同，跳过 %s", heading)
         state.data["last_hot_check"] = stamp
         state.data["hot_snapshot"] = snapshot
+        state.data["hot_rules_version"] = HOT_RULES_VERSION
         state.data["hot_day"] = day
         if slot:
             state.data["slots"][f"{day}:{slot}"] = stamp
@@ -896,6 +904,7 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     )
     state.data["last_hot_check"] = stamp
     state.data["hot_snapshot"] = snapshot
+    state.data["hot_rules_version"] = HOT_RULES_VERSION
     state.data["hot_day"] = day
     state.data["hot_digest"] = digest
     if slot:

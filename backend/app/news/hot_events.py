@@ -24,7 +24,7 @@
 上一收盘之后到下一交易日 9:30，同一股票或同一细概念、并且是同一个动作的稿并成一件，不再卡 6 小时。
 提价、涨价函、上调价格和涨价算同一个提价动作。公司提价至少是重要；写了幅度或再次提价就是重大。
 隔夜和周末的新鲜度从该交易日 9:00 起算；簇里还有更晚的稿时，从最晚那条起算。
-寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。要点缓存版本仍是 v19。
+寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。要点缓存版本是 v20。
 半截标题并回完整事件，提及次数跟着走。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社、经济日报），券商「招商电新…称」，以及研报文件名里的日期戳和 #。第一句太短或没有主体时，把叹号后面的下一句留下。引号没合上时不在引号里截断。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
@@ -130,7 +130,15 @@ _TITLE_DISPLAY_MAX = 80
 # v19: 取文改成「候选与同簇候选比对」（见 _candidate_in_event）。早先拿候选
 #      标题去比跨源重写过的主标题（Jaccard≥0.5），主标题措辞与任何候选都对不上，
 #      被漏掉的 8 条事件正文一条都取不到；v18 把它们的失败写进了 _miss。
-_TITLE_CACHE_VERSION = 19
+# v20: 标题准入 4 处误杀修复 + importance 覆盖后分数对齐（见 _resync_importance_score）。
+#      缓存里存着旧口径 importance 的要点作废重问，push 也靠 HOT_RULES_VERSION
+#      识别新旧快照，避免部署后第一轮把口径差报成「升温」。
+_TITLE_CACHE_VERSION = 20
+# 热门计分/准入口径版本。改 _score_event 的计分、_original_reject_reason 的准入或
+# _resync_importance_score 的同步方式时 +1。push 比较前后两轮快照前校验它：
+# 版本不匹配说明上一轮快照的分数是新口径算不出来的，只建基线不比较，否则
+# importance 20→130 这类口径差会被当成升温跳变（PR #97 评审）。
+HOT_RULES_VERSION = 1
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -160,9 +168,13 @@ _GATE_HEDGES = ("可能", "或许", "还会", "几次", "多次", "预计", "有
 # 数字后面的单字量词是写完了，不是把词切断。例如 13.1元。
 _MEASURE_TAILS = frozenset("元吨点股成倍")
 _CN_NUMERALS = frozenset("一二三四五六七八九十百千万两")
-# 以数字开头、但其实是日期的标题：「10月以来…」「12月3日…」都是正常新闻。
+# 以数字开头、但其实是日期的标题：「10月以来…」「12月3日…」「2026年…」都是正常新闻。
 # 「以数字开头」这条门槛本来要拦的是「1. 」「2）」这类编号清单。
-_DATE_LIKE_OPENING = re.compile(r"^\d{1,2}\s*[月日]")
+# 「N日」单独出现时只认「N日讯 / N日晚间 / N日早间 / N日以来」——「5日均线」
+# 「3日偏离」这类技术指标碎片不是日期，仍按编号拦（PR #97 评审）。
+_DATE_LIKE_OPENING = re.compile(
+    r"^(?:\d{1,2}\s*月(?:\d{1,2}\s*[日号])?|\d{4}\s*年|\d{1,2}\s*日[讯早晚以])"
+)
 # 词典词性里能当主体的标记。普通名词不算，避免「数据」混进去。
 _POS_ENTITY_FLAGS = frozenset({"ns", "nr", "nt", "nz", "j"})
 _POS_ENTITY_MARKS = ("价格", "股价", "公司", "股份", "集团", "指数", "电网", "机场", "银行")
@@ -3661,10 +3673,19 @@ def _headline_blocked(source: str, title: str) -> bool:
     return bool(cleaned and _report_chatter(cleaned))
 
 
-def _original_reject_reason(title: str, sources: list[str] | None = None) -> str:
-    """原标题门槛。不卡 20 字。寒暄、纯点评、研报标签和空标题仍然丢掉。"""
+def _original_reject_reason(
+    title: str,
+    sources: list[str] | None = None,
+    texts: list[str] | None = None,
+) -> str:
+    """原标题门槛。不卡 20 字。寒暄、纯点评、研报标签和空标题仍然丢掉。
+
+    texts 是本事件候选的正文。单源簇没有同簇长 peer 时，标题若是某条正文的
+    开头切片，同样是来源自己截断的证据（见 _cut_off_by_source_text）。
+    """
     text = _compact(str(title or ""))
     blobs = [str(item) for item in (sources or []) if str(item).strip()]
+    bodies = [str(item) for item in (texts or []) if str(item).strip()]
     if not text or text == "事件":
         return "空标题"
     if any(mark in text for mark in _CHATTER_MARKS) or any(mark in text for mark in _NARRATIVE_MARKS):
@@ -3689,7 +3710,7 @@ def _original_reject_reason(title: str, sources: list[str] | None = None) -> str
     name_reason = _title_name_reject_reason(text)
     if name_reason:
         return name_reason
-    boundary = _boundary_reason(text, blobs)
+    boundary = _boundary_reason(text, blobs, bodies)
     if boundary:
         return boundary
     if blobs and _dropped_signing_party(text, "\n".join(blobs)):
@@ -3765,16 +3786,21 @@ def _trailing_latin_fragment(text: str, blobs: list[str]) -> bool:
 
 
 def _measure_tail_after_number(words: list[str], last: str) -> bool:
-    """元/吨、成/股：量词跟在数字后面（中间可能再隔一个量词），不是词被切断。
+    """元/吨、成/股：量词紧跟数字或另一个量词，不是词被切断。
 
-    「报114600元/吨」切出来是「114600元」「吨」两个词，只看前一个词的话
-    末字是「元」不是数字，老代码在这里误判「词中间截断」。往前多找一个词，
-    见到以数字或中文数字结尾的就放行。
+    「报114600元/吨」切出来是「114600」「元」「/」「吨」四个词，只看前一个词
+    末字是「元」不是数字，老代码在这里误判「词中间截断」。只回看末尾前两个词：
+    见到以数字或中文数字结尾的（「2成」的「2」），或量词字结尾的（「元/吨」
+    的「元」），就放行。不往前扫全文 —— 「沪深300指数早盘走低成」这种截断
+    尾巴不该因为标题里出现过指数代码就放行（PR #97 评审实测）。
     """
     if last not in _MEASURE_TAILS:
         return False
-    for word in reversed(words[:-1]):
-        if word and (word[-1].isdigit() or word[-1] in _CN_NUMERALS):
+    for word in reversed(words[:-1][-2:]):
+        if not word:
+            continue
+        tail = word[-1]
+        if tail.isdigit() or tail in _CN_NUMERALS or tail in _MEASURE_TAILS:
             return True
     return False
 
@@ -3794,7 +3820,22 @@ def _cut_off_by_longer_peer(body: str, blobs: list[str]) -> bool:
     return False
 
 
-def _boundary_reason(text: str, blobs: list[str]) -> str:
+def _cut_off_by_source_text(body: str, texts: list[str] | None) -> bool:
+    """本条自己的候选正文里，有没有更长的、以本条整体开头的文本。
+
+    单源簇没有同簇长 peer 可比，来源自己截断的标题（只留下正文开头半句）
+    会漏过。正文在手时，标题是某条正文的前缀切片同样是截断证据
+    （PR #97 评审）。只在末词是单字时调用 —— 完整短标题的末词通常是
+    整词，不走这条分支，不会把「标题=正文第一句」误判成截断。
+    """
+    for raw in texts or []:
+        text = _compact(str(raw or ""))
+        if len(text) > len(body) and text.startswith(body):
+            return True
+    return False
+
+
+def _boundary_reason(text: str, blobs: list[str], texts: list[str] | None = None) -> str:
     body = _compact(text)
     if not body:
         return "空标题"
@@ -3823,6 +3864,9 @@ def _boundary_reason(text: str, blobs: list[str]) -> str:
             return ""
         # 单字收尾不等于截断，见 _cut_off_by_longer_peer。
         if _cut_off_by_longer_peer(body, blobs):
+            return "词中间截断"
+        # 单源簇没有同簇长 peer 时，本条自己的正文开头也是截断证据。
+        if _cut_off_by_source_text(body, texts):
             return "词中间截断"
         return ""
     return ""
@@ -3995,8 +4039,11 @@ def _candidate_rows(event: dict) -> list[tuple[str, str]]:
     return [("", text) for text in _event_title_sources(event)]
 
 
-def _first_original_title(rows: list[tuple[str, str]]) -> str:
-    """按来源档次试新闻原标题。研报和群聊跳过。最可信的一条不合格，就试下一条。"""
+def _first_original_title(rows: list[tuple[str, str]], texts: list[str] | None = None) -> str:
+    """按来源档次试新闻原标题。研报和群聊跳过。最可信的一条不合格，就试下一条。
+
+    texts 是本事件候选的正文，单源簇里拿来当截断证据（见 _cut_off_by_source_text）。
+    """
     ordered = sorted(enumerate(rows), key=lambda item: (_headline_tier(item[1][0], item[1][1]), item[0]))
     blobs = [title for _source, title in rows]
     passing: list[str] = []
@@ -4006,7 +4053,7 @@ def _first_original_title(rows: list[tuple[str, str]]) -> str:
         cleaned = _display_original(title)
         if not cleaned or cleaned in passing:
             continue
-        if _original_reject_reason(cleaned, blobs):
+        if _original_reject_reason(cleaned, blobs, texts):
             continue
         passing.append(cleaned)
     for candidate in passing:
@@ -4032,10 +4079,23 @@ def _awaiting_news_title(event: dict) -> bool:
     return any(_headline_blocked(source, title) for source, title in rows)
 
 
+def _candidate_texts(event: dict) -> list[str]:
+    """候选正文。单源簇里拿来当标题截断的证据（见 _cut_off_by_source_text）。"""
+    rows = event.get("_candidates")
+    if not isinstance(rows, list):
+        return []
+    return [
+        str(row.get("text") or "")
+        for row in rows
+        if isinstance(row, dict) and str(row.get("text") or "").strip()
+    ]
+
+
 def _ensure_shown_name(event: dict) -> None:
     """主标题优先用新闻原标题。没有时，严格门槛通过的模型标题顶上，否则留空。"""
     rows = _candidate_rows(event)
-    original = _first_original_title(rows)
+    texts = _candidate_texts(event)
+    original = _first_original_title(rows, texts)
     subtitle = str(event.get("subtitle") or "")
     if original:
         event["name"] = original
@@ -4281,7 +4341,7 @@ def _keep_shown_event(event: dict) -> bool:
         return False
     name = str(event.get("name") or "")
     blobs = [title for _source, title in _candidate_rows(event)]
-    return _original_reject_reason(name, blobs) == ""
+    return _original_reject_reason(name, blobs, _candidate_texts(event)) == ""
 
 
 def _subtitle_has_source_prefix(text: str) -> bool:
