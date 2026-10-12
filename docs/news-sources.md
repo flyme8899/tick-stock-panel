@@ -143,11 +143,17 @@ python scripts/news_host_collector.py --data-dir ./data
 python scripts/news_host_collector.py --data-dir ./data --backfill-since 2025-08-23
 ```
 
+已经采过的帖子如果当时没下到 PDF，可以单独补附件。这一步不改文本游标，也不把帖子再写进收件箱。范围内的 PDF 先进入下载队列，本轮仍只下默认的 8 个、间隔 1 秒；剩下的由之后的定时任务按同样配额接着下，直到队列空。最多翻 400 页。
+
+```bash
+python scripts/news_host_collector.py --data-dir ./data --backfill-files-since 2026-10-01
+```
+
 示例 systemd 单元在 `deploy/tsp-news-collector.service` 和 `.timer`，默认每 5 分钟跑一次。单元以用户 `ubuntu` 运行，`HOME=/home/ubuntu`，工作目录是 `/home/ubuntu/tick-stock-panel`。`TimeoutStartSec=3600` 留给知识星球长回补。`ExecStart` 用 `~/.venvs/tsp-collector` 里的 Python。`PATH` 带上 `~/.local/bin`，才能找到 `dws` 和 `zsxq-cli`。
 
 这条定时器不是容器调度的重复。容器里的轮询对钉钉和知识星球只调用 `collect_inbox()`，读取 `data/news/inbox`。容器内没有 `dws` / `zsxq-cli`，登录态在宿主机的 `~/.dws` 等目录。停掉 `tsp-news-collector.timer` 之后，这两路资讯不再入库。
 
-采集脚本启动时检查 Python 版本，低于 3.10 会直接退出。面板和容器仍用 Python 3.11。推荐把 `~/.venvs/tsp-collector` 建在 3.11 上，不要长期留在系统自带的 3.10。虚拟环境里至少要有 `pydantic` 和 `pydantic-settings`，因为脚本会导入 `app.config`。要抽取研报 PDF 正文，还要有 `pypdf`（与后端依赖一起装即可）。`ProtectSystem=strict` 时，`data/research` 也要放进 `ReadWritePaths`，否则全文表和 PDF 写不进去；收件箱仍在 `data/news`。目录不存在时先 `mkdir -p data/research data/news`。
+采集脚本启动时检查 Python 版本，低于 3.10 会直接退出。面板和容器仍用 Python 3.11。推荐把 `~/.venvs/tsp-collector` 建在 3.11 上，不要长期留在系统自带的 3.10。虚拟环境里至少要有 `pydantic` 和 `pydantic-settings`，因为脚本会导入 `app.config`。抽研报 PDF 正文还要在这个虚拟环境里安装 `pypdf`，只装在面板环境里不够。systemd 单元的 `ReadWritePaths` 必须包含 `data/research`（全文表和 PDF）以及 `data/news`（收件箱）。`data/research` 不存在时先 `mkdir -p data/research data/news`，否则 `ProtectSystem=strict` 下附件写不进去。
 
 Ubuntu 可以用 deadsnakes：
 
@@ -157,7 +163,7 @@ sudo apt-get update
 sudo apt-get install -y python3.11 python3.11-venv
 rm -rf ~/.venvs/tsp-collector
 python3.11 -m venv ~/.venvs/tsp-collector
-~/.venvs/tsp-collector/bin/pip install pydantic pydantic-settings
+~/.venvs/tsp-collector/bin/pip install pydantic pydantic-settings pypdf
 ```
 
 或者用 uv：
@@ -166,10 +172,10 @@ python3.11 -m venv ~/.venvs/tsp-collector
 uv python install 3.11
 rm -rf ~/.venvs/tsp-collector
 uv venv --python 3.11 ~/.venvs/tsp-collector
-uv pip install --python ~/.venvs/tsp-collector/bin/python pydantic pydantic-settings
+uv pip install --python ~/.venvs/tsp-collector/bin/python pydantic pydantic-settings pypdf
 ```
 
-`ProtectSystem=strict` 下，`data/news` 必须属于该服务用户，否则收件箱写不进去。dws 大约每 2 小时刷新一次令牌；`ProtectHome` 只读时还要放开 `~/.dws`、`~/.local/share/dws-cli`、`~/.config/zsxq-cli`、`~/.local/share/zsxq-cli`。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。
+`ProtectSystem=strict` 下，`data/news` 和 `data/research` 都必须属于该服务用户，并且都要写在单元的 `ReadWritePaths` 里。前者是收件箱，后者是研报 PDF 和全文表。dws 大约每 2 小时刷新一次令牌；`ProtectHome` 只读时还要放开 `~/.dws`、`~/.local/share/dws-cli`、`~/.config/zsxq-cli`、`~/.local/share/zsxq-cli`。仓库不在这个路径时，改 `WorkingDirectory`、`Environment=DATA_DIR`、`EnvironmentFile`、`ExecStart` 和 `ReadWritePaths`。
 
 容器默认不再以 root 运行。已经用 root 写过数据目录的机器，切换前执行一次 `sudo chown -R 1000:1000 data`，让容器用户和上面的 `ubuntu` 用户是同一个 uid。步骤和回滚见 [deployment.md](./deployment.md)。
 
