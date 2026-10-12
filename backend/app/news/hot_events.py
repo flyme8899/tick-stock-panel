@@ -852,6 +852,7 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     updated_hm = now.astimezone(CN_TZ).strftime("%H:%M")
     if latest > now:
         logger.info("热门事件簇内时间晚于计算时刻 %s", latest.isoformat(timespec="seconds"))
+    _log_suspect_event_pairs(kept)
     return {
         "as_of": chosen.isoformat(),
         "trading_day": (chosen if not fallback else trading).isoformat(),
@@ -860,6 +861,45 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
         "updated_at": updated_hm,
         "events": kept,
     }
+
+
+def _log_suspect_event_pairs(events: list[dict]) -> None:
+    """概念集合完全相同、成员却零重叠的事件对，打 warning 供监控。
+
+    线上实测案例（2026-10-12 20:06 快照）：「证监会召开资本市场和金融形势
+    专家座谈会」与「上交所向东百集团下发监管工作函」两条事件 concepts 同为
+    东百集团收购题材（光芯片收购/光探测芯片/商业零售）、item_ids 零重叠、
+    breakdown 逐项相同（124.5506）——概念与成员完全脱节的聚合层双写残差。
+    正常计算里这是低频事件（同批同档 + 同一组涨停题材也会撞），所以只告警
+    不拦截：warning 带两个 key、成员数和共同概念，监控侧按条数与案例定位，
+    确认根因后再升级成断言。
+    """
+    by_concepts: dict[tuple[str, ...], list[dict]] = {}
+    for event in events:
+        concepts = tuple(sorted(
+            str(name).strip()
+            for name in (event.get("concepts") or [])
+            if str(name).strip()
+        ))
+        if not concepts:
+            continue
+        by_concepts.setdefault(concepts, []).append(event)
+    for concepts, group in by_concepts.items():
+        if len(group) < 2:
+            continue
+        for index, first in enumerate(group):
+            for second in group[index + 1:]:
+                ids_first = set(first.get("item_ids") or [])
+                ids_second = set(second.get("item_ids") or [])
+                if ids_first & ids_second:
+                    continue
+                logger.warning(
+                    "热门事件概念撞车：%s(%d成员) 与 %s(%d成员) 概念同为 %s"
+                    " 但成员零重叠",
+                    first.get("key"), len(ids_first),
+                    second.get("key"), len(ids_second),
+                    "/".join(concepts),
+                )
 
 
 def _prepare_merge_doc(doc: dict) -> None:
@@ -2686,7 +2726,7 @@ def _suffix_negated(blob: str, index: int, verb: str) -> bool:
 
 
 def _direction_signal(text: str, action: str) -> str:
-    """有明确动作时返回利好或利空。对不上则返回空，调用方再默认利好。
+    """有明确动作时返回利好或利空。对不上则返回空（中性/未知），不默认利好。
 
     否定先于利空词：概率低、不会、未、否认、暂不盖住后面的制裁、加息。
     下调准备金、下调利率、取消限购、缓和冲突整句是利好，里面的下调、取消、冲突不算利空。
@@ -2736,6 +2776,10 @@ def _direction_signal(text: str, action: str) -> str:
             if _prefix_negated(blob, index) or _suffix_negated(blob, index, verb):
                 for pos in range(index, index + len(verb)):
                     masked[pos] = True
+                # 否定利空是明确利好（「制裁概率偏低」「加征关税概率回落」的
+                # 反面），记利好而不是留空 —— 留空会被下游当中性丢掉这个信号，
+                # 而旧代码靠默认利好兜底，正是 85.7% 利好偏置的来源之一。
+                remember("利好", index)
                 continue
             remember("利空", index)
     for verb in _BULL_VERBS:
@@ -2768,7 +2812,10 @@ def _direction_signal(text: str, action: str) -> str:
 
 
 def _direction_for(text: str, action: str) -> str:
-    return _direction_signal(text, action) or "利好"
+    # 无信号时留空（中性/未知），不默认利好。默认利好是利好偏置的根因：
+    # 线上实测 349 事件利好:利空=300:49（85.7%），无信号事件被这条默认值
+    # 批量标成利好，用户拿「利空」做风控触发时全部失灵。
+    return _direction_signal(text, action) or ""
 
 
 def _explicit_target_direction(name: str, text: str) -> str:
@@ -2793,9 +2840,12 @@ def _explicit_target_direction(name: str, text: str) -> str:
 
 
 def _annotate_directions(event: dict, text: str) -> None:
+    # 无信号事件保持空方向：前端不渲染红绿标签，_score_event 也不给 direction
+    # 分。旧逻辑在这里把空方向强制改写成「利好」，配合 _direction_for 的默认
+    # 值，实测把 85.7% 的事件标成利好——宁可少给信号，不可给错信号。
     direction = str(event.get("direction") or "")
     if direction not in {"利好", "利空"}:
-        direction = "利好"
+        direction = ""
         event["direction"] = direction
     for item in event.get("mapping") or []:
         if not isinstance(item, dict):
@@ -5571,7 +5621,7 @@ def _apply_llm(event: dict, parsed: dict) -> None:
                 break
         event["concepts"] = picked
     event["mapping"] = [
-        {"name": name, "kind": "concept", "direction": event.get("direction") or "利好"}
+        {"name": name, "kind": "concept", "direction": event.get("direction") or ""}
         for name in event["concepts"]
     ]
     known = {item["key"] for item in event.get("mentioned_stocks") or []}
@@ -5588,6 +5638,6 @@ def _apply_llm(event: dict, parsed: dict) -> None:
             "name": name or key,
             "mentions": 1,
             "source_count": 1,
-            "direction": event.get("direction") or "利好",
+            "direction": event.get("direction") or "",
         })
     _annotate_directions(event, story_blob)
