@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type NewsCandidate, type NewsHotEvent, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
+import { api, type NewsCandidate, type NewsHotEvent, type NewsMxHotStatus, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { PageHelpButton } from '@/components/PageHelpButton'
@@ -106,6 +106,16 @@ export function HotEvents() {
   const push = useQuery({
     queryKey: QK.newsPush,
     queryFn: () => api.newsPush(),
+  })
+  const mxHot = useQuery({
+    queryKey: QK.newsMxHot,
+    queryFn: () => api.newsMxHot(),
+  })
+  const saveMxHot = useMutation({
+    mutationFn: (enabled: boolean) => api.newsSetMxHot(enabled),
+    onSuccess: (data: NewsMxHotStatus) => {
+      queryClient.setQueryData(QK.newsMxHot, data)
+    },
   })
   const savePush = useMutation({
     mutationFn: (body: { enabled?: boolean; types?: Record<string, boolean> }) => api.newsSetPush(body),
@@ -251,6 +261,9 @@ export function HotEvents() {
                         {item.subtitle && (
                           <span className="mt-0.5 block text-xs text-muted">{item.subtitle}</span>
                         )}
+                        {item.summary && (
+                          <span className="mt-0.5 block line-clamp-2 text-xs text-secondary">{item.summary}</span>
+                        )}
                       </span>
                       <span className="shrink-0 text-xs text-muted">热度 {item.heat}</span>
                     </div>
@@ -333,6 +346,25 @@ export function HotEvents() {
               <h2 className="mb-1 break-words text-sm font-medium">{pickedEvent.name}</h2>
               {pickedEvent.subtitle && (
                 <p className="mb-2 text-xs text-muted">{pickedEvent.subtitle}</p>
+              )}
+              {pickedEvent.summary && (
+                <p className="mb-2 text-xs text-secondary">{pickedEvent.summary}</p>
+              )}
+              {(pickedEvent.sources ?? []).length > 0 && (
+                <ul className="mb-2 space-y-1">
+                  {(pickedEvent.sources ?? []).map(source => (
+                    <li key={`${source.source}-${source.title}`} className="text-xs text-muted">
+                      {[source.source, source.authority].filter(Boolean).join(' · ')}
+                      {source.url ? (
+                        <a className="ml-1 text-accent" href={source.url} target="_blank" rel="noreferrer">
+                          {source.title || '打开来源'}
+                        </a>
+                      ) : (
+                        source.title ? ` · ${source.title}` : ''
+                      )}
+                    </li>
+                  ))}
+                </ul>
               )}
               {(eventDetail.data?.stocks ?? pickedEvent.stocks).length > 0 && (
                 <p className="mb-2 text-xs text-muted">
@@ -461,6 +493,37 @@ export function HotEvents() {
                   {testPush.isPending ? '发送中…' : '发送测试消息'}
                 </button>
                 {pushNote && <p className="text-xs text-muted">{pushNote}</p>}
+              </div>
+            )}
+          </section>
+          <section className="rounded-md border border-border p-3">
+            <h2 className="mb-1 text-sm font-medium">妙想补全</h2>
+            <p className="mb-2 text-xs text-muted">
+              {mxHot.data?.summary || '新热点第一次冲上榜首时，用妙想检索权威报道，补到事件来源和摘要。每天默认 25 次，和资金流妙想配额分开。失败时保持原事件。'}
+            </p>
+            {mxHot.isLoading && <p className="text-sm text-muted">加载中…</p>}
+            {mxHot.isError && <p className="text-sm text-danger">妙想补全状态加载失败</p>}
+            {mxHot.data && (
+              <div className="space-y-1 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span>榜首检索</span>
+                  <button
+                    type="button"
+                    disabled={mxHot.data.locked || saveMxHot.isPending}
+                    className={cn(
+                      'rounded border px-2 py-0.5 text-xs',
+                      mxHot.data.enabled ? 'border-accent text-foreground' : 'border-border text-muted',
+                    )}
+                    onClick={() => saveMxHot.mutate(!mxHot.data!.enabled)}
+                  >
+                    {mxHot.data.enabled ? '已开启' : '已关闭'}
+                  </button>
+                </div>
+                <p className="text-xs text-muted">
+                  今日已用 {mxHot.data.used}/{mxHot.data.budget}
+                  {mxHot.data.locked ? ' · 由环境变量 NEWS_MX_HOT_ENABLED 锁定' : ''}
+                  {!mxHot.data.configured ? ' · 未配置 MX_APIKEY，打开后也不会请求' : ''}
+                </p>
               </div>
             )}
           </section>

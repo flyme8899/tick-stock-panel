@@ -2520,6 +2520,27 @@ export interface NewsHotEvent {
   confirmation?: NewsHotConfirmation
   stocks: NewsHotStock[]
   etfs?: NewsHotStock[]
+  /** 妙想权威稿摘要。没有补全时不返回。 */
+  summary?: string
+  /** 妙想权威来源。没有补全时不返回。 */
+  sources?: NewsMxSource[]
+}
+
+export interface NewsMxSource {
+  title: string
+  source: string
+  url: string
+  authority: string
+  date: string
+}
+
+export interface NewsMxHotStatus {
+  enabled: boolean
+  locked: boolean
+  configured: boolean
+  budget: number
+  used: number
+  summary: string
 }
 
 export interface NewsHotResponse {
@@ -4688,6 +4709,14 @@ export const api = {
     request<NewsHealth & { applied: Record<string, boolean> }>('/api/news/sources', {
       method: 'PUT',
       body: JSON.stringify({ sources }),
+    }),
+
+  newsMxHot: () => request<NewsMxHotStatus>('/api/news/mx-hot'),
+
+  newsSetMxHot: (enabled: boolean) =>
+    request<NewsMxHotStatus>('/api/news/mx-hot', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
     }),
 
   newsPush: () => request<NewsPushStatus>('/api/news/push'),

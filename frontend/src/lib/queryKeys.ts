@@ -167,6 +167,7 @@ export const QK = {
   newsMessages:         (kind: string, key: string) => ['news-messages', kind, key] as const,
   newsHealth:           ['news-health'] as const,
   newsPush:             ['news-push'] as const,
+  newsMxHot:            ['news-mx-hot'] as const,
   pickerSources:        ['picker-sources'] as const,
 } as const
 
