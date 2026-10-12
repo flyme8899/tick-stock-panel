@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, BarChart3, Building2, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Eraser, Layers3, ListPlus, Plus, RadioTower, Save, Search, Siren, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
 import { api, genRuleId, type MonitorRule, type MonitorCondition, type SectorKind, type SectorMonitorTarget, type StrategyNotifyEvent } from '@/lib/api'
+import { SECTOR_TARGET_LIMIT, deselectVisibleSectorTargets, isSectorTargetUnavailable, sectorDirectionClass, selectVisibleSectorTargets } from '@/components/monitor/sectorSelection'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS, LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS } from '@/lib/strategyMonitorEvents'
 import { QK } from '@/lib/queryKeys'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -60,10 +61,13 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
   group_id: null,
   sector: null,
   sector_kind: 'index',
+  sector_scope: 'targets',
   sector_targets: [],
   sector_trigger: 'change_pct',
   threshold_pct: 1,
   window_minutes: 5,
+  min_valid_count: 5,
+  min_coverage_pct: 80,
   abnormal_window: 'any',
   strategy_id: null,
   score_min: null,
@@ -184,7 +188,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       // name 为空时用默认名
       if (!d.name.trim()) {
         const base = TYPE_DEFAULT_NAME[d.type] ?? '监控规则'
-        d.name = d.type === 'sector' && d.sector_targets?.length
+        d.name = d.type === 'sector' && d.sector_scope === 'all_a'
+          ? `${base} · 全A`
+          : d.type === 'sector' && d.sector_targets?.length
           ? `${base} · ${d.sector_targets[0].name}${d.sector_targets.length > 1 ? ` 等${d.sector_targets.length}个` : ''}`
           : d.type === 'abnormal'
           ? `${base} · 接近度≥${d.threshold_pct ?? 70}%${d.abnormal_window && d.abnormal_window !== 'any' ? ` (${d.abnormal_window.toUpperCase()})` : ''}`
@@ -212,7 +218,26 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         d.symbols = []
         d.conditions = []
         delete d.notify_events
-        if (!d.sector_targets?.length) throw new Error('请选择至少一个监控对象')
+        if (d.sector_scope === 'all_a') {
+          if (d.sector_kind !== 'concept' && d.sector_kind !== 'industry') {
+            throw new Error('全A 仅适用于概念题材或行业板块')
+          }
+          d.sector_targets = []
+          const minValid = d.min_valid_count ?? 5
+          const minCoverage = d.min_coverage_pct ?? 80
+          if (!Number.isInteger(minValid) || minValid < 1 || minValid > 20000) {
+            throw new Error('有效成分门槛必须是 1 到 20000 的整数')
+          }
+          if (!Number.isFinite(minCoverage) || minCoverage <= 0 || minCoverage > 100) {
+            throw new Error('行情覆盖率必须大于 0 且不超过 100%')
+          }
+          d.min_valid_count = minValid
+          d.min_coverage_pct = minCoverage
+        } else {
+          d.sector_scope = 'targets'
+          if (!d.sector_targets?.length) throw new Error('请选择至少一个监控对象')
+          if (d.sector_targets.length > SECTOR_TARGET_LIMIT) throw new Error(`监控对象最多 ${SECTOR_TARGET_LIMIT} 个，全市场请改用全A`)
+        }
         if ((d.threshold_pct ?? 0) <= 0 || (d.threshold_pct ?? 0) > 20) throw new Error('阈值必须大于 0 且不超过 20%')
       } else if (d.type === 'abnormal') {
         delete d.score_min
@@ -361,18 +386,38 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const groupNameBySymbol = groupNamesQ.data?.names ?? {}
 
   const selectSectorKind = (kind: SectorKind) => {
-    setDraft(d => ({ ...d, sector_kind: kind, sector_targets: [] }))
+    setDraft(d => ({
+      ...d,
+      sector_kind: kind,
+      sector_targets: [],
+      // 指数没有成分聚合; 概念与行业之间切换时保留全A (聚合范围相同)
+      sector_scope: kind === 'index' ? 'targets' : (d.sector_scope ?? 'targets'),
+    }))
     setSectorQuery('')
   }
 
   const toggleSectorTarget = (target: SectorMonitorTarget) => {
     setDraft(d => {
+      if (d.sector_scope === 'all_a') return d
       const current = d.sector_targets ?? []
       if (current.some(item => item.key === target.key)) {
         return { ...d, sector_targets: current.filter(item => item.key !== target.key) }
       }
-      if (current.length >= 20) return d
-      return { ...d, sector_targets: [...current, target] }
+      if (current.length >= SECTOR_TARGET_LIMIT) return d
+      return { ...d, sector_scope: 'targets', sector_targets: [...current, target] }
+    })
+  }
+
+  const toggleAllA = () => {
+    setDraft(d => {
+      if (d.sector_scope === 'all_a') return { ...d, sector_scope: 'targets' }
+      return {
+        ...d,
+        sector_scope: 'all_a',
+        sector_targets: [],
+        min_valid_count: d.min_valid_count ?? 5,
+        min_coverage_pct: d.min_coverage_pct ?? 80,
+      }
     })
   }
 
@@ -433,6 +478,33 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     if (!query) return true
     return `${target.name} ${target.symbol ?? ''} ${target.value ?? ''}`.toLowerCase().includes(query)
   }).slice(0, 100)
+  const allA = sectorKind !== 'index' && draft.sector_scope === 'all_a'
+  const selectedSectorCount = draft.sector_targets?.length ?? 0
+  const canSelectMoreVisible = !allA
+    && selectedSectorCount < SECTOR_TARGET_LIMIT
+    && visibleSectorTargets.some(target => (
+      !isSectorTargetUnavailable(target)
+      && !(draft.sector_targets ?? []).some(item => item.key === target.key)
+    ))
+  const canDeselectVisible = !allA && (draft.sector_targets ?? []).some(item => (
+    visibleSectorTargets.some(target => target.key === item.key)
+  ))
+  const selectAllVisible = () => {
+    setDraft(d => {
+      if (d.sector_scope === 'all_a') return d
+      return {
+        ...d,
+        sector_scope: 'targets',
+        sector_targets: selectVisibleSectorTargets(d.sector_targets ?? [], visibleSectorTargets),
+      }
+    })
+  }
+  const deselectAllVisible = () => {
+    setDraft(d => ({
+      ...d,
+      sector_targets: deselectVisibleSectorTargets(d.sector_targets ?? [], visibleSectorTargets),
+    }))
+  }
   const thresholdConds = draft.conditions.filter(c => c.op !== 'truth')
   const strategyPresets = strategies.data?.presets ?? []
   const normalizedStrategyQuery = strategyQuery.trim().toLowerCase()
@@ -701,7 +773,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     aria-pressed={industryLevel === level}
                     onClick={() => {
                       setIndustryLevel(level)
-                      setDraft(d => ({ ...d, sector_targets: [] }))
+                      setDraft(d => (d.sector_scope === 'all_a' ? d : { ...d, sector_targets: [] }))
                     }}
                     className={`px-3 text-[11px] transition-colors cursor-pointer ${
                       industryLevel === level ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'
@@ -717,8 +789,62 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-3">
               <span className="text-[11px] text-muted">监控对象</span>
-              <span className="text-[10px] font-mono text-muted">{draft.sector_targets?.length ?? 0}/20</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={selectAllVisible}
+                  disabled={!canSelectMoreVisible}
+                  title={
+                    allA
+                      ? '全A 与单个板块互斥'
+                      : selectedSectorCount >= SECTOR_TARGET_LIMIT
+                        ? `最多 ${SECTOR_TARGET_LIMIT} 个`
+                        : canSelectMoreVisible
+                          ? '全选当前可见列表'
+                          : '当前可见项已全选或不可选'
+                  }
+                  className="text-[10px] text-accent hover:underline disabled:cursor-not-allowed disabled:text-muted/40 disabled:no-underline cursor-pointer"
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  onClick={deselectAllVisible}
+                  disabled={!canDeselectVisible}
+                  title={allA ? '全A 与单个板块互斥' : '取消当前可见列表的勾选'}
+                  className="text-[10px] text-secondary hover:text-foreground hover:underline disabled:cursor-not-allowed disabled:text-muted/40 disabled:no-underline cursor-pointer"
+                >
+                  取消全选
+                </button>
+                <span className="text-[10px] font-mono text-muted">{allA ? '全A' : `${selectedSectorCount}/${SECTOR_TARGET_LIMIT}`}</span>
+              </div>
             </div>
+            {sectorKind !== 'index' && (
+              <div className={`rounded-btn border px-2.5 py-2 ${allA ? 'border-accent/40 bg-accent/10' : 'border-border bg-base'}`}>
+                <button
+                  type="button"
+                  aria-pressed={allA}
+                  onClick={toggleAllA}
+                  className="flex w-full items-start justify-between gap-3 text-left cursor-pointer"
+                >
+                  <span className="min-w-0">
+                    <span className={`block text-[11px] font-medium ${allA ? 'text-accent' : 'text-foreground'}`}>全A</span>
+                    <span className="mt-0.5 block text-[10px] text-muted">
+                      全部行业/概念成分等权，不受 {SECTOR_TARGET_LIMIT} 个上限
+                      {options.data?.all_a_member_count != null ? ` · 成分 ${options.data.all_a_member_count} 只` : ''}
+                    </span>
+                  </span>
+                  <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-full border ${allA ? 'border-accent bg-accent text-white' : 'border-border text-transparent'}`}>
+                    <Check className="h-2.5 w-2.5" />
+                  </span>
+                </button>
+                {allA && (
+                  <p className="mt-1.5 text-[10px] leading-4 text-muted">
+                    已选全A，与单个板块互斥。下面的列表已停用；再点一次全A即可改回逐个勾选。
+                  </p>
+                )}
+              </div>
+            )}
             {(draft.sector_targets?.length ?? 0) > 0 && (
               <div className="flex flex-wrap gap-1">
                 {draft.sector_targets?.map(target => (
@@ -747,7 +873,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 </div>
               ) : visibleSectorTargets.map(target => {
                 const selected = draft.sector_targets?.some(item => item.key === target.key) ?? false
-                const unavailable = !target.available || (target.kind !== 'index' && target.member_count < 5)
+                const unavailable = isSectorTargetUnavailable(target)
+                const locked = allA || unavailable
                 const targetLabel = target.kind === 'industry'
                   ? (target.value ?? target.name).replaceAll('-', ' / ')
                   : target.name
@@ -755,12 +882,12 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   <button
                     key={target.key}
                     type="button"
-                    disabled={unavailable}
+                    disabled={locked}
                     aria-pressed={selected}
                     onClick={() => toggleSectorTarget(target)}
-                    title={!target.available ? '请先在实时监控设置中加入该指数' : target.member_count < 5 ? '有效成分少于 5 只' : targetLabel}
+                    title={allA ? '已选全A，与单个板块互斥' : !target.available ? '请先在实时监控设置中加入该指数' : target.kind !== 'index' && target.member_count < 5 ? '有效成分少于 5 只' : targetLabel}
                     className={`flex h-9 min-w-0 items-center gap-2 rounded-btn border px-2.5 text-left transition-colors ${
-                      unavailable
+                      locked
                         ? 'cursor-not-allowed border-border/40 bg-base/40 text-muted/40'
                         : selected
                           ? 'cursor-pointer border-accent/40 bg-accent/10 text-accent'
@@ -813,9 +940,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     type="button"
                     aria-pressed={draft.direction === key}
                     onClick={() => setDraft(d => ({ ...d, direction: key }))}
-                    className={`text-[11px] font-medium transition-colors cursor-pointer ${
-                      draft.direction === key ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'
-                    }`}
+                    className={`text-[11px] font-medium transition-colors cursor-pointer ${sectorDirectionClass(key, draft.direction === key)}`}
                   >
                     {label}
                   </button>
@@ -850,11 +975,45 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
               </span>
             </label>
           </div>
-          {sectorKind !== 'index' && (
+          {sectorKind !== 'index' && !allA && (
             <div className="flex flex-wrap gap-1.5 text-[9px] text-muted">
               <span className="rounded bg-elevated px-1.5 py-0.5">等权平均</span>
               <span className="rounded bg-elevated px-1.5 py-0.5">行情覆盖 ≥ 80%</span>
               <span className="rounded bg-elevated px-1.5 py-0.5">有效成分 ≥ 5</span>
+            </div>
+          )}
+          {allA && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1.5">
+                <span className="text-[11px] text-muted">有效成分不少于</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={20000}
+                  step={1}
+                  value={draft.min_valid_count ?? 5}
+                  onChange={event => setDraft(d => ({ ...d, min_valid_count: Number(event.target.value) }))}
+                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-[11px] text-muted">行情覆盖不低于</span>
+                <span className="relative block">
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    step={1}
+                    value={draft.min_coverage_pct ?? 80}
+                    onChange={event => setDraft(d => ({ ...d, min_coverage_pct: Number(event.target.value) }))}
+                    className="h-9 w-full rounded-btn border border-border bg-base pl-3 pr-8 text-xs font-mono text-foreground"
+                  />
+                  <span className="absolute right-3 top-2.5 text-xs text-muted">%</span>
+                </span>
+              </label>
+              <p className="sm:col-span-2 text-[10px] leading-4 text-muted">
+                与快速异动相同：成分等权平均，凑满统计窗口后才比较阈值。覆盖率 = 有行情的成分 / 全部行业与概念成分（去重）。默认 ≥ 5 只且 ≥ 80%，全市场可按需提高。
+              </p>
             </div>
           )}
         </div>

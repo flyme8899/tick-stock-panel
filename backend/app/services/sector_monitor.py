@@ -15,10 +15,17 @@ from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.index_const import CORE_INDEX_NAMES as CORE_INDICES
 SECTOR_KINDS = {"index", "concept", "industry"}
+ALL_A_KIND = "all_a"
+ALL_A_NAME = "全A"
 _VALUE_SEP = re.compile(r"[\u3001,\uff0c;\uff1b|]+")
 _NULL_VALUES = {"nan", "none", "null", "<na>", "n/a", "-"}
 _HISTORY_SECONDS = 31 * 60
 _WINDOW_TOLERANCE_SECONDS = 90
+
+
+def all_a_snapshot_key(min_valid: int, min_coverage: float) -> str:
+    """同一门槛共享一条等权基线; 门槛变化即换键, 避免松紧规则互相污染窗口。"""
+    return f"market:all_a:{int(min_valid)}:{float(min_coverage):.4f}"
 
 
 def _finite(value: Any) -> float | None:
@@ -49,6 +56,8 @@ def _target_key(kind: str, source_id: str, field: str, value: str, level: int | 
 class SectorMonitorService:
     """缓存板块成员关系, 并按启用规则构建轻量实时快照。"""
 
+    all_a_snapshot_key = staticmethod(all_a_snapshot_key)
+
     def __init__(self, repo) -> None:
         self._repo = repo
         self._data_dir: Path = repo.store.data_dir
@@ -56,12 +65,20 @@ class SectorMonitorService:
         self._catalog: dict[str, list[dict]] = {kind: [] for kind in SECTOR_KINDS}
         self._targets_by_key: dict[str, dict] = {}
         self._members_by_key: dict[str, set[str]] = {}
+        # 行业+概念成分去重后的全市场集合, 只在目录签名变化时重建。
+        self._all_a_members: set[str] = set()
+        self._all_a_member_list: list[str] = []
         self._history: dict[str, deque[tuple[float, float]]] = {}
         self._history_day: str | None = None
 
     def list_targets(self) -> dict[str, list[dict]]:
         self._ensure_catalog()
         return {kind: [dict(item) for item in self._catalog[kind]] for kind in self._catalog}
+
+    def all_a_member_count(self) -> int:
+        """全A 分母: 已缓存的行业/概念成分去重数量, 不读行情、不扫库。"""
+        self._ensure_catalog()
+        return len(self._all_a_members)
 
     def missing_target_keys(self, targets: list[dict]) -> list[str]:
         self._ensure_catalog()
@@ -90,19 +107,33 @@ class SectorMonitorService:
         self._ensure_catalog()
         self._reset_history_for_day(now)
 
-        stock_rows = self._row_map(stock_df, index_values_are_percent=False)
-        index_rows = self._row_map(index_df, index_values_are_percent=True)
+        kinds = [self._resolved_kind(raw) for raw in targets]
+        # 个股行展开只服务具体概念/行业。全A 与纯指数规则不把整帧收成 Python dict。
+        stock_rows = (
+            self._row_map(stock_df, index_values_are_percent=False)
+            if any(kind in {"concept", "industry"} for kind in kinds)
+            else {}
+        )
+        index_rows = (
+            self._row_map(index_df, index_values_are_percent=True)
+            if any(kind == "index" for kind in kinds)
+            else {}
+        )
+        all_a_stats = self._all_a_stats(stock_df) if any(kind == "all_a" for kind in kinds) else None
         snapshots: dict[str, dict] = {}
 
-        for raw_target in targets:
+        for raw_target, kind in zip(targets, kinds, strict=True):
             key = str(raw_target.get("key") or "")
-            target = self._targets_by_key.get(key)
-            if not target:
-                continue
-            if target["kind"] == "index":
-                snapshot = self._index_snapshot(target, index_rows)
+            if kind == "all_a":
+                snapshot = self._all_a_snapshot(all_a_stats or {}, raw_target)
             else:
-                snapshot = self._dimension_snapshot(target, stock_rows)
+                target = self._targets_by_key.get(key)
+                if not target:
+                    continue
+                if target["kind"] == "index":
+                    snapshot = self._index_snapshot(target, index_rows)
+                else:
+                    snapshot = self._dimension_snapshot(target, stock_rows)
             if snapshot is None:
                 continue
 
@@ -190,15 +221,20 @@ class SectorMonitorService:
                                 targets_by_key[key] = target
                                 catalog[kind].append(target)
 
+        all_a_members: set[str] = set()
         for kind in ("concept", "industry"):
             for target in catalog[kind]:
-                target["member_count"] = len(members_by_key.get(target["key"], set()))
+                members = members_by_key.get(target["key"], set())
+                target["member_count"] = len(members)
+                all_a_members.update(members)
             catalog[kind].sort(key=lambda item: (item.get("level") or 0, item["name"], item["value"]))
 
         self._catalog_signature = signature
         self._catalog = catalog
         self._targets_by_key = targets_by_key
         self._members_by_key = members_by_key
+        self._all_a_members = all_a_members
+        self._all_a_member_list = sorted(all_a_members)
         self._history.clear()
 
     def _data_signature(self) -> tuple[tuple[str, int, int], ...]:
@@ -322,6 +358,98 @@ class SectorMonitorService:
                 "name": leader.get("name"),
                 "change_pct": leader.get("change_pct"),
             } if leader else None,
+        }
+
+    def _resolved_kind(self, raw_target: dict) -> str | None:
+        if raw_target.get("kind") == ALL_A_KIND:
+            return ALL_A_KIND
+        target = self._targets_by_key.get(str(raw_target.get("key") or ""))
+        if not target:
+            return None
+        return str(target.get("kind") or "")
+
+    def _all_a_stats(self, stock_df: pl.DataFrame) -> dict:
+        """等权聚合全A。分母是目录缓存, 分子只来自本轮已在内存中的行情帧。"""
+        total = len(self._all_a_members)
+        empty = {
+            "change_pct": None,
+            "coverage_ratio": 0.0,
+            "valid_count": 0,
+            "total_count": total,
+            "up_count": 0,
+            "down_count": 0,
+            "leader": None,
+        }
+        if (
+            total == 0
+            or stock_df.is_empty()
+            or "symbol" not in stock_df.columns
+            or "change_pct" not in stock_df.columns
+        ):
+            return empty
+        frame = stock_df.with_columns(
+            pl.col("symbol").cast(pl.Utf8).str.strip_chars().str.to_uppercase().alias("_symbol"),
+            pl.col("change_pct").cast(pl.Float64, strict=False).alias("_change"),
+        ).filter(
+            pl.col("_symbol").is_in(self._all_a_member_list)
+            & pl.col("_change").is_not_null()
+            & pl.col("_change").is_finite()
+        )
+        if frame.is_empty():
+            return empty
+        frame = frame.unique(subset=["_symbol"], keep="first")
+        valid_count = frame.height
+        summary = frame.select(
+            pl.col("_change").mean().alias("change_pct"),
+            (pl.col("_change") > 0).sum().alias("up_count"),
+            (pl.col("_change") < 0).sum().alias("down_count"),
+        ).row(0, named=True)
+        leader_row = frame.sort("_change", descending=True).row(0, named=True)
+        leader_name = leader_row.get("name") if "name" in frame.columns else None
+        return {
+            "change_pct": float(summary["change_pct"]),
+            "coverage_ratio": valid_count / total,
+            "valid_count": valid_count,
+            "total_count": total,
+            "up_count": int(summary["up_count"]),
+            "down_count": int(summary["down_count"]),
+            "leader": {
+                "symbol": leader_row.get("_symbol"),
+                "name": leader_name,
+                "change_pct": float(leader_row["_change"]),
+            },
+        }
+
+    @staticmethod
+    def _all_a_snapshot(stats: dict, target: dict) -> dict:
+        min_valid = int(target.get("min_valid_count") or 5)
+        min_coverage = target.get("min_coverage")
+        coverage_floor = 0.8 if min_coverage is None else float(min_coverage)
+        valid_count = int(stats.get("valid_count") or 0)
+        coverage = float(stats.get("coverage_ratio") or 0.0)
+        change = stats.get("change_pct")
+        valid = (
+            change is not None
+            and valid_count >= min_valid
+            and coverage + 1e-9 >= coverage_floor
+        )
+        return {
+            "key": target.get("key"),
+            "kind": ALL_A_KIND,
+            "name": ALL_A_NAME,
+            "valid": valid,
+            "change_pct": change,
+            "price": None,
+            "coverage_ratio": coverage,
+            "valid_count": valid_count,
+            "total_count": int(stats.get("total_count") or 0),
+            "up_count": int(stats.get("up_count") or 0),
+            "down_count": int(stats.get("down_count") or 0),
+            "leader": stats.get("leader"),
+            "symbol": None,
+            "source_field": None,
+            "value": None,
+            "level": None,
         }
 
     @staticmethod

@@ -506,14 +506,20 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
                   })() : (
                     <>
                       <div className="flex items-center gap-2 flex-wrap">
-                        {ev.source === 'sector' && (
+                        {ev.source === 'sector' && ev.sector_kind === 'all_a' && (
+                          <span className="inline-flex items-center gap-1.5 px-1 text-xs font-medium text-foreground" title="全市场等权">
+                            <Tags className="h-3.5 w-3.5 text-cyan-600 dark:text-cyan-300" />
+                            <span>全A</span>
+                          </span>
+                        )}
+                        {ev.source === 'sector' && ev.sector_kind !== 'all_a' && (
                           <button
                             onClick={() => {
                               if (ev.sector_kind === 'index' && ev.symbol) {
                                 navigate(`/indices?symbol=${encodeURIComponent(ev.symbol)}`)
-                              } else if (ev.sector_source_field && ev.sector_value) {
+                              } else if (ev.sector_source_field && ev.sector_value && (ev.sector_kind === 'concept' || ev.sector_kind === 'industry')) {
                                 setDimensionTarget({
-                                  kind: ev.sector_kind as DimensionKind,
+                                  kind: ev.sector_kind,
                                   value: ev.sector_value,
                                   sourceField: ev.sector_source_field,
                                 })
@@ -935,19 +941,32 @@ function RulesList({ rulesQuery, onEdit }: {
               {/* 第二行: 类型摘要 */}
               {r.type === 'sector' ? (
                 <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 pl-0.5">
-                  {(r.sector_targets ?? []).slice(0, 3).map(target => (
-                    <span key={target.key} className="max-w-28 truncate rounded bg-cyan-500/8 px-1.5 py-0.5 text-[9px] text-cyan-700 dark:text-cyan-300">
-                      {target.name}
+                  {r.sector_scope === 'all_a' ? (
+                    <span className="max-w-28 truncate rounded bg-cyan-500/8 px-1.5 py-0.5 text-[9px] text-cyan-700 dark:text-cyan-300">
+                      全A
                     </span>
-                  ))}
-                  {(r.sector_targets?.length ?? 0) > 3 && (
-                    <span className="text-[9px] text-muted">+{(r.sector_targets?.length ?? 0) - 3}</span>
+                  ) : (
+                    <>
+                      {(r.sector_targets ?? []).slice(0, 3).map(target => (
+                        <span key={target.key} className="max-w-28 truncate rounded bg-cyan-500/8 px-1.5 py-0.5 text-[9px] text-cyan-700 dark:text-cyan-300">
+                          {target.name}
+                        </span>
+                      ))}
+                      {(r.sector_targets?.length ?? 0) > 3 && (
+                        <span className="text-[9px] text-muted">+{(r.sector_targets?.length ?? 0) - 3}</span>
+                      )}
+                    </>
                   )}
                   <span className="text-[9px] text-secondary">·</span>
-                  <span className="text-[9px] text-secondary">
+                  <span className={`text-[9px] ${r.direction === 'down' ? 'text-bear' : 'text-bull'}`}>
                     {r.sector_trigger === 'momentum' ? `${r.window_minutes ?? 5}分钟异动` : '涨跌幅'}
                     {r.direction === 'down' ? ' ≤ -' : ' ≥ '}{r.threshold_pct ?? 1}%
                   </span>
+                  {r.sector_scope === 'all_a' && (
+                    <span className="text-[9px] text-muted">
+                      有效成分 ≥ {r.min_valid_count ?? 5} · 覆盖 ≥ {r.min_coverage_pct ?? 80}%
+                    </span>
+                  )}
                 </div>
               ) : r.type === 'abnormal' ? (
                 <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 pl-0.5">
