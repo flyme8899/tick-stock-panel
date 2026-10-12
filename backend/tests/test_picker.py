@@ -543,7 +543,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert snapshot["trading_day"] == "2026-10-12"
     assert snapshot["as_of"] == "2026-10-12"
     assert snapshot["fallback"] is False
-    assert snapshot["hint"] == "交易日 10月12日 · 等待竞价 · 更新于 08:30"
+    assert snapshot["hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 08:30"
     names = [event["name"] for event in snapshot["events"]]
     # 只断言「哪些事件进前 5」以及「平安银行进了前 5」，**不锁两个条目之间的
     # 相对名次**：它们的先后取决于盘面确认分（平安银行 seed 带 601318.SH 且
@@ -592,7 +592,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     same_day = top_hot_events(friday_afternoon)
     assert same_day["fallback"] is False
     assert same_day["as_of"] == "2026-10-12"
-    assert same_day["hint"] == "交易日 10月12日 · 等待竞价 · 更新于 16:00"
+    assert same_day["hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 16:00"
     assert same_day["events"][0]["first_seen"] == "14:52"
 
     scores, _labels, note = map_selected_hot_event(head, Dimensions(), {"600519.SH", "000001.SZ"})
@@ -613,7 +613,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert "601318.SH" not in {row["symbol"] for row in picked["rows"]}
     assert {row["event"] for row in picked["rows"]} == {"华为发布盘古新模型，昇腾链走强 · 3源"}
     assert picked["rows"][0]["score"] == 36.0
-    assert picked["summary"]["hot_hint"] == "交易日 10月12日 · 等待竞价 · 更新于 08:30"
+    assert picked["summary"]["hot_hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 08:30"
 
     robot = next(event for event in snapshot["events"] if event["name"].startswith("工信部"))
     overlapped = run_picker(
@@ -647,7 +647,7 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert group["items"][0]["importance"] == "重大"
     assert group["items"][0]["concepts"] == ["昇腾"]
     assert group["items"][0]["headline"] == "华为发布盘古新模型，昇腾链走强"
-    assert group["hint"] == "交易日 10月12日 · 等待竞价 · 更新于 08:30"
+    assert group["hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 08:30"
     assert group["fallback"] is False
     ran = client.post("/api/picker/run", json={
         "sources": [{"type": "hot_events", "id": head["key"]}],
@@ -804,7 +804,7 @@ def test_weekend_news_waits_on_the_next_session_and_keeps_red(tmp_path):
     assert saturday["trading_day"] == "2026-10-12"
     assert saturday["fallback"] is False
     assert saturday["updated_at"] == "18:00"
-    assert "等待竞价" in saturday["hint"]
+    assert "待开盘验证" in saturday["hint"]
     for name in ("碳酸锂报价继续上涨", "橡胶价格大涨超预期"):
         confirm = saturday_by_name[name]["confirmation"]
         assert confirm["label"] == "待开盘验证"
@@ -827,7 +827,7 @@ def test_weekend_news_waits_on_the_next_session_and_keeps_red(tmp_path):
     assert sunday["as_of"] == "2026-10-12"
     assert sunday["fallback"] is False
     assert sunday["updated_at"] == "15:00"
-    assert "等待竞价" in sunday["hint"]
+    assert "待开盘验证" in sunday["hint"]
     assert sunday_by_name["原油期货报价上调"]["red_count"] > 0
     assert sunday_by_name["橡胶价格大涨超预期"]["red_count"] > 0
     assert sunday_by_name["原油期货报价上调"]["confirmation"]["pending"] is True
@@ -837,7 +837,7 @@ def test_weekend_news_waits_on_the_next_session_and_keeps_red(tmp_path):
     monday_wait_by_name = {event["name"]: event for event in monday_wait["events"]}
     assert monday_wait["as_of"] == "2026-10-12"
     assert monday_wait["updated_at"] == "09:10"
-    assert "等待竞价" in monday_wait["hint"]
+    assert "待开盘验证" in monday_wait["hint"]
     assert {event["name"] for event in monday_wait["events"]} >= {
         "橡胶价格大涨超预期", "原油期货报价上调", "碳酸锂报价继续上涨",
         "工信部出台算力补贴",
@@ -876,7 +876,7 @@ def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
     assert snapshot["fallback"] is False
     assert snapshot["as_of"] == "2026-10-12"
     assert snapshot["trading_day"] == "2026-10-12"
-    assert snapshot["hint"] == "交易日 10月12日 · 等待竞价 · 更新于 08:30"
+    assert snapshot["hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 08:30"
     assert snapshot["events"][0]["first_seen"] == "10-08 18:12"
     assert snapshot["events"][0]["name"] == "茅台批价上调"
     assert snapshot["events"][0]["concepts"] == []
@@ -896,7 +896,7 @@ def test_hot_events_fall_back_to_last_day_with_data(tmp_path):
     assert crossed["as_of"] == "2026-10-12"
     assert crossed["trading_day"] == "2026-10-12"
     assert crossed["fallback"] is False
-    assert crossed["hint"].startswith("交易日 10月12日 · 等待竞价")
+    assert crossed["hint"].startswith("交易日 10月12日 · 待开盘验证")
     assert crossed["updated_at"] == "08:30"
     assert crossed["events"][0]["confirmation"]["label"] == "待开盘验证"
     assert crossed["events"][0]["confirmation"]["pending"] is True

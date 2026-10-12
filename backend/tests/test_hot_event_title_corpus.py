@@ -1735,10 +1735,87 @@ def test_prompt_tells_the_model_not_to_answer_with_a_placeholder():
     assert "不要再回空字符串" in retry
 
 
-def test_partial_empty_titles_retry_once_then_fall_back(monkeypatch):
-    """8 条里只有 2 条写出要点时，不整批重发，只把空的重写一轮，仍空就用正文。
+def test_fallback_ignores_roundup_and_morning_brief_sentences():
+    """早报、汇总里的别条不能当要点。对不上展示标题就留空。"""
+    from app.news.hot_events import (
+        _fallback_subtitle,
+        _fill_empty_subtitles,
+        _shares_subject_or_number,
+    )
 
-    对应线上「补问切片外未标注条目 8 条，只回来 2 条」，正文 563 和 1301 字仍是空 title。
+    treasury = "发改委、财政部下达第四批625亿超长期特别国债支持以旧换新"
+    aigc = "国内首部AIGC长剧《后西游记》已正式上线，播放量突破1200万"
+    digest = {
+        "name": treasury,
+        "headline": treasury,
+        "subtitle": "",
+        "_candidates": [{
+            "source": "jin10",
+            "title": treasury,
+            "text": f"{treasury}\n{aigc}。",
+        }],
+    }
+    assert _fallback_subtitle(digest) == ""
+    assert "后西游记" not in _fallback_subtitle(digest)
+
+    related = {
+        "name": treasury,
+        "headline": treasury,
+        "subtitle": "",
+        "_candidates": [{
+            "source": "cls",
+            "title": treasury,
+            "text": f"{treasury}\n{aigc}。家电以旧换新安排150亿元。",
+        }],
+    }
+    point = _fallback_subtitle(related)
+    assert "后西游记" not in point
+    assert "150亿" in point
+    assert _shares_subject_or_number(treasury, point)
+
+    bond = "前三季度银行二永债发行显著放量"
+    profit = "宁德时代发布业绩预告，预计净利润同比增长50%"
+    morning = f"周一早报：{bond}；另有公司快讯"
+    bond_event = {
+        "name": bond,
+        "headline": bond,
+        "subtitle": "",
+        "_candidates": [
+            {"source": "cls", "title": bond, "text": bond},
+            {"source": "jin10", "title": morning, "text": f"{morning}\n{profit}。"},
+        ],
+    }
+    assert _fallback_subtitle(bond_event) == ""
+    filled = {"subtitle": "", **bond_event}
+    assert _fill_empty_subtitles([filled]) == 0
+    assert filled["subtitle"] == ""
+    assert "净利润" not in filled["subtitle"]
+    assert "宁德时代" not in filled["subtitle"]
+
+
+def test_jinshi_dateline_is_stripped_from_the_headline():
+    """「金十数据10月12日讯」以及方括号、带年份的写法都要从来源头去掉。"""
+    body = "发改委、财政部下达第四批625亿超长期特别国债支持以旧换新"
+    for raw in (
+        f"金十数据10月12日讯，{body}",
+        f"金十数据10月12日讯{body}",
+        f"【金十数据】10月12日讯，{body}",
+        f"金十数据2026年10月12日讯，{body}",
+        f"金十数据 10月12日讯：{body}",
+    ):
+        shown = _display_original(raw)
+        assert "金十" not in shown, raw
+        assert "10月12日讯" not in shown, raw
+        assert "特别国债" in shown, raw
+    price = _display_original("10月12日电价下调")
+    assert "电价" in price
+
+
+def test_partial_empty_titles_retry_once_then_fall_back(monkeypatch):
+    """8 条里只有 2 条写出要点时，不整批重发，只把空的重写一轮。
+
+    展示标题还在、并且正文和它对得上的，才从那一条成员抽句。标题过不了门槛被清空的，
+    不再拿别的正文顶上。
     """
     import json
 
@@ -1812,7 +1889,7 @@ def test_partial_empty_titles_retry_once_then_fall_back(monkeypatch):
     for event in batch:
         _ensure_shown_name(event)
     filled = hot_mod._fill_empty_subtitles(batch)
-    assert filled == 5
+    assert filled == 1
     assert titled["subtitle"] == "市场关注度持续升温"
     assert titled["subtitle_source"] == "model"
     assert peer["subtitle"] == "市场关注度持续升温"
@@ -1820,17 +1897,18 @@ def test_partial_empty_titles_retry_once_then_fall_back(monkeypatch):
     assert "150亿" in bond["subtitle"]
     assert "200亿" in bond["subtitle"]
     assert bond["subtitle_source"] == "fallback"
-    assert "0.393" in nuclear["subtitle"]
-    assert nuclear["subtitle_source"] == "fallback"
+    assert bond["subtitle"] != bond["name"]
+    assert not hot_mod._point_repeats_name(bond["name"], bond["subtitle"])
+    # 核电标题缺少主体，芯片标题里的数字被当成编号，展示名被清空后不再抽句。
+    assert nuclear["name"] == ""
+    assert nuclear["subtitle"] == ""
+    assert "subtitle_source" not in nuclear
     assert bare["subtitle"] == ""
     assert "subtitle_source" not in bare
-    for event in (bond, nuclear, *others):
-        assert event["subtitle"] != event["name"]
-        assert not hot_mod._point_repeats_name(event["name"], event["subtitle"])
     for event in others:
-        assert event["subtitle_source"] == "fallback"
-        assert "成" in event["subtitle"]
-        assert len(event["subtitle"]) <= 40
+        assert event["name"] == ""
+        assert event["subtitle"] == ""
+        assert "subtitle_source" not in event
 
 
 def test_reported_snapshot_empty_points_drop_from_13_to_1():

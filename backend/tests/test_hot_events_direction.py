@@ -11,7 +11,7 @@
 
 同时守护聚合层「概念撞车」监控：线上实测「证监会座谈会」与「上交所监管
 工作函」两条无关事件共享同一组东百收购概念且成员零重叠（双写残差），
-`_log_suspect_event_pairs` 对此打 warning。
+`_log_suspect_event_pairs` 对此记一条 info，并且至少要两个共同概念。
 
 ## 二、反向语义修正（PR #110）
 
@@ -122,7 +122,7 @@ def test_score_event_gives_direction_points_with_signal() -> None:
 
 
 def test_log_suspect_event_pairs_warns_on_disjoint_same_concepts(caplog) -> None:
-    """概念集合相同、成员零重叠的事件对打 warning（双写残差监控）。"""
+    """至少两个概念完全相同、成员零重叠才记 info。只共享一个概念不记。"""
     events = [
         {
             "key": "ev_a",
@@ -139,14 +139,27 @@ def test_log_suspect_event_pairs_warns_on_disjoint_same_concepts(caplog) -> None
             "concepts": ["光芯片收购", "光探测芯片", "商业零售"],
             "item_ids": ["1", "3"],
         },
+        {
+            "key": "ev_d",
+            "concepts": ["银行"],
+            "item_ids": ["8"],
+        },
+        {
+            "key": "ev_e",
+            "concepts": ["银行"],
+            "item_ids": ["9"],
+        },
     ]
-    with caplog.at_level(logging.WARNING, logger="app.news.hot_events"):
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         _log_suspect_event_pairs(events)
     warned = [r for r in caplog.records if "概念撞车" in r.message]
     assert len(warned) == 1
+    assert warned[0].levelno == logging.INFO
     assert "ev_a" in warned[0].getMessage() and "ev_b" in warned[0].getMessage()
     # ev_c 与 ev_a 共享成员 1、与 ev_b 共享成员 3 —— 有重叠不算撞车。
     assert "ev_c" not in warned[0].getMessage()
+    assert "ev_d" not in warned[0].getMessage()
+    assert "ev_e" not in warned[0].getMessage()
 
 
 # --------------------------------------------------------------------------
