@@ -10,10 +10,12 @@ from app.news.hot_events import (
     _cleaned_display_ok,
     _cleaned_headline,
     _clip_at_boundary,
+    _compact,
     _DATE_LIKE_OPENING,
     _display_clause_ok,
     _display_gate_reason,
     _display_original,
+    _ends_mid_clause,
     _ensure_shown_name,
     _fallback_title_ok,
     _first_credible_title,
@@ -26,6 +28,7 @@ from app.news.hot_events import (
     _measure_tail_after_number,
     _original_reject_reason,
     _parse_title_batch,
+    _recover_truncated_title,
     _resync_importance_score,
     _segment,
     _subtitle_reject_reason,
@@ -1529,3 +1532,113 @@ def test_llm_importance_leaves_score_consistent(tmp_path, monkeypatch):
         assert label in _IMPORTANCE_POINTS
         assert breakdown["importance"] == _IMPORTANCE_POINTS[label], label
         assert event["score"] == round(sum(breakdown.values()), 4), label
+
+
+def test_wire_flash_body_opening_with_the_title_is_not_a_cutoff():
+    """wire 快讯的正文常以标题句开头，末词单字 + 正文前缀不等于截断。
+
+    「…苦水难咽」：jieba 把未登录词「难咽」切成单字「咽」，老规则借「标题是
+    正文前缀」判它词中间截断（PR #97 调查里 score 163 的事件就这样被丢）。
+    正文紧随标题的是另一句（「中国政府频频…」），标题其实是完整句。
+    """
+    title = "关税加伊朗战事反噬 美国制造商苦水难咽"
+    text = (
+        "关税加伊朗战事反噬 美国制造商苦水难咽。"
+        "中国政府频频对贸易伙伴挥舞关税大棒，美国制造商苦水难咽。"
+    )
+    assert _boundary_reason(_compact(title), [title], [text]) == ""
+    assert _first_original_title([("wscn", title)], [text]) == (
+        "关税加伊朗战事反噬美国制造商苦水难咽"
+    )
+    # 正文用日期接下一句时同样不是截断（PR #97 测试语料里的「俄罗斯制裁法」）。
+    title2 = "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法"
+    text2 = (
+        "特朗普与普京达成的柴油协议被指违反俄罗斯制裁法。"
+        "10月9日，美国总统特朗普表示，战争结束后油价将会下跌。"
+    )
+    assert _boundary_reason(_compact(title2), [title2], [text2]) == ""
+    # 对照组：末词被切掉的仍然拦截（「从容应」后面正文接着「对」）。
+    cut = "风险可控从容应"
+    assert _boundary_reason(cut, [cut], ["风险可控从容应对，市场情绪保持稳定"]) == "词中间截断"
+
+
+def test_repeated_headline_in_the_body_still_counts_as_cutoff():
+    """源按固定字数截断标题、完整句在正文里重复出现时，仍然判截断。
+
+    「…以便实现能源停」：标题末词「停」是单字，正文第一行就是这条被截的
+    标题、第二行才是完整句「…能源停火。」。正文里标题的第二次出现后面紧跟
+    「火」——「停火」是词，标题确实被从词中间切开了。
+    """
+    cut = "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停"
+    text = (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停\n"
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火。"
+    )
+    assert _boundary_reason(_compact(cut), [cut], [text]) == "词中间截断"
+
+
+def test_continuation_particle_after_the_title_means_mid_phrase_cut():
+    """jieba 词典漏收的词组靠续接虚词兜底。
+
+    「…估值可能约」+「为30亿美元」：「约为」不在词典里、逐字分词切不开，
+    但中文正文不会用「为」开头写新句子——出现即说明标题断在短语中间。
+    """
+    cut = "亚马逊公司正在洽谈收购人工智能初创公司DecartAI，该交易的估值可能约"
+    text = (
+        "亚马逊公司正在洽谈收购人工智能初创公司DecartAI，该交易的估值可能约\n"
+        "亚马逊公司正在洽谈收购人工智能初创公司DecartAI，该交易的估值可能约为30亿美元。"
+    )
+    assert _boundary_reason(_compact(cut), [cut], [text]) == "词中间截断"
+
+
+def test_truncated_title_is_recovered_from_the_body():
+    """标题被源截成半句、正文留着完整句时，捡回完整句（PR #97 调查）。
+
+    句级补全优先；正文把截断标题又重复一遍时（句级会连重复标题一起捞回来），
+    退到词级补全，只把切断的词补完。没有截断证据时不恢复。
+    """
+    cut = "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停"
+    text = (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停\n"
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火。"
+    )
+    assert _recover_truncated_title(cut, [text]).endswith("以便实现能源停火")
+    cut2 = "恒力重工（松发股份）今日调整点"
+    text2 = (
+        "恒力重工（松发股份）今日调整点评恒力重工（松发股份）今日调整点评"
+        "#点评：公司今日股价调整主要受市场情绪影响。"
+    )
+    assert _recover_truncated_title(cut2, [text2]) == "恒力重工（松发股份）今日调整点评"
+    assert _recover_truncated_title("半导体大涨", ["半导体大涨。资金流入超10亿"]) == ""
+
+
+def test_first_original_title_uses_the_recovered_full_sentence():
+    """端到端：截断标题的完整句从正文捡回后当主标题（PR #97 调查）。"""
+    cut = "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停"
+    text = (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停\n"
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火。"
+    )
+    rows = [("glh", cut)]
+    assert _first_original_title(rows, [text]) == (
+        "乌克兰总统泽连斯基：我们需要美国对俄罗斯施加压力，而不是放松制裁，以便实现能源停火"
+    )
+
+
+def test_single_char_bad_tail_only_applies_when_the_last_word_is_bare():
+    """坏尾表单字条目（和/资/中）不误杀完整词尾（PR #97 调查）。
+
+    「压力缓和」「千亿投资」的末词是双字整词，坏尾字只是词的一部分——
+    修复前 score 166 的事件（排名第 10）就这样被丢。只有末词被切成单字
+    功能词收尾（jieba 从「苹果和」切出的「和」）才算截断。
+    """
+    for whole in (
+        "有色金属行业周报：非农不及预期加息预期退潮，短期金属估值压力缓和",
+        "“十五五”北京城市副中心将继续保持每年千亿投资",
+    ):
+        assert _boundary_reason(_display_original(whole), [], []) == ""
+        assert not _ends_mid_clause(whole)
+    assert _boundary_reason(_display_original("苹果和"), [], []) == "词中间截断"
+    assert _ends_mid_clause("苹果和")
+    # 多字条目（集体/进行）仍按结尾匹配。
+    assert _boundary_reason(_display_original("多股集体"), [], []) == "词中间截断"

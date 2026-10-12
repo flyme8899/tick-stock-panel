@@ -117,6 +117,9 @@ _LLM_TITLE_MAX = 48
 _SUBTITLE_MAX = 40
 # 清理后的回退标题如果停在这些残词上，不能拿来顶替没通过的模型标题。
 _FALLBACK_BAD_TAILS = ("集体", "进行", "中", "资", "的", "和", "与")
+# 标题是正文前缀时，正文紧随标题的虚词只可能是短语中间续接（「可能约」+「为30亿」），
+# 中文正文不用这些字开头写新句子。用来兜底 jieba 词典漏收的词组（约为/着的/了）。
+_CONTINUATION_CHARS = frozenset("为的着了与及或并而则以于和")
 _FALLBACK_BAD_OPENINGS = ("市场没有", "我们认为", "点评")
 _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
 # 半截标题对照用。第一句通常到不了这么长；再长仍整句保留，页面两行截断。
@@ -138,7 +141,13 @@ _TITLE_CACHE_VERSION = 20
 # _resync_importance_score 的同步方式时 +1。push 比较前后两轮快照前校验它：
 # 版本不匹配说明上一轮快照的分数是新口径算不出来的，只建基线不比较，否则
 # importance 20→130 这类口径差会被当成升温跳变（PR #97 评审）。
-HOT_RULES_VERSION = 1
+# v2: 标题准入再修两处误伤并放开截断恢复（2026-10-12）——①「标题是正文
+#     前缀即判截断」误杀 wire 完整句标题（末词被切成单字），改成逐出现处做
+#     词边界判定；② _CLOSED_TAILS 闭环检查排在悬空字后面永不可达，「压力缓和」
+#     这类末字悬空、末两字整词的完整标题被判半句；③源把标题截成半句时，从
+#     正文完整句恢复（_recover_truncated_title）。真实数据重放：空标题事件
+#     535→499（救回 36 条）。旧口径算不出这些分数，快照只建基线不比较。
+HOT_RULES_VERSION = 2
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -365,8 +374,29 @@ _GLUE_FOLLOWUPS = frozenset({
 })
 _DANGLING_FINAL = frozenset("的了和与及等把被将已正而或但之以为于对从在超")
 # 以这些字结尾时，只有最后两个字是完整词才算没截断。
+# 悬空字作整词尾很常见（缓和/投资/集中），PR #97 调查里「压力缓和」
+# 「千亿投资」两条高分事件曾被误判成半句（2026-10-12 补齐）。
 _CLOSED_TAILS = {
     "政": frozenset({"新政", "政府", "财政", "行政", "市政", "内政", "党政", "军政"}),
+    "和": frozenset({"缓和", "融合", "温和", "饱和", "柔和", "祥和", "协和", "顺和"}),
+    "资": frozenset({
+        "投资", "资金", "资产", "资源", "薪资", "工资", "融资", "资讯",
+        "资格", "资料", "合资", "集资", "耗资", "出资", "增资", "注资",
+    }),
+    "中": frozenset({"集中", "其中", "适中", "命中", "文中", "盘中", "战中"}),
+    "的": frozenset({"目的", "标的", "有的"}),
+    "了": frozenset({"了解", "了断"}),
+    "已": frozenset({"而已"}),
+    "而": frozenset({"然而"}),
+    "但": frozenset({"不但"}),
+    "在": frozenset({"存在", "实在", "内在", "潜在"}),
+    "对": frozenset({"绝对", "面对"}),
+    "从": frozenset({"无从", "服从", "依从"}),
+    "将": frozenset({"即将"}),
+    "等": frozenset({"同等", "平等", "高等"}),
+    "为": frozenset({"行为", "作为", "人为"}),
+    "于": frozenset({"出于", "位于", "属于", "等于", "高于", "低于", "归于", "至于"}),
+    "及": frozenset({"波及", "提及", "顾及", "来不及"}),
 }
 _SOURCE_HEADS = (
     "财联社", "华尔街见闻", "证券时报", "上海证券报", "中国证券报",
@@ -2785,10 +2815,14 @@ def _ends_abruptly(text: str) -> bool:
     if not text:
         return True
     last = text[-1]
-    if last in _DANGLING_FINAL:
-        return True
+    # 闭环词先判：「压力缓和」「千亿投资」的末字是悬空字，但最后两个字是
+    # 完整词，不是半句（PR #97 调查，2026-10-12；此前 _CLOSED_TAILS 因排在
+    # _DANGLING_FINAL 后面永不可达，注释说的「只有最后两个字是完整词才算
+    # 没截断」一直没生效）。
     allowed = _CLOSED_TAILS.get(last)
-    return allowed is not None and text[-2:] not in allowed
+    if allowed is not None:
+        return text[-2:] not in allowed
+    return last in _DANGLING_FINAL
 
 
 def _subject_text(before: str) -> str:
@@ -2960,7 +2994,7 @@ def _ends_mid_clause(text: str) -> bool:
     body = _compact(text)
     if not body:
         return True
-    if any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
+    if _fallback_tail_reason(body):
         return True
     return _ends_abruptly(body)
 
@@ -3820,19 +3854,138 @@ def _cut_off_by_longer_peer(body: str, blobs: list[str]) -> bool:
     return False
 
 
+def _sentence_completion(text: str, start: int) -> str:
+    """text 里 start 处到下一个句末标点（或全文结尾）为止的片段（不含标点）。"""
+    if start >= len(text):
+        return ""
+    m = re.search(r"[。！？；]", text[start:])
+    if not m:
+        return text[start:]
+    return text[start:start + m.start()]
+
+
+def _word_spans_tail(body: str, tail_text: str) -> bool:
+    """tail_text 紧随 body 的那个字，与 body 末字是否构成同一个词。
+
+    「…能源停」+「火…」→「停火」是词，标题被从词中间截断；
+    「…苦水难咽」+「中国政府频频…」→「咽」「中」各是各的词，标题是完整句，
+    只是正文恰好在标题后面接着写（wire 快讯的常见形态）。
+    词典漏收录的组合（「可能约」+「为30亿美元」）靠续接虚词兜底：中文正文
+    不会用「为/的/了」这类虚词开头写新句子，它们出现就意味着标题断在短语中间。
+    """
+    if len(tail_text) <= len(body):
+        return False
+    nxt = tail_text[len(body)]
+    window = _compact(body[-1] + nxt + tail_text[len(body) + 1:len(body) + 3])
+    jieba = _jieba()[0]
+    pos = 0
+    for word in jieba.cut(window, HMM=False):
+        token = str(word)
+        if not token.strip():
+            continue
+        if pos == 0 and len(token) >= 2 and token[0] == body[-1]:
+            return True
+        pos += len(token)
+    return nxt in _CONTINUATION_CHARS
+
+
 def _cut_off_by_source_text(body: str, texts: list[str] | None) -> bool:
     """本条自己的候选正文里，有没有更长的、以本条整体开头的文本。
 
     单源簇没有同簇长 peer 可比，来源自己截断的标题（只留下正文开头半句）
     会漏过。正文在手时，标题是某条正文的前缀切片同样是截断证据
-    （PR #97 评审）。只在末词是单字时调用 —— 完整短标题的末词通常是
-    整词，不走这条分支，不会把「标题=正文第一句」误判成截断。
+    （PR #97 评审）。只在末词是单字时调用。
+
+    但「标题是正文前缀」不等于截断（PR #97 调查，2026-10-12）：wire 快讯
+    的正文常常就以标题句开头，「…苦水难咽。中国政府频频…」里标题是完整句。
+    逐出现处看紧随标题的字与标题末字是否构成同一个词（停+火、约+为）——
+    构成才是来源把词切断了；边界干净就放行。源按固定字数截断标题时，全文
+    常在正文里重复出现（「…能源停」+ 完整句「…能源停火。」），所以标题的
+    每次出现都要查，真截断交给 _recover_truncated_title 捡完整句。
     """
     for raw in texts or []:
         text = _compact(str(raw or ""))
-        if len(text) > len(body) and text.startswith(body):
-            return True
+        if len(text) <= len(body) or not text.startswith(body):
+            continue
+        pos = text.find(body)
+        while pos != -1:
+            if _word_spans_tail(body, text[pos:]):
+                return True
+            pos = text.find(body, pos + 1)
     return False
+
+
+def _complete_cut_word(body: str, tail_text: str) -> str:
+    """把被切断的末词补完：逐字加长到分词器切出完整词为止。
+
+    正文把截断标题又重复一遍时（「…调整点」+「评恒力重工…调整点评#点评：…」），
+    句级补全会连重复的标题一起捞回来。这时候只需要把切断的那个词补上：
+    「…调整点」+「评」→「…调整点评」。
+    """
+    for k in range(1, 7):
+        if len(tail_text) <= len(body) + k:
+            break
+        candidate = body + tail_text[len(body):len(body) + k]
+        words = _segment(candidate)
+        if words and len(words[-1]) >= 2 and not words[-1][-1].isdigit():
+            return candidate
+    return ""
+
+
+def _recover_truncated_title(cleaned: str, texts: list[str] | None) -> str:
+    """标题被源截成半句时，从候选正文里找回完整句。
+
+    源常把标题按固定字数截断（「…以便实现能源停」其实是「…能源停火」），
+    而正文里留着完整句。标题某次出现处紧随的字与末字构成同一个词时，两条
+    补全路子都试，取最短的：
+    1. 句级 —— 补到句末标点；补语里不能又出现整条标题（那是正文把标题重复
+       了一遍，捞回来会是垃圾）；
+    2. 词级 —— 只把被切断的那个词补完（「…调整点」+「评」→「…调整点评」），
+       句级捞不回干净句子时用它。
+    补出来的标题再走一遍原标题门槛（PR #97 调查，2026-10-12）。
+    """
+    body = _compact(cleaned)
+    if len(body) < 8:
+        return ""
+    best = ""
+    for raw in texts or []:
+        text = _compact(str(raw or ""))
+        pos = text.find(body)
+        while pos != -1:
+            tail = text[pos:]
+            if _word_spans_tail(body, tail):
+                candidates = []
+                completion = _sentence_completion(text, pos + len(body))
+                if 0 < len(completion) <= 30 and body not in completion:
+                    candidates.append(body + completion)
+                word_done = _complete_cut_word(body, tail)
+                if word_done:
+                    candidates.append(word_done)
+                for candidate in candidates:
+                    if not best or len(candidate) < len(best):
+                        best = candidate
+            pos = text.find(body, pos + 1)
+    if not best or best == body:
+        return ""
+    return _display_original(best) or best
+
+
+def _fallback_tail_reason(body: str) -> bool:
+    """坏尾词表是否命中。单字条目（和/与/资/的/中）只在整个末词就是它时才算：
+
+    「压力缓和」「千亿投资」的末词是完整双字词，坏尾字只是词的一部分，
+    不是截断（PR #97 调查，2026-10-12：score 166 的事件因此被丢）。
+    只有末词被切成单字功能词收尾（jieba 从「苹果和」切出的「和」）才算。
+    多字条目（集体/进行）仍按结尾匹配。
+    """
+    if not any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS):
+        return False
+    words = _segment(body)
+    if not words:
+        return True
+    if len(words[-1]) >= 2:
+        return any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS if len(tail) >= 2)
+    return True
 
 
 def _boundary_reason(text: str, blobs: list[str], texts: list[str] | None = None) -> str:
@@ -3842,7 +3995,7 @@ def _boundary_reason(text: str, blobs: list[str], texts: list[str] | None = None
     if (
         _ends_split_verb(body)
         or _ends_mid_number(body)
-        or any(body.endswith(tail) for tail in _FALLBACK_BAD_TAILS)
+        or _fallback_tail_reason(body)
     ):
         return "词中间截断"
     if _trailing_latin_fragment(body, blobs):
@@ -4053,7 +4206,14 @@ def _first_original_title(rows: list[tuple[str, str]], texts: list[str] | None =
         cleaned = _display_original(title)
         if not cleaned or cleaned in passing:
             continue
-        if _original_reject_reason(cleaned, blobs, texts):
+        reason = _original_reject_reason(cleaned, blobs, texts)
+        if reason == "词中间截断":
+            # 源把标题截成半句时，正文里可能留着完整句，捡回来再试一次。
+            recovered = _recover_truncated_title(cleaned, texts)
+            if recovered and not _original_reject_reason(recovered, blobs, texts):
+                passing.append(recovered)
+            continue
+        if reason:
             continue
         passing.append(cleaned)
     for candidate in passing:
