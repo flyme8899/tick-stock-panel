@@ -508,6 +508,42 @@ def reset_sector_cache() -> None:
     _sector_cache.clear()
 
 
+def sync_stock_intraday(
+    data_dir: Path,
+    clients: SourceClients,
+    *,
+    trade_date: str,
+    captured_at: str,
+    breaker: CircuitBreaker,
+    sleeper: Sleeper | None = None,
+) -> RunResult:
+    """同花顺 ``stock_fund_flow_individual(symbol="即时")`` 的一份全市场快照。
+
+    失败走资金流熔断的 2s/4s/8s 退避。空表不当成成功，避免把上一份快照标成刚更新过。
+    真正出网的客户端把这次调用送进东财共用限流和缺省超时；测试注入的客户端不出网。
+    """
+    result = RunResult(kind="stock_intraday")
+
+    def _call() -> list[dict]:
+        return clients.ak("stock_fund_flow_individual", symbol="即时")
+
+    try:
+        raw = call_with_retry("akshare", _call, breaker, sleeper=sleeper)
+    except Exception as exc:  # noqa: BLE001
+        result.errors.append(str(exc))
+        store.update_kind_state(data_dir, "stock_intraday", last_error=str(exc))
+        return result
+    rows = normalize.normalize_stock_intraday(raw, trade_date=trade_date, captured_at=captured_at)
+    if not rows:
+        message = "同花顺即时个股资金流为空"
+        result.errors.append(message)
+        store.update_kind_state(data_dir, "stock_intraday", last_error=message)
+        return result
+    result.wrote = store.write_rows(data_dir, "stock_intraday", trade_date, rows)
+    store.update_kind_state(data_dir, "stock_intraday", last_error=None, last_snapshot=captured_at)
+    return result
+
+
 def fetch_sector_rows(
     clients: SourceClients,
     kind: str,

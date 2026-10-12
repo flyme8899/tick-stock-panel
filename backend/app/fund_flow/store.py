@@ -17,6 +17,7 @@ from app.services.fs_utils import atomic_write_parquet, atomic_write_text
 
 KINDS = frozenset({
     "stock",
+    "stock_intraday",
     "industry",
     "concept",
     "margin",
@@ -34,6 +35,7 @@ FULL_MARKET_MIN = 1000
 # 合并主键。后写覆盖先写。
 KEYS: dict[str, list[str]] = {
     "stock": ["code", "trade_date"],
+    "stock_intraday": ["code", "captured_at"],
     "industry": ["name", "snapshot", "captured_at"],
     "concept": ["name", "snapshot", "captured_at"],
     "margin": ["market", "symbol", "row_kind", "trade_date"],
@@ -53,6 +55,15 @@ _SCHEMAS: dict[str, dict[str, pl.DataType]] = {
         "large_net": pl.Float64,
         "super_net": pl.Float64,
         "main_net_5d": pl.Float64,
+        "source": pl.Utf8,
+    },
+    "stock_intraday": {
+        "symbol": pl.Utf8,
+        "code": pl.Utf8,
+        "name": pl.Utf8,
+        "trade_date": pl.Utf8,
+        "captured_at": pl.Utf8,
+        "main_net": pl.Float64,
         "source": pl.Utf8,
     },
     "industry": {

@@ -7,7 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
-import { fmtPct, cnDateFromUtc } from '@/lib/format'
+import { fmtPct, fmtSignedFlow, flowClock, priceColorClass, cnDateFromUtc } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { NavPager, NavWrapToast } from '@/components/NavPager'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
@@ -17,7 +17,7 @@ import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { buildMonitorPriceLines } from '@/lib/price-alerts'
-import { usePreferences } from '@/lib/useSharedQueries'
+import { usePreferences, useIntradayFundFlow } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
@@ -106,6 +106,11 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
     queryFn: api.watchlistList,
     enabled: !!symbol,
   })
+  const intradayFlow = useIntradayFundFlow(symbol ? [symbol] : [])
+  const flowCode = symbol?.split('.')[0] ?? ''
+  const flowItem = intradayFlow.data?.items.find(item => item.code === flowCode)
+  const flowNet = flowItem?.main_net ?? null
+  const flowWhen = flowNet == null ? '' : flowClock(intradayFlow.data?.captured_at)
   const monitorRules = useQuery({
     queryKey: QK.monitorRules,
     queryFn: api.monitorRulesList,
@@ -286,6 +291,14 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                 })()}
                 <span className="shrink-0 font-mono text-[15px] font-semibold tracking-tight text-foreground">{symbol}</span>
                 {name && <span className="truncate text-xs text-secondary">{name}</span>}
+                <span
+                  className="inline-flex shrink-0 items-baseline gap-1 rounded border border-border/60 bg-base/50 px-1.5 py-0.5 text-[11px]"
+                  title={flowWhen ? `盘中主力净流入 ${flowWhen}` : '盘中主力净流入，还没有今日快照'}
+                >
+                  <span className="text-muted">主力净流入</span>
+                  <span className={`font-mono tabular-nums ${priceColorClass(flowNet)}`}>{fmtSignedFlow(flowNet)}</span>
+                  {flowWhen ? <span className="font-mono text-[10px] text-muted">{flowWhen}</span> : null}
+                </span>
 
                 {/* 切股导航: 上一只 / n·N / 下一只 */}
                 <NavPager nav={nav} prevLabel="上一只" nextLabel="下一只" />

@@ -26,6 +26,23 @@ export function priceColorClass(v: number | null | undefined): string {
   return v > 0 ? 'text-bull' : 'text-bear'
 }
 
+/** 主力净流入（元）。正数红、负数绿由 priceColorClass 决定；缺失是 —，不是 0。 */
+export function fmtSignedFlow(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return '—'
+  if (v === 0) return '0'
+  const sign = v > 0 ? '+' : '-'
+  const abs = Math.abs(v)
+  if (abs >= 1e8) return `${sign}${(abs / 1e8).toFixed(2)}亿`
+  if (abs >= 1e4) return `${sign}${(abs / 1e4).toFixed(2)}万`
+  return `${sign}${abs.toFixed(0)}`
+}
+
+/** 快照时间 ``YYYY-MM-DDTHH:MM:SS`` → ``HH:MM``。不是这格式就返回空串。 */
+export function flowClock(capturedAt: string | null | undefined): string {
+  const match = /T(\d{2}:\d{2})/.exec(String(capturedAt ?? ''))
+  return match?.[1] ?? ''
+}
+
 export function fmtBigNum(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return '—'
   if (v >= 1_000_000_000_000) return `${(v / 1_000_000_000_000).toFixed(2)}万亿`

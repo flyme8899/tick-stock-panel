@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 RETRY_GAP_S = 30 * 60
 SECTOR_GAP_S = 180
+# 个股即时资金流落在 5–10 分钟这一档。6 分钟是固定间隔，文档和页面按这个数写。
+STOCK_INTRADAY_GAP_S = 6 * 60
 
 _worker: FundFlowWorker | None = None
 _worker_lock = threading.Lock()
@@ -58,6 +60,14 @@ def _parse_stamp(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=CN_TZ)
     return parsed
+
+
+def _in_continuous_clock(clock: dt_time) -> bool:
+    """连续竞价钟点，不含午休。交易日与否由调用方的 ``trading`` 决定。"""
+    return (
+        dt_time(9, 30) <= clock <= dt_time(11, 30)
+        or dt_time(13, 0) <= clock <= dt_time(15, 0)
+    )
 
 
 def _recent(kind_state: dict, now: datetime, gap_s: float) -> bool:
@@ -106,6 +116,13 @@ def due_tasks(
         and not _recent(kind_state("sector_intraday"), now, SECTOR_GAP_S)
     ):
         due.append("sector_intraday")
+    if (
+        flags.get("stock_intraday")
+        and "akshare" not in breakers_open
+        and _in_continuous_clock(clock)
+        and not _recent(kind_state("stock_intraday"), now, STOCK_INTRADAY_GAP_S)
+    ):
+        due.append("stock_intraday")
     if (
         flags.get("sector")
         and "akshare" not in breakers_open
@@ -193,7 +210,7 @@ def task_day(
 ) -> str:
     if name in {"margin", "margin_evening"}:
         return _margin_target(now, known_days)
-    if name == "sector_intraday":
+    if name in {"sector_intraday", "stock_intraday"}:
         return now.date().isoformat()
     ready = {
         "stock": dt_time(16, 30),
@@ -325,6 +342,7 @@ def current_flags() -> dict[str, bool]:
     return {
         "enabled": config.enabled(),
         "stock": config.stock_enabled(),
+        "stock_intraday": config.stock_intraday_enabled(),
         "sector": config.sector_enabled(),
         "margin": config.margin_enabled(),
         "etf_shares": config.etf_shares_enabled(),
@@ -510,6 +528,13 @@ class FundFlowWorker:
             )
             if not result.errors:
                 _mark_success(data_dir, "stock", day)
+            return result
+        if name == "stock_intraday":
+            result = jobs.sync_stock_intraday(
+                data_dir, clients, trade_date=trade_day, captured_at=captured, breaker=ak,
+            )
+            if not result.errors:
+                _mark_success(data_dir, "stock_intraday", day)
             return result
         if name == "sector_intraday":
             for kind in ("industry", "concept"):

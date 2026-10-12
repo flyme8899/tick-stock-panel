@@ -208,3 +208,59 @@ def test_default_interval_stays_one_second(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("EASTMONEY_MIN_INTERVAL", raising=False)
     assert DEFAULT_MIN_INTERVAL == 1.0
     assert min_interval() == 1.0
+
+
+def test_ths_pages_share_the_eastmoney_interval_and_default_timeout() -> None:
+    """同花顺分页占用东财同一把间隔，并补上缺省超时。中证指数仍不进这把锁。"""
+    from app.selection_fields.timeouts import REQUEST_TIMEOUT
+
+    sleeps: list[float] = []
+    now = {"t": 0.0}
+    seen: list[tuple[str, object]] = []
+
+    def clock() -> float:
+        return now["t"]
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        now["t"] += seconds
+
+    def limited(url, **kwargs):
+        seen.append((url, kwargs.get("timeout")))
+        return SimpleNamespace(
+            status_code=200, url=url, content=b"{}", text="{}", headers={}, encoding="utf-8",
+        )
+
+    def original(self, method, url, *args, **kwargs):
+        seen.append((str(url), kwargs.get("timeout")))
+        return SimpleNamespace(status_code=200, url=url, content=b"ok", text="ok", headers={})
+
+    limiter = EastMoneyLimiter(
+        min_interval_s=1.0,
+        clock=clock,
+        sleeper=sleeper,
+        request=limited,
+        jitter=lambda: 0.0,
+    )
+    saved = requests.sessions.Session.request
+    requests.sessions.Session.request = original  # type: ignore[method-assign]
+    reset_for_tests()
+    try:
+        install(limiter)
+        session = requests.Session()
+        session.get("http://data.10jqka.com.cn/funds/ggzjl/field/zdf/order/desc/ajax/1/free/1/")
+        session.get("http://data.10jqka.com.cn/funds/ggzjl/field/zdf/order/desc/ajax/2/free/1/")
+        session.get("https://datacenter-web.eastmoney.com/api/data/v1/get", timeout=5)
+        session.get("https://www.csindex.com.cn/csindex-home/indexInfo/index-constituents")
+        assert sleeps == [pytest.approx(1.0), pytest.approx(1.0)]
+        assert seen[0][0].startswith("http://data.10jqka.com.cn/")
+        assert seen[0][1] == REQUEST_TIMEOUT
+        assert seen[1][1] == REQUEST_TIMEOUT
+        assert seen[2][0].startswith("https://datacenter-web.eastmoney.com/")
+        assert seen[2][1] == 5
+        assert seen[3][0].startswith("https://www.csindex.com.cn/")
+        # 缺省超时对 opt-in 线程的所有主机都补上；中证不占用间隔，所以没有第三次 sleep。
+        assert seen[3][1] == REQUEST_TIMEOUT
+    finally:
+        reset_for_tests()
+        requests.sessions.Session.request = saved  # type: ignore[method-assign]

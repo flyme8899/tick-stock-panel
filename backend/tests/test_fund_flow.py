@@ -32,6 +32,7 @@ def _flags(**overrides: bool) -> dict[str, bool]:
     base = {
         "enabled": True,
         "stock": True,
+        "stock_intraday": True,
         "sector": True,
         "margin": True,
         "etf_shares": True,
@@ -45,7 +46,7 @@ def _flags(**overrides: bool) -> dict[str, bool]:
 
 def test_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
-        "FUND_FLOW_ENABLED", "FUND_FLOW_STOCK", "FUND_FLOW_SECTOR",
+        "FUND_FLOW_ENABLED", "FUND_FLOW_STOCK", "FUND_FLOW_STOCK_INTRADAY", "FUND_FLOW_SECTOR",
         "FUND_FLOW_MARGIN", "FUND_FLOW_ETF_SHARES", "FUND_FLOW_SOUTHBOUND",
         "FUND_FLOW_NORTHBOUND_TURNOVER", "FUND_FLOW_LHB_BACKUP",
     ):
@@ -56,6 +57,11 @@ def test_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.stock_enabled() is False
     monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
     assert config.stock_enabled() is True
+    assert config.stock_intraday_enabled() is True
+    monkeypatch.setenv("FUND_FLOW_STOCK_INTRADAY", "false")
+    assert config.stock_intraday_enabled() is False
+    monkeypatch.setenv("FUND_FLOW_STOCK_INTRADAY", "true")
+    assert config.stock_intraday_enabled() is True
 
 
 def test_money_units_are_explicit() -> None:
@@ -268,15 +274,24 @@ def test_due_tasks_follow_shanghai_clock() -> None:
     assert "sector_intraday" in scheduler.due_tasks(
         _day(10, 0), trading=True, state=state, flags=_flags(), breakers_open=set(),
     )
+    assert "stock_intraday" in scheduler.due_tasks(
+        _day(10, 0), trading=True, state=state, flags=_flags(), breakers_open=set(),
+    )
     assert "stock" not in scheduler.due_tasks(
         _day(10, 0), trading=True, state=state, flags=_flags(), breakers_open=set(),
     )
+    lunch = scheduler.due_tasks(
+        _day(12, 0), trading=True, state=state, flags=_flags(), breakers_open=set(),
+    )
+    assert "stock_intraday" not in lunch
+    assert "sector_intraday" in lunch
     afternoon = scheduler.due_tasks(
         _day(16, 45), trading=True, state=state, flags=_flags(), breakers_open=set(),
     )
     assert "stock" in afternoon
     assert "southbound" in afternoon
     assert "sector_intraday" not in afternoon
+    assert "stock_intraday" not in afternoon
     assert scheduler.due_tasks(
         _day(16, 45), trading=False, state=state, flags=_flags(), breakers_open=set(),
     ) == []
@@ -1604,3 +1619,147 @@ def test_sz_main_batch_failure_does_not_fall_back_to_history_bill(tmp_path, monk
     assert bills == []
     assert any("整批失败" in item for item in result.errors)
     assert store.read_partition(tmp_path, "stock", "2026-10-09").height == 1
+
+
+def test_stock_intraday_respects_session_and_gap() -> None:
+    assert scheduler.STOCK_INTRADAY_GAP_S == 6 * 60
+    state: dict = {"kinds": {}}
+    assert "stock_intraday" not in scheduler.due_tasks(
+        _day(10, 0), trading=True, state=state, flags=_flags(stock_intraday=False), breakers_open=set(),
+    )
+    assert "stock_intraday" not in scheduler.due_tasks(
+        _day(10, 0), trading=True, state=state, flags=_flags(), breakers_open={"akshare"},
+    )
+    recent = {"kinds": {"stock_intraday": {"last_attempt_at": _day(10, 0).isoformat()}}}
+    assert "stock_intraday" not in scheduler.due_tasks(
+        _day(10, 5), trading=True, state=recent, flags=_flags(), breakers_open=set(),
+    )
+    assert "stock_intraday" in scheduler.due_tasks(
+        _day(10, 6), trading=True, state=recent, flags=_flags(), breakers_open=set(),
+    )
+
+
+def test_intraday_snapshot_is_latest_today_only(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
+    for name in (
+        "FUND_FLOW_STOCK", "FUND_FLOW_STOCK_INTRADAY", "FUND_FLOW_SECTOR",
+        "FUND_FLOW_MARGIN", "FUND_FLOW_ETF_SHARES", "FUND_FLOW_SOUTHBOUND",
+        "FUND_FLOW_NORTHBOUND_TURNOVER", "FUND_FLOW_LHB_BACKUP",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    calls: list[tuple[str, dict]] = []
+
+    def ak(name, **kwargs):
+        calls.append((name, kwargs))
+        if len(calls) == 1:
+            return [{"股票代码": "600519", "股票简称": "贵州茅台", "净额": "1.5亿"}]
+        return [
+            {"股票代码": "600519", "股票简称": "贵州茅台", "净额": "2亿"},
+            {"股票代码": "000001", "股票简称": "平安银行", "净额": "-8000万"},
+        ]
+
+    worker = scheduler.FundFlowWorker()
+    assert worker.run_once(
+        now=_day(10, 0), data_dir=tmp_path, clients=SourceClients(ak_call=ak),
+        symbols=[], trading=True, busy=False,
+    ) == ["stock_intraday"]
+    assert worker.run_once(
+        now=_day(10, 6), data_dir=tmp_path, clients=SourceClients(ak_call=ak),
+        symbols=[], trading=True, busy=False,
+    ) == ["stock_intraday"]
+    frame = store.read_partition(tmp_path, "stock_intraday", "2026-10-09")
+    assert frame.height == 3
+    assert calls[0] == ("stock_fund_flow_individual", {"symbol": "即时"})
+    latest = query.intraday_latest(
+        ["600519.SH", "000002.SZ"], data_dir=tmp_path, today="2026-10-09",
+    )
+    assert latest["captured_at"] == "2026-10-09T10:06:00"
+    assert latest["items"] == [{"code": "600519", "name": "贵州茅台", "main_net": 2e8}]
+    stale = query.intraday_latest(["600519.SH"], data_dir=tmp_path, today="2026-10-10")
+    assert stale == {"trade_date": None, "captured_at": None, "items": []}
+
+
+def test_intraday_retries_then_keeps_previous_snapshot_on_empty(tmp_path) -> None:
+    sleeps: list[float] = []
+    calls = {"n": 0}
+
+    def ak(name, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("read timed out")
+        return [{"股票代码": "600519", "股票简称": "贵州茅台", "净额": 100.0}]
+
+    result = jobs.sync_stock_intraday(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_date="2026-10-09",
+        captured_at="2026-10-09T10:00:00",
+        breaker=CircuitBreaker("akshare", clock=lambda: 0.0),
+        sleeper=sleeps.append,
+    )
+    assert sleeps == [2.0]
+    assert result.errors == []
+    assert store.read_partition(tmp_path, "stock_intraday", "2026-10-09")["main_net"][0] == 100.0
+
+    empty = jobs.sync_stock_intraday(
+        tmp_path,
+        SourceClients(ak_call=lambda name, **kwargs: []),
+        trade_date="2026-10-09",
+        captured_at="2026-10-09T10:06:00",
+        breaker=CircuitBreaker("akshare", clock=lambda: 0.0),
+        sleeper=lambda _seconds: None,
+    )
+    assert empty.errors == ["同花顺即时个股资金流为空"]
+    assert store.read_partition(tmp_path, "stock_intraday", "2026-10-09").height == 1
+
+
+def test_intraday_does_not_run_outside_session(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
+    monkeypatch.delenv("FUND_FLOW_STOCK", raising=False)
+    monkeypatch.delenv("FUND_FLOW_STOCK_INTRADAY", raising=False)
+
+    def ak(name, **kwargs):
+        raise AssertionError(name)
+
+    ran = scheduler.FundFlowWorker().run_once(
+        now=_day(16, 0),
+        data_dir=tmp_path,
+        clients=SourceClients(ak_call=ak),
+        symbols=[],
+        trading=True,
+        busy=False,
+    )
+    assert ran == []
+
+
+def test_live_individual_flow_uses_shared_gate(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_call(name, **kwargs):
+        seen["name"] = name
+        seen["kwargs"] = kwargs
+        return [{"股票代码": "600519", "净额": 1}]
+
+    monkeypatch.setattr("app.eastmoney.akshare_gate.call_akshare", fake_call)
+    from app.fund_flow.sources import live_clients
+
+    rows = live_clients().ak("stock_fund_flow_individual", symbol="即时")
+    assert seen == {"name": "stock_fund_flow_individual", "kwargs": {"symbol": "即时"}}
+    assert rows[0]["股票代码"] == "600519"
+
+
+def test_intraday_api_filters_symbols(tmp_path, monkeypatch) -> None:
+    store.write_rows(tmp_path, "stock_intraday", "2026-10-09", [{
+        "symbol": "600519", "code": "600519", "name": "贵州茅台",
+        "trade_date": "2026-10-09", "captured_at": "2026-10-09T10:06:00",
+        "main_net": 2e8, "source": "akshare_ths",
+    }])
+    monkeypatch.setattr(query, "_dir", lambda data_dir=None: tmp_path)
+    monkeypatch.setattr(query, "cn_today", lambda: date(2026, 10, 9))
+    app = FastAPI()
+    from app.api.fund_flow import router
+    app.include_router(router)
+    client = TestClient(app)
+    body = client.get("/api/fund-flow/intraday", params={"symbols": "600519.SH,000001.SZ"}).json()
+    assert body["items"] == [{"code": "600519", "name": "贵州茅台", "main_net": 2e8}]
+    assert body["captured_at"] == "2026-10-09T10:06:00"

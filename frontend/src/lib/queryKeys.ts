@@ -163,6 +163,7 @@ export const QK = {
   dsaUpstream:          (key: string) => ['dsa-upstream', key] as const,
   newsHot:              (kind: string) => ['news-hot', kind] as const,
   fundFlowBoard:        ['fund-flow-board'] as const,
+  fundFlowIntraday:     (symbolsKey: string) => ['fund-flow-intraday', symbolsKey] as const,
   newsMessages:         (kind: string, key: string) => ['news-messages', kind, key] as const,
   newsHealth:           ['news-health'] as const,
   newsPush:             ['news-push'] as const,

@@ -9,6 +9,7 @@ import polars as pl
 from app.fund_flow import factors, normalize, store
 from app.fund_flow.scheduler import current_flags, get_worker
 from app.fund_flow.units import percent_points_to_decimal
+from app.market_time import cn_today
 
 _FLOW_COLUMNS = ("net_flow", "flow_net", "net_inflow", "净流入")
 _CODE_COLUMNS = ("code", "symbol", "基金代码")
@@ -28,7 +29,7 @@ def health(data_dir: Path | None = None) -> dict:
     worker = get_worker()
     kinds = {}
     for kind in (
-        "stock", "industry", "concept", "margin", "etf_shares",
+        "stock", "stock_intraday", "industry", "concept", "margin", "etf_shares",
         "southbound", "northbound_turnover", "lhb",
     ):
         latest = store.latest_date(root, kind)
@@ -50,6 +51,55 @@ def health(data_dir: Path | None = None) -> dict:
         "deferred_reason": worker.deferred_reason or scheduler_state.get("deferred"),
         "kinds": kinds,
         "sources": state.get("sources") or {},
+    }
+
+
+def intraday_latest(
+    symbols: list[str] | None = None,
+    *,
+    data_dir: Path | None = None,
+    today: str | None = None,
+) -> dict:
+    """今天最近一份盘中个股主力净流入。没有快照时 items 为空，不把缺失写成 0。
+
+    只读当天分区。昨天的快照不带到今天，避免开盘前把昨日盘中数当成即时。
+    ``symbols`` 为空列表时不返回行，仍带上快照时间。``None`` 表示不按代码过滤。
+    """
+    root = _dir(data_dir)
+    day = today or cn_today().isoformat()
+    frame = store.read_partition(root, "stock_intraday", day)
+    captured = None
+    if not frame.is_empty() and "captured_at" in frame.columns:
+        captured = frame.select(pl.col("captured_at").max()).item()
+        if captured:
+            frame = frame.filter(pl.col("captured_at") == captured)
+        else:
+            frame = store.empty_frame("stock_intraday")
+    else:
+        frame = store.empty_frame("stock_intraday")
+    if symbols is not None:
+        codes = [code for symbol in symbols if (code := normalize.code6(symbol))]
+        if codes and not frame.is_empty():
+            frame = frame.filter(pl.col("code").is_in(codes))
+        else:
+            frame = store.empty_frame("stock_intraday")
+    items = []
+    if not frame.is_empty():
+        for row in frame.select(["code", "name", "main_net"]).iter_rows(named=True):
+            amount = row.get("main_net")
+            if amount is None:
+                continue
+            if isinstance(amount, float) and amount != amount:
+                continue
+            items.append({
+                "code": row.get("code"),
+                "name": row.get("name"),
+                "main_net": amount,
+            })
+    return {
+        "trade_date": day if captured else None,
+        "captured_at": captured,
+        "items": items,
     }
 
 

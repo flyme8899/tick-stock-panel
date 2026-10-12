@@ -23,6 +23,13 @@ def stock(symbol: str, limit: int = Query(120, ge=1, le=500)) -> dict:
     return query.stock_series(symbol, limit=limit)
 
 
+@router.get("/intraday")
+def intraday(symbols: str = Query("", max_length=20000)) -> dict:
+    """自选和个股详情读的盘中主力净流入。只读本地快照，不触发出网。"""
+    requested = [part.strip() for part in symbols.split(",") if part.strip()]
+    return query.intraday_latest(requested[:2000])
+
+
 @router.get("/sectors")
 def sectors(
     kind: str = Query(..., pattern="industry|concept"),
