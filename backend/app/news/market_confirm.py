@@ -471,11 +471,16 @@ def _fuyao_trading_days() -> frozenset[date] | None:
 
 
 def _known_holiday(day: date) -> bool:
-    """工作日但交易日历明确休市。没有日历时不当休市。"""
+    """工作日但交易日历明确休市。没有日历时不当休市。
+
+    日历在年底截断之后的工作日不在集合里，不当休市，否则会一路跳到 16 天后。
+    """
     if day.weekday() >= 5:
         return False
     days = _fuyao_trading_days()
     if not days:
+        return False
+    if day > max(days):
         return False
     return day not in days
 
@@ -487,11 +492,16 @@ def _clock_day_closed(now: datetime) -> bool:
 
 
 def _next_open_day(day: date) -> date:
-    """day 之后的第一个开市日。没有日历时只跳过周六日。"""
+    """day 之后的第一个开市日。没有日历时只跳过周六日。
+
+    最多看 16 天。日历到头或连着休市时，退回下一个工作日，不落在周末。
+    """
     cursor = day + timedelta(days=1)
     for _ in range(16):
         if cursor.weekday() < 5 and not _known_holiday(cursor):
             return cursor
+        cursor += timedelta(days=1)
+    while cursor.weekday() >= 5:
         cursor += timedelta(days=1)
     return cursor
 

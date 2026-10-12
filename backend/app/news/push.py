@@ -22,7 +22,7 @@ from app.news.config import (
     webhook_configured,
 )
 from app.news.dingtalk import send_markdown
-from app.news.hot_events import HOT_RULES_VERSION, display_session_day
+from app.news.hot_events import HOT_RULES_VERSION, display_view_key
 
 logger = logging.getLogger(__name__)
 
@@ -845,9 +845,9 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     # 6.5 倍跳变）全报成「升温」（PR #97 评审）。
     if previous is not None and state.data.get("hot_rules_version") != HOT_RULES_VERSION:
         previous = None
-    # 15:00 榜单从「当天」切到「下一场」（盘中 + 收盘后）。名次会整批换掉，
-    # 不能把这次切换报成一堆新热点。视图变了就只建基线。
-    view = display_session_day(now).isoformat()
+    # 15:00 榜单从「当天」切到「下一场」，9:25 再丢掉上一场盘中。名次会整批换掉，
+    # 不能把这次切换报成一堆新热点。展示日或带上的开市日变了就只建基线。
+    view = display_view_key(now)
     if previous is not None and state.data.get("hot_view") != view:
         previous = None
     verified_only = push_type_saved("hot_verified")

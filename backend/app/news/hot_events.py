@@ -2,9 +2,9 @@
 
 上一收盘（15:00）之后到下一交易日 9:25 的资讯归入下一交易日，和隔夜竞价是同一窗口。
 交易日 15:00 起，以及周末和交易日历上的休市日，榜单改看下一场开盘：当天盘中事件
-和收盘后、隔夜的稿放在一起，沿用原来的时间衰减，新消息可以浮上来。还没有盘面的
-事件标「待开盘验证」，验证分记 0，不另扣分。发布时间晚于计算时刻的资讯不进榜。
-「更新于」是这次计算的时间。
+和收盘后、隔夜的稿放在一起，沿用原来的时间衰减，新消息可以浮上来。上一开市日的
+盘中事件留到下一场 9:25，不在午夜丢掉。还没有盘面的事件标「待开盘验证」，验证分
+记 0，不另扣分。发布时间晚于计算时刻的资讯不进榜。「更新于」是这次计算的时间。
 
 聚类看标题里的主体、动作，以及标题里出现的细概念，再加同一时间窗。正文里抽到、
 但标题没写的概念不参与聚类，避免旁支概念把无关消息粘成一件事。同一主体和动作，
@@ -609,19 +609,39 @@ def display_session_day(now: datetime) -> date:
     return _view_days(now)[0]
 
 
+def display_view_key(now: datetime) -> str:
+    """推送用的视图签名：展示日，加上这份榜从哪一个开市日带起。
+
+    午夜前后展示日相同，但 9:25 会丢掉上一场盘中。只记展示日的话，成员变了
+    也不会重建基线。
+    """
+    display, included = _view_days(now)
+    anchor = included[0] if included else display
+    return f"{display.isoformat()}|{anchor.isoformat()}"
+
+
 def _view_days(now: datetime) -> tuple[date, list[date]]:
     """展示日，以及要放进这一份榜的交易日。
 
-    交易日 15:00 之前只看当天。15:00 起把当天盘中和下一场（收盘后、隔夜）
-    放在一起。周末和已知休市日同样看下一场，并带上最近一个开市日的盘中事件。
+    开市日 9:25 到 15:00 只看当天。15:00 起把当天盘中和下一场放在一起。
+    下一场 9:25 之前，以及周末和已知休市日，仍带上最近一个开市日的盘中事件。
     """
     from app.news.market_confirm import _clock_day_closed, _next_open_day, _prev_open_day
 
     local = now.astimezone(CN_TZ)
-    if not _clock_day_closed(local) and local.time() < dt_time(15, 0):
+    closed = _clock_day_closed(local)
+    clock = local.time()
+    if not closed and dt_time(9, 25) <= clock < dt_time(15, 0):
         return local.date(), [local.date()]
-    display = _next_open_day(local.date())
-    anchor = _prev_open_day(local.date()) if _clock_day_closed(local) else local.date()
+    if not closed and clock < dt_time(9, 25):
+        display = local.date()
+        anchor = _prev_open_day(local.date())
+    elif closed:
+        display = _next_open_day(local.date())
+        anchor = _prev_open_day(local.date())
+    else:
+        display = _next_open_day(local.date())
+        anchor = local.date()
     days: list[date] = []
     cursor = anchor
     while cursor <= display:

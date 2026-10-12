@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from app.market_time import CN_TZ
-from app.news.hot_events import build_top_hot_events
+from app.news.hot_events import build_top_hot_events, display_view_key
 from app.news.service import get_store, public_hot_event, reset_store_for_tests
 from app.services.picker import _confirmation_brief
 
@@ -174,6 +174,35 @@ def test_weekend_keeps_friday_intraday_and_marks_overnight_pending(tmp_path):
     assert opened["碳酸锂报价继续上涨"]["confirmation"]["pending"] is False
     assert opened["原油期货报价上调"]["confirmation"]["pending"] is False
     assert opened["碳酸锂报价继续上涨"]["confirmation"]["label"] != "待开盘验证"
+
+
+def test_previous_intraday_stays_until_the_auction(tmp_path):
+    """上一场盘中留到 9:25。午夜展示日不变，9:25 成员变了，视图签名也要变。"""
+    reset_store_for_tests(tmp_path / "auction-hold.sqlite")
+    _insert("session", _at(FRIDAY, 11, 0), "工信部出台算力补贴")
+    _insert("after", _at(FRIDAY, 18, 0), "碳酸锂报价继续上涨", "碳酸锂")
+
+    late = _by_name(_events(_at(FRIDAY, 23, 59)))
+    early = _by_name(_events(_at(MONDAY, 0, 1)))
+    before_open = _by_name(_events(_at(MONDAY, 9, 24)))
+    opened = _by_name(_events(_at(MONDAY, 9, 26)))
+    for found in (late, early, before_open):
+        assert "工信部出台算力补贴" in found
+        assert "碳酸锂报价继续上涨" in found
+        assert found["工信部出台算力补贴"]["confirmation"]["pending"] is False
+        assert found["碳酸锂报价继续上涨"]["confirmation"]["pending"] is True
+    assert "工信部出台算力补贴" not in opened
+    assert opened["碳酸锂报价继续上涨"]["confirmation"]["pending"] is False
+
+    carried = "2026-10-12|2026-10-09"
+    assert display_view_key(_at(FRIDAY, 23, 59)) == carried
+    assert display_view_key(_at(MONDAY, 0, 1)) == carried
+    assert display_view_key(_at(MONDAY, 9, 24)) == carried
+    assert display_view_key(_at(MONDAY, 9, 26)) == "2026-10-12|2026-10-12"
+    assert _events(_at(FRIDAY, 23, 59))["updated_at"] == "23:59"
+    assert _events(_at(MONDAY, 0, 1))["updated_at"] == "00:01"
+    assert _events(_at(MONDAY, 9, 24))["updated_at"] == "09:24"
+    assert _events(_at(MONDAY, 9, 26))["updated_at"] == "09:26"
 
 
 def test_holiday_preview_waits_for_the_next_open(tmp_path, monkeypatch):

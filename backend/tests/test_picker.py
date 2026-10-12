@@ -834,15 +834,18 @@ def test_weekend_news_waits_on_the_next_session_and_keeps_red(tmp_path):
     assert sunday_by_name["工信部出台算力补贴"]["confirmation"]["pending"] is False
 
     monday_wait = top_hot_events(datetime(2026, 10, 12, 9, 10, tzinfo=CN_TZ))
+    monday_wait_by_name = {event["name"]: event for event in monday_wait["events"]}
     assert monday_wait["as_of"] == "2026-10-12"
     assert monday_wait["updated_at"] == "09:10"
     assert "等待竞价" in monday_wait["hint"]
     assert {event["name"] for event in monday_wait["events"]} >= {
         "橡胶价格大涨超预期", "原油期货报价上调", "碳酸锂报价继续上涨",
+        "工信部出台算力补贴",
     }
-    assert "工信部出台算力补贴" not in {event["name"] for event in monday_wait["events"]}
-    assert all(event["confirmation"]["label"] == "待开盘验证" for event in monday_wait["events"])
-    assert all(event["confirmation"]["pending"] is True for event in monday_wait["events"])
+    assert monday_wait_by_name["工信部出台算力补贴"]["confirmation"]["pending"] is False
+    for name in ("橡胶价格大涨超预期", "原油期货报价上调", "碳酸锂报价继续上涨"):
+        assert monday_wait_by_name[name]["confirmation"]["label"] == "待开盘验证"
+        assert monday_wait_by_name[name]["confirmation"]["pending"] is True
 
     monday = top_hot_events(datetime(2026, 10, 12, 10, 40, tzinfo=CN_TZ))
     monday_by_name = {event["name"]: event for event in monday["events"]}
