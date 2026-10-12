@@ -18,7 +18,7 @@ SOURCE_ORDER = (
 
 SOURCE_LABELS = {
     "dws": "钉钉作文实时",
-    "zsxq": "知识星球纳指星球调研",
+    "zsxq": "知识星球",
     "ima": "ima爱分享",
     "cls": "财联社",
     "wscn": "华尔街见闻",
@@ -93,18 +93,66 @@ def ima_research_times() -> tuple[str, ...]:
     return parse_clocks(str(raw)) or ("06:30", "08:30")
 
 
-def group_id(source: str) -> str:
-    """钉钉群号或知识星球号。留空表示这个来源未配置。"""
+def zsxq_source_label(group_name: str = "") -> str:
+    """单条资讯的来源名。有星球名时写成「知识星球·每日投研」。"""
+    name = (group_name or "").strip()
+    if not name or name.startswith("知识星球"):
+        return name or SOURCE_LABELS["zsxq"]
+    return f"知识星球·{name}"
+
+
+_ZSXQ_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
+
+
+def _split_csv(raw: str) -> list[str]:
+    return [part.strip() for part in (raw or "").replace("，", ",").split(",") if part.strip()]
+
+
+def _parse_named_groups(raw: str) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for part in _split_csv(raw):
+        gid, name = part, ""
+        for sep in (":", "："):
+            if sep in part:
+                gid, name = part.split(sep, 1)
+                break
+        gid = gid.strip()
+        name = name.strip()
+        if not _ZSXQ_ID.fullmatch(gid) or gid in seen:
+            continue
+        seen.add(gid)
+        found.append((gid, name))
+    return found
+
+
+def _parse_id_list(raw: str) -> list[tuple[str, str]]:
+    """旧写法只写星球号。逗号分隔时每一段仍是星球号，不从冒号里拆名称。"""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for part in _split_csv(raw):
+        if not _ZSXQ_ID.fullmatch(part) or part in seen:
+            continue
+        seen.add(part)
+        found.append((part, ""))
+    return found
+
+
+def zsxq_groups() -> list[tuple[str, str]]:
+    """(星球号, 名称)。NEWS_ZSXQ_GROUPS 非空时优先，否则读 NEWS_ZSXQ_GROUP_ID。"""
+    named = _text_setting("NEWS_ZSXQ_GROUPS", "news_zsxq_groups")
+    if named:
+        return _parse_named_groups(named)
+    return _parse_id_list(_text_setting("NEWS_ZSXQ_GROUP_ID", "news_zsxq_group_id"))
+
+
+def group_id(source: str) -> str | list[tuple[str, str]]:
+    """钉钉返回群号。知识星球返回 [(星球号, 名称), ...]。留空表示未配置。"""
     if source == "dws":
-        env_name, attr = "NEWS_DWS_GROUP_ID", "news_dws_group_id"
-    elif source == "zsxq":
-        env_name, attr = "NEWS_ZSXQ_GROUP_ID", "news_zsxq_group_id"
-    else:
-        return ""
-    raw = os.environ.get(env_name)
-    if raw is not None and raw.strip():
-        return raw.strip()
-    return str(getattr(settings, attr, "") or "").strip()
+        return _text_setting("NEWS_DWS_GROUP_ID", "news_dws_group_id")
+    if source == "zsxq":
+        return zsxq_groups()
+    return ""
 
 
 def _text_setting(env_name: str, attr: str) -> str:

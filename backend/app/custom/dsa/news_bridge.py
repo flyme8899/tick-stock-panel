@@ -24,7 +24,7 @@ logger = logging.getLogger("tsp.dsa.news_bridge")
 CN = timezone(timedelta(hours=8))
 _SOURCES = (
     ("dws", "钉钉作文实时", "钉钉群「作文实时」，由宿主机只读采集后交给 TSP。"),
-    ("zsxq", "知识星球纳指星球调研", "知识星球「纳指星球调研」，由宿主机只读采集后交给 TSP。"),
+    ("zsxq", "知识星球", "知识星球，由宿主机只读采集后交给 TSP。可配置多个星球，条目按星球名称区分。"),
     ("ima", "ima爱分享", "ima 知识库「【爱分享】的财经资讯」，只同步标题。"),
     ("cls", "财联社", "财联社电报，保留级别、个股和板块标签。"),
     ("wscn", "华尔街见闻", "华尔街见闻快讯，保留标的、主题和热度。"),
@@ -219,11 +219,24 @@ def _ensure_sources(service) -> None:
         })
 
 
+# 来源目录改成「知识星球」之后，已经建好的旧情报源仍要能对上，避免再造一个停更的副本。
+_LEGACY_SOURCE_NAMES = {
+    "知识星球": ("知识星球纳指星球调研",),
+}
+
+
+def source_lookup_names(name: str) -> tuple[str, ...]:
+    legacy = _LEGACY_SOURCE_NAMES.get(name, ())
+    return (name, *legacy)
+
+
 def _find_source(service, name: str):
     rows, _total = service.repo.list_sources(page=1, page_size=100)
-    for row in rows:
-        if row.name == name:
-            return row
+    by_name = {row.name: row for row in rows}
+    for wanted in source_lookup_names(name):
+        found = by_name.get(wanted)
+        if found is not None:
+            return found
     return None
 
 
