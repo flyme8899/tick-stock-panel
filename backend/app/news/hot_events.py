@@ -18,9 +18,13 @@
 第一句完整时停在句号、分号、叹号、问号或全文结束处，不在 40 字或逗号处截开。第一句太短或没有主体时，把下一句留下。引号没合上时不在引号里截断。公司名后面的冒号留下公司名，后面的顿号按原文保留。
 模型写一句话要点放在副标题。要点只丢掉空的、替换符或乱码、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。数字、百分号和斜杠不算乱码。和主标题相同或已经包含在主标题里的要点不重复显示。
 来源优先：公司公告和交易所，然后新华社、央视、证监会这类官方稿，再是财联社和华尔街见闻，然后外媒。
-知识星球、ima、钉钉，以及带「更新」「建议」「把握机会」「1e+」或编号列表的研报标题，不当主标题。
+知识星球、ima、钉钉里带「更新」「建议」「把握机会」「1e+」或编号列表的研报标题，不当主标题。
+公司或主题已经写清楚、并且过了原标题门槛的，可以用清理后的原标题。多主题晨报按条拆开，不再整篇丢掉。
 有新闻源标题就用那条；没有就用过了严格门槛的模型标题；再没有就丢掉。
-寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。缓存版本是 v16。
+上一收盘之后到下一交易日 9:30，同一股票或同一细概念、并且是同一个动作的稿并成一件，不再卡 6 小时。
+提价、涨价函、上调价格和涨价算同一个提价动作。公司提价至少是重要；写了幅度或再次提价就是重大。
+隔夜和周末的新鲜度从该交易日 9:00 起算；簇里还有更晚的稿时，从最晚那条起算。
+寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。要点缓存版本仍是 v19。
 半截标题并回完整事件，提及次数跟着走。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社、经济日报），券商「招商电新…称」，以及研报文件名里的日期戳和 #。第一句太短或没有主体时，把叹号后面的下一句留下。引号没合上时不在引号里截断。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
@@ -268,7 +272,26 @@ _SIMILAR_WINDOW = timedelta(hours=3)
 _SIMILARITY_MIN = 0.72
 _REPRESENTATIVE_SIMILARITY = 0.45
 _LEADER_ACTS = ("发布", "收购", "回购", "停产", "制裁", "订单", "上市", "立案")
-_IMPORTANT_ACTS = ("涨价", "获批", "回购", "订单", "收购", "中标")
+_IMPORTANT_ACTS = (
+    "涨价", "提价", "涨价函", "提价函", "上调价格", "价格上调", "上调报价",
+    "获批", "回购", "订单", "收购", "中标",
+)
+# 「上调产品价格」中间可以隔几个字，但「上调评级」不是提价。
+_HIKE_PATTERN = re.compile(
+    r"涨价函|提价函|涨价|提价|上调[^，。；！？\n]{0,8}价格|价格上调|上调报价|上调出厂价"
+)
+_HIKE_PERCENT = re.compile(r"\d+(?:\.\d+)?\s*[%％]|百分之|\d+成")
+_HIKE_REPEAT = (
+    "再次", "再度", "二次", "又一次", "第二次", "第2次",
+    "连续提价", "连续涨价", "继续提价", "继续涨价",
+)
+_COMPANY_SUFFIX = re.compile(r"[\u4e00-\u9fff]{2,12}(?:科技|股份|集团|公司)")
+# 晨报里的 1、 / ①。至少两条才拆，避免把普通句子里的数字切开。
+_BRIEF_MARK = re.compile(
+    r"(?:^|[\n；;])\s*(?:[（(]?[0-9]{1,2}[)）、.．]|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫])\s*"
+)
+# 切片之外仍要优先起标题的条数。只替换已经有原标题的位置，模型调用次数不增加。
+_TITLE_PRIORITY_EXTRA = 20
 _IMPORTANT_CATEGORIES = frozenset({
     "国内政策/宏观", "海外市场/央行", "地缘政治", "公司重大事项",
 })
@@ -551,7 +574,8 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
             continue
         row = dict(row)
         row["published"] = published
-        by_day[_news_session_day(published)].append(row)
+        for piece in _expand_topic_rows(row):
+            by_day[_news_session_day(published)].append(piece)
     ranked = {day: _cluster_day(rows, now, blocked=blocked) for day, rows in by_day.items()}
     ranked = {day: events for day, events in ranked.items() if events}
     fallback = False
@@ -586,7 +610,11 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     # 先留下能上屏的，再写要点。过不了门槛的簇不再占模型名额。
     events = [
         event for event in events
-        if _keep_shown_event(event) or _awaiting_news_title(event)
+        if (
+            _keep_shown_event(event)
+            or _awaiting_news_title(event)
+            or _has_stock_mapping(event)
+        )
     ]
     if not events:
         return {
@@ -608,7 +636,8 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     # 切片前先重排一次：_absorb_cutoff_events 把半截簇并进宿主后 heat/mentions
     # 变了，沿用合并前的顺序会让个别该进前 20 的事件沉下去。
     events = _rank_events(events, now, grade=False)
-    _label_with_llm(events[: _TITLE_SLICE])
+    # 竞价分已经算进名次。股票映射或重要、但还没有原标题的簇，优先占用切片名额。
+    _label_with_llm(_events_for_titles(events))
     for event in events:
         _ensure_shown_name(event)
     # 过滤会改变成员但不重排：名次以上一步为准，保证「前 20 有要点」成立。
@@ -682,6 +711,15 @@ def _block_keys(doc: dict) -> list[str]:
     elif len(norm) >= 4:
         for start in range(len(norm) - 2):
             keys.append("g:" + norm[start:start + 3])
+    if _in_preopen_window(doc["published"]):
+        overnight = _overnight_action(doc)
+        if overnight:
+            for code in doc.get("stocks") or {}:
+                keys.append(f"n:s:{overnight}:{code}")
+            for concept in doc.get("concepts") or []:
+                label = str(concept)
+                if _fine_concept(label, label):
+                    keys.append(f"n:c:{overnight}:{label}")
     return keys
 
 
@@ -704,8 +742,8 @@ def _blocked_pairs(docs: list[dict]):
     for key, indexes in buckets.items():
         if len(indexes) < 2:
             continue
-        # 双方、业绩和标题前缀不受 6 小时限制。其余桶只比时间窗里的稿。
-        limited = not key.startswith(("p:", "e:", "x:"))
+        # 双方、业绩、标题前缀和隔夜锚点不受 6 小时限制。其余桶只比时间窗里的稿。
+        limited = not key.startswith(("p:", "e:", "x:", "n:"))
         for left, right in _pairs_in_bucket(docs, indexes, limited=limited):
             if left > right:
                 left, right = right, left
@@ -765,6 +803,7 @@ def _cluster_day(rows: list[dict], now: datetime, *, blocked: bool = True) -> li
             or int(event.get("red_count") or 0) > 0
             or _worth_labeling(event)
             or _awaiting_news_title(event)
+            or _has_stock_mapping(event)
         ):
             events.append(event)
     return _rank_events(events, now, grade=True)
@@ -829,6 +868,7 @@ def _doc(row: dict) -> dict | None:
         "concepts": concepts,
         "stocks": stocks,
         "tokens": tokens,
+        "_topic": str(row.get("_topic") or ""),
     }
 
 
@@ -1001,7 +1041,12 @@ def _event_from(members: list[dict], now: datetime) -> dict:
     for hit in mentioned:
         hit["direction"] = direction
     item_ids = [str(item["item_id"]) for item in members]
-    digest = hashlib.sha1(",".join(sorted(item_ids)).encode("utf-8")).hexdigest()[:12]
+    digest_src = ",".join(sorted(item_ids))
+    topics = [str(item.get("_topic") or "") for item in members]
+    if any(topics):
+        # 同一篇晨报拆成的主题仍指向原文，用主题序号把 key 分开。
+        digest_src += "#" + ",".join(topics)
+    digest = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:12]
     seen = first.astimezone(CN_TZ)
     first_seen = seen.strftime("%H:%M") if seen.date() == now.date() else seen.strftime("%m-%d %H:%M")
     headlines: list[str] = []
@@ -1085,11 +1130,7 @@ def _score_event(event: dict, now: datetime) -> None:
     direction = str(event.get("direction") or "")
     if direction in {"利好", "利空"} and (concepts or stocks):
         mapping += _MAPPING_DIRECTION
-    first = event.get("_first")
-    if isinstance(first, datetime):
-        age_hours = max(0.0, (now - first).total_seconds() / 3600)
-    else:
-        age_hours = _HEAT_HALF_LIFE_HOURS
+    age_hours = _freshness_age_hours(event, now)
     freshness = _FRESH_MAX * math.exp(-math.log(2) * age_hours / _HEAT_HALF_LIFE_HOURS)
     try:
         heat = float(event.get("heat") or 0)
@@ -1190,7 +1231,33 @@ def _rule_importance(event: dict) -> str:
     return label
 
 
+def _price_hike_text(text: str) -> bool:
+    return _HIKE_PATTERN.search(text or "") is not None
+
+
+def _names_company(text: str) -> bool:
+    body = _compact(text)
+    if _listed_companies(body):
+        return True
+    return _COMPANY_SUFFIX.search(body) is not None
+
+
+def _company_price_hike(text: str) -> bool:
+    return _price_hike_text(text) and _names_company(text)
+
+
+def _hike_is_major(text: str) -> bool:
+    """公司提价写了幅度，或是再次提价，算重大。没有点名公司的寻常涨价仍是重要。"""
+    if not _company_price_hike(text):
+        return False
+    if _HIKE_PERCENT.search(text):
+        return True
+    return any(mark in text for mark in _HIKE_REPEAT)
+
+
 def _is_major(text: str) -> bool:
+    if _hike_is_major(text):
+        return True
     if any(cue in text for cue in _MAJOR_RATE):
         return True
     if any(org in text for org in _MAJOR_ORGS) and any(act in text for act in _MAJOR_POLICY_ACTS):
@@ -1203,11 +1270,141 @@ def _is_major(text: str) -> bool:
 
 
 def _is_important(text: str, category: str) -> bool:
-    if any(act in text for act in _IMPORTANT_ACTS):
+    if any(act in text for act in _IMPORTANT_ACTS) or _price_hike_text(text):
         return True
     if category in _IMPORTANT_CATEGORIES:
         return True
     return any(name in text for name in _LEADERS) and any(verb in text for verb in _PRICE_VERBS)
+
+
+def _in_preopen_window(published: datetime) -> bool:
+    """上一收盘之后到下一交易日 9:30，含周末。15:00 整点仍算当天。"""
+    local = published.astimezone(CN_TZ)
+    if local.weekday() >= 5:
+        return True
+    clock = local.time()
+    return clock <= dt_time(9, 30) or clock > dt_time(15, 0)
+
+
+def _overnight_action(doc: dict) -> str:
+    """涨价、提价、涨价函、上调价格在隔夜合并里算同一个动作。"""
+    if _price_hike_text(str(doc.get("title") or "")):
+        return "提价"
+    return str(doc.get("action") or "")
+
+
+def _same_overnight_session(left: dict, right: dict) -> bool:
+    if not _in_preopen_window(left["published"]) or not _in_preopen_window(right["published"]):
+        return False
+    return _news_session_day(left["published"]) == _news_session_day(right["published"])
+
+
+def _shared_stock_or_fine_concept(left: dict, right: dict) -> bool:
+    if set(left.get("stocks") or {}) & set(right.get("stocks") or {}):
+        return True
+    left_concepts = {
+        str(name) for name in (left.get("concepts") or []) if _fine_concept(str(name), str(name))
+    }
+    right_concepts = {
+        str(name) for name in (right.get("concepts") or []) if _fine_concept(str(name), str(name))
+    }
+    return bool(left_concepts & right_concepts)
+
+
+def _same_overnight_anchor(left: dict, right: dict) -> bool:
+    """同一场开盘里，同一股票或细概念、同一个动作，隔夜也并成一件。"""
+    if not _same_overnight_session(left, right):
+        return False
+    action = _overnight_action(left)
+    if not action or action != _overnight_action(right):
+        return False
+    return _shared_stock_or_fine_concept(left, right)
+
+
+def _freshness_age_hours(event: dict, now: datetime) -> float:
+    """隔夜稿从交易日 9:00 起算，避免周末把周一开盘前的事件埋掉。"""
+    first = event.get("_first")
+    if not isinstance(first, datetime):
+        return float(_HEAT_HALF_LIFE_HOURS)
+    if _in_preopen_window(first):
+        session = _news_session_day(first)
+        anchor = datetime.combine(session, dt_time(9, 0), CN_TZ)
+        latest = event.get("_latest")
+        if isinstance(latest, datetime) and latest > anchor:
+            anchor = latest
+        if now <= anchor:
+            return 0.0
+        return max(0.0, (now - anchor).total_seconds() / 3600)
+    return max(0.0, (now - first).total_seconds() / 3600)
+
+
+def _brief_parts(text: str) -> list[str]:
+    body = (text or "").strip()
+    if not body:
+        return []
+    marks = list(_BRIEF_MARK.finditer(body))
+    if len(marks) < 2:
+        return []
+    parts: list[str] = []
+    for index, mark in enumerate(marks):
+        end = marks[index + 1].start() if index + 1 < len(marks) else len(body)
+        chunk = body[mark.end():end].strip(" \n；;，,。")
+        if len(_compact(chunk)) >= 6:
+            parts.append(chunk)
+    return parts if len(parts) >= 2 else []
+
+
+def _mention_mapping(mention) -> dict:
+    if isinstance(mention, dict):
+        return mention
+    return {
+        "kind": mention["kind"],
+        "key": mention["key"],
+        "name": mention["name"],
+    }
+
+
+def _mentions_for_part(mentions, part: str) -> list:
+    kept = []
+    for raw in mentions or []:
+        mention = _mention_mapping(raw)
+        name = str(mention.get("name") or "")
+        key = str(mention.get("key") or "")
+        if (name and name in part) or (key and key in part):
+            kept.append(mention)
+    return kept
+
+
+def _expand_topic_rows(row: dict) -> list[dict]:
+    """研究来源的多主题晨报按条拆开。单条仍用原来的标题。"""
+    source = str(row.get("source") or "").strip().lower()
+    if source not in _RESEARCH_SOURCES:
+        return [row]
+    title = str(row.get("title") or "")
+    body = _summary_text(row)
+    parts = _brief_parts(body)
+    if len(parts) < 2:
+        parts = _brief_parts(title)
+    if len(parts) < 2:
+        parts = _brief_parts(f"{title}\n{body}")
+    if len(parts) < 2:
+        return [row]
+    # 标题本身已经能上屏时不拆，避免把一条完整的公司新闻按编号切碎。
+    if _research_headline_ok(title):
+        return [row]
+    mentions = [_mention_mapping(item) for item in (row.get("mentions") or [])]
+    expanded = []
+    for index, part in enumerate(parts):
+        headline = part.strip().split("\n", 1)[0].strip()[:180]
+        if len(_compact(headline)) < 6:
+            continue
+        piece = dict(row)
+        piece["title"] = headline
+        piece["clean_text"] = part
+        piece["mentions"] = _mentions_for_part(mentions, part)
+        piece["_topic"] = str(index)
+        expanded.append(piece)
+    return expanded or [row]
 
 
 def _drop_minor(event: dict) -> bool:
@@ -1515,6 +1712,8 @@ def _can_merge(left: dict, right: dict) -> bool:
     # 同一组双方做同一件事时，合并这一交易日里的全部稿，00:13 和 08:39 也算一件。
     # 同一家公司的业绩预告同样并进这一交易日。其他合并仍看 6 小时。
     if _same_party_action(left, right) or _cutoff_pair(left, right) or _same_company_earnings(left, right):
+        return True
+    if _same_overnight_anchor(left, right):
         return True
     gap = abs(left["published"] - right["published"])
     if gap > _CLUSTER_WINDOW:
@@ -3117,13 +3316,23 @@ def _report_chatter(text: str) -> bool:
     return bool(_LIST_MARKER.search(body) or _GLUED_LIST_INDEX.search(body))
 
 
+def _research_headline_ok(title: str) -> bool:
+    """研究来源里写清楚的公司或主题标题。研报口吻和多主题清单仍然不用。"""
+    cleaned = _display_original(title)
+    if not cleaned or _report_chatter(cleaned):
+        return False
+    if _TOPIC_JOIN.search(cleaned) or len(_BRIEF_MARK.findall(cleaned)) >= 2:
+        return False
+    return _original_reject_reason(cleaned) == ""
+
+
 def _headline_blocked(source: str, title: str) -> bool:
-    """星球、ima、钉钉，以及清理后仍带研报标记的标题，不拿来当主标题。
+    """星球、ima、钉钉里的研报口吻不拿来当主标题。写清楚的公司或主题标题可以。
 
     研报文件名里的「更新」会先被剥掉。剥完还剩「十五五政策定调」这种句子时可以上屏。
     """
     if str(source or "").strip().lower() in _RESEARCH_SOURCES:
-        return True
+        return not _research_headline_ok(title)
     cleaned = _display_original(title)
     return bool(cleaned and _report_chatter(cleaned))
 
@@ -3632,6 +3841,52 @@ def _absorb_cutoff_events(events: list[dict]) -> list[dict]:
         host["heat"] = round(float(host.get("heat") or 0) + float(event.get("heat") or 0), 4)
         drop.add(index)
     return [event for index, event in enumerate(events) if index not in drop]
+
+
+def _has_stock_mapping(event: dict) -> bool:
+    for item in event.get("mentioned_stocks") or []:
+        if isinstance(item, dict) and str(item.get("key") or "").strip():
+            return True
+    return False
+
+
+def _needs_model_title(event: dict) -> bool:
+    return _first_original_title(_candidate_rows(event)) == ""
+
+
+def _title_priority(event: dict) -> bool:
+    """还没有能用的原标题，但已经映射到股票，或规则上是重要/重大。"""
+    if not _needs_model_title(event):
+        return False
+    if _has_stock_mapping(event):
+        return True
+    return str(event.get("importance") or "") in {"重要", "重大"}
+
+
+def _events_for_titles(events: list[dict]) -> list[dict]:
+    """切片之外的股票映射和重要事件优先起标题。有原标题的位置让出来，调用次数不变。"""
+    if len(events) <= _TITLE_SLICE:
+        return list(events)
+    head = list(events[:_TITLE_SLICE])
+    pulled: list[dict] = []
+    for event in events[_TITLE_SLICE:]:
+        if len(pulled) >= _TITLE_PRIORITY_EXTRA:
+            break
+        if _title_priority(event):
+            pulled.append(event)
+    if not pulled:
+        return head
+    drop: set[int] = set()
+    for index in range(len(head) - 1, -1, -1):
+        if len(drop) >= len(pulled):
+            break
+        if not _needs_model_title(head[index]):
+            drop.add(index)
+    kept = [event for index, event in enumerate(head) if index not in drop]
+    overflow = len(pulled) + len(kept) - _TITLE_SLICE
+    if overflow > 0:
+        kept = kept[:-overflow] if overflow < len(kept) else []
+    return (pulled + kept)[:_TITLE_SLICE]
 
 
 def _has_ashare_mapping(event: dict) -> bool:
