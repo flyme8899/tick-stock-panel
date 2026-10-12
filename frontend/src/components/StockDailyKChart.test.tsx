@@ -7,6 +7,7 @@ import type { CandleMarker, KlineRow } from '@/lib/api'
 const state = vi.hoisted(() => ({
   rows: [] as KlineRow[],
   candle_markers: [] as CandleMarker[],
+  chip: undefined as { width?: number } | null | undefined,
 }))
 
 vi.mock('@tanstack/react-query', () => ({
@@ -18,11 +19,20 @@ vi.mock('@tanstack/react-query', () => ({
 }))
 
 vi.mock('@/components/EChartsCandlestick', () => ({
-  EChartsCandlestick: ({ markers }: { markers?: Array<{ label?: string; patternTag?: boolean }> }) => (
-    <div data-testid="marks">
-      {(markers ?? []).filter(marker => marker.patternTag).map(marker => marker.label).join('|')}
-    </div>
-  ),
+  EChartsCandlestick: ({
+    markers,
+    chip,
+  }: {
+    markers?: Array<{ label?: string; patternTag?: boolean }>
+    chip?: { width?: number } | null
+  }) => {
+    state.chip = chip
+    return (
+      <div data-testid="marks">
+        {(markers ?? []).filter(marker => marker.patternTag).map(marker => marker.label).join('|')}
+      </div>
+    )
+  },
   OVERLAY_INDICATORS: [],
   SUB_CHARTS: [],
 }))
@@ -84,4 +94,16 @@ it('形态默认关闭，刷新后仍关闭，打开后只显示重要短标签'
   await renderChart()
   expect(patternButton().className).not.toContain('bg-[#C74040]/10')
   expect(host.querySelector('[data-testid="marks"]')?.textContent).toBe('')
+})
+
+it('筹码默认打开，关掉后不再占右侧宽度', async () => {
+  await renderChart()
+  const button = [...host.querySelectorAll('button')].find(item => item.textContent === '筹码')
+  if (!button) throw new Error('找不到筹码按钮')
+  expect(button.className).toContain('bg-[#C74040]/10')
+  expect(button.title).toContain('本地计算（东财算法）')
+  expect(state.chip?.width).toBe(72)
+
+  await act(async () => { button.click() })
+  expect(state.chip).toBeNull()
 })

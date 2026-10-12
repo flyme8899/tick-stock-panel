@@ -315,6 +315,39 @@ export interface KlineDailyResponse {
   candle_markers?: CandleMarker[]
 }
 
+export interface ChipBin {
+  price: number
+  ratio: number
+  profit?: boolean
+}
+
+export interface ChipZone {
+  low: number
+  high: number
+  share: number
+}
+
+export interface ChipDistribution {
+  symbol: string
+  date: string
+  source: string
+  estimate: boolean
+  computable: boolean
+  close: number | null
+  benefit_ratio: number | null
+  avg_cost: number | null
+  avg_cost_bias: number | null
+  cost_90_low: number | null
+  cost_90_high: number | null
+  concentration_90: number | null
+  cost_70_low: number | null
+  cost_70_high: number | null
+  concentration_70: number | null
+  accuracy: number | null
+  bins: ChipBin[]
+  trapped_zones: ChipZone[]
+}
+
 export interface CandlePatternInfo {
   id: string
   name: string
@@ -3074,6 +3107,10 @@ export const api = {
   redetectCapabilities: () =>
     request<CapabilitiesResponse>('/api/capabilities/redetect', { method: 'POST' }),
 
+  chipDistribution: (symbol: string, date?: string | null) =>
+    request<ChipDistribution>(
+      `/api/chip/${encodeURIComponent(symbol)}${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+    ),
   klineDaily: (symbol: string, days = 120, dateRange?: { start: string; end: string }, extColumns?: string) =>
     request<KlineDailyResponse>(
       (dateRange

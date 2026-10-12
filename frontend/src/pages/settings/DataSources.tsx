@@ -754,6 +754,11 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
           </div>
         </div>
 
+        <div className="mb-4 rounded-lg border border-border bg-elevated/40 px-3 py-2.5 text-[11px] leading-relaxed text-muted">
+          筹码分布为<span className="text-secondary">本地计算（东财算法）</span>
+          ，用本机前复权日 K 估算获利比例和成本区间，结果是估算，不是交易所持仓成本。
+        </div>
+
         {/* 数据源卡片 - 横向网格 (配置入口) */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
           {allItems.map(item => {

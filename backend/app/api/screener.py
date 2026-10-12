@@ -205,19 +205,40 @@ def _attach_selection_result(payload: dict, data_dir) -> dict:
     try:
         from app.selection_fields.query import annotate_result
 
-        return annotate_result(payload, data_dir)
+        payload = annotate_result(payload, data_dir)
     except Exception as exc:  # noqa: BLE001
         logger.warning("选股补充字段跳过: %s", exc)
-        return payload
+    return _attach_chip_result(payload, data_dir)
 
 
 def _attach_selection_cache(payload: dict, data_dir) -> dict:
     try:
         from app.selection_fields.query import annotate_cache
 
-        return annotate_cache(payload, data_dir)
+        payload = annotate_cache(payload, data_dir)
     except Exception as exc:  # noqa: BLE001
         logger.warning("选股补充字段跳过: %s", exc)
+    return _attach_chip_cache(payload, data_dir)
+
+
+def _attach_chip_result(payload: dict, data_dir) -> dict:
+    """筹码列只读当日分区。没算过就标缺数据，不在选股请求里重算。"""
+    try:
+        from app.chip.query import attach_result
+
+        return attach_result(payload, data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("筹码列跳过: %s", exc)
+        return payload
+
+
+def _attach_chip_cache(payload: dict, data_dir) -> dict:
+    try:
+        from app.chip.query import attach_cache
+
+        return attach_cache(payload, data_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("筹码列跳过: %s", exc)
         return payload
 
 

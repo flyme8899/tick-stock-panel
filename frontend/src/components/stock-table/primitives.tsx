@@ -54,6 +54,12 @@ function fmtPercentPoint(value: number): string {
   return `${value.toFixed(2)}%`
 }
 
+/** 0–1 比率显示成百分数，不加正负号。空值是「—」。 */
+function fmtUnsignedRatio(value: unknown): string {
+  if (value == null || Number.isNaN(Number(value))) return '—'
+  return `${(Number(value) * 100).toFixed(2)}%`
+}
+
 function gapTd(col: ColumnConfig): ReactNode {
   return <td key={col.id} className={`${alignTdClass(col.align)} text-warning`}>缺数据</td>
 }
@@ -233,6 +239,18 @@ export function renderBuiltinDataCell(
     case 'down_streak':
       if (isBlankCell(r.down_streak) && gaps?.gapKeys?.includes('down_streak')) return gapTd(col)
       return streakBadge(col, Number(r.down_streak), 'down')
+    case 'benefit_ratio':
+      if (isBlankCell(r.benefit_ratio) && gaps?.gapKeys?.includes('benefit_ratio')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{fmtUnsignedRatio(r.benefit_ratio)}</td>
+    case 'avg_cost_bias':
+      if (isBlankCell(r.avg_cost_bias) && gaps?.gapKeys?.includes('avg_cost_bias')) return gapTd(col)
+      return <td key={col.id} className={`${numCls} font-medium ${priceColorClass(r.avg_cost_bias)}`}>{fmtPct(r.avg_cost_bias)}</td>
+    case 'concentration_90':
+      if (isBlankCell(r.concentration_90) && gaps?.gapKeys?.includes('concentration_90')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{fmtUnsignedRatio(r.concentration_90)}</td>
+    case 'concentration_70':
+      if (isBlankCell(r.concentration_70) && gaps?.gapKeys?.includes('concentration_70')) return gapTd(col)
+      return <td key={col.id} className={numCls}>{fmtUnsignedRatio(r.concentration_70)}</td>
     case 'macd_dif_w':
       if (isBlankCell(r.macd_dif_w) && gaps?.gapKeys?.includes('macd_dif_w')) return gapTd(col)
       return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_w)}`}>{r.macd_dif_w != null ? fmtPrice(r.macd_dif_w) : '—'}</td>

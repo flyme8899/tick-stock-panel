@@ -83,6 +83,11 @@ export const SCREENER_BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:monthly_change_pct', source: { type: 'builtin', key: 'monthly_change_pct' }, label: '月涨跌', visible: true, align: 'right' },
   { id: 'builtin:up_streak', source: { type: 'builtin', key: 'up_streak' }, label: '连涨', visible: true, align: 'center' },
   { id: 'builtin:down_streak', source: { type: 'builtin', key: 'down_streak' }, label: '连跌天数', visible: false, align: 'center' },
+  // 筹码。收盘后由本地日 K 估算；获利比例和集中度是 0–1 比率。
+  { id: 'builtin:benefit_ratio', source: { type: 'builtin', key: 'benefit_ratio' }, label: '获利比例', visible: true, align: 'right' },
+  { id: 'builtin:avg_cost_bias', source: { type: 'builtin', key: 'avg_cost_bias' }, label: '平均成本偏离', visible: true, align: 'right' },
+  { id: 'builtin:concentration_90', source: { type: 'builtin', key: 'concentration_90' }, label: '90集中度', visible: false, align: 'right' },
+  { id: 'builtin:concentration_70', source: { type: 'builtin', key: 'concentration_70' }, label: '70集中度', visible: false, align: 'right' },
   { id: 'builtin:macd_hist_w', source: { type: 'builtin', key: 'macd_hist_w' }, label: '周MACD', visible: false, align: 'right' },
   { id: 'builtin:macd_dif_w', source: { type: 'builtin', key: 'macd_dif_w' }, label: '周DIF', visible: false, align: 'right' },
   { id: 'builtin:macd_dea_w', source: { type: 'builtin', key: 'macd_dea_w' }, label: '周DEA', visible: false, align: 'right' },
@@ -133,6 +138,7 @@ export const SCREENER_COLUMN_GROUPS: ColumnGroup[] = [
       'macd_hist_m', 'macd_dif_m', 'macd_dea_m', 'kdj_k_m', 'kdj_d_m', 'kdj_j_m',
     ],
   },
+  { id: 'chip', label: '筹码', icon: '🧊', keys: ['benefit_ratio', 'avg_cost_bias', 'concentration_90', 'concentration_70'] },
   { id: 'signal', label: '信号', icon: '📡', keys: ['signals', 'candle', 'intraday'] },
   { id: 'finance', label: '财务', icon: '📋', keys: ['eps', 'bps', 'roe', 'pe_ttm', 'pb', 'gross_margin', 'net_margin', 'revenue_yoy', 'net_income_yoy', 'debt_ratio'] },
 ]

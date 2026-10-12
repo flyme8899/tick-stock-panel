@@ -60,6 +60,48 @@ async function hoverCandle(index: number) {
   await act(async () => { chart.handlers.updateAxisPointer?.({ axesInfo: [{ value: index }] }) })
 }
 
+it('筹码柱留在K线右侧，获利为红、套牢为绿，并画出均价和90%区间', async () => {
+  const onHoverDate = vi.fn()
+  await act(async () => root.render(
+    <EChartsCandlestick
+      data={rows(10)}
+      symbol="300829.SZ"
+      height={400}
+      showInfoBar={false}
+      visibleBars="all"
+      onHoverDate={onHoverDate}
+      chip={{
+        width: 72,
+        close: 10,
+        avgCost: 10.2,
+        cost90Low: 9.5,
+        cost90High: 10.8,
+        accuracy: 0.2,
+        bins: [
+          { price: 9.6, ratio: 0.4 },
+          { price: 10.4, ratio: 0.6 },
+        ],
+      }}
+    />,
+  ))
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  expect(option.grid[0].right).toBe(80)
+  const series = option.series.find((item: any) => item.name === '筹码')
+  expect(series.clip).toBe(false)
+  const drawn = series.renderItem(
+    { coordSys: { x: 0, y: 20, width: 400, height: 200 } },
+    { coord: (value: number[]) => [0, 220 - value[1] * 10] },
+  )
+  const fills = drawn.children.filter((child: any) => child.type === 'rect').map((child: any) => child.style.fill)
+  expect(fills).toContain('#C74040')
+  expect(fills).toContain('#2D9B65')
+  expect(fills).toContain('rgba(245, 158, 11, 0.16)')
+  expect(drawn.children.find((child: any) => child.type === 'line').style.stroke).toBe('#D97706')
+
+  await hoverCandle(3)
+  expect(onHoverDate).toHaveBeenCalledWith(DAYS[3])
+})
+
 it('切标的后响应 dataZoom 仍用当前标的的买卖标记, 不回退到上一只', async () => {
   const render = async (symbol: string, data: OHLC[], markerLabel: string, markerDate: string) => {
     await act(async () => root.render(
