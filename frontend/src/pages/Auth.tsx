@@ -25,6 +25,7 @@ export function Auth() {
   const [confirmPassword, setConfirmPassword] = useState('')  // 仅设密码时用
   const [showPwd, setShowPwd] = useState(false)
   const [localError, setLocalError] = useState('')
+  const passwordChanged = new URLSearchParams(window.location.search).get('changed') === '1'
 
   // 取认证状态(是否已设密码)
   const [status, setStatus] = useState<{ configured: boolean } | null>(null)
@@ -112,6 +113,12 @@ export function Auth() {
             </div>
           </div>
 
+          {!isSetup && passwordChanged && (
+            <p className="mb-3 rounded-btn bg-accent/10 px-3 py-2 text-[11px] leading-relaxed text-accent">
+              密码已修改，请使用新密码重新登录。其他设备上的登录已失效。
+            </p>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-3">
             {!isSetup && (
               <input
@@ -182,7 +189,7 @@ export function Auth() {
 
           {!isSetup && (
             <p className="mt-3 text-[10px] leading-relaxed text-muted/70">
-              多人账号由服务器上的用户文件管理。仍使用单一访问密码时，用户名填 admin，或留空。
+              多人账号由服务器上的用户文件管理。仍使用单一访问密码时，用户名填 admin，或留空。登录后可在「设置 → 修改密码」修改自己的密码。
             </p>
           )}
 

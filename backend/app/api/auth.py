@@ -154,7 +154,10 @@ class LoginIn(BaseModel):
 
 class ChangePasswordIn(BaseModel):
     old_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
+    confirm_password: str = Field(min_length=1, max_length=128)
+    # 只允许缺省或等于当前会话。传了别人的用户名就拒绝，避免误改。
+    username: str | None = Field(default=None, max_length=64)
 
 
 @router.get("/status")
@@ -238,9 +241,28 @@ def logout(request: Request, response: Response) -> dict:
     return {"ok": True}
 
 
+def _reject_other_username(session_username: str, requested: str | None) -> None:
+    """请求里若点名了账号，必须就是当前会话。不能替别人改密码。"""
+    name = (requested or "").strip()
+    if not name:
+        return
+    try:
+        wanted = user_accounts.normalize_username(name)
+        current = user_accounts.normalize_username(session_username)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="只能修改自己的密码") from None
+    if wanted != current:
+        raise HTTPException(status_code=403, detail="只能修改自己的密码")
+
+
 @router.post("/change-password")
-def change_password(req: ChangePasswordIn, request: Request) -> dict:
-    """修改当前账号的密码。成功后该账号的会话失效(含当前, 需重新登录)。"""
+def change_password(req: ChangePasswordIn, request: Request, response: Response) -> dict:
+    """修改当前登录账号的密码。成功后该账号全部会话失效，需要重新登录。
+
+    当前浏览器也退出，不再单独补发令牌。多用户账号靠 rev + 1 作废已签发会话；
+    旧版共享密码沿用 set_password，只作废 legacy 会话，不影响其他账号。
+    当前密码错误与登录失败共用限流（同一 IP 或同一用户名 5 次锁 5 分钟）。
+    """
     token = request.cookies.get(COOKIE_NAME, "")
     info = auth.session_info(token)
     if info is None:
@@ -251,22 +273,36 @@ def change_password(req: ChangePasswordIn, request: Request) -> dict:
 
     ip = _client_ip(request)
     username = str(info.get("username") or "")
-    if info.get("kind") == "user":
-        if user_accounts.verify_user(username, req.old_password) is None:
-            _record_login_fail(ip, username)
-            raise HTTPException(status_code=401, detail="旧密码错误")
-        try:
-            user_accounts.set_user_password(username, req.new_password)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        auth.revoke_user_sessions(username)
-        return {"ok": True, "message": "密码已修改, 请重新登录"}
+    _check_login_rate_limit(ip, username)
+    _reject_other_username(username, req.username)
 
-    # 旧版共享密码: 只作废 legacy 会话, 不踢掉其他账号
-    new_token = auth.verify_and_create_session(req.old_password)
-    if not new_token:
+    kind = info.get("kind")
+    if kind == "user":
+        old_ok = user_accounts.verify_user(username, req.old_password) is not None
+    elif kind == "legacy":
+        # 空用户名只校验旧版共享密码，避免同名 admin 账号把 owner 会话带偏。
+        old_ok = auth.authenticate(req.old_password) is not None
+    else:
+        raise HTTPException(status_code=401, detail="请先登录")
+    if not old_ok:
         _record_login_fail(ip, username)
         raise HTTPException(status_code=401, detail="旧密码错误")
-    auth.revoke_session(new_token)
-    auth.set_password(req.new_password)
+
+    if req.confirm_password != req.new_password:
+        raise HTTPException(status_code=400, detail="两次输入的新密码不一致")
+    try:
+        user_accounts.validate_replacement_password(req.new_password, req.old_password)
+        if kind == "user":
+            user_accounts.set_user_password(username, req.new_password)
+        else:
+            auth.set_password(req.new_password)
+    except user_accounts.UsersSourceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if kind == "user":
+        auth.revoke_user_sessions(username)
+    _clear_login_fails(ip, username)
+    response.delete_cookie(key=COOKIE_NAME, path="/")
     return {"ok": True, "message": "密码已修改, 请重新登录"}

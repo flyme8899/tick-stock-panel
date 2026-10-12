@@ -34,6 +34,8 @@ _HASHER = PasswordHasher(
 )
 _PASSWORD_MIN = 6
 _PASSWORD_MAX = 128
+# 自助改密比首次设密更严。建号和 AUTH_PASSWORD 初始化仍用上面的最短 6 位。
+_REPLACEMENT_MIN = 8
 _USERNAME_MAX = 32
 _lock = threading.Lock()
 _cache_key: object = None
@@ -215,6 +217,31 @@ def _check_password_length(password: str) -> None:
         raise ValueError(f"密码至少 {_PASSWORD_MIN} 位")
     if len(password) > _PASSWORD_MAX:
         raise ValueError(f"密码不能超过 {_PASSWORD_MAX} 位")
+
+
+def validate_replacement_password(new_password: str, old_password: str) -> None:
+    """自助改密：至少 8 位，字母、数字、符号至少两类，且不能与当前密码相同。"""
+    if not isinstance(new_password, str) or len(new_password) > _PASSWORD_MAX:
+        raise ValueError(f"密码不能超过 {_PASSWORD_MAX} 位")
+    if new_password == old_password:
+        raise ValueError("新密码不能与当前密码相同")
+    if len(new_password) < _REPLACEMENT_MIN:
+        raise ValueError(f"新密码至少 {_REPLACEMENT_MIN} 位")
+    if _character_classes(new_password) < 2:
+        raise ValueError("新密码须混合字母、数字、符号中的至少两类")
+
+
+def _character_classes(password: str) -> int:
+    """字母、数字、符号各算一类。空白不算符号，避免用空格凑强度。"""
+    letters = digits = symbols = False
+    for ch in password:
+        if ch.isalpha():
+            letters = True
+        elif ch.isdigit():
+            digits = True
+        elif not ch.isspace():
+            symbols = True
+    return int(letters) + int(digits) + int(symbols)
 
 
 def _dummy() -> str:
