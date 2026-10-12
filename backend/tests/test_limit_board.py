@@ -197,12 +197,16 @@ def test_enrich_verifies_and_skips_new_broad_names(tmp_path: Path) -> None:
         {
             "concepts": ["固态电池概念", "白酒"],
             "direction": "利好",
+            "name": "贵州茅台股价创历史新高",
+            "headlines": ["贵州茅台：前三季度净利润同比增长"],
             "mentioned_stocks": [{"key": "600519.SH", "name": "贵州茅台"}],
             "mapping": [{"name": "固态电池概念", "kind": "concept", "direction": "利好"}],
         },
         {
             "concepts": [],
             "direction": "利好",
+            "name": "宁德时代概念股集体大涨",
+            "headlines": ["宁德时代放量拉升"],
             "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
         },
     ]
@@ -218,6 +222,32 @@ def test_enrich_verifies_and_skips_new_broad_names(tmp_path: Path) -> None:
     members = _members(tmp_path, ["固态电池概念"], date.fromisoformat(_DAY))
     assert members["固态电池概念"][0] == "600519.SH"
     assert "300750.SZ" in members["固态电池概念"]
+
+
+def test_enrich_skips_limit_theme_for_stock_absent_from_titles(tmp_path: Path) -> None:
+    """涨停题材只补股票名在事件标题里出现过的事件。
+
+    线上实测双写残差：早报目录行的上游 stocks 混进弱相关个股（东百集团进了
+    「证监会座谈会」簇，15 个成员没有一条讲收购），涨停题材把「光芯片收购」
+    补进该簇，概念与成员完全脱节。股票名不在任何成员标题里，题材就没有
+    锚定资格 —— 本例用 fixture 里的宁德时代：涨停题材命中，但股票名不在
+    事件标题里，enriched 必须为空。
+    """
+    store.write_rows(tmp_path, "ths", _DAY, parse_ths_pool(_load("ths_pool.json"), _DAY) or [])
+    events = [
+        {
+            "concepts": [],
+            "direction": "",
+            "name": "证监会召开资本市场和金融形势专家座谈会，听取意见建议",
+            "headlines": ["证监会召开资本市场和金融形势专家座谈会"],
+            "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
+        },
+    ]
+    apply_limit_reasons(events, tmp_path, _DAY)
+    # 股票被锚定校验挡在最外面，verified/enriched 都空，事件压根不写
+    # limit_reason 键 —— 概念列表保持原样。
+    assert "limit_reason" not in events[0]
+    assert events[0]["concepts"] == []
 
 
 def test_limit_board_sentiment_route(tmp_path, monkeypatch) -> None:
