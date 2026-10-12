@@ -248,3 +248,49 @@ def test_unlabeled_events_pulled_into_top20_get_a_second_ask(tmp_path, monkeypat
     # 被降级的美股组（重大→一般，-110）不该留在前列。
     top_names = " ".join(str(event.get("name") or "") for event in events[:10])
     assert "美股" not in top_names
+
+
+def test_extra_round_empty_titles_still_fill_the_top20(tmp_path, monkeypatch, caplog):
+    """补问轮模型回空 title 时，重写一次后仍空，前 20 也要用兜底补上要点。"""
+    calls: list[str] = []
+
+    def fake(prompt: str, **_kwargs: object) -> str:
+        calls.append(prompt)
+        rows = []
+        retry = "上一轮要点不合格" in prompt
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            if len(calls) == 1 and not retry:
+                if "碳酸锂" in rest:
+                    importance, subtitle = "重大", _LITHIUM_SUBTITLE
+                elif "美股" in rest:
+                    importance, subtitle = "一般", _US_SUBTITLE
+                else:
+                    importance = "一般"
+                    subtitle = _GENERIC_SUBTITLES[len(rows) % len(_GENERIC_SUBTITLES)]
+            else:
+                importance, subtitle = "一般", ""
+            rows.append({"id": head, "title": subtitle, "importance": importance})
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    reset_store_for_tests(tmp_path / "empty-extra.sqlite")
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", fake)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
+    monkeypatch.setattr(hot_mod, "_rule_importance", _fake_rule_importance)
+    monkeypatch.setattr(hot_mod, "_events_for_titles", lambda events: events[:10])
+    monkeypatch.setattr(hot_mod.time, "sleep", lambda *_args, **_kwargs: None)
+    _insert_corpus()
+    hot_mod.clear_hot_event_cache()
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        events = top_hot_events(NOW)["events"]
+    assert len(events) >= 20
+    assert all(str(event.get("subtitle") or "").strip() for event in events[:20])
+    assert sum("上一轮要点不合格" in prompt for prompt in calls) == 1
+    asked = [record for record in caplog.records if "补问切片外未标注条目" in record.message]
+    assert asked and int(str(asked[0].args[0])) >= 1
+    logged = [record.message for record in caplog.records if "要点为空" in record.message]
+    assert logged and "要点为空 0 条" in logged[-1]
+    assert "兜底前 0 条" not in logged[-1]
