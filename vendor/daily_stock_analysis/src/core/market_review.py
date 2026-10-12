@@ -88,13 +88,15 @@ def _record_market_review_notification_run(
     success: bool,
     attempts: int = 1,
     error_message: Optional[Any] = None,
+    reason: Optional[str] = None,
 ) -> None:
     record_notification_run(
         channel=channel,
         status=status,
         success=success,
         attempts=attempts,
-        error_message=error_message,
+        error_message=error_message if error_message is not None else reason,
+        reason=reason,
     )
     _refresh_market_review_history_diagnostics(query_id=query_id)
 
@@ -184,6 +186,7 @@ def run_market_review(
     save_report_file: bool = True,
     persist_history: bool = True,
     trigger_source: str = "cli",
+    notification_skip_reason: Optional[str] = None,
 ) -> Optional[str] | Optional[MarketReviewRunResult]:
     """
     执行大盘复盘分析
@@ -200,6 +203,8 @@ def run_market_review(
         save_report_file: 是否保存 Markdown 文件；上下文生成路径可关闭以避免多区域临时复盘互相覆盖
         persist_history: 是否写入 analysis_history；预热路径可关闭以避免覆盖用户可见的同日大盘复盘记录
         trigger_source: 触发来源，用于日志排障（cli/schedule/api/bot/service 等）
+        notification_skip_reason: send_notification=False 时写入 notification_runs 的跳过原因。
+            上下文预热传 deferred_pending_reuse_push，真正的 --no-notify 才用 no_notify。
 
     Returns:
         复盘报告文本
@@ -357,6 +362,7 @@ def run_market_review(
                     status="skipped",
                     success=False,
                     attempts=0,
+                    reason="merge_notification",
                 )
             elif send_notification and notifier.is_available():
                 # 添加标题
@@ -383,6 +389,7 @@ def run_market_review(
                     channel="report",
                     status="success" if success else "failed",
                     success=success,
+                    reason="sent" if success else "send_failed",
                 )
                 if success:
                     logger.info(
@@ -401,9 +408,11 @@ def run_market_review(
                         persist_region,
                     )
             elif not send_notification:
+                skip_reason = (notification_skip_reason or "no_notify").strip() or "no_notify"
                 logger.info(
                     "[MarketReview] component=market_review action=skip_notification "
-                    "reason=no_notify trigger_source=%s query_id=%s region=%s",
+                    "reason=%s trigger_source=%s query_id=%s region=%s",
+                    skip_reason,
                     trigger_source,
                     history_query_id,
                     persist_region,
@@ -414,6 +423,7 @@ def run_market_review(
                     status="skipped",
                     success=False,
                     attempts=0,
+                    reason=skip_reason,
                 )
             else:
                 logger.info(
@@ -429,6 +439,7 @@ def run_market_review(
                     status="not_configured",
                     success=False,
                     attempts=0,
+                    reason="not_configured",
                 )
             
             if return_structured:

@@ -37,6 +37,8 @@ docker compose --profile dsa up --build
 
 sidecar 默认监听 `127.0.0.1:8000`，数据库放在 `data/dsa/stock_analysis.db`。`ENV_FILE` 指向仓库根目录的 `.env`，所以 TSP 和 DSA 共用一份配置。镜像时区是 `Asia/Shanghai`，本地 `scripts/dsa.sh` / `dsa.ps1` 在未设置 `TZ` 时也使用这个时区。
 
+盘后复盘窗口（北京时间 15:30–16:00，包含 `SCHEDULE_TIME`）不要重建 dsa 容器。重建会打断正在生成的复盘。日志写在 `data/dsa/logs`（容器内 `LOG_DIR=/app/data/logs`），跟数据库在同一份已挂载目录里，重建之后还能查。
+
 Docker 服务带健康检查：容器内 `curl -fsS http://127.0.0.1:8000/api/v1/health`。这个接口免登录，HTTP 失败或连不上都会让容器变为 unhealthy。决策页徽标每 30 秒请求 TSP 的 `/api/dsa/status`，悬停可看到同样的探测结果。
 
 ## 运行用户
@@ -59,8 +61,8 @@ docker compose --profile dsa up -d --build --force-recreate
 
 | 路径 | 宿主机 | 说明 |
 | --- | --- | --- |
-| `/app/data` | `./data/dsa` | SQLite（`stock_analysis.db` 及 `-wal`/`-shm`）、`cache/akshare_name_map.json`、`cache/stocks.index.json`、选股缓存、`.admin_password_hash`、`.session_secret` |
-| `/app/logs` | 不挂载 | `LOG_DIR`。目录在镜像里是 `1777`，日志留在容器层，不再落到宿主机变成 root 文件 |
+| `/app/data` | `./data/dsa` | SQLite（`stock_analysis.db` 及 `-wal`/`-shm`）、`cache/akshare_name_map.json`、`cache/stocks.index.json`、选股缓存、`.admin_password_hash`、`.session_secret`、`logs/`（`LOG_DIR=/app/data/logs`） |
+| `/app/logs` | 不单独挂载 | 镜像里这个目录仍是 `1777`，但 compose 把 `LOG_DIR` 指到已挂载的 `/app/data/logs`。重建容器不会丢掉复盘日志，也不会在仓库根目录多出一个 root 属主的日志目录 |
 | `/app/reports` | 不挂载 | 研报回退文件。同样只在容器层 |
 | `/app/config/.env` | `./.env` | 可写单文件挂载。观察池、定时推送和设置保存都写这份文件。见下文「为什么仍是单文件挂载」 |
 | `/opt/tsp/*.py` | 仓库里的桥接文件 | 只读。`PYTHONDONTWRITEBYTECODE=1`，不会在旁边写 `__pycache__` |

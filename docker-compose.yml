@@ -63,7 +63,10 @@ services:
       # 单文件挂载上 os.replace 会被拒绝（EPERM 或 EBUSY），再原地改写同一 inode。
       - ENV_FILE=/app/config/.env
       - DATABASE_PATH=/app/data/stock_analysis.db
-      - LOG_DIR=/app/logs
+      # 日志放在已挂载的 /app/data 下，重建容器后仍留在宿主机 ./data/dsa/logs。
+      # 盘后复盘窗口（北京时间 15:30–16:00，含 SCHEDULE_TIME）不要重建 dsa，
+      # 否则进行中的复盘会被打断。
+      - LOG_DIR=/app/data/logs
       - WEBUI_HOST=0.0.0.0
       - WEBUI_PORT=8000
       - TZ=Asia/Shanghai

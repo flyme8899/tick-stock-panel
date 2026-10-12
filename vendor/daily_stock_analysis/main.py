@@ -959,6 +959,7 @@ def run_full_analysis(
         market_context_summary = ""
         market_context_full_report = ""
         market_context_generated_during_stock = False
+        reused_review_history_query_id = None
         pipeline = StockAnalysisPipeline(
             config=config,
             max_workers=args.workers,
@@ -1051,6 +1052,7 @@ def run_full_analysis(
                 and can_reuse_market_context
                 and bool(market_context_full_report or market_context_summary)
             )
+            reused_review_history_query_id = None
             if can_skip_market_review:
                 market_report = market_context_full_report or market_context_summary
                 logger.info(
@@ -1063,20 +1065,25 @@ def run_full_analysis(
                     trigger_source=review_trigger_source,
                     region=market_review_region,
                 )
-                if (
-                    market_context_generated_during_stock
-                    and not merge_notification
-                    and not args.no_notify
-                    and pipeline.notifier.is_available()
-                ):
-                    if pipeline.notifier.send(
-                        f"# 📈 大盘复盘\n\n{market_report}",
-                        email_send_to_all=True,
-                        route_type="report",
-                    ):
-                        logger.info("复用本轮大盘上下文推送大盘复盘成功")
-                    else:
-                        logger.warning("复用本轮大盘上下文推送大盘复盘失败")
+                # 上下文生成只记 deferred_pending_reuse_push，不发钉钉。
+                # 这里补上 SCHEDULE_TIME 复用正文后的推送，并把结果写入 notification_runs。
+                if market_context_generated_during_stock:
+                    from src.services.daily_market_context import (
+                        market_context_history_query_id,
+                    )
+                    from src.services.market_review_push import notify_market_review_text
+
+                    reused_review_history_query_id = market_context_history_query_id(
+                        query_id,
+                        market_review_region,
+                    )
+                    if not merge_notification:
+                        notify_market_review_text(
+                            pipeline.notifier,
+                            f"# 📈 大盘复盘\n\n{market_report}",
+                            history_query_id=reused_review_history_query_id,
+                            notify=not args.no_notify,
+                        )
 
             review_result = None
             if not can_skip_market_review:
@@ -1164,11 +1171,27 @@ def run_full_analysis(
                 parts.append(f"# 🚀 个股决策仪表盘\n\n{dashboard_content}")
             if parts:
                 combined_content = "\n\n---\n\n".join(parts)
-                if pipeline.notifier.is_available():
-                    if pipeline.notifier.send(combined_content, email_send_to_all=True, route_type="report"):
-                        logger.info("已合并推送（个股+大盘复盘）")
-                    else:
-                        logger.warning("合并推送失败")
+                from src.services.market_review_push import notify_market_review_text
+
+                merge_outcome = notify_market_review_text(
+                    pipeline.notifier,
+                    combined_content,
+                    history_query_id=reused_review_history_query_id,
+                    notify=True,
+                )
+                if merge_outcome.success:
+                    logger.info("已合并推送（个股+大盘复盘）")
+                else:
+                    logger.warning("合并推送失败: reason=%s", merge_outcome.reason)
+        elif merge_notification and reused_review_history_query_id and args.no_notify:
+            from src.services.market_review_push import notify_market_review_text
+
+            notify_market_review_text(
+                pipeline.notifier,
+                market_report,
+                history_query_id=reused_review_history_query_id,
+                notify=False,
+            )
 
         # 输出摘要
         if results:
