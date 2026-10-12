@@ -250,8 +250,8 @@ def test_unlabeled_events_pulled_into_top20_get_a_second_ask(tmp_path, monkeypat
     assert "美股" not in top_names
 
 
-def test_extra_round_empty_titles_still_fill_the_top20(tmp_path, monkeypatch, caplog):
-    """补问轮模型回空 title 时，重写一次后仍空，前 20 也要用兜底补上要点。"""
+def test_extra_round_empty_titles_stay_empty_without_a_title_copy(tmp_path, monkeypatch, caplog):
+    """补问轮模型回空 title 时，重写一次后仍空。正文没有新事实就留空，不用标题再写一遍。"""
     calls: list[str] = []
 
     def fake(prompt: str, **_kwargs: object) -> str:
@@ -287,10 +287,20 @@ def test_extra_round_empty_titles_still_fill_the_top20(tmp_path, monkeypatch, ca
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         events = top_hot_events(NOW)["events"]
     assert len(events) >= 20
-    assert all(str(event.get("subtitle") or "").strip() for event in events[:20])
+    top = events[:20]
+    empties = [event for event in top if hot_mod._point_is_empty(event)]
+    written = [event for event in top if not hot_mod._point_is_empty(event)]
+    assert empties
+    assert written
+    assert all(not str(event.get("subtitle") or "").strip() for event in empties)
+    assert all(event.get("subtitle_source") != "fallback" for event in empties)
+    assert all(event.get("subtitle") != event.get("name") for event in top)
+    assert all(event.get("subtitle_source") == "model" for event in written)
     assert sum("上一轮要点不合格" in prompt for prompt in calls) == 1
     asked = [record for record in caplog.records if "补问切片外未标注条目" in record.message]
     assert asked and int(str(asked[0].args[0])) >= 1
     logged = [record.message for record in caplog.records if "要点为空" in record.message]
-    assert logged and "要点为空 0 条" in logged[-1]
+    assert logged
+    assert f"要点为空 {len(empties)} 条" in logged[-1]
+    assert "要点为空 0 条" not in logged[-1]
     assert "兜底前 0 条" not in logged[-1]

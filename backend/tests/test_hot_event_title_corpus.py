@@ -634,7 +634,9 @@ def test_subtitle_repeats_are_dropped_and_listing_keeps_the_field(tmp_path, monk
     listed = hot_event_listing(NOW)
     by_name = {event["name"]: event for event in listed["events"]}
     assert by_name[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
+    assert by_name[oil]["subtitle_source"] == "model"
     assert by_name[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
+    assert by_name[nasdaq]["subtitle_source"] == "model"
     assert "WTI" not in by_name[nasdaq]["subtitle"]
     assert flags and all(flags)
     assert hot_mod._LLM_TITLE_TOKENS >= 4096
@@ -674,11 +676,11 @@ def test_omitted_subtitle_row_is_not_cached_as_miss(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache()
     first = {event["name"]: event for event in top_hot_events(NOW)["events"]}
     assert first[oil]["subtitle"] == "WTI原油期货收涨至91.85美元"
-    # 模型漏回这一条时不再把要点留空：没有额外正文就用清理后的标题。
-    # 不能拿另一条的原油要点来填，也不能记成永久未采用。
-    assert first[nasdaq]["subtitle"] == nasdaq
-    assert "原油" not in first[nasdaq]["subtitle"]
-    assert "WTI" not in first[nasdaq]["subtitle"]
+    assert first[oil]["subtitle_source"] == "model"
+    # 模型漏回这一条、正文又只有标题时，要点留空。不能拿另一条的原油要点来填，
+    # 也不能用标题再写一遍，也不能记成永久未采用。
+    assert first[nasdaq]["subtitle"] == ""
+    assert first[nasdaq].get("subtitle_source") not in {"model", "fallback"}
     assert not any(item.get("_miss") for item in hot_mod._LLM_CACHE.values() if isinstance(item, dict))
 
     def complete(prompt: str, **_kwargs: object) -> str:
@@ -697,6 +699,7 @@ def test_omitted_subtitle_row_is_not_cached_as_miss(tmp_path, monkeypatch):
     hot_mod.clear_hot_event_cache(llm=False)
     second = {event["name"]: event for event in top_hot_events(NOW + timedelta(minutes=11))["events"]}
     assert second[nasdaq]["subtitle"] == "纳斯达克金龙中国指数收涨"
+    assert second[nasdaq]["subtitle_source"] == "model"
 
 
 def test_same_company_earnings_notes_are_one_event(tmp_path):
@@ -1809,31 +1812,46 @@ def test_partial_empty_titles_retry_once_then_fall_back(monkeypatch):
     for event in batch:
         _ensure_shown_name(event)
     filled = hot_mod._fill_empty_subtitles(batch)
-    assert filled == 6
-    assert all(str(event.get("subtitle") or "").strip() for event in batch)
+    assert filled == 5
+    assert titled["subtitle"] == "市场关注度持续升温"
+    assert titled["subtitle_source"] == "model"
+    assert peer["subtitle"] == "市场关注度持续升温"
+    assert peer["subtitle_source"] == "model"
     assert "150亿" in bond["subtitle"]
     assert "200亿" in bond["subtitle"]
+    assert bond["subtitle_source"] == "fallback"
     assert "0.393" in nuclear["subtitle"]
-    assert bare["subtitle"] == "航运公司上调运价"
-    assert titled["subtitle"] == "市场关注度持续升温"
+    assert nuclear["subtitle_source"] == "fallback"
+    assert bare["subtitle"] == ""
+    assert "subtitle_source" not in bare
+    for event in (bond, nuclear, *others):
+        assert event["subtitle"] != event["name"]
+        assert not hot_mod._point_repeats_name(event["name"], event["subtitle"])
     for event in others:
+        assert event["subtitle_source"] == "fallback"
         assert "成" in event["subtitle"]
         assert len(event["subtitle"]) <= 40
 
 
-def test_reported_snapshot_empty_points_drop_from_13_to_0():
-    """按线上快照的形状：前 20 条里 13 条要点为空，兜底后为 0。
+def test_reported_snapshot_empty_points_drop_from_13_to_1():
+    """按线上快照的形状：前 20 条里 13 条要点为空。正文有新事实的 12 条抽句补上，只剩标题的那条留空。
 
     含 #1「发改委、财政部…625亿…」（正文 563 字）和 #3「第三个核电机制电价执行省份」
-    （正文 1301 字）。模型 title 留空时，这两条改从正文抽数字句。
+    （正文 1301 字）。模型 title 留空时，这两条改从正文抽数字句。标题本身不再当要点。
     """
-    from app.news.hot_events import _event_body, _fill_empty_subtitles
+    from app.news.hot_events import (
+        _empty_point_count,
+        _event_body,
+        _fill_empty_subtitles,
+        _point_repeats_name,
+    )
 
     kept = []
     for index in range(7):
         kept.append({
             "name": f"已有要点事件{index}",
             "subtitle": f"模型已写要点{index}",
+            "subtitle_source": "model",
             "_candidates": [],
         })
     bond = _padded_event(_BOND, _BOND_FACT, 563)
@@ -1857,26 +1875,34 @@ def test_reported_snapshot_empty_points_drop_from_13_to_0():
     ]
     kept.extend([bond, nuclear, bare, *extras])
     assert len(kept) == 20
-    before = sum(1 for event in kept if not str(event.get("subtitle") or "").strip())
+    before = _empty_point_count(kept)
     assert before == 13
+    assert _empty_point_count([{"name": "航运公司上调运价", "subtitle": "航运公司上调运价"}]) == 1
     assert len(_event_body(bond)) == 563
     assert len(_event_body(nuclear)) == 1301
     filled = _fill_empty_subtitles(kept)
-    after = sum(1 for event in kept if not str(event.get("subtitle") or "").strip())
-    assert filled == 13
-    assert after == 0
+    after = _empty_point_count(kept)
+    assert filled == 12
+    assert after == 1
     assert "150亿" in bond["subtitle"] and "200亿" in bond["subtitle"]
+    assert bond["subtitle_source"] == "fallback"
     assert "0.393" in nuclear["subtitle"]
-    assert bare["subtitle"] == "航运公司上调运价"
+    assert nuclear["subtitle_source"] == "fallback"
+    assert bare["subtitle"] == ""
+    assert "subtitle_source" not in bare
     for index in range(7):
         assert kept[index]["subtitle"] == f"模型已写要点{index}"
-    for event in kept:
-        assert str(event.get("subtitle") or "").strip()
+        assert kept[index]["subtitle_source"] == "model"
+    for event in (bond, nuclear, *extras):
+        assert event["subtitle"]
+        assert event["subtitle"] != event["name"]
+        assert not _point_repeats_name(event["name"], event["subtitle"])
+        assert event["subtitle_source"] == "fallback"
         assert len(event["subtitle"]) <= 40
 
 
 def test_empty_model_output_still_leaves_a_point_on_the_list(tmp_path, monkeypatch, caplog):
-    """整条链路：模型两轮都回空 title，前排要点仍非空，并记下兜底前的条数。"""
+    """整条链路：模型两轮都回空 title。正文有新事实就抽句，只有标题的留空，日志按真空条数记。"""
     import json
     import logging
 
@@ -1914,15 +1940,24 @@ def test_empty_model_output_still_leaves_a_point_on_the_list(tmp_path, monkeypat
     with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
         events = top_hot_events(NOW)["events"]
     assert events
-    assert all(str(event.get("subtitle") or "").strip() for event in events[:20])
     by_name = {event["name"]: event for event in events}
     assert "150亿" in by_name[fiscal]["subtitle"]
-    assert by_name[ship]["subtitle"] == ship
+    assert by_name[fiscal]["subtitle"] != fiscal
+    assert by_name[fiscal]["subtitle_source"] == "fallback"
+    assert by_name[ship]["subtitle"] == ""
+    assert by_name[ship].get("subtitle_source") not in {"model", "fallback"}
     if _BOND in by_name:
         assert "150亿" in by_name[_BOND]["subtitle"]
+        assert by_name[_BOND]["subtitle"] != _BOND
+        assert by_name[_BOND]["subtitle_source"] == "fallback"
         assert len(by_name[_BOND]["subtitle"]) <= 40
+    shown = events[:20]
+    empty = hot_mod._empty_point_count(shown)
+    assert empty >= 1
+    assert hot_mod._point_is_empty(by_name[ship])
     assert sum("上一轮要点不合格" in prompt for prompt in prompts) == 1
     logged = [record.message for record in caplog.records if "要点为空" in record.message]
     assert logged
-    assert "要点为空 0 条" in logged[-1]
+    assert f"要点为空 {empty} 条" in logged[-1]
+    assert "要点为空 0 条" not in logged[-1]
     assert "兜底前 0 条" not in logged[-1]
