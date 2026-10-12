@@ -9,7 +9,7 @@ import re
 from app.config import settings
 
 SOURCE_ORDER = (
-    "dws", "zsxq", "ima", "cls", "wscn", "etf_flow",
+    "dws", "zsxq", "ima", "cls", "wscn", "glh", "etf_flow",
     "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "reddit", "sec",
     "research",
     "ima_research",
@@ -22,6 +22,7 @@ SOURCE_LABELS = {
     "ima": "ima爱分享",
     "cls": "财联社",
     "wscn": "华尔街见闻",
+    "glh": "格隆汇",
     "etf_flow": "ETF领航者",
     "cnbc": "CNBC",
     "marketwatch": "MarketWatch",
@@ -228,9 +229,8 @@ def source_enabled(source: str) -> bool:
     row = saved.get(source) if isinstance(saved, dict) else None
     if isinstance(row, dict) and "enabled" in row:
         return bool(row.get("enabled"))
-    if source == "research":
-        return True
-    return False
+    # 研报和格隆汇没有凭据。没写偏好、环境变量也留空时默认打开。
+    return source in {"research", "glh"}
 
 
 def source_locked(source: str) -> bool:

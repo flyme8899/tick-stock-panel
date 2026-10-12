@@ -20,6 +20,10 @@ from app.news.collectors import (
     CLS_URL,
     FOREIGN_FEEDS,
     FOREIGN_SOURCES,
+    GLH_BACKOFF_CAP,
+    GLH_HEADERS,
+    GLH_POLL_SECONDS,
+    GLH_URL,
     IMA_BASE,
     REDDIT_MIN_GAP,
     REDDIT_USER_AGENT,
@@ -30,6 +34,9 @@ from app.news.collectors import (
     Item,
     cls_next_last_time,
     cls_params,
+    glh_error_wait,
+    glh_next_live_id,
+    glh_params,
     ima_headers,
     ima_next_cursor,
     ima_retcode,
@@ -41,6 +48,7 @@ from app.news.collectors import (
     parse_cls,
     parse_dws_payload,
     parse_feed_xml,
+    parse_glh,
     parse_ima_titles,
     parse_reddit_atom,
     parse_reuters_google_news,
@@ -782,6 +790,83 @@ def collect_wscn(client: httpx.Client | None = None) -> dict:
             client.close()
 
 
+_GLH_NOT_BEFORE = "glh:not-before"
+_GLH_BACKOFF = "glh:backoff"
+
+
+def collect_glh(client: httpx.Client | None = None, *, now: float | None = None) -> dict:
+    """拉格隆汇快讯。第一页每轮都要；见到已入库 id 就停止往更早翻。
+
+    失败不在这条线程里 sleep。下次等待写进返回值和本地缓存，进程重启后仍生效。
+    """
+    moment = time.time() if now is None else float(now)
+    not_before = _glh_stamp(_GLH_NOT_BEFORE)
+    if moment < not_before:
+        remaining = max(1, math.ceil(not_before - moment))
+        return {
+            "inserted": 0,
+            "duplicate": 0,
+            "skipped": True,
+            "retry_after": min(remaining, GLH_BACKOFF_CAP),
+        }
+    own = client is None
+    client = client or httpx.Client(
+        timeout=httpx.Timeout(12.0, connect=5.0),
+        follow_redirects=True,
+    )
+    try:
+        def fetch(token):
+            response = client.get(GLH_URL, params=glh_params(token), headers=GLH_HEADERS)
+            status = int(getattr(response, "status_code", 200))
+            if status >= 400:
+                response.raise_for_status()
+            payload = response.json()
+            page = parse_glh(payload)
+            ids = [item.source_id for item in page]
+            hit = bool(ids) and bool(get_store().existing_ids("glh", ids))
+            return page, glh_next_live_id(payload), hit
+
+        result = ingest_items(paginate_until_seen(fetch))
+        _glh_put(_GLH_BACKOFF, 0)
+        _glh_put(_GLH_NOT_BEFORE, 0)
+        get_store().mark_health("glh", ok=True, auth_state="n/a")
+        return {**result, "retry_after": GLH_POLL_SECONDS}
+    except Exception as exc:  # noqa: BLE001
+        return _glh_fail(moment, exc)
+    finally:
+        if own:
+            client.close()
+
+
+def _glh_fail(moment: float, exc: Exception) -> dict:
+    stored = _glh_stamp(_GLH_BACKOFF)
+    header = ""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        header = str(headers.get("retry-after") or headers.get("Retry-After") or "")
+    retry_after = reddit_retry_after_seconds(header, moment) if header else None
+    wait = glh_error_wait(stored, retry_after)
+    _glh_put(_GLH_BACKOFF, wait)
+    _glh_put(_GLH_NOT_BEFORE, math.ceil(moment + wait))
+    message = str(exc)[:180] or "格隆汇采集失败"
+    logger.warning("格隆汇采集失败: %s", exc)
+    get_store().mark_health("glh", ok=False, error=message, auth_state="n/a")
+    return {"inserted": 0, "duplicate": 0, "error": message[:200], "retry_after": wait}
+
+
+def _glh_stamp(key: str) -> int:
+    raw, _modified = get_store().get_feed_cache(key)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _glh_put(key: str, value: int) -> None:
+    get_store().save_feed_cache(key, str(int(value)), "")
+
+
 def collect_ima(client: httpx.Client | None = None) -> dict:
     """只读标题。共享知识库正文接口会返回 220030，这里不调用。"""
     if not source_configured("ima"):
@@ -917,6 +1002,8 @@ def run_due(source: str) -> dict:
         return collect_cls()
     if source == "wscn":
         return collect_wscn()
+    if source == "glh":
+        return collect_glh()
     if source == "ima":
         return collect_ima()
     if source in {"dws", "zsxq"}:

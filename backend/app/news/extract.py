@@ -34,6 +34,8 @@ class Mention:
 class StructuredStock:
     name: str = ""
     code: str = ""
+    # 来源接口给出的关联股记 source。正文或模型抽到的仍是 structured。
+    origin: str = "structured"
 
 
 def code6_of(raw: str) -> str:
@@ -120,13 +122,14 @@ class Lexicon:
             found.append(Mention(kind, key, (name or key).strip(), code, origin))
 
         for stock in structured_stocks or []:
+            origin = _stock_origin(stock.origin)
             symbol, name, code = self.resolve(stock.code, stock.name)
             if symbol:
-                add("stock", symbol, name or stock.name, code, "structured")
+                add("stock", symbol, name or stock.name, code, origin)
             elif stock.name and stock.name in self._name_symbol:
                 symbol = self._name_symbol[stock.name]
                 code = code6_of(symbol)
-                add("stock", symbol, stock.name, code, "structured")
+                add("stock", symbol, stock.name, code, origin)
         for sector in structured_sectors or []:
             sector = (sector or "").strip()
             if _usable_sector_name(sector):
@@ -152,6 +155,13 @@ class Lexicon:
                 continue
             add("sector", name, name, "", "text")
         return found
+
+
+def _stock_origin(value: str) -> str:
+    text = (value or "").strip()
+    if text in {"structured", "source"}:
+        return text
+    return "structured"
 
 
 def _code_in_text_ok(body: str, match: re.Match, lexicon: Lexicon) -> bool:
