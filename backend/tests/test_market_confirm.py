@@ -138,7 +138,8 @@ def test_event_after_the_session_waits_for_the_next_one():
     event["_first"] = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
     scored = score_confirmation(event, _tape(bars), NOW)
     assert scored["score"] == 0
-    assert scored["label"] == "等待竞价"
+    assert scored["label"] == "待开盘验证"
+    assert scored["pending"] is True
     assert scored["phase"] == "auction"
     assert scored["strength"] == "无"
 
@@ -298,7 +299,8 @@ def test_overnight_auction_confirms_after_925_and_not_before():
         datetime(2026, 10, 8, 22, 0, tzinfo=CN_TZ),
     )
     assert early["score"] == 0
-    assert early["label"] == "等待竞价"
+    assert early["label"] == "待开盘验证"
+    assert early["pending"] is True
     assert early["phase"] == "auction"
     assert early["detail"]["auction_open_pct"] is None
 

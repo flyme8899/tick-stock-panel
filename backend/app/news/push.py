@@ -22,7 +22,7 @@ from app.news.config import (
     webhook_configured,
 )
 from app.news.dingtalk import send_markdown
-from app.news.hot_events import HOT_RULES_VERSION
+from app.news.hot_events import HOT_RULES_VERSION, display_session_day
 
 logger = logging.getLogger(__name__)
 
@@ -845,6 +845,11 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     # 6.5 倍跳变）全报成「升温」（PR #97 评审）。
     if previous is not None and state.data.get("hot_rules_version") != HOT_RULES_VERSION:
         previous = None
+    # 15:00 榜单从「当天」切到「下一场」（盘中 + 收盘后）。名次会整批换掉，
+    # 不能把这次切换报成一堆新热点。视图变了就只建基线。
+    view = display_session_day(now).isoformat()
+    if previous is not None and state.data.get("hot_view") != view:
+        previous = None
     verified_only = push_type_saved("hot_verified")
     eligible = _eligible_hot_rows(snapshot, verified_only=verified_only)
     eligible_prev = _eligible_hot_rows(previous, verified_only=verified_only)
@@ -865,6 +870,7 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         state.data["hot_snapshot"] = snapshot
         state.data["hot_rules_version"] = HOT_RULES_VERSION
         state.data["hot_day"] = day
+        state.data["hot_view"] = view
         return False
     limit = top_n()
     events = [row for row in snapshot if row["kind"] == "event"][:limit]
@@ -891,6 +897,7 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
         state.data["hot_snapshot"] = snapshot
         state.data["hot_rules_version"] = HOT_RULES_VERSION
         state.data["hot_day"] = day
+        state.data["hot_view"] = view
         if slot:
             state.data["slots"][f"{day}:{slot}"] = stamp
         return False
@@ -906,6 +913,7 @@ def _push_hot(now: datetime, state: PushState, opener, trading: bool | None, loa
     state.data["hot_snapshot"] = snapshot
     state.data["hot_rules_version"] = HOT_RULES_VERSION
     state.data["hot_day"] = day
+    state.data["hot_view"] = view
     state.data["hot_digest"] = digest
     if slot:
         state.data["slots"][f"{day}:{slot}"] = stamp

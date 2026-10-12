@@ -288,6 +288,68 @@ def test_hot_rules_version_mismatch_drops_the_previous_snapshot(tmp_path, monkey
     assert "升温" in sent[-1]["markdown"]["text"]
 
 
+def _sector(key: str, score: float, stories: int) -> dict:
+    return {
+        "kind": "sector",
+        "key": key,
+        "name": key,
+        "score": score,
+        "story_count": stories,
+        "sources": ["cls"],
+        "growth": 1.5,
+    }
+
+
+def test_hot_view_switch_at_the_close_does_not_flood(tmp_path, monkeypatch):
+    """15:00 榜单从当天切到下一场时只建基线，不把整批名次变化报成新热点。"""
+    monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)
+    monkeypatch.setattr("app.news.push.push_type_enabled", lambda kind: kind == "hot")
+    monkeypatch.setattr("app.config.settings.dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test")
+    monkeypatch.setattr("app.config.settings.dingtalk_secret", "")
+    monkeypatch.setattr("app.config.settings.news_push_top_n", 5)
+    monkeypatch.setattr("app.config.settings.news_push_min_stories", 2)
+    monkeypatch.setattr("app.config.settings.news_push_score_jump", 0.5)
+    monkeypatch.setattr("app.config.settings.news_push_hot_cooldown_min", 30)
+    state = PushState(tmp_path / "push_state.json")
+    sent = []
+
+    def opener(request, timeout=10):
+        sent.append(json.loads(request.data.decode()))
+        return None
+
+    morning = datetime(2026, 10, 9, 14, 50, tzinfo=CN_TZ)
+    assert tick(
+        morning, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("半导体", 2, 3)],
+    ) == []
+    assert state.data["hot_view"] == "2026-10-09"
+    # 升级前的快照没有 hot_view。缺字段也只建基线。
+    state.data.pop("hot_view")
+    assert tick(
+        morning + timedelta(minutes=6), state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("银行", 8, 4)],
+    ) == []
+    assert sent == []
+    assert state.data["hot_view"] == "2026-10-09"
+
+    at_close = datetime(2026, 10, 9, 15, 6, tzinfo=CN_TZ)
+    assert tick(
+        at_close, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("碳酸锂", 9, 4)],
+    ) == []
+    assert sent == []
+    assert state.data["hot_view"] == "2026-10-12"
+
+    later = datetime(2026, 10, 9, 15, 12, tzinfo=CN_TZ)
+    assert tick(
+        later, state=state, opener=opener, trading=True,
+        hot_loader=lambda: [_sector("碳酸锂", 9, 4), _sector("机器人", 3, 3)],
+    ) == ["hot"]
+    assert "【热点候选】变化" in sent[-1]["markdown"]["text"]
+    assert "机器人" in sent[-1]["markdown"]["text"]
+    assert state.data["hot_view"] == "2026-10-12"
+
+
 def test_abnormal_and_t_only_after_baseline(tmp_path, monkeypatch):
     enabled = {"abnormal"}
     monkeypatch.setattr("app.news.push.push_master_enabled", lambda: True)

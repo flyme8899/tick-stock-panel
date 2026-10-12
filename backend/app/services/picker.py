@@ -862,6 +862,7 @@ def _confirmation_brief(raw) -> dict | None:
         "live": bool(raw.get("live")),
         "phase": phase if phase in {"auction", "intraday", "session"} else "",
         "lagged": bool(raw.get("lagged")),
+        "pending": bool(raw.get("pending")) or label == "待开盘验证",
         "horizon": horizon if horizon in {"主线", "一日游"} else "",
     }
 

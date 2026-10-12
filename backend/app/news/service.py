@@ -567,6 +567,7 @@ def _public_confirmation(raw) -> dict:
         "persistence": persistence,
         "phase": phase,
         "lagged": bool(payload.get("lagged")),
+        "pending": bool(payload.get("pending")) or str(payload.get("label") or "") == "待开盘验证",
         "horizon": horizon,
         "detail": {
             "excess_pct": _optional_score(detail.get("excess_pct")),
@@ -666,13 +667,14 @@ def event_detail(key: str, *, limit: int = 30, now: datetime | None = None) -> d
 
 
 def top_hot_events(now: datetime | None = None) -> dict:
-    """当前交易日分量最高的具体事件。
+    """当前这场开盘分量最高的具体事件。
 
     同一交易日的标题按主体、动作和细概念聚类。排序把事件重要性和首见之后的盘面验证
     放在同一档，再看 A 股映射和新鲜度。隔夜稿的新鲜度从交易日 9:00 起算。
     热度（条数乘来源数，再按更新时间衰减）只作加分。
-    当天没有资讯时，改用不晚于今天、且落在回看窗口里的最近一天，并在 hint 里标明。
-    结果缓存约 10 分钟。模型不可用时保留关键词标题和规则分级。
+    交易日 15:00 起，以及周末和休市日，改看下一场，并带上最近一个开市日的盘中事件。
+    这两天都没有资讯时，改用更早、且落在回看窗口里的最近一天，并在 hint 里标明。
+    「更新于」是这次计算的时间。结果缓存约 10 分钟。模型不可用时保留关键词标题和规则分级。
     """
     from app.news.hot_events import build_top_hot_events
 
