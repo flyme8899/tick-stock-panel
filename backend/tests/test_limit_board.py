@@ -250,6 +250,35 @@ def test_enrich_skips_limit_theme_for_stock_absent_from_titles(tmp_path: Path) -
     assert events[0]["concepts"] == []
 
 
+def test_enrich_anchors_stock_by_short_name_or_code(tmp_path: Path) -> None:
+    """锚定校验支持简称与 6 位代码，别把该补的题材误挡。
+
+    标题常写简称（「威领」而非「*ST威领」）或代码（「300750」）。只看全名会把
+    这些正确场景挡掉，所以去掉 ST/XD 前缀的正名和 6 位代码也算锚定。
+    """
+    store.write_rows(tmp_path, "ths", _DAY, parse_ths_pool(_load("ths_pool.json"), _DAY) or [])
+    # 简称命中：股票带 *ST 前缀，标题只写去前缀的名字。
+    short_hit = {
+        "concepts": [],
+        "direction": "",
+        "name": "威领股份要约收购结果出炉",
+        "headlines": ["威领股份要约收购结果出炉"],
+        "mentioned_stocks": [{"key": "300750.SZ", "name": "*ST威领"}],
+    }
+    # 代码命中：标题只写 6 位代码。
+    code_hit = {
+        "concepts": [],
+        "direction": "",
+        "name": "300750盘中涨停",
+        "headlines": ["300750盘中涨停"],
+        "mentioned_stocks": [{"key": "300750.SZ", "name": "宁德时代"}],
+    }
+    apply_limit_reasons([short_hit, code_hit], tmp_path, _DAY)
+    # 两只都锚定成功，涨停题材（fixture 里宁德时代对应固态电池概念）应被补上。
+    assert short_hit["limit_reason"]["enriched"] == ["固态电池概念"]
+    assert code_hit["limit_reason"]["enriched"] == ["固态电池概念"]
+
+
 def test_limit_board_sentiment_route(tmp_path, monkeypatch) -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
