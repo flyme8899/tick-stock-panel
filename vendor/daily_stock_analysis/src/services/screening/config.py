@@ -102,9 +102,11 @@ def _parse_bool_env(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-# Docker compose mounts the TSP data dir here and sets INDUSTRY_MAP_FILES.
+# Docker compose mounts only this directory read-only and points INDUSTRY_MAP_FILES
+# at the parquet inside it. The parent data directory stays on the host.
 # Local runs discover the same table under the repo data directory.
-_DOCKER_INDUSTRY_MAP = Path("/opt/tsp/data/ext_data/ext_hy_ths/part.parquet")
+_DOCKER_INDUSTRY_DIR = Path("/opt/tsp/data/ext_data/ext_hy_ths")
+_DOCKER_INDUSTRY_MAP = _DOCKER_INDUSTRY_DIR / "part.parquet"
 
 
 def _builtin_industry_map_candidates() -> list[Path]:

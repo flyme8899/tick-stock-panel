@@ -207,10 +207,22 @@ def test_compose_and_env_example_point_at_ext_hy_ths() -> None:
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     example = (root / ".env.example").read_text(encoding="utf-8")
     docs = (root / "docs" / "dsa-integration.md").read_text(encoding="utf-8")
-    container_path = "/opt/tsp/data/ext_data/ext_hy_ths/part.parquet"
+    container_dir = "/opt/tsp/data/ext_data/ext_hy_ths"
+    container_path = f"{container_dir}/part.parquet"
+    mount = f"./data/ext_data/ext_hy_ths:{container_dir}:ro"
 
     assert f"INDUSTRY_MAP_FILES={container_path}" in compose
-    assert "./data:/opt/tsp/data:ro" in compose
+    assert mount in compose
+    # app 仍挂 ./data:/app/data。DSA 不能再把整份 data 送进容器。
+    assert "./data:/opt/tsp" not in compose
+    assert "./data:/opt/tsp/data" not in docs
+    assert "users.json" in docs
+    assert "user_data/auth.json" in docs
     assert "INDUSTRY_MAP_FILES" in example
     assert "ext_hy_ths" in example
     assert container_path in docs
+
+    from src.services.screening.config import _DOCKER_INDUSTRY_DIR, _DOCKER_INDUSTRY_MAP
+
+    assert Path(container_path) == _DOCKER_INDUSTRY_MAP
+    assert _DOCKER_INDUSTRY_MAP.parent == _DOCKER_INDUSTRY_DIR

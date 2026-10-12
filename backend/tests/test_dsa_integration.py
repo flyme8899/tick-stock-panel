@@ -505,6 +505,7 @@ def test_catalog_documents_screening_and_efinance_priority(client: TestClient) -
     assert "screening_disabled" in purposes["SCREENING_ENABLED"]
     assert "ext_hy_ths" in purposes["INDUSTRY_MAP_FILES"]
     assert "第一级" in purposes["INDUSTRY_MAP_FILES"]
+    assert "只读挂载该目录" in purposes["INDUSTRY_MAP_FILES"]
     assert "3" in purposes["EFINANCE_PRIORITY"]
     assert "TickFlow" in purposes["EFINANCE_PRIORITY"]
 
