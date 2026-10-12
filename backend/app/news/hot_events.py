@@ -559,6 +559,8 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
         }
     events = ranked[chosen]
     _attach_limit_reasons(events, chosen)
+    # 第一次验证在写要点之前。新进前排的事件这时常常还没有个股或概念。
+    mapped_before = {id(event): _confirmation_mapping(event) for event in events}
     from app.news.market_confirm import attach_confirmations
     attach_confirmations(events, now)
     events = _rank_events(events, now, grade=False)
@@ -604,6 +606,8 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
             "updated_at": None,
             "events": [],
         }
+    # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上，不改已经排好的顺序。
+    _confirm_newly_mapped(kept, now, mapped_before)
     latest = max(event.pop("_latest") for event in kept)
     for event in kept:
         event.pop("_fp", None)
@@ -1085,6 +1089,58 @@ def _score_event(event: dict, now: datetime) -> None:
         "heat": round(heat_bonus, 4),
     }
     event["score"] = round(importance + confirmation + mapping + freshness + heat_bonus, 4)
+
+
+def _confirmation_mapping(event: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """盘面验证看的个股和概念。用来发现写要点之后才出现的映射。"""
+    stocks = tuple(sorted({
+        str(item.get("key") or "").strip()
+        for item in (event.get("mentioned_stocks") or [])
+        if isinstance(item, dict) and str(item.get("key") or "").strip()
+    }))
+    concepts = tuple(sorted({
+        str(name).strip()
+        for name in (event.get("concepts") or [])
+        if str(name).strip()
+    }))
+    return stocks, concepts
+
+
+def _confirm_newly_mapped(
+    events: list[dict],
+    now: datetime,
+    mapped_before: dict[int, tuple[tuple[str, ...], tuple[str, ...]]],
+) -> None:
+    """榜单定稿后，给这一轮才补上映射、且还没验证的事件做盘面验证。
+
+    请求路径只读快照。补验放在后台快照里，这样新事件在进入本轮榜单时就能判断，
+    不用空着强度再等下一轮。已经验证过的不重算，顺序也不改。
+    """
+    from app.news.market_confirm import load_market_tape, score_confirmation
+    from app.news.push import event_is_verified
+
+    pending = []
+    for event in events:
+        confirm = event.get("confirmation")
+        if event_is_verified(confirm if isinstance(confirm, dict) else None):
+            continue
+        current = _confirmation_mapping(event)
+        if current == mapped_before.get(id(event)):
+            continue
+        if not current[0] and not current[1]:
+            continue
+        pending.append(event)
+    if not pending:
+        return
+    tape = load_market_tape(now, events)
+    upgraded: list[str] = []
+    for event in pending:
+        event["confirmation"] = score_confirmation(event, tape, now, peers=events)
+        _score_event(event, now)
+        if event_is_verified(event.get("confirmation")):
+            upgraded.append(str(event.get("name") or event.get("key") or ""))
+    if upgraded:
+        logger.info("热门事件本轮完成盘面验证 %s", "、".join(upgraded))
 
 
 def _confirmation_points(raw) -> float:
