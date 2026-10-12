@@ -20,6 +20,7 @@
 展示主标题是簇里最可信的新闻原标题，只去掉来源前缀、括号、券商组名，以及开头的「报道」「据报道」「消息称」。
 第一句完整时停在句号、分号、叹号、问号或全文结束处，不在 40 字或逗号处截开。第一句太短或没有主体时，把下一句留下。引号没合上时不在引号里截断。公司名后面的冒号留下公司名，后面的顿号按原文保留。
 模型写一句话要点放在副标题。要点只丢掉空的、替换符或乱码、来源前缀和寒暄，不套主标题的主谓宾门槛，也不卡 12 到 18 字。数字、百分号和斜杠不算乱码。和主标题相同或已经包含在主标题里的要点不重复显示。
+模型回了空 title 或「无」时先重写一轮。仍空就从正文抽一句带数字或机构名、且和主标题不重复的话。抽不到就留空，不用标题再写一遍。模型写的要点标 subtitle_source 为 model，正文兜底的标 fallback。
 来源优先：公司公告和交易所，然后新华社、央视、证监会这类官方稿，再是财联社、华尔街见闻和格隆汇，然后外媒。
 知识星球、ima、钉钉里带「更新」「建议」「把握机会」「1e+」或编号列表的研报标题，不当主标题。
 公司或主题已经写清楚、并且过了原标题门槛的，可以用清理后的原标题。多主题晨报按条拆开，不再整篇丢掉。
@@ -27,7 +28,7 @@
 上一收盘之后到下一交易日 9:30，同一股票或同一细概念、并且是同一个动作的稿并成一件，不再卡 6 小时。
 提价、涨价函、上调价格和涨价算同一个提价动作。公司提价至少是重要；写了幅度或再次提价就是重大。
 隔夜和周末的新鲜度从该交易日 9:00 起算；簇里还有更晚的稿时，从最晚那条起算。
-寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。要点缓存版本是 v20。
+寒暄、纯点评、研报标签、空标题和只有栏目标签的，仍然不进列表。要点缓存版本是 v22。
 半截标题并回完整事件，提及次数跟着走。
 清理会去掉开头的钟点、【】标签、末尾省略号、已知媒体来源前缀（央视财经、财联社、新华社、经济日报），券商「招商电新…称」，以及研报文件名里的日期戳和 #。第一句太短或没有主体时，把叹号后面的下一句留下。引号没合上时不在引号里截断。
 公司名后面的冒号不是来源。后面如果以「公司」或「本公司」起笔，就换成这家公司的名字。
@@ -143,7 +144,10 @@ _TITLE_DISPLAY_MAX = 80
 #      Nit）。恢复出的标题会改变指纹、自然重问，但旧口径写下的 _miss 缓存
 #      （「此事件没有合格原标题」）不会——被误判截断而丢弃标题的事件会被旧
 #      _miss 一直压着。升版本把旧 _miss 一并作废（PR #97 复审，2026-10-12）。
-_TITLE_CACHE_VERSION = 21
+# v22: 模型 title 为空或只回「无」时，解析别名字段并重写一轮，仍空则用正文关键句。
+#      旧 _miss 会跳过新提示词，升版本作废（2026-10-12，线上前 20 有 13 条要点为空）。
+#      复审去掉「清理后的标题」兜底：那句和主标题重复。提示词未改，不升版本。
+_TITLE_CACHE_VERSION = 22
 # 热门计分/准入口径版本。改 _score_event 的计分、_original_reject_reason 的准入或
 # _resync_importance_score 的同步方式时 +1。push 比较前后两轮快照前校验它：
 # 版本不匹配说明上一轮快照的分数是新口径算不出来的，只建基线不比较，否则
@@ -826,6 +830,16 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
         logger.info("热门事件重排后补问切片外未标注条目 %d 条", len(unlabeled))
     # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上，不改已经排好的顺序。
     _confirm_newly_mapped(kept, now, mapped_before)
+    # 模型留空（补问一轮也一样）时，从正文抽一句和标题不同的要点。抽不到就留空，
+    # 不用标题再写一遍。不改分数、不改已经排好的顺序。候选正文还在，抽句要用，下面才丢掉。
+    shown = kept[:_TITLE_LIMIT]
+    before_empty = _empty_point_count(shown)
+    _fill_empty_subtitles(shown)
+    empty = _empty_point_count(shown)
+    logger.info(
+        "热门事件前%d要点为空 %d 条（兜底前 %d 条）",
+        len(shown), empty, before_empty,
+    )
     latest = max(event.pop("_latest") for event in kept)
     for event in kept:
         event.pop("_fp", None)
@@ -4385,12 +4399,18 @@ def _ensure_shown_name(event: dict) -> None:
         and _llm_title_reject_reason(subtitle, _event_source_text(event)) == ""
     ):
         event["name"] = subtitle
-        event["subtitle"] = ""
+        _blank_subtitle(event)
     else:
         event["name"] = ""
         event["subtitle"] = subtitle
     _drop_repeated_subtitle(event)
     event.pop("_llm_title_applied", None)
+
+
+def _blank_subtitle(event: dict) -> None:
+    """清掉要点，连带来源标记。空要点不该还挂着 model 或 fallback。"""
+    event["subtitle"] = ""
+    event.pop("subtitle_source", None)
 
 
 def _drop_repeated_subtitle(event: dict) -> None:
@@ -4406,16 +4426,19 @@ def _drop_repeated_subtitle(event: dict) -> None:
     """
     name = _compact(str(event.get("name") or ""))
     subtitle = _compact(str(event.get("subtitle") or ""))
-    if not name or not subtitle:
+    if not subtitle:
+        event.pop("subtitle_source", None)
+        return
+    if not name:
         return
     if subtitle == name or subtitle in name:
-        event["subtitle"] = ""
+        _blank_subtitle(event)
         return
     if _headline_similarity(name, subtitle) >= _SUBTITLE_SAME_TOPIC:
-        event["subtitle"] = ""
+        _blank_subtitle(event)
         return
     if not _shares_subject_or_number(name, subtitle):
-        event["subtitle"] = ""
+        _blank_subtitle(event)
 
 
 # 要点与主标题的 bigram 重合率到这一档就算「只是换个说法」。0.7 是评审给的
@@ -4918,6 +4941,117 @@ def _body_repeats_title(name: str, body: str) -> bool:
     return _headline_similarity(name, flat) >= _SUBTITLE_SAME_TOPIC
 
 
+def _point_repeats_name(name: str, text: str) -> bool:
+    """要点和主标题是同一句话时，不拿来当补充。"""
+    if not name or not text:
+        return False
+    if text == name or text in name or name in text:
+        return True
+    return _headline_similarity(name, text) >= _SUBTITLE_SAME_TOPIC
+
+
+def _clip_point(text: str) -> str:
+    """把超长的一句收到要点上限里，尽量停在逗号或顿号上。"""
+    body = _compact(text)
+    if len(body) <= _SUBTITLE_MAX:
+        return body
+    cut = max(
+        body.rfind("，", 0, _SUBTITLE_MAX + 1),
+        body.rfind("、", 0, _SUBTITLE_MAX + 1),
+    )
+    if cut >= 6:
+        return body[:cut]
+    return body[:_SUBTITLE_MAX]
+
+
+def _point_chunks(body: str) -> list[str]:
+    chunks: list[str] = []
+    for sentence in _SENTENCE_END.split(body):
+        compact = _compact(_strip_source_prefix(sentence))
+        if not compact:
+            continue
+        pieces = [compact]
+        if len(compact) > _SUBTITLE_MAX:
+            pieces = [part for part in (_compact(item) for item in _CLAUSE.split(compact)) if part]
+        for piece in pieces:
+            clipped = _clip_point(piece)
+            if clipped:
+                chunks.append(clipped)
+    return chunks
+
+
+def _key_sentence(name: str, body: str) -> str:
+    """从正文里挑一句带数字或机构、且主标题没写过的话。
+
+    模型把 title 留空时用。优先标题里没有的数字，其次新出现的机构名。
+    和主标题重复、过长、寒暄、来源前缀的不要。
+    """
+    if not body:
+        return ""
+    source = f"{name}\n{body}"
+    best = ""
+    best_score = 0
+    for text in _point_chunks(body):
+        if len(text) < 6:
+            continue
+        if _subtitle_reject_reason(text, source):
+            continue
+        if _point_repeats_name(name, text):
+            continue
+        novel_numbers = _subtitle_numbers(text) - _subtitle_numbers(name)
+        novel_entities = [item for item in _explicit_entities(text) if item not in name]
+        if not novel_numbers and not novel_entities:
+            if not _subtitle_numbers(text) and not _explicit_entities(text):
+                continue
+            score = 1
+        else:
+            score = len(novel_numbers) * 5 + len(novel_entities) * 3
+        if score > best_score:
+            best_score = score
+            best = text
+    return best
+
+
+def _fallback_subtitle(event: dict) -> str:
+    """模型没有可用要点时，从正文抽一句和主标题不同的话。抽不到就留空。"""
+    name = _compact(str(event.get("name") or ""))
+    point = _key_sentence(name, _event_body(event))
+    if not point or _point_repeats_name(name, point):
+        return ""
+    return point
+
+
+def _point_is_empty(event: dict) -> bool:
+    """没有要点，或要点只是把主标题再写一遍，都算空。"""
+    subtitle = _compact(str(event.get("subtitle") or ""))
+    if not subtitle:
+        return True
+    name = _compact(str(event.get("name") or ""))
+    return _point_repeats_name(name, subtitle)
+
+
+def _empty_point_count(events: list[dict]) -> int:
+    return sum(1 for event in events if _point_is_empty(event))
+
+
+def _fill_empty_subtitles(events: list[dict]) -> int:
+    """给还没有要点、且正文里有新事实的事件补一句。返回补上的条数。
+
+    和主标题相同的句子不算补上。补上的标 ``subtitle_source=fallback``。
+    """
+    filled = 0
+    for event in events:
+        if str(event.get("subtitle") or "").strip():
+            continue
+        point = _fallback_subtitle(event)
+        if not point:
+            continue
+        event["subtitle"] = point
+        event["subtitle_source"] = "fallback"
+        filled += 1
+    return filled
+
+
 def _title_prompt(events: list[dict], *, retry: bool) -> str:
     blocks = []
     for event in events:
@@ -4960,7 +5094,9 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
             "上一轮要点不合格，请重写。注意：下面每条的主标题都已经定稿，你写的"
             "要点**必须**是主标题里没有的新事实（数字、金额、比例、日期、地点、"
             "原因、影响对象）。**正文里有这类事实就一定要写出来，不要留空，也不要"
-            "把主标题换个说法充数**；正文确实只是重复主标题时才留空。\n"
+            "把主标题换个说法充数**；正文确实只是重复主标题时才留空。"
+            "如果上一轮 title 是空的或只写了「无」，这一轮必须改成一句正文里的事实，"
+            "不要再回空字符串。\n"
         )
     names = "、".join(_dictionary_names())
     return (
@@ -4981,6 +5117,7 @@ def _title_prompt(events: list[dict], *, retry: bool) -> str:
         "事实，要点写「转让对价 3.16 亿元」；不能因为标题已经说了「收购」就留空。"
         "只有翻遍正文、确实找不出「已有标题」之外的任何事实（正文就是把标题重复"
         "一遍）时才留空。留空是下策，不是「没把握就留空」。"
+        "不要用「无」「空」「暂无」「没有」填 title，这些和空字符串一样，都不算写了要点。"
         "绝对不要把「已有标题」换个说法当作要点：不要复述标题，不要给标题加「称」"
         "「表示」「建议」「将」「并」，也不要去掉标题的标点另写一句。"
         "不要直接抄正文的第一句话——那句话通常就是标题的扩写。"
@@ -5176,6 +5313,8 @@ def _label_batch_with_llm(
         return
     for index, event in enumerate(failed, start=1):
         event["_batch_id"] = str(index)
+    # 空 title、占位词和没过门槛的，在这里重写一轮。整批全空另有上面的原地重发；
+    # 这一轮是「有的写出了、有的留空」时的那一次重试。再空就交给展示兜底。
     second: dict[str, dict] = {}
     if reserve_call():
         second = _parse_title_batch(_request_titles(failed, retry=True), failed)
@@ -5288,8 +5427,39 @@ def _parse_title_batch(raw: str, events: list[dict]) -> dict[str, dict]:
     return found
 
 
+# 模型没写出要点时常见的占位。整段等于这些词才算，避免误伤「没有下调价格」。
+_PLACEHOLDER_POINTS = frozenset({
+    "无", "空", "没有", "暂无", "无要点", "无新事实", "没有新事实",
+    "（无）", "(无)", "n/a", "na", "none", "null", "略", "同上",
+    "-", "—", "―",
+})
+
+
+def _is_placeholder_point(text: str) -> bool:
+    """「无」「暂无」这种占位按空 title 处理，好走重试和兜底。"""
+    return _compact(text).lower() in _PLACEHOLDER_POINTS
+
+
+def _model_point_text(payload: dict) -> str:
+    """从模型 JSON 里取出要点。title 为空时再看 summary 等别名字段。
+
+    线上补问只回来一部分要点：title 是空字符串，正文却有几百到一千多字。
+    有的响应把那句话写在 summary，title 留空。占位词不当成写过。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("title", "summary", "point", "subtitle", "要点", "fact"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        text = _compact(value)
+        if text and not _is_placeholder_point(text):
+            return text
+    return ""
+
+
 def _parse_llm_payload(payload: dict, text: str) -> dict | None:
-    title = _compact(str(payload.get("title") or ""))
+    title = _model_point_text(payload)
     allowed = set(_dictionary_names())
     concepts = []
     concept_directions: dict[str, str] = {}
@@ -5348,8 +5518,9 @@ def _apply_llm(event: dict, parsed: dict) -> None:
     title = _compact(str(parsed.get("title") or ""))
     if _subtitle_reject_reason(title) == "":
         event["subtitle"] = title
+        event["subtitle_source"] = "model"
     else:
-        event["subtitle"] = ""
+        _blank_subtitle(event)
     anchor_name = str(event.get("name") or "")
     story_titles = [str(event.get("headline") or "")]
     story_titles.extend(str(item) for item in (event.get("headlines") or []))

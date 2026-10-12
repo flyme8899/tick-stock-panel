@@ -2507,6 +2507,8 @@ export interface NewsHotEvent {
   headline: string
   headlines?: string[]
   subtitle?: string
+  /** 要点来源。model 是模型所写，fallback 是从正文抽出的句子。没有要点时不返回。 */
+  subtitle_source?: 'model' | 'fallback'
   mentions: number
   red_count?: number
   source_count: number
