@@ -753,8 +753,27 @@ def test_dws_cursor_overlaps_two_minutes(tmp_path, monkeypatch):
 def test_host_collector_rejects_writes():
     assert_readonly(["/usr/local/bin/dws", "auth", "status"])
     assert_readonly(["zsxq-cli", "group", "+topics", "--group-id", "1", "--json"])
+    assert_readonly([
+        "/bin/zsxq-cli", "api", "raw", "--method", "GET",
+        "--path", "/v2/files/file_1/download_url",
+    ])
     with pytest.raises(CommandRejectedError):
         assert_readonly(["dws", "chat", "message", "send", "hello"])
+    with pytest.raises(CommandRejectedError):
+        assert_readonly([
+            "zsxq-cli", "api", "raw", "--method", "POST",
+            "--path", "/v2/files/file_1/download_url",
+        ])
+    with pytest.raises(CommandRejectedError):
+        assert_readonly([
+            "zsxq-cli", "api", "raw", "--method", "GET",
+            "--path", "/v2/files/../secrets/download_url",
+        ])
+    with pytest.raises(CommandRejectedError):
+        assert_readonly([
+            "zsxq-cli", "api", "raw", "--method", "GET",
+            "--path", "/v2/files/file_1/download_url", "--data", "{}",
+        ])
 
 
 def test_empty_group_id_is_unconfigured(tmp_path, monkeypatch):

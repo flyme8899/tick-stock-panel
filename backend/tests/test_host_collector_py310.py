@@ -34,6 +34,12 @@ _ALLOWED = {
     "backend/app/news/dingtalk.py",
     "backend/app/news/extract.py",
     "backend/app/news/host_collector.py",
+    "backend/app/news/zsxq_files.py",
+    "backend/app/research_reports/__init__.py",
+    "backend/app/research_reports/ima_store.py",
+    "backend/app/research_reports/ima_text.py",
+    "backend/app/services/__init__.py",
+    "backend/app/services/fs_utils.py",
 }
 
 _SPEC = importlib.util.spec_from_file_location("news_host_collector", _SCRIPT)

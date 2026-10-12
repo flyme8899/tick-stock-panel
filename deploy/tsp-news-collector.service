@@ -17,7 +17,9 @@ TimeoutStartSec=3600
 NoNewPrivileges=yes
 ProtectSystem=strict
 # data/news 必须属于 User= 指定的用户，否则收件箱写不进去。
+# data/research 给知识星球研报 PDF 和全文表。目录需已存在。
 ReadWritePaths=/home/ubuntu/tick-stock-panel/data/news
+ReadWritePaths=/home/ubuntu/tick-stock-panel/data/research
 # dws 约每 2 小时刷新令牌。ProtectHome 只读时这些目录不放开就会看成未登录。
 ReadWritePaths=/home/ubuntu/.dws
 ReadWritePaths=/home/ubuntu/.local/share/dws-cli

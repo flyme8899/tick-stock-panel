@@ -193,6 +193,15 @@ class Settings(BaseSettings):
     news_zsxq_group_id: str = ""
     # 「星球号:名称」逗号分隔。非空时优先于 news_zsxq_group_id。
     news_zsxq_groups: str = ""
+    # 留空时下载帖子里的 PDF 研报。false 才关闭。mp3、xlsx 仍只记元数据。
+    news_zsxq_files_enabled: str = ""
+    news_zsxq_files_max_mb: str = ""
+    news_zsxq_files_per_round: str = ""
+    news_zsxq_files_gap_ms: str = ""
+    news_zsxq_files_keep_days: str = ""
+    news_zsxq_files_max_total_mb: str = ""
+    # true 时正文写入研报库后删除 PDF。留空则保留文件，另有天数和总量上限。
+    news_zsxq_files_delete_after: str = ""
     news_etf_flow_enabled: str = ""
     # ETF 申赎表格的视觉模型。和上面的 ai_api_key / ai_model 分开，避免把文本模型当成视觉模型。
     vision_ai_api_key: str = ""

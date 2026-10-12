@@ -5,6 +5,7 @@ dws / zsxq-cli 的登录态在宿主机，不在容器里。本模块禁止任�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -23,18 +24,42 @@ _READONLY = {
     ("zsxq-cli", "auth", "status"),
     ("zsxq-cli", "group", "+topics"),
 }
+# 只放行取签名链接这一条 GET。不能按 api raw 前缀放行，否则 POST 也会通过。
+_ZSXQ_FILE_PATH = re.compile(r"^/v2/files/[0-9A-Za-z_-]{1,64}/download_url$")
+_logger = logging.getLogger(__name__)
 
 
 class CommandRejectedError(RuntimeError):
     pass
 
 
+def _zsxq_download_args(args: list[str]) -> bool:
+    """zsxq-cli api raw --method GET --path /v2/files/{id}/download_url。多一个参数就拒绝。"""
+    if tuple(args[:2]) != ("api", "raw"):
+        return False
+    method = ""
+    path = ""
+    index = 2
+    while index < len(args):
+        flag = args[index]
+        if flag not in {"--method", "--path"} or index + 1 >= len(args):
+            return False
+        if flag == "--method":
+            method = args[index + 1]
+        else:
+            path = args[index + 1]
+        index += 2
+    return method == "GET" and _ZSXQ_FILE_PATH.fullmatch(path) is not None
+
+
 def assert_readonly(argv: list[str]) -> None:
-    """只允许登录状态查询和拉消息。发帖、评论、发送一律拒绝。"""
+    """只允许登录状态查询、拉消息，以及取附件下载地址。发帖、评论、发送一律拒绝。"""
     if len(argv) < 3:
         raise CommandRejectedError("命令为空")
     name = Path(argv[0]).name
     args = argv[1:]
+    if name == "zsxq-cli" and _zsxq_download_args(args):
+        return
     allowed = [item[1:] for item in _READONLY if item[0] == name]
     if not any(tuple(args[:len(expected)]) == expected for expected in allowed):
         raise CommandRejectedError(f"拒绝执行非只读命令: {name} {' '.join(args[:3])}")
@@ -117,6 +142,23 @@ def zsxq_argv(binary: str, group_id: str, end_time: str = "") -> list[str]:
     argv = [binary, "group", "+topics", "--group-id", group_id, "--json", "--limit", "30"]
     if end_time:
         argv.extend(["--end-time", end_time])
+    assert_readonly(argv)
+    return argv
+
+
+def zsxq_file_argv(binary: str, file_id: str) -> list[str]:
+    """取签名下载地址。file_id 限定字符集，避免把路径拼出白名单。"""
+    if not _ZSXQ_FILE_PATH.fullmatch(f"/v2/files/{file_id}/download_url"):
+        raise CommandRejectedError("附件编号无效")
+    argv = [
+        binary,
+        "api",
+        "raw",
+        "--method",
+        "GET",
+        "--path",
+        f"/v2/files/{file_id}/download_url",
+    ]
     assert_readonly(argv)
     return argv
 
@@ -261,6 +303,7 @@ def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: st
     default_since = (cn_now() - timedelta(days=2)).isoformat()
     pages = 400 if backfill_since else 8
     errors: list[str] = []
+    batched: list = []
     for gid, name in groups:
         # 游标按星球分开。一个星球推进不能把另一个星球的新帖滤掉。
         key = f"zsxq:{gid}"
@@ -275,8 +318,23 @@ def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: st
             topic["group_name"] = name
         if topics:
             write_inbox(data_dir, "zsxq", topics, suffix=gid)
+            batched.extend(topics)
         write_cursor(data_dir, key, cn_now().isoformat())
+    # 文本游标已经推进。附件失败只留在自己的索引里，下轮再试，不把这一轮收成失败。
+    _sync_zsxq_files(data_dir, batched, run, binary)
     if errors:
         write_auth(data_dir, "zsxq", "ok", errors[0])
         return "fetch-failed"
     return "ok"
+
+
+def _sync_zsxq_files(data_dir: Path, topics: list, run, binary: str) -> None:
+    try:
+        from app.news.zsxq_files import sync_zsxq_files
+
+        sync_zsxq_files(data_dir, topics, run, binary)
+    except Exception as exc:  # noqa: BLE001
+        text = str(exc)
+        if "://" in text or "zsxq.com" in text:
+            text = "附件下载失败"
+        _logger.warning("知识星球附件未完成: %s", text[:120])

@@ -114,10 +114,13 @@ SEC 8-K 还要 `SEC_USER_AGENT`，字符串里必须有联系邮箱，例如 `TS
 
 钉钉群号和知识星球号留空表示未配置，对应来源无法开启。知识星球可以只填一个号，也可以一次填多个。`NEWS_ZSXQ_GROUPS` 非空时不再读 `NEWS_ZSXQ_GROUP_ID`。名称会写进每条资讯，热点和推送显示成「知识星球·名称」。每个星球各记一个进度游标，补历史时同一起点套到全部星球。标题像复盘、舆情或汇总的帖子仍会入库，但不会按正文编号拆成多条热点，个股热度也只看标题。
 
+帖子附件里的 PDF 会进同一张研报全文表 `data/research/ima_reports.sqlite`，供个股页和 DSA 使用。来源名是「知识星球·星球名」，标题用文件名去掉扩展名，并记下原帖编号和发布时间。只下载 `.pdf`；mp3、xlsx 只把文件名、大小和哈希留在收件箱。按 `file_id` 和哈希去重。单文件默认不超过 30MB，每一轮最多 8 个，相邻下载至少间隔 1 秒。下载或抽正文失败不影响帖子文本入库，下一轮再试。签名链接不落盘、不写日志。PDF 放在 `data/research/zsxq_files/`，默认保留 60 天或总量 2048MB；`NEWS_ZSXQ_FILES_DELETE_AFTER=true` 时正文入库后删除文件。`NEWS_ZSXQ_FILES_ENABLED=false` 关闭下载。热门事件仍只看帖子标题和摘要，不读 PDF 正文。
+
 ```ini
 NEWS_DWS_GROUP_ID=
 NEWS_ZSXQ_GROUP_ID=
 NEWS_ZSXQ_GROUPS=
+# NEWS_ZSXQ_FILES_ENABLED=false
 ```
 
 登录失效时，若配置了 `DINGTALK_WEBHOOK_URL`（可选 `DINGTALK_SECRET`），6 小时内对同一来源只发一条提醒，正文不含资讯内容。
@@ -132,7 +135,7 @@ NEWS_ZSXQ_GROUPS=
 python scripts/news_host_collector.py --data-dir ./data
 ```
 
-脚本只允许 `dws auth status`、`dws chat +chat-messages`、`dws chat message list`、`zsxq-cli auth status`、`zsxq-cli group +topics`。发帖、评论、发送会被拒绝。
+脚本只允许 `dws auth status`、`dws chat +chat-messages`、`dws chat message list`、`zsxq-cli auth status`、`zsxq-cli group +topics`，以及 `zsxq-cli api raw --method GET --path /v2/files/{file_id}/download_url`。其它 `api raw`（包括 POST）会被拒绝。发帖、评论、发送也会被拒绝。
 
 知识星球补历史（可选，从 2025-08-23 起）：
 
@@ -144,7 +147,7 @@ python scripts/news_host_collector.py --data-dir ./data --backfill-since 2025-08
 
 这条定时器不是容器调度的重复。容器里的轮询对钉钉和知识星球只调用 `collect_inbox()`，读取 `data/news/inbox`。容器内没有 `dws` / `zsxq-cli`，登录态在宿主机的 `~/.dws` 等目录。停掉 `tsp-news-collector.timer` 之后，这两路资讯不再入库。
 
-采集脚本启动时检查 Python 版本，低于 3.10 会直接退出。面板和容器仍用 Python 3.11。推荐把 `~/.venvs/tsp-collector` 建在 3.11 上，不要长期留在系统自带的 3.10。虚拟环境里至少要有 `pydantic` 和 `pydantic-settings`，因为脚本会导入 `app.config`。
+采集脚本启动时检查 Python 版本，低于 3.10 会直接退出。面板和容器仍用 Python 3.11。推荐把 `~/.venvs/tsp-collector` 建在 3.11 上，不要长期留在系统自带的 3.10。虚拟环境里至少要有 `pydantic` 和 `pydantic-settings`，因为脚本会导入 `app.config`。要抽取研报 PDF 正文，还要有 `pypdf`（与后端依赖一起装即可）。`ProtectSystem=strict` 时，`data/research` 也要放进 `ReadWritePaths`，否则全文表和 PDF 写不进去；收件箱仍在 `data/news`。目录不存在时先 `mkdir -p data/research data/news`。
 
 Ubuntu 可以用 deadsnakes：
 

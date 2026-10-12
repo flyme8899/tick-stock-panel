@@ -48,6 +48,8 @@ dependencies = [
     "argon2-cffi>=23.1",
     "bcrypt>=4.1",
     "jieba>=0.42.1",
+    # 知识星球研报 PDF 抽正文。纯 Python，宿主机采集环境也要装。
+    "pypdf>=5.1",
 ]
 
 [project.optional-dependencies]

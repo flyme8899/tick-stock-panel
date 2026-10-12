@@ -146,6 +146,60 @@ def zsxq_groups() -> list[tuple[str, str]]:
     return _parse_id_list(_text_setting("NEWS_ZSXQ_GROUP_ID", "news_zsxq_group_id"))
 
 
+def zsxq_files_enabled() -> bool:
+    """帖子 PDF 研报。留空默认下载，只有显式 false 才关。"""
+    flag = _flag("NEWS_ZSXQ_FILES_ENABLED")
+    return flag is None or flag
+
+
+def zsxq_files_delete_after() -> bool:
+    """正文入库后是否删除 PDF。留空则保留，靠天数和总量上限清盘。"""
+    return _flag("NEWS_ZSXQ_FILES_DELETE_AFTER") is True
+
+
+def _bounded_int(env_name: str, attr: str, default: int, lo: int, hi: int) -> int:
+    raw = os.environ.get(env_name)
+    if raw is None or not str(raw).strip():
+        raw = getattr(settings, attr, "")
+    text = str(raw or "").strip()
+    if not text:
+        return default
+    try:
+        value = int(text)
+    except ValueError:
+        return default
+    return min(hi, max(lo, value))
+
+
+def zsxq_files_max_bytes() -> int:
+    """单个 PDF 上限，默认 30MB。元数据已经更大的不请求下载。"""
+    mb = _bounded_int("NEWS_ZSXQ_FILES_MAX_MB", "news_zsxq_files_max_mb", 30, 1, 200)
+    return mb * 1024 * 1024
+
+
+def zsxq_files_per_round() -> int:
+    """每一轮最多下载几个 PDF。0 表示本轮不下载，收件箱仍保留元数据。"""
+    return _bounded_int("NEWS_ZSXQ_FILES_PER_ROUND", "news_zsxq_files_per_round", 8, 0, 32)
+
+
+def zsxq_files_gap_s() -> float:
+    ms = _bounded_int("NEWS_ZSXQ_FILES_GAP_MS", "news_zsxq_files_gap_ms", 1000, 0, 60_000)
+    return ms / 1000.0
+
+
+def zsxq_files_keep_days() -> int:
+    """已抽取的 PDF 保留天数。0 表示不按天数删除。"""
+    return _bounded_int("NEWS_ZSXQ_FILES_KEEP_DAYS", "news_zsxq_files_keep_days", 60, 0, 3650)
+
+
+def zsxq_files_max_total_bytes() -> int:
+    """已抽取 PDF 的总量上限。0 表示不按总量删除。默认 2GB。"""
+    mb = _bounded_int(
+        "NEWS_ZSXQ_FILES_MAX_TOTAL_MB", "news_zsxq_files_max_total_mb", 2048, 0, 102_400
+    )
+    return mb * 1024 * 1024
+
+
 def group_id(source: str) -> str | list[tuple[str, str]]:
     """钉钉返回群号。知识星球返回 [(星球号, 名称), ...]。留空表示未配置。"""
     if source == "dws":
