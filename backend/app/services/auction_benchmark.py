@@ -27,11 +27,12 @@ import json
 import logging
 import re
 from datetime import date as date_cls
+from datetime import time as dt_time
 from pathlib import Path
 
 import polars as pl
 
-from app.market_time import cn_today
+from app.market_time import cn_now, cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -122,10 +123,23 @@ def _read_kline_closes(data_dir: Path, d: date_cls) -> dict[str, float]:
         return {}
 
 
+def _day_return_ready(trade_date: date_cls) -> bool:
+    """当日开盘买→收盘卖是否已经有可展示的收益。
+
+    连续竞价 (09:30) 开始前, 实时行情会把缺失的 open 用 close 填上, close/open-1
+    恒为 0。这不是「当日走平」, 不能当成 0.00% 展示。历史交易日的日 K 已收盘, 直接可用。
+    """
+    now = cn_now()
+    if trade_date != now.date():
+        return True
+    return now.time() >= dt_time(9, 30)
+
+
 def _enrich(data_dir: Path, trade_date: date_cls, items: list[dict]) -> list[dict]:
     """名单叠加真实收益: day0_oc (开盘买→收盘卖) / day0_pct (全天) / d1_pct (次日)。
 
     用相邻 kline_daily 分区现算, 不落缓存 — 次日分区晚到时先给 None, 到了自然补上。
+    当日连续竞价开始前不计算 day0_oc / day0_pct, 避免盘前占位 K 线显示成 0.00%。
     """
     root = data_dir / "kline_daily" / f"date={trade_date.isoformat()}"
     day0: dict[str, tuple[float, float]] = {}  # symbol -> (open, close)
@@ -142,11 +156,12 @@ def _enrich(data_dir: Path, trade_date: date_cls, items: list[dict]) -> list[dic
     nxt = _next_trading_day(data_dir, trade_date)
     next_close = _read_kline_closes(data_dir, nxt) if nxt else {}
 
+    ready = _day_return_ready(trade_date)
     out: list[dict] = []
     for r in items:
         sym = str(r.get("thscode") or "")
         oc = pct = d1 = None
-        if sym in day0:
+        if ready and sym in day0:
             o, c = day0[sym]
             if o and o > 0 and c is not None:
                 oc = c / o - 1.0

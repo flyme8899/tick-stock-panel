@@ -8,12 +8,13 @@ fuyao 未配置降级、目标日失败 fallback_prev、彻底失败 no_data、A
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
 import pytest
 
+from app.market_time import CN_TZ
 from app.plugins.fuyao.client import FuyaoError
 from app.services import auction_benchmark as ab
 
@@ -152,6 +153,41 @@ def test_enrich_math_with_local_kline(data_dir, monkeypatch):
     assert wly["d1_pct"] == pytest.approx(133.0 / 130.0 - 1)
     # 原始字段透传
     assert mt["auction_pct"] == 1.0 and mt["tags"] == ["白酒", "超级品牌"]
+
+
+def test_before_open_placeholder_bar_is_not_zero_return(data_dir, monkeypatch):
+    """开盘前实时日K open 被 close 填平, 不能把 0.00% 当成当日收益。"""
+    day = date(2026, 10, 12)
+    _write_kline(
+        data_dir,
+        day.isoformat(),
+        [("600519.SH", 10.0, 10.0), ("000858.SZ", 8.0, 8.0)],
+    )
+    monkeypatch.setattr(ab, "cn_today", lambda: day)
+    monkeypatch.setattr(ab, "cn_now", lambda: datetime(2026, 10, 12, 9, 26, tzinfo=CN_TZ))
+    _use_provider(monkeypatch, _FakeProvider())
+    out = ab.get_auction_benchmark(data_dir, day)
+    assert out["state"] == "ok" and out["trade_date"] == "2026-10-12"
+    for item in out["items"]:
+        assert item["day0_oc"] is None
+        assert item["day0_pct"] is None
+
+
+def test_after_open_flat_bar_stays_zero(data_dir, monkeypatch):
+    """连续竞价开始后, 开盘价等于最新价是真实的 0% , 不是缺失。"""
+    day = date(2026, 10, 12)
+    _write_kline(
+        data_dir,
+        day.isoformat(),
+        [("600519.SH", 10.0, 10.0), ("000858.SZ", 8.0, 8.4)],
+    )
+    monkeypatch.setattr(ab, "cn_today", lambda: day)
+    monkeypatch.setattr(ab, "cn_now", lambda: datetime(2026, 10, 12, 10, 0, tzinfo=CN_TZ))
+    _use_provider(monkeypatch, _FakeProvider())
+    out = ab.get_auction_benchmark(data_dir, day)
+    by = {i["thscode"]: i for i in out["items"]}
+    assert by["600519.SH"]["day0_oc"] == 0.0
+    assert by["000858.SZ"]["day0_oc"] == pytest.approx(8.4 / 8.0 - 1)
 
 
 def test_enrich_missing_kline_gives_none(data_dir, monkeypatch):
