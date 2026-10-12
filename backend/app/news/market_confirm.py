@@ -1,6 +1,7 @@
 """热门事件的盘面验证。只使用当时已经能看到的行情和资金。
 
 隔夜消息（上一交易日收盘后到下一交易日 9:25，含周末）在 9:25 集合竞价出来之后按竞价验证计分。
+9:25 到 9:30 连续竞价尚未开始，确认用的交易日仍切到当天，否则竞价高开读不到。
 盘中消息看发布后 5、15、30 分钟相对发布前的增量，用来区分消息推动和本来就在涨的标的。
 已经验证的事件再看下午和下一交易日，分成一日游和主线。异动若发生在消息之前，标成消息滞后确认。
 同一窗口里多条事件映射到同一标的时，按时间和映射强弱分配，不重复计算同一段涨跌。
@@ -38,6 +39,14 @@ _BULL_SIGNALS = frozenset({"limit_up", "new_high", "broken"})
 _BEAR_SIGNALS = frozenset({"limit_down", "new_low"})
 
 
+def confirm_session_day(now: datetime) -> date:
+    """盘面确认用的交易日。9:25 竞价出来后就是当天，不等 9:30。"""
+    local = now.astimezone(CN_TZ)
+    if local.weekday() < 5 and local.time() >= dt_time(9, 25):
+        return local.date()
+    return latest_session_day(local)
+
+
 def latest_session_day(now: datetime) -> date:
     """周末、盘前用上一个交易日；盘中和收盘后用当天。"""
     local = now.astimezone(CN_TZ)
@@ -62,7 +71,7 @@ def load_market_tape(now: datetime, events: list[dict]) -> dict:
         return _load_market_tape(now, events)
     except Exception:
         logger.exception("盘面验证读取失败")
-        session = latest_session_day(now)
+        session = confirm_session_day(now)
         return _blank_tape(session, live=in_continuous_session(now))
 
 
@@ -87,7 +96,15 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
     # 不要被「首见晚于最近交易日」这条短路走掉。
     deadline = _auction_deadline(first)
     waiting = deadline is not None and now.astimezone(CN_TZ) < deadline
-    if not waiting and session is not None and first.date() > session and not live:
+    # 隔夜稿的确认日可能晚于「最近交易日」（9:25 竞价已出、连续竞价未开）。
+    # 这种稿走竞价计分，不能被「首见晚于最近交易日」短路成 0 分。
+    if (
+        not waiting
+        and deadline is None
+        and session is not None
+        and first.date() > session
+        and not live
+    ):
         return _result(
             0, False, "无", "无", "尚无首见之后的盘面", session, False, {},
         )
@@ -219,7 +236,7 @@ def _load_market_tape(now: datetime, events: list[dict]) -> dict:
     from app.config import settings
 
     data_dir = Path(settings.data_dir)
-    session = latest_session_day(now)
+    session = confirm_session_day(now)
     live = in_continuous_session(now)
     concepts = sorted({
         str(name).strip()
@@ -416,7 +433,7 @@ def _next_weekday(day: date) -> date:
 
 
 def _tape_days(now: datetime, events: list[dict]) -> list[date]:
-    latest = latest_session_day(now)
+    latest = confirm_session_day(now)
     days = {latest}
     for event in events:
         first = _first_at(event)
