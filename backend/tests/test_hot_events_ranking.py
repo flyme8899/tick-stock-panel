@@ -15,6 +15,7 @@ _resync_importance_score 只把展示分对齐、不重排 —— 榜单按旧�
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 
 from app.market_time import CN_TZ
@@ -224,7 +225,7 @@ def test_ranking_is_monotonic_and_top20_keeps_titles(tmp_path, monkeypatch):
     assert all(str(event.get("subtitle") or "").strip() for event in events[:20])
 
 
-def test_unlabeled_events_pulled_into_top20_get_a_second_ask(tmp_path, monkeypatch):
+def test_unlabeled_events_pulled_into_top20_get_a_second_ask(tmp_path, monkeypatch, caplog):
     """切片漏掉的事件被重排送进前 20 时，补问一轮，保证仍然条条有要点。"""
     calls: list[str] = []
     reset_store_for_tests(tmp_path / "second-ask.sqlite")
@@ -233,13 +234,17 @@ def test_unlabeled_events_pulled_into_top20_get_a_second_ask(tmp_path, monkeypat
     # 只让规则前 10 名送模型：碳酸锂（规则垫底）和一批「重要」事件都在切片外。
     monkeypatch.setattr(hot_mod, "_events_for_titles", lambda events: events[:10])
     hot_mod.clear_hot_event_cache()
-    events = top_hot_events(NOW)["events"]
+    with caplog.at_level(logging.INFO, logger="app.news.hot_events"):
+        events = top_hot_events(NOW)["events"]
     assert len(events) >= 20
     scores = _scores(events)
     assert scores == sorted(scores, reverse=True)
     assert all(str(event.get("subtitle") or "").strip() for event in events[:20])
     # 补问真的发生了：首轮切片一批 + 补问一批，至少两次调用。
     assert len(calls) >= 2
+    # 补问条数记了日志，线上靠它观察裕度是否被击穿（正常情况下这条不出现）。
+    asked = [r for r in caplog.records if "补问切片外未标注条目" in r.message]
+    assert asked and int(str(asked[0].args[0])) >= 1
     # 被降级的美股组（重大→一般，-110）不该留在前列。
     top_names = " ".join(str(event.get("name") or "") for event in events[:10])
     assert "美股" not in top_names

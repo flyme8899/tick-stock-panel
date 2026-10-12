@@ -758,6 +758,9 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
             _ensure_shown_name(event)
             _resync_importance_score(event)
         kept.sort(key=_event_sort_key)
+        # 补问是裕度的保险不是常规路径，正常情况下这条日志不出现；出现即说明
+        # 重排真的把切片外条目送进了前 _TITLE_LIMIT，条数进监控。
+        logger.info("热门事件重排后补问切片外未标注条目 %d 条", len(unlabeled))
     # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上，不改已经排好的顺序。
     _confirm_newly_mapped(kept, now, mapped_before)
     latest = max(event.pop("_latest") for event in kept)
