@@ -43,11 +43,15 @@
 
 概念先留标题里已经出现的细概念，再用主体到 A 股概念的小词典补回被滤空的映射。
 概念必须对得上这条事件自己的展示标题：同簇其他稿上的概念，以及只在其他稿里出现的词典触发词，不贴过来。
-伊朗、中东映射到中东，不能因为都出现了「冲突」就标成俄乌。
+伊朗、对伊映射到中东，金丹科技映射到聚乳酸。不能因为都出现了「冲突」就标成俄乌。
 「俄乌冲突快报」这类栏目名不是概念。事件自己没有概念时，模型只能从这张词典里选，而且触发词必须出现在这条标题里。词典没写到的无关概念仍然丢掉。
 利好利空也只看这条标题，不靠同簇多数票，模型不能把已经判定的负面动作改成利好。
 削减、砸单、砸价、下调、取消、暴跌、减产先于订单和发布，这些动作是利空。
+概率低、不会、未、否认、暂不先于这些利空词：全面严格制裁概率低不是利空。
+下调准备金、下调利率、取消限购、缓和冲突是利好。
 只有标题写明利好某个名字（例如利好下游电池）时，那个受益方才标利好；没有这些词时仍默认利好。
+联储、加息、降息归海外市场/央行，对伊、战事归地缘政治，点名公司的提价归公司重大事项。
+模型不能把这些已经对上的分类改回科技与产业。
 同一时间窗里，财政部、国务院这类国内政策主体即使一个写发布、一个写出台，也并成一件事。
 """
 from __future__ import annotations
@@ -190,13 +194,15 @@ CATEGORY_NAMES = (
     "公司重大事项",
 )
 _CATEGORY_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("地缘政治", ("制裁", "关税", "冲突", "战争", "停火", "出口管制", "配额", "地缘")),
-    ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "加息", "降息", "美股", "纳指", "标普", "欧股", "日经")),
+    ("地缘政治", ("制裁", "关税", "冲突", "战争", "战事", "对伊", "伊朗", "停火", "出口管制", "配额", "地缘")),
+    ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "联储", "加息", "降息", "美股", "纳指", "标普", "欧股", "日经")),
     ("国内政策/宏观", ("出台", "补贴", "降准", "国务院", "发改委", "工信部", "证监会", "财政部", "国资委", "央行", "宏观", "政策")),
     ("大宗商品/期货价格异动", ("碳酸锂", "原油", "期货", "黄金", "铜价", "铁矿", "煤炭", "稀土", "豆粕", "螺纹", "报价", "橡胶")),
     ("公司重大事项", ("收购", "回购", "上市", "立案", "停产", "召回", "签约", "签署", "签订", "中标", "停牌", "退市")),
     ("科技与产业", ("发布", "订单", "追加", "获批", "涨价", "降价", "提价", "上调", "下调", "量产", "芯片", "模型")),
 )
+# 纽约联储不包含「美联储」四个字。有央行主体时，关税评论仍是海外市场，不落到科技与产业。
+_CENTRAL_BANK_CUES = ("美联储", "欧央行", "日本央行", "英央行", "联储", "加息", "降息")
 _ACTION_CATEGORY = {
     "出台": "国内政策/宏观",
     "定调": "国内政策/宏观",
@@ -374,15 +380,18 @@ _SUBJECT_CONCEPTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("IEA",), ("石油", "油服")),
     (("美联储", "加息"), ("黄金", "银行")),
     (("伊朗",), ("中东",)),
+    (("对伊",), ("中东",)),
+    (("伊核",), ("中东",)),
     (("以色列",), ("中东",)),
     (("加沙",), ("中东",)),
     (("巴勒斯坦",), ("中东",)),
     (("中东",), ("中东",)),
+    (("金丹科技",), ("聚乳酸",)),
 )
 # 概念里点名的地缘实体必须在事件正文里出现。同一组里任一说法都算对上。
 _GEO_ENTITY_GROUPS = (
     ("俄乌", "乌克兰"),
-    ("伊朗", "中东", "以色列", "加沙", "巴勒斯坦"),
+    ("伊朗", "对伊", "伊核", "中东", "以色列", "加沙", "巴勒斯坦"),
     ("俄罗斯",),
 )
 # 没有 A 股映射时直接丢掉。发布、获奖这类弱动词留不住诺贝尔和世界杯。
@@ -2334,10 +2343,34 @@ def _relevance(title: str, lead: str, action: str, concepts: list[str], stocks: 
 
 def _category_for(text: str, action: str) -> str:
     blob = text or ""
+    # 联储评论里的关税仍是海外市场。关税单独出现时仍按地缘政治。
+    if any(cue in blob for cue in _CENTRAL_BANK_CUES):
+        return "海外市场/央行"
     for name, cues in _CATEGORY_CUES:
+        if name == "科技与产业":
+            continue
         if any(cue in blob for cue in cues):
             return name
+    # 点名公司的提价是公司事项。行业涨价没有公司名，仍走科技与产业。
+    if _company_price_hike(blob):
+        return "公司重大事项"
+    for name, cues in _CATEGORY_CUES:
+        if name == "科技与产业" and any(cue in blob for cue in cues):
+            return name
     return _ACTION_CATEGORY.get(action, "科技与产业")
+
+
+def _category_locked(text: str, action: str) -> bool:
+    """实体知识已经定类时，模型不能改回科技与产业。"""
+    blob = text or ""
+    ruled = _category_for(blob, action)
+    if ruled == "海外市场/央行" and any(cue in blob for cue in _CENTRAL_BANK_CUES):
+        return True
+    if ruled == "公司重大事项" and _company_price_hike(blob):
+        return True
+    return ruled == "地缘政治" and any(
+        cue in blob for cue in ("对伊", "战事", "伊朗", "冲突", "战争")
+    )
 
 
 def _category_allowed(category: str, text: str, action: str) -> bool:
@@ -2346,6 +2379,8 @@ def _category_allowed(category: str, text: str, action: str) -> bool:
         return False
     if category == _category_for(text, action):
         return True
+    if _category_locked(text, action):
+        return False
     for name, cues in _CATEGORY_CUES:
         if name == category:
             return any(cue in (text or "") for cue in cues)
@@ -2364,15 +2399,23 @@ _BULL_VERBS = (
     "回购", "获批", "降息", "降准", "补贴", "中标",
     "签约", "签署", "签订", "追加", "增长", "新增",
 )
-
-
-def _earliest_verb(text: str, verbs: tuple[str, ...]) -> int:
-    found = -1
-    for verb in verbs:
-        index = text.find(verb)
-        if index >= 0 and (found < 0 or index < found):
-            found = index
-    return found
+# 这些说法里夹着下调、取消、冲突，但整句是利好。长的放前面，避免只盖住一半。
+_POLICY_BULL = (
+    "下调存款准备金",
+    "下调准备金",
+    "下调存款利率",
+    "下调利率",
+    "取消限购",
+    "取消购房限制",
+)
+_EASING = re.compile(r"缓和[^，。；！？\n]{0,6}冲突|冲突[^，。；！？\n]{0,6}缓和")
+# 「未来」里的未不是否定。否定要紧挨着后面的利空词，中间可以隔几个字。
+_NEG_PREFIX = re.compile(
+    r"(?:不会|暂不|并未|尚未|暂未|否认|(?<!将)未(?!来))[\u4e00-\u9fff]{0,8}$"
+)
+_NEG_SUFFIX = re.compile(
+    r"^(?:的)?(?:概率|可能性)(?:偏低|较低|低|不大|较小|不高|有限)"
+)
 
 
 def _story_texts(name: str, titles: list[str]) -> list[str]:
@@ -2399,20 +2442,106 @@ def _story_texts(name: str, titles: list[str]) -> list[str]:
     return kept
 
 
+def _clause_before(blob: str, index: int, limit: int) -> str:
+    left = blob[max(0, index - limit):index]
+    for sep in "。；！？\n":
+        cut = left.rfind(sep)
+        if cut >= 0:
+            left = left[cut + 1:]
+    return left
+
+
+def _prefix_negated(blob: str, index: int) -> bool:
+    return _NEG_PREFIX.search(_clause_before(blob, index, 16)) is not None
+
+
+def _suffix_negated(blob: str, index: int, verb: str) -> bool:
+    right = blob[index + len(verb):index + len(verb) + 12]
+    for sep in "。；！？\n":
+        cut = right.find(sep)
+        if cut >= 0:
+            right = right[:cut]
+    return _NEG_SUFFIX.search(right) is not None
+
+
 def _direction_signal(text: str, action: str) -> str:
-    """有明确动作时返回利好或利空。对不上则返回空，调用方再默认利好。"""
+    """有明确动作时返回利好或利空。对不上则返回空，调用方再默认利好。
+
+    否定先于利空词：概率低、不会、未、否认、暂不盖住后面的制裁、加息。
+    下调准备金、下调利率、取消限购、缓和冲突整句是利好，里面的下调、取消、冲突不算利空。
+    """
     blob = text or ""
-    bear_at = _earliest_verb(blob, _BEAR_VERBS)
-    bull_at = _earliest_verb(blob, _BULL_VERBS)
+    masked = [False] * len(blob)
+    bear_at = -1
+    bull_at = -1
+
+    def remember(kind: str, index: int) -> None:
+        nonlocal bear_at, bull_at
+        if kind == "利空":
+            if bear_at < 0 or index < bear_at:
+                bear_at = index
+        elif bull_at < 0 or index < bull_at:
+            bull_at = index
+
+    def cover(start: int, end: int, kind: str) -> None:
+        if start < 0 or end <= start or any(masked[start:end]):
+            return
+        for pos in range(start, end):
+            masked[pos] = True
+        remember(kind, start)
+
+    for phrase in _POLICY_BULL:
+        start = 0
+        while True:
+            index = blob.find(phrase, start)
+            if index < 0:
+                break
+            kind = "利空" if _prefix_negated(blob, index) else "利好"
+            cover(index, index + len(phrase), kind)
+            start = index + len(phrase)
+    for match in _EASING.finditer(blob):
+        kind = "利空" if _prefix_negated(blob, match.start()) else "利好"
+        cover(match.start(), match.end(), kind)
+
+    for verb in _BEAR_VERBS:
+        start = 0
+        while True:
+            index = blob.find(verb, start)
+            if index < 0:
+                break
+            start = index + len(verb)
+            if any(masked[index:index + len(verb)]):
+                continue
+            if _prefix_negated(blob, index) or _suffix_negated(blob, index, verb):
+                for pos in range(index, index + len(verb)):
+                    masked[pos] = True
+                continue
+            remember("利空", index)
+    for verb in _BULL_VERBS:
+        start = 0
+        while True:
+            index = blob.find(verb, start)
+            if index < 0:
+                break
+            start = index + len(verb)
+            if any(masked[index:index + len(verb)]):
+                continue
+            remember("利好", index)
+
     if bear_at >= 0 and (bull_at < 0 or bear_at <= bull_at):
         return "利空"
     if bull_at >= 0:
         return "利好"
-    if any(cue in blob for cue in _BEAR_CUES):
+    visible = "".join(char for index, char in enumerate(blob) if not masked[index])
+    if any(cue in visible for cue in _BEAR_CUES):
         return "利空"
-    if any(cue in blob for cue in _BULL_CUES):
+    if any(cue in visible for cue in _BULL_CUES):
         return "利好"
-    if action in {"降价", "下调", "立案", "停产", "召回", "制裁", "收紧", "加息"}:
+    if (
+        action in {"降价", "下调", "立案", "停产", "召回", "制裁", "收紧", "加息"}
+        and action in visible
+        and not _prefix_negated(blob, blob.find(action))
+    ):
         return "利空"
     return ""
 

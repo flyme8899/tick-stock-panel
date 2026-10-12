@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 
 from app.market_time import CN_TZ
 from app.news.hot_events import (
+    _category_for,
     _cleaned_headline,
     _concept_relevant,
     _dictionary_concepts,
@@ -1852,3 +1853,112 @@ def test_negative_actions_are_bearish_and_cluster_concepts_stay_on_the_title(tmp
     assert tesla["direction"] == "利好"
     assert tesla["category"] != "海外市场/央行"
     assert "石油" not in tesla["concepts"] and "油服" not in tesla["concepts"]
+
+
+_SANCTION_ODDS = "全面严格制裁概率低"
+_PENTAGON = "五角大楼对伊战事"
+_NY_FED = "纽约联储称特朗普关税推高商品价格"
+_JINDAN_HIKE = "金丹科技产品提价"
+_JINDAN_RAISE = "金丹科技上调产品价格"
+
+
+def test_negation_and_entity_tags_keep_live_titles(tmp_path, monkeypatch):
+    """否定先于利空词；对伊、联储、公司提价和金丹的产品概念留在这条标题上。"""
+    assert _direction_for(_SANCTION_ODDS, "制裁") == "利好"
+    assert _direction_for("不会实施全面制裁", "制裁") == "利好"
+    assert _direction_for("美方否认将扩大制裁", "制裁") == "利好"
+    assert _direction_for("暂不加息", "加息") == "利好"
+    assert _direction_for("未启动制裁", "制裁") == "利好"
+    assert _direction_for("央行下调准备金率", "下调") == "利好"
+    assert _direction_for("央行下调利率", "下调") == "利好"
+    assert _direction_for("多地取消限购", "取消") == "利好"
+    assert _direction_for("缓和冲突", "冲突") == "利好"
+    assert _direction_for("中东冲突有所缓和", "冲突") == "利好"
+    assert _direction_for("美国对华芯片制裁升级", "制裁") == "利空"
+    assert _direction_for("公司取消年度订单", "订单") == "利空"
+    assert _direction_for("光伏组件厂下调报价", "下调") == "利空"
+    assert _direction_for("地区冲突升级", "冲突") == "利空"
+
+    assert _category_for(_PENTAGON, "") == "地缘政治"
+    assert _dictionary_concepts(_PENTAGON) == ["中东"]
+    assert _category_for(_NY_FED, "") == "海外市场/央行"
+    assert _category_for(_JINDAN_HIKE, "提价") == "公司重大事项"
+    assert _dictionary_concepts(_JINDAN_HIKE) == ["聚乳酸"]
+    assert _category_for(_JINDAN_RAISE, "上调") == "公司重大事项"
+    assert "聚乳酸" in _dictionary_concepts(_JINDAN_RAISE)
+    assert _category_for("华为发布盘古新模型", "发布") == "科技与产业"
+    assert _category_for("杰富瑞将特斯拉目标价从350美元上调至400美元", "上调") != "海外市场/央行"
+
+    reset_store_for_tests(tmp_path / "negation-tags.sqlite")
+    # 短句「五角大楼对伊战事」没有谓语，进不了榜。上屏标题保留这句，并带上宣布。
+    _insert_rich(
+        "pentagon",
+        "五角大楼对伊战事宣布延长部署",
+        10,
+        5,
+        sectors=["中东", "石油", "油服"],
+    )
+    _insert_rich(
+        "jindan-hike",
+        _JINDAN_HIKE,
+        10,
+        15,
+        sectors=["聚乳酸", "石油"],
+        stocks=[("300829.SZ", "金丹科技")],
+    )
+    _insert_rich(
+        "jindan-raise",
+        _JINDAN_RAISE,
+        10,
+        40,
+        sectors=["石油", "油服"],
+        stocks=[("300829.SZ", "金丹科技")],
+    )
+    events = top_hot_events(NOW)["events"]
+    pentagon = next(event for event in events if "对伊战事" in event["name"])
+    assert pentagon["category"] == "地缘政治"
+    assert "中东" in pentagon["concepts"]
+    assert "石油" not in pentagon["concepts"]
+    assert "油服" not in pentagon["concepts"]
+    jindan = [event for event in events if "金丹" in event["name"] or any("金丹" in title for title in event["headlines"])]
+    assert len(jindan) == 2
+    for event in jindan:
+        assert event["category"] == "公司重大事项"
+        assert event["direction"] == "利好"
+        assert "聚乳酸" in event["concepts"]
+        assert "石油" not in event["concepts"]
+        assert "油服" not in event["concepts"]
+
+    from app.news import hot_events as hot_mod
+    from app.news import service as news_service
+
+    def wrong(prompt: str, **_kwargs: object) -> str:
+        rows = []
+        for line in prompt.splitlines():
+            head, sep, rest = line.partition(". ")
+            if not sep or not head.isdigit() or not rest.strip():
+                continue
+            rows.append({
+                "id": head,
+                "title": "补充要点",
+                "concepts": ["石油", "油服"],
+                "category": "科技与产业",
+                "direction": "利空",
+            })
+        return json.dumps({"events": rows}, ensure_ascii=False)
+
+    monkeypatch.setattr("app.news.config.llm_extract_enabled", lambda: True)
+    monkeypatch.setattr(news_service, "_llm_text", wrong)
+    monkeypatch.setattr(news_service, "reserve_hot_title_call", lambda: True)
+    hot_mod.clear_hot_event_cache()
+    labeled = top_hot_events(NOW + timedelta(minutes=11))["events"]
+    pentagon = next(event for event in labeled if "对伊战事" in event["name"])
+    assert pentagon["category"] == "地缘政治"
+    assert "中东" in pentagon["concepts"]
+    assert "石油" not in pentagon["concepts"]
+    jindan = [event for event in labeled if "金丹" in event["name"]]
+    assert len(jindan) == 2
+    for event in jindan:
+        assert event["category"] == "公司重大事项"
+        assert "聚乳酸" in event["concepts"]
+        assert "石油" not in event["concepts"]
