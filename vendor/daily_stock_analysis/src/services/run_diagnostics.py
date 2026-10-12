@@ -221,6 +221,7 @@ class NotificationRun:
     success: bool
     attempts: int = 1
     error_message_sanitized: Optional[str] = None
+    reason: Optional[str] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
@@ -230,6 +231,7 @@ class NotificationRun:
             "status": self.status,
             "success": self.success,
             "attempts": self.attempts,
+            "reason": self.reason,
             "error_message_sanitized": self.error_message_sanitized,
             "created_at": self.created_at,
         }
@@ -833,7 +835,8 @@ def _notification_flow_event(
         message = f"{channel} 通知发送成功"
     elif status == "skipped":
         title = "通知跳过"
-        message = f"{channel} 通知跳过"
+        reason = run.reason or run.error_message_sanitized
+        message = f"{channel} 通知跳过：{reason}" if reason else f"{channel} 通知跳过"
     else:
         title = "通知失败"
         message = f"{channel} 通知失败：{run.error_message_sanitized or run.status or '未知错误'}"
@@ -992,6 +995,7 @@ def record_notification_run(
     success: bool,
     attempts: int = 1,
     error_message: Optional[Any] = None,
+    reason: Optional[str] = None,
 ) -> None:
     """Append a notification result to the active context without affecting callers."""
     context = get_current_diagnostic_context()
@@ -1006,6 +1010,7 @@ def record_notification_run(
                 status=status,
                 success=success,
                 attempts=attempts,
+                reason=sanitize_diagnostic_text(reason, max_length=80),
                 error_message_sanitized=sanitize_diagnostic_text(error_message),
             )
         )
@@ -1360,12 +1365,15 @@ def _notification_component(diagnostics: Dict[str, Any]) -> RunDiagnosticCompone
         )
     if skipped and not failures:
         status = "not_configured" if any(run.get("status") == "not_configured" for run in skipped) else "skipped"
+        last_skipped = skipped[-1]
+        reason = last_skipped.get("reason") or last_skipped.get("error_message_sanitized")
+        message = f"通知跳过：{reason}" if reason else "通知未配置或本次跳过"
         return _component(
             "notification",
             label,
             status,
-            "通知未配置或本次跳过",
-            {"channels": channels},
+            message,
+            {"channels": channels, "reason": reason} if reason else {"channels": channels},
         )
     last_failure = failures[-1] if failures else runs[-1]
     return _component(

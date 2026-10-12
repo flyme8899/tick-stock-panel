@@ -1181,6 +1181,9 @@ def _notification_run_message(channel: str, run: Dict[str, Any], status: str) ->
     if status == "success":
         return f"{channel} 通知发送成功"
     if status == "skipped":
+        reason = _safe_text(run.get("reason") or run.get("error_message_sanitized"), max_length=160)
+        if reason:
+            return f"{channel} 通知跳过：{reason}"
         return f"{channel} 通知跳过"
     if status == "failed":
         error = _safe_text(run.get("error_message_sanitized") or run.get("status"), max_length=160)

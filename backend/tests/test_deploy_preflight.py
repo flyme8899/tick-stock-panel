@@ -320,7 +320,8 @@ def test_compose_runs_as_configurable_user_outside_root():
     assert "PYTHONDONTWRITEBYTECODE=1" in compose
     assert "ENV_FILE=/app/config/.env" in compose
     assert "./.env:/app/config/.env" in compose
-    assert "LOG_DIR=/app/logs" in compose
+    assert "LOG_DIR=/app/data/logs" in compose
+    assert "15:30–16:00" in compose
     assert "/opt/tsp/dsa_bootstrap.py:ro" in compose
     assert "HOME=/home/dsa" in dsa_dockerfile
     assert "MPLCONFIGDIR=/home/dsa/.config/matplotlib" in dsa_dockerfile

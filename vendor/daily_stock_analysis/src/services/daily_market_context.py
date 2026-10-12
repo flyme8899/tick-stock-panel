@@ -22,7 +22,6 @@ from src.services.run_diagnostics import (
     activate_run_diagnostic_context,
     reset_run_diagnostic_context,
 )
-from src.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +57,22 @@ def run_market_review(**kwargs: Any) -> Any:
     return _run_market_review(**kwargs)
 
 
+# Context generation is a prompt preload. It must not send, and it must not be the
+# last word on delivery: SCHEDULE_TIME reuses this body and calls
+# notify_market_review_text afterwards. The skip reason stays queryable until that
+# follow-up appends success/failed.
+DEFERRED_MARKET_REVIEW_PUSH_REASON = "deferred_pending_reuse_push"
+
+
+def market_context_history_query_id(caller_query_id: Optional[str], region: str) -> Optional[str]:
+    """History query id shared by context generation and the later DingTalk push."""
+    normalized = _normalize_context_region(region)
+    caller = caller_query_id.strip() if isinstance(caller_query_id, str) else ""
+    if not normalized or not caller:
+        return None
+    return f"market_context_{caller}_{normalized}"
+
+
 @dataclass(frozen=True)
 class DailyMarketContext:
     """Low-sensitivity daily market background for stock analysis prompts."""
@@ -91,11 +106,15 @@ class DailyMarketContextService:
 
     def __init__(
         self,
-        db_manager: Optional[DatabaseManager] = None,
+        db_manager: Optional[Any] = None,
         *,
         today_fn: Optional[Callable[[], date]] = None,
     ) -> None:
-        self.db = db_manager or DatabaseManager.get_instance()
+        if db_manager is None:
+            from src.storage import DatabaseManager
+
+            db_manager = DatabaseManager.get_instance()
+        self.db = db_manager
         self._today_fn = today_fn or date.today
         self._cache: Dict[Tuple[Any, ...], DailyMarketContext] = {}
         self._lock = threading.Lock()
@@ -430,11 +449,9 @@ class DailyMarketContextService:
             if isinstance(current_query_id, str) and current_query_id.strip()
             else None
         )
-        market_context_query_id = (
-            f"market_context_{caller_query_id}_{region}"
-            if caller_query_id
-            else f"market_context_{uuid.uuid4().hex}_{region}"
-        )
+        market_context_query_id = market_context_history_query_id(caller_query_id, region)
+        if market_context_query_id is None:
+            market_context_query_id = f"market_context_{uuid.uuid4().hex}_{region}"
 
         diagnostic_token = None
         try:
@@ -451,7 +468,9 @@ class DailyMarketContextService:
                 analyzer=analyzer,
                 search_service=search_service,
                 query_id=market_context_query_id,
+                # Preload only. The schedule/CLI reuse path must push this body.
                 send_notification=False,
+                notification_skip_reason=DEFERRED_MARKET_REVIEW_PUSH_REASON,
                 merge_notification=False,
                 override_region=region,
                 return_structured=True,
