@@ -266,7 +266,11 @@ def test_login_api_sessions_logout_and_rate_limit() -> None:
 
     changed = bob.post(
         "/api/auth/change-password",
-        json={"old_password": "bob-password-22", "new_password": "bob-password-33"},
+        json={
+            "old_password": "bob-password-22",
+            "new_password": "bob-password-33",
+            "confirm_password": "bob-password-33",
+        },
     )
     assert changed.status_code == 200
     assert bob.get("/api/auth/status").json()["authenticated"] is False
@@ -364,6 +368,213 @@ def test_manage_users_script_prints_password_once(tmp_path: Path) -> None:
     refused = run("add", "bob")
     assert refused.returncode == 2
     assert "密码:" not in refused.stdout
+
+
+def test_wrong_old_password_is_rejected_and_does_not_change_credential() -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    client = _api()
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password-1"},
+    ).status_code == 200
+
+    rejected = client.post("/api/auth/change-password", json={
+        "old_password": "wrong-password",
+        "new_password": "alice-password-2",
+        "confirm_password": "alice-password-2",
+    })
+    assert rejected.status_code == 401
+    assert rejected.json()["detail"] == "旧密码错误"
+    assert client.get("/api/auth/status").json()["authenticated"] is True
+    assert auth.verify_and_create_session("alice-password-1", "alice") is not None
+    assert auth.verify_and_create_session("alice-password-2", "alice") is None
+
+
+@pytest.mark.parametrize("new_password", [
+    "short1",
+    "abcdefgh",
+    "12345678",
+    "!!!!!!!!",
+    "abcd    ",
+    "alice-password-1",
+])
+def test_weak_or_unchanged_password_is_rejected(new_password: str) -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    client = _api()
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password-1"},
+    ).status_code == 200
+
+    rejected = client.post("/api/auth/change-password", json={
+        "old_password": "alice-password-1",
+        "new_password": new_password,
+        "confirm_password": new_password,
+    })
+    assert rejected.status_code == 400
+    assert client.get("/api/auth/status").json()["authenticated"] is True
+    assert auth.verify_and_create_session("alice-password-1", "alice") is not None
+
+
+def test_weak_password_does_not_consume_login_lockout() -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    client = _api()
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password-1"},
+    ).status_code == 200
+    for _ in range(auth_api._MAX_FAILS):
+        rejected = client.post("/api/auth/change-password", json={
+            "old_password": "alice-password-1",
+            "new_password": "password",
+            "confirm_password": "password",
+        })
+        assert rejected.status_code == 400
+    changed = client.post("/api/auth/change-password", json={
+        "old_password": "alice-password-1",
+        "new_password": "alice-password-2",
+        "confirm_password": "alice-password-2",
+    })
+    assert changed.status_code == 200
+
+
+def test_change_password_accepts_new_credential_and_drops_other_sessions(tmp_path: Path) -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    user_accounts.add_user("bob", "bob-password-22")
+    other = auth.verify_and_create_session("alice-password-1", "alice")
+    bob = auth.verify_and_create_session("bob-password-22", "bob")
+    assert other and bob
+
+    alice = _api()
+    assert alice.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password-1"},
+    ).status_code == 200
+    changed = alice.post("/api/auth/change-password", json={
+        "old_password": "alice-password-1",
+        "new_password": "alice-password-2",
+        "confirm_password": "alice-password-2",
+    })
+    assert changed.status_code == 200
+    assert changed.json()["message"] == "密码已修改, 请重新登录"
+    assert alice.get("/api/auth/status").json()["authenticated"] is False
+    assert auth.is_valid_session(other) is False
+    assert auth.is_valid_session(bob) is True
+    assert auth.verify_and_create_session("alice-password-1", "alice") is None
+    assert auth.verify_and_create_session("alice-password-2", "alice") is not None
+    assert auth.verify_and_create_session("bob-password-22", "bob") is not None
+    stored = (tmp_path / "users.json").read_text(encoding="utf-8")
+    assert "alice-password-2" not in stored
+    assert "$argon2id$" in stored
+
+
+def test_user_cannot_change_another_users_password() -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    user_accounts.add_user("bob", "bob-password-22")
+    alice = _api()
+    assert alice.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password-1"},
+    ).status_code == 200
+
+    denied = alice.post("/api/auth/change-password", json={
+        "username": "bob",
+        "old_password": "bob-password-22",
+        "new_password": "bob-password-99",
+        "confirm_password": "bob-password-99",
+    })
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "只能修改自己的密码"
+    assert alice.get("/api/auth/status").json()["authenticated"] is True
+    assert auth.verify_and_create_session("bob-password-22", "bob") is not None
+    assert auth.verify_and_create_session("bob-password-99", "bob") is None
+    assert auth.verify_and_create_session("alice-password-1", "alice") is not None
+    assert auth.verify_and_create_session("bob-password-99", "alice") is None
+
+
+def test_confirm_mismatch_keeps_the_current_password() -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    client = _api()
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password-1"},
+    ).status_code == 200
+    rejected = client.post("/api/auth/change-password", json={
+        "old_password": "alice-password-1",
+        "new_password": "alice-password-2",
+        "confirm_password": "alice-password-3",
+    })
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "两次输入的新密码不一致"
+    assert auth.verify_and_create_session("alice-password-1", "alice") is not None
+    assert auth.verify_and_create_session("alice-password-2", "alice") is None
+
+
+def test_wrong_current_password_uses_login_lockout() -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    client = _api()
+    assert client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "alice-password-1"},
+    ).status_code == 200
+    for _ in range(auth_api._MAX_FAILS):
+        failed = client.post("/api/auth/change-password", json={
+            "old_password": "wrong-password",
+            "new_password": "alice-password-2",
+            "confirm_password": "alice-password-2",
+        })
+        assert failed.status_code == 401
+    locked = client.post("/api/auth/change-password", json={
+        "old_password": "alice-password-1",
+        "new_password": "alice-password-2",
+        "confirm_password": "alice-password-2",
+    })
+    assert locked.status_code == 429
+    assert auth.verify_and_create_session("alice-password-1", "alice") is not None
+    assert client.get("/api/auth/status").json()["authenticated"] is True
+
+
+def test_legacy_change_password_drops_only_legacy_sessions() -> None:
+    auth.set_password("legacy-secret")
+    user_accounts.add_user("alice", "alice-password-1")
+    other_legacy = auth.verify_and_create_session("legacy-secret")
+    alice = auth.verify_and_create_session("alice-password-1", "alice")
+    assert other_legacy and alice
+    client = _api()
+    assert client.post("/api/auth/login", json={"password": "legacy-secret"}).status_code == 200
+
+    weak = client.post("/api/auth/change-password", json={
+        "old_password": "legacy-secret",
+        "new_password": "password",
+        "confirm_password": "password",
+    })
+    assert weak.status_code == 400
+    assert auth.is_valid_session(other_legacy) is True
+
+    changed = client.post("/api/auth/change-password", json={
+        "old_password": "legacy-secret",
+        "new_password": "legacy-secret-2",
+        "confirm_password": "legacy-secret-2",
+    })
+    assert changed.status_code == 200
+    assert client.get("/api/auth/status").json()["authenticated"] is False
+    assert auth.is_valid_session(other_legacy) is False
+    assert auth.is_valid_session(alice) is True
+    assert auth.verify_and_create_session("legacy-secret") is None
+    assert auth.verify_and_create_session("legacy-secret-2") is not None
+    assert auth.verify_and_create_session("alice-password-1", "alice") is not None
+
+
+def test_anonymous_change_password_is_rejected() -> None:
+    user_accounts.add_user("alice", "alice-password-1")
+    client = _api()
+    rejected = client.post("/api/auth/change-password", json={
+        "old_password": "alice-password-1",
+        "new_password": "alice-password-2",
+        "confirm_password": "alice-password-2",
+    })
+    assert rejected.status_code == 401
+    assert auth.verify_and_create_session("alice-password-1", "alice") is not None
 
 
 def _password_line(stdout: str) -> str:

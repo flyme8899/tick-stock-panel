@@ -2666,10 +2666,15 @@ export const api = {
     }),
   authLogout: () =>
     request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  authChangePassword: (oldPassword: string, newPassword: string) =>
-    request<{ ok: boolean }>('/api/auth/change-password', {
+  authChangePassword: (oldPassword: string, newPassword: string, confirmPassword: string) =>
+    request<{ ok: boolean; message?: string }>('/api/auth/change-password', {
       method: 'POST',
-      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+      quiet: true,
+      body: JSON.stringify({
+        old_password: oldPassword,
+        new_password: newPassword,
+        confirm_password: confirmPassword,
+      }),
     }),
 
   settings: () => request<SettingsState>('/api/settings'),

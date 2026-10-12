@@ -163,7 +163,7 @@ AUTH_PASSWORD='你的密码'  # 至少 6 位;仅首次生效,已设过则不覆�
 cd backend && uv run python ../scripts/manage_users.py add alice
 ```
 
-命令会生成强密码并只打印一次。各账号权限相同。
+命令会生成强密码并只打印一次。各账号权限相同。已登录用户在「设置 → 修改密码」修改自己的密码,规则见 [deploy-password.md](./deploy-password.md)。
 
 详细步骤、SSH 转发方案、重置密码方法见 [deployment.md → 访问密码设置](./deployment.md#访问密码设置公网部署必读)。
 
