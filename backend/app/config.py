@@ -167,6 +167,8 @@ class Settings(BaseSettings):
     news_dsa_feed_token: str = ""
     news_cls_enabled: str = ""
     news_wscn_enabled: str = ""
+    # 留空时格隆汇默认打开，见 news.config.source_enabled。false 才关闭。
+    news_glh_enabled: str = ""
     news_ima_enabled: str = ""
     news_dws_enabled: str = ""
     news_zsxq_enabled: str = ""

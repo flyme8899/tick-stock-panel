@@ -1,4 +1,4 @@
-"""财联社、华尔街见闻、外文 RSS、路透 sitemap、Reddit Atom、SEC Atom、ima 与宿主机收件箱的解析。
+"""财联社、华尔街见闻、格隆汇、外文 RSS、路透 sitemap、Reddit Atom、SEC Atom、ima 与宿主机收件箱的解析。
 
 网络调用由 service 注入，这里只负责请求参数和响应归一，方便离线测试。
 外文源只取标题、摘要、链接、guid 和发布时间，不读 content:encoded 或 Atom content。
@@ -18,10 +18,26 @@ from xml.etree import ElementTree as ET
 from app.market_time import CN_TZ
 from app.news.cleaning import media_ids_from_text
 from app.news.cls_sign import cls_query
-from app.news.extract import StructuredStock
+from app.news.extract import StructuredStock, canonical_symbol
 
 CLS_URL = "https://www.cls.cn/v1/roll/get_roll_list"
 WSCN_URL = "https://api-one-wscn.awtmt.com/apiv1/content/lives"
+GLH_URL = "https://www.gelonghui.com/api/live-channels/all/lives/v4"
+# 公开接口不签名。浏览器 UA，避免把 tsp-news 这种短标识当成脚本拦掉。
+GLH_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+GLH_HEADERS = {
+    "User-Agent": GLH_USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.gelonghui.com/",
+}
+# 约 28 条/小时。45 秒落在要求的 30–60 秒里，也和财联社交易时段同一档。
+GLH_POLL_SECONDS = 45
+# 出错从 60 秒起倍增，上限 15 分钟。成功后调用方把累计清零。
+GLH_BACKOFF_CAP = 900
+_GLH_A_MARKETS = {"SH": "SH", "SZ": "SZ", "BJ": "BJ"}
 IMA_BASE = "https://ima.qq.com/openapi/wiki/v1"
 _DATE_FOLDER = re.compile(
     r"(20\d{2})\s*[-./年]\s*(\d{1,2})\s*[-./月]\s*(\d{1,2})"
@@ -189,6 +205,151 @@ def paginate_until_seen(fetch_page, *, cap: int = PAGE_CAP) -> list[Item]:
         used.add(nxt)
         token = nxt
     return collected
+
+
+def glh_params(live_id: str | None = None) -> dict[str, str]:
+    """第一页不带 liveId。往更早翻时带上一页最后一条的 id。"""
+    params = {"category": "all", "limit": "15"}
+    if live_id:
+        params["liveId"] = str(live_id)
+    return params
+
+
+def glh_backoff_seconds(stored_seconds: int) -> int:
+    """第一次失败等 60 秒，之后倍增，不超过 15 分钟。"""
+    try:
+        stored = int(stored_seconds)
+    except (TypeError, ValueError):
+        stored = 0
+    if stored <= 0:
+        return 60
+    return min(GLH_BACKOFF_CAP, stored * 2)
+
+
+def glh_error_wait(stored_seconds: int, retry_after: int | None = None) -> int:
+    """有 Retry-After 时不少于指数退避，也不超过上限。"""
+    base = glh_backoff_seconds(stored_seconds)
+    if retry_after is None:
+        return base
+    return min(GLH_BACKOFF_CAP, max(base, int(retry_after)))
+
+
+def glh_rows(payload: dict) -> list:
+    """result 不是列表时抛错，避免把改版响应当成空列表记成功。"""
+    if not isinstance(payload, dict):
+        raise ValueError("格隆汇响应不是对象")
+    status = payload.get("statusCode", payload.get("code"))
+    if status not in (None, 200, "200"):
+        raise ValueError(f"格隆汇 statusCode {status}")
+    rows = payload.get("result")
+    if rows is None:
+        rows = payload.get("data")
+    if not isinstance(rows, list):
+        raise ValueError("格隆汇响应没有 result")
+    return rows
+
+
+def glh_next_live_id(payload: dict) -> str:
+    """下一页 liveId 用这一页最后一条的 id。接口按时间从新到旧排。"""
+    last = ""
+    for row in glh_rows(payload):
+        if isinstance(row, dict) and row.get("id") not in (None, ""):
+            last = str(row["id"])
+    return last
+
+
+def strip_glh_prefix(text: str, prefix: str) -> str:
+    """去掉正文开头的 contentPrefix。带「」或【】的同一种前缀也去掉。"""
+    body = text or ""
+    token = (prefix or "").strip()
+    if token:
+        for cand in (token, f"「{token}」", f"【{token}】"):
+            if body.startswith(cand):
+                body = body[len(cand):]
+                break
+    return body.strip()
+
+
+def glh_symbol(market: str, code: str) -> str:
+    """SH/SZ/BJ 收成 600000.SH。港股、美股和指数没有内部代码，返回空串。"""
+    venue = (market or "").strip().upper()
+    if venue in {"HK", "US"}:
+        return ""
+    digits = re.sub(r"\D", "", str(code or ""))
+    if len(digits) != 6:
+        return ""
+    if venue in _GLH_A_MARKETS:
+        return f"{digits}.{_GLH_A_MARKETS[venue]}"
+    if venue:
+        return ""
+    return canonical_symbol(digits)
+
+
+def glh_url(route: str) -> str:
+    text = (route or "").strip()
+    if text.startswith(("http://", "https://")):
+        return text
+    if text.startswith("/"):
+        return "https://www.gelonghui.com" + text
+    return text
+
+
+def _glh_text(title: str, content: str, prefix: str) -> tuple[str, str]:
+    """标题和去掉来源前缀的正文。正文已经以标题开头时不再拼一次。"""
+    head = strip_glh_prefix(title, prefix).strip()
+    body = strip_glh_prefix(content, prefix).strip()
+    if head and body and not body.startswith(head):
+        return head, f"{head}\n{body}"
+    return head, body or head
+
+
+def parse_glh(payload: dict) -> list[Item]:
+    items: list[Item] = []
+    for row in glh_rows(payload):
+        if not isinstance(row, dict):
+            continue
+        published = parse_time(row.get("createTimestamp"))
+        if published is None:
+            continue
+        prefix = str(row.get("contentPrefix") or "")
+        title, text = _glh_text(
+            str(row.get("title") or ""),
+            str(row.get("content") or ""),
+            prefix,
+        )
+        if not text:
+            continue
+        stocks: list[StructuredStock] = []
+        seen: set[str] = set()
+        for stock in row.get("relatedStocks") or []:
+            if not isinstance(stock, dict):
+                continue
+            symbol = glh_symbol(
+                str(stock.get("market") or ""),
+                str(stock.get("code") or ""),
+            )
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            stocks.append(StructuredStock(
+                name=str(stock.get("name") or ""),
+                code=symbol,
+                origin="source",
+            ))
+        level = row.get("level")
+        level_text = "" if level is None else str(level).strip()
+        items.append(Item(
+            source="glh",
+            source_id=str(row.get("id") or ""),
+            published_at=published,
+            title=title,
+            text=text,
+            url=glh_url(str(row.get("route") or "")),
+            level=level_text,
+            stocks=stocks,
+            raw={"id": row.get("id"), "level": level},
+        ))
+    return [item for item in items if item.source_id]
 
 
 def parse_wscn(payload: dict, channel: str) -> list[Item]:
