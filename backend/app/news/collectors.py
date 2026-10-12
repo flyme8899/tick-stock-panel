@@ -431,6 +431,48 @@ def zsxq_digest_title(title: str) -> bool:
     return _ZSXQ_DIGEST_TITLE.search(title or "") is not None
 
 
+_ZSXQ_FILE_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
+_ZSXQ_FILE_CAP = 48
+_URL_IN_FILE_META = re.compile(r"https?://\S+")
+
+
+def zsxq_file_meta(row: dict) -> list[dict]:
+    """附件只留编号、文件名、大小和哈希。签名链接不进收件箱。"""
+    raw_files = row.get("files")
+    if isinstance(raw_files, dict):
+        raw_files = [raw_files]
+    if not isinstance(raw_files, list):
+        return []
+    found: list[dict] = []
+    seen: set[str] = set()
+    for item in raw_files:
+        if not isinstance(item, dict):
+            continue
+        file_id = str(item.get("file_id") or item.get("id") or "").strip()
+        if not _ZSXQ_FILE_ID.fullmatch(file_id) or file_id in seen:
+            continue
+        seen.add(file_id)
+        name = str(item.get("name") or item.get("file_name") or "")
+        name = name.replace("\\", "/").split("/")[-1]
+        name = _URL_IN_FILE_META.sub("", name)
+        name = re.sub(r"\s+", " ", name).strip()[:120]
+        try:
+            size_raw = item.get("size")
+            if size_raw is None:
+                size_raw = item.get("file_size") or 0
+            size = int(size_raw)
+        except (TypeError, ValueError):
+            size = 0
+        if size < 0:
+            size = 0
+        digest = str(item.get("hash") or item.get("file_hash") or "").strip()
+        digest = _URL_IN_FILE_META.sub("", digest).strip()[:64]
+        found.append({"file_id": file_id, "name": name, "size": size, "hash": digest})
+        if len(found) >= _ZSXQ_FILE_CAP:
+            break
+    return found
+
+
 def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
     """返回条目和分页信息（has_more / next_end_time）。"""
     topics = payload
@@ -474,6 +516,9 @@ def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
             raw["group_name"] = name
         if zsxq_digest_title(title):
             raw["digest"] = True
+        files = zsxq_file_meta(row)
+        if files:
+            raw["files"] = files
         items.append(Item(
             source="zsxq",
             source_id=str(row.get("topic_id") or ""),
