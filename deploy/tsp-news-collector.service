@@ -11,7 +11,7 @@ Environment=DATA_DIR=/home/ubuntu/tick-stock-panel/data
 Environment=PATH=/home/ubuntu/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=-/home/ubuntu/tick-stock-panel/.env
-# 独立虚拟环境，需已安装 pydantic（采集脚本会导入 app）。不要用系统 python3。
+# 独立虚拟环境，需已安装 pydantic 和 pypdf（抽研报 PDF 正文）。不要用系统 python3。
 ExecStart=/home/ubuntu/.venvs/tsp-collector/bin/python /home/ubuntu/tick-stock-panel/scripts/news_host_collector.py --data-dir /home/ubuntu/tick-stock-panel/data
 TimeoutStartSec=3600
 NoNewPrivileges=yes

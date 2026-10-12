@@ -243,7 +243,13 @@ def write_cursor(data_dir: Path, source: str, value: str) -> None:
     path.write_text(value, encoding="utf-8")
 
 
-def run_host(data_dir: Path, run, *, backfill_since: str = "") -> dict:
+def run_host(
+    data_dir: Path,
+    run,
+    *,
+    backfill_since: str = "",
+    backfill_files_since: str = "",
+) -> dict:
     """跑一轮宿主机采集。run(argv) -> 有 returncode/stdout/stderr 的对象。"""
     summary = {}
     webhook = os.environ.get("DINGTALK_WEBHOOK_URL", "")
@@ -251,7 +257,9 @@ def run_host(data_dir: Path, run, *, backfill_since: str = "") -> dict:
     if enabled_from_env_and_prefs("dws", data_dir):
         summary["dws"] = _run_dws(data_dir, run, webhook, secret)
     if enabled_from_env_and_prefs("zsxq", data_dir):
-        summary["zsxq"] = _run_zsxq(data_dir, run, webhook, secret, backfill_since)
+        summary["zsxq"] = _run_zsxq(
+            data_dir, run, webhook, secret, backfill_since, backfill_files_since,
+        )
     return summary
 
 
@@ -283,7 +291,29 @@ def _run_dws(data_dir: Path, run, webhook: str, secret: str) -> str:
     return "ok"
 
 
-def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: str) -> str:
+_FILE_BACKFILL_PAGES = 400
+
+
+def _valid_since(raw: str) -> str:
+    """回填日期。解析不了就放弃这一次，避免没有下界把历史全部翻出来。"""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    parsed = parse_time(text)
+    if parsed is None:
+        _logger.warning("知识星球附件回填日期无效")
+        return ""
+    return parsed.isoformat()
+
+
+def _run_zsxq(
+    data_dir: Path,
+    run,
+    webhook: str,
+    secret: str,
+    backfill_since: str,
+    backfill_files_since: str = "",
+) -> str:
     groups = zsxq_groups()
     if not groups:
         write_auth(data_dir, "zsxq", "missing", "未配置星球号")
@@ -320,6 +350,24 @@ def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: st
             write_inbox(data_dir, "zsxq", topics, suffix=gid)
             batched.extend(topics)
         write_cursor(data_dir, key, cn_now().isoformat())
+    # 文本游标不动。只把已经采过的帖子里的 PDF 放进下载队列，本轮仍受条数和间隔限制。
+    since_files = _valid_since(backfill_files_since)
+    if since_files:
+        for gid, name in groups:
+            try:
+                extra = collect_zsxq_pages(
+                    run, binary, gid, since=since_files, max_pages=_FILE_BACKFILL_PAGES,
+                )
+            except (RuntimeError, json.JSONDecodeError, OSError, ValueError) as exc:
+                detail = str(exc)
+                if "://" in detail or "zsxq.com" in detail:
+                    detail = "附件回填失败"
+                _logger.warning("知识星球附件回填未完成: %s", detail[:120])
+                continue
+            for topic in extra:
+                topic["group_id"] = gid
+                topic["group_name"] = name
+            batched.extend(extra)
     # 文本游标已经推进。附件失败只留在自己的索引里，下轮再试，不把这一轮收成失败。
     _sync_zsxq_files(data_dir, batched, run, binary)
     if errors:

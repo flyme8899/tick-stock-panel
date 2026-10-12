@@ -197,22 +197,41 @@ def _signed_url(stdout: str) -> str:
     return _require_files_host(url)
 
 
+def _accept_download_url(value: str) -> str:
+    text = value.strip().strip('"')
+    if not text.startswith("https://"):
+        return ""
+    try:
+        return _require_files_host(text.split()[0])
+    except RuntimeError:
+        return ""
+
+
 def _find_download_url(payload, depth: int = 0) -> str:
-    if depth > 4:
+    """在任意嵌套里找 files.zsxq.com 的 https 链接。zsxq-cli 放在 body.resp_data 下。"""
+    if depth > 8:
         return ""
     if isinstance(payload, str):
-        text = payload.strip()
-        return text if text.startswith("https://") else ""
-    if not isinstance(payload, dict):
+        return _accept_download_url(payload)
+    if isinstance(payload, dict):
+        preferred = ("download_url", "url", "body", "resp_data", "data", "result")
+        for key in preferred:
+            if key in payload:
+                found = _find_download_url(payload.get(key), depth + 1)
+                if found:
+                    return found
+        for key, value in payload.items():
+            if key in preferred:
+                continue
+            found = _find_download_url(value, depth + 1)
+            if found:
+                return found
         return ""
-    for key in ("download_url", "url"):
-        found = _find_download_url(payload.get(key), depth + 1)
-        if found:
-            return found
-    for key in ("resp_data", "data", "result"):
-        found = _find_download_url(payload.get(key), depth + 1)
-        if found:
-            return found
+    if isinstance(payload, list):
+        for item in payload:
+            found = _find_download_url(item, depth + 1)
+            if found:
+                return found
     return ""
 
 

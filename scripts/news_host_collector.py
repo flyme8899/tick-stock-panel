@@ -47,6 +47,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="宿主机只读采集钉钉和知识星球资讯")
     parser.add_argument("--data-dir", default="", help="TSP data 目录，默认 <仓库>/data 或 DATA_DIR")
     parser.add_argument("--backfill-since", default="", help="知识星球回补起点，如 2025-08-23")
+    parser.add_argument(
+        "--backfill-files-since",
+        default="",
+        help="补下已采集帖子里的 PDF，如 2026-10-01。不改文本游标，下载仍受每轮配额限制",
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(_backend_path()))
@@ -62,7 +67,12 @@ def main() -> int:
     def run(argv: list[str]):
         return subprocess.run(argv, capture_output=True, text=True, timeout=180, check=False)
 
-    summary = run_host(data_dir, run, backfill_since=args.backfill_since)
+    summary = run_host(
+        data_dir,
+        run,
+        backfill_since=args.backfill_since,
+        backfill_files_since=args.backfill_files_since,
+    )
     print(summary)
     return 0
 
