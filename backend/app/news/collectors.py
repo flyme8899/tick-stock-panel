@@ -423,11 +423,23 @@ def parse_dws_payload(payload) -> list[Item]:
     return [item for item in items if item.source_id]
 
 
+# 复盘、舆情汇总会点到很多标的。只看标题，避免正文里偶然出现这些词就把单条新闻降级。
+_ZSXQ_DIGEST_TITLE = re.compile(r"复盘|舆情|汇总|综述|盘点|一览|收盘总结|市场总结")
+
+
+def zsxq_digest_title(title: str) -> bool:
+    return _ZSXQ_DIGEST_TITLE.search(title or "") is not None
+
+
 def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
     """返回条目和分页信息（has_more / next_end_time）。"""
     topics = payload
     page = {"has_more": False, "next_end_time": ""}
+    default_gid = ""
+    default_name = ""
     if isinstance(payload, dict):
+        default_gid = str(payload.get("group_id") or "").strip()
+        default_name = str(payload.get("group_name") or "").strip()
         topics = (
             payload.get("topics_brief")
             or payload.get("topics")
@@ -453,6 +465,15 @@ def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
         published = parse_time(row.get("create_time"))
         if published is None:
             continue
+        gid = str(row.get("group_id") or default_gid).strip()
+        name = str(row.get("group_name") or default_name).strip()
+        raw = {"topic_id": row.get("topic_id")}
+        if gid:
+            raw["group_id"] = gid
+        if name:
+            raw["group_name"] = name
+        if zsxq_digest_title(title):
+            raw["digest"] = True
         items.append(Item(
             source="zsxq",
             source_id=str(row.get("topic_id") or ""),
@@ -462,7 +483,7 @@ def parse_zsxq_payload(payload) -> tuple[list[Item], dict]:
             text=text or title,
             media_ids=images,
             url="",
-            raw={"topic_id": row.get("topic_id")},
+            raw=raw,
         ))
     return [item for item in items if item.source_id], page
 

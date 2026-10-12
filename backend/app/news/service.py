@@ -75,6 +75,7 @@ from app.news.config import (
     source_configured,
     source_enabled,
     source_locked,
+    zsxq_source_label,
 )
 from app.news.etf_flow import collect_etf_flow
 from app.news.extract import (
@@ -214,12 +215,18 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
         clean = clean_text(item.text)
         title = clean_text(item.title) or _title_from(clean)
         digest = content_hash(clean, item.media_ids)
+        # 汇总帖正文会点到一长串标的。热点个股只认标题，避免一条复盘把榜单抬起来。
+        mention_text = f"{title}\n{clean}"
+        if item.source == "zsxq" and (item.raw or {}).get("digest"):
+            mention_text = title
         mentions = lexicon.extract(
-            f"{title}\n{clean}",
+            mention_text,
             item.stocks,
             item.sectors,
         )
         extra = {"stocks": [stock.__dict__ for stock in item.stocks], "sectors": item.sectors}
+        if item.source == "zsxq" and (item.raw or {}).get("digest"):
+            extra["digest"] = True
         if item.source in FOREIGN_SOURCES:
             # 超过本轮上限后不再落到通用抽取，否则限额形同虚设。
             if (
@@ -232,7 +239,12 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
                 if summary_zh:
                     extra["summary_zh"] = summary_zh
                 mentions = _merge_mentions(mentions, llm_found)
-        elif not mentions and llm_extract_enabled() and len(clean) >= 40:
+        elif (
+            not mentions
+            and not (item.raw or {}).get("digest")
+            and llm_extract_enabled()
+            and len(clean) >= 40
+        ):
             mentions = _llm_mentions(title, clean, lexicon)
         status = store.insert_item(
             source=item.source,
@@ -269,6 +281,8 @@ def backfill_mentions(lexicon: Lexicon, *, limit: int = 200) -> int:
             extra = json.loads(row["extra_json"] or "{}")
         except json.JSONDecodeError:
             extra = {}
+        if extra.get("digest"):
+            continue
         stocks = [
             StructuredStock(name=str(item.get("name") or ""), code=str(item.get("code") or ""))
             for item in (extra.get("stocks") or [])
@@ -665,10 +679,36 @@ def top_hot_events(now: datetime | None = None) -> dict:
     return build_top_hot_events(now, get_store())
 
 
+def _row_field(row, key: str):
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _zsxq_group_name(row) -> str:
+    raw = _row_field(row, "raw_json")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return ""
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get("group_name") or "").strip()
+
+
 def message_view(row, *, limit: int = 240) -> dict:
+    source = row["source"]
+    if source == "zsxq":
+        label = zsxq_source_label(_zsxq_group_name(row))
+    else:
+        label = SOURCE_LABELS.get(source, source)
     return {
-        "source": row["source"],
-        "source_label": SOURCE_LABELS.get(row["source"], row["source"]),
+        "source": source,
+        "source_label": label,
         "published_at": row["published_at"],
         "author": row["author"] or "",
         "title": row["title"] or "",

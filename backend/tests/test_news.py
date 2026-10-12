@@ -26,14 +26,24 @@ from app.news.collectors import (
     pick_knowledge_base,
     split_ima_list,
 )
-from app.news.config import feed_matches, group_id, source_configured
+from app.news.config import (
+    SOURCE_LABELS,
+    feed_matches,
+    group_id,
+    source_configured,
+    zsxq_groups,
+    zsxq_source_label,
+)
 from app.news.extract import Lexicon, StructuredStock, canonical_symbol
 from app.news.host_collector import (
     CommandRejectedError,
     _run_dws,
+    _run_zsxq,
     assert_readonly,
     dws_cursor_stamp,
+    read_cursor,
     run_host,
+    write_cursor,
 )
 from app.news.scoring import MentionEvent, score_candidates
 from app.news.service import (
@@ -45,6 +55,7 @@ from app.news.service import (
     hot_candidates,
     hot_messages,
     ingest_items,
+    message_view,
     reset_store_for_tests,
 )
 from app.services.api_gateway import required_scope
@@ -749,9 +760,11 @@ def test_host_collector_rejects_writes():
 def test_empty_group_id_is_unconfigured(tmp_path, monkeypatch):
     monkeypatch.delenv("NEWS_DWS_GROUP_ID", raising=False)
     monkeypatch.delenv("NEWS_ZSXQ_GROUP_ID", raising=False)
+    monkeypatch.delenv("NEWS_ZSXQ_GROUPS", raising=False)
     from app.config import settings
     monkeypatch.setattr(settings, "news_dws_group_id", "")
     monkeypatch.setattr(settings, "news_zsxq_group_id", "")
+    monkeypatch.setattr(settings, "news_zsxq_groups", "")
     assert group_id("dws") == ""
     assert source_configured("dws") is False
     assert source_configured("zsxq") is False
@@ -775,6 +788,224 @@ def test_empty_group_id_is_unconfigured(tmp_path, monkeypatch):
     monkeypatch.setenv("NEWS_DWS_GROUP_ID", "group-from-env")
     assert group_id("dws") == "group-from-env"
     assert source_configured("dws") is True
+
+
+def test_zsxq_groups_keep_single_id_and_named_list(monkeypatch):
+    monkeypatch.delenv("NEWS_ZSXQ_GROUP_ID", raising=False)
+    monkeypatch.delenv("NEWS_ZSXQ_GROUPS", raising=False)
+    from app.config import settings
+    monkeypatch.setattr(settings, "news_zsxq_group_id", "")
+    monkeypatch.setattr(settings, "news_zsxq_groups", "")
+    assert zsxq_groups() == []
+    assert group_id("zsxq") == []
+    assert source_configured("zsxq") is False
+    assert zsxq_source_label("") == SOURCE_LABELS["zsxq"] == "知识星球"
+
+    monkeypatch.setenv("NEWS_ZSXQ_GROUP_ID", "1001")
+    assert zsxq_groups() == [("1001", "")]
+    assert group_id("zsxq") == [("1001", "")]
+    assert source_configured("zsxq") is True
+
+    monkeypatch.setenv("NEWS_ZSXQ_GROUP_ID", "1001, 1002，1001")
+    assert zsxq_groups() == [("1001", ""), ("1002", "")]
+
+    monkeypatch.setattr(settings, "news_zsxq_group_id", "3003")
+    monkeypatch.delenv("NEWS_ZSXQ_GROUP_ID", raising=False)
+    assert zsxq_groups() == [("3003", "")]
+
+    monkeypatch.setenv("NEWS_ZSXQ_GROUP_ID", "1001")
+    monkeypatch.setenv("NEWS_ZSXQ_GROUPS", "2002：每日投研, 1001:纳指星球调研, 2002:重复")
+    assert zsxq_groups() == [("2002", "每日投研"), ("1001", "纳指星球调研")]
+    assert zsxq_source_label("每日投研") == "知识星球·每日投研"
+    assert zsxq_source_label("知识星球·每日投研") == "知识星球·每日投研"
+
+    monkeypatch.setenv("NEWS_ZSXQ_GROUPS", "不是星球号")
+    assert zsxq_groups() == []
+    assert source_configured("zsxq") is False
+
+
+def _zsxq_proc(argv: list[str], *, fail_group: str = ""):
+    class Proc:
+        def __init__(self):
+            self.returncode = 0
+            self.stderr = ""
+            self.stdout = "logged in"
+            if argv[1:3] == ["auth", "status"]:
+                return
+            gid = argv[argv.index("--group-id") + 1]
+            if gid == fail_group:
+                self.returncode = 1
+                self.stderr = "zsxq-cli 失败"
+                self.stdout = ""
+                return
+            self.stdout = json.dumps([{
+                "topic_id": f"topic-{gid}",
+                "title": "贵州茅台上调出厂价",
+                "content": "正文",
+                "create_time": "2026-10-09T10:00:00+08:00",
+                "owner": {"name": "作者"},
+            }])
+
+    return Proc()
+
+
+def test_zsxq_cursors_do_not_advance_each_other(tmp_path, monkeypatch):
+    moment = datetime(2026, 10, 9, 12, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.news.host_collector.cn_now", lambda: moment)
+    monkeypatch.setattr(
+        "app.news.host_collector.which",
+        lambda name: "/bin/zsxq-cli" if name == "zsxq-cli" else None,
+    )
+    monkeypatch.setattr(
+        "app.news.host_collector.zsxq_groups",
+        lambda: [("111", "纳指星球调研"), ("222", "每日投研")],
+    )
+    write_cursor(tmp_path, "zsxq:111", "2026-10-09T08:00:00+08:00")
+    write_cursor(tmp_path, "zsxq:222", "2026-10-09T11:30:00+08:00")
+    seen = []
+
+    def run(argv):
+        seen.append(list(argv))
+        return _zsxq_proc(argv)
+
+    assert _run_zsxq(tmp_path, run, "", "", "") == "ok"
+    pulled = [argv[argv.index("--group-id") + 1] for argv in seen if "--group-id" in argv]
+    assert pulled == ["111", "222"]
+    inbox = list((tmp_path / "news" / "inbox").glob("zsxq-*.json"))
+    assert len(inbox) == 1
+    payload = json.loads(inbox[0].read_text(encoding="utf-8"))
+    assert payload["source"] == "zsxq"
+    topic = payload["payload"][0]
+    assert topic["group_id"] == "111"
+    assert topic["group_name"] == "纳指星球调研"
+    assert topic["topic_id"] == "topic-111"
+    assert read_cursor(tmp_path, "zsxq:111", "") == moment.isoformat()
+    assert read_cursor(tmp_path, "zsxq:222", "") == moment.isoformat()
+    assert (tmp_path / "news" / "cursors" / "zsxq-111.txt").is_file()
+    assert (tmp_path / "news" / "cursors" / "zsxq-222.txt").is_file()
+    assert not (tmp_path / "news" / "cursors" / "zsxq.txt").exists()
+
+
+def test_zsxq_one_group_failure_leaves_the_other_cursor(tmp_path, monkeypatch):
+    moment = datetime(2026, 10, 9, 12, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.news.host_collector.cn_now", lambda: moment)
+    monkeypatch.setattr(
+        "app.news.host_collector.which",
+        lambda name: "/bin/zsxq-cli" if name == "zsxq-cli" else None,
+    )
+    monkeypatch.setattr(
+        "app.news.host_collector.zsxq_groups",
+        lambda: [("111", "纳指星球调研"), ("222", "每日投研")],
+    )
+    older = "2026-10-09T08:00:00+08:00"
+    write_cursor(tmp_path, "zsxq:111", older)
+    write_cursor(tmp_path, "zsxq:222", older)
+
+    assert _run_zsxq(tmp_path, lambda argv: _zsxq_proc(argv, fail_group="222"), "", "", "") == "fetch-failed"
+    assert read_cursor(tmp_path, "zsxq:111", "") == moment.isoformat()
+    assert read_cursor(tmp_path, "zsxq:222", "") == older
+    inbox = list((tmp_path / "news" / "inbox").glob("zsxq-*.json"))
+    assert len(inbox) == 1
+    topic = json.loads(inbox[0].read_text(encoding="utf-8"))["payload"][0]
+    assert topic["group_id"] == "111"
+
+
+def test_old_single_zsxq_group_id_still_collects(tmp_path, monkeypatch):
+    moment = datetime(2026, 10, 9, 12, 0, tzinfo=CN_TZ)
+    monkeypatch.delenv("NEWS_ZSXQ_GROUPS", raising=False)
+    monkeypatch.setenv("NEWS_ZSXQ_GROUP_ID", "1001")
+    from app.config import settings
+    monkeypatch.setattr(settings, "news_zsxq_groups", "")
+    monkeypatch.setattr("app.news.host_collector.cn_now", lambda: moment)
+    monkeypatch.setattr(
+        "app.news.host_collector.which",
+        lambda name: "/bin/zsxq-cli" if name == "zsxq-cli" else None,
+    )
+    seen = []
+
+    def run(argv):
+        seen.append(list(argv))
+        return _zsxq_proc(argv)
+
+    assert _run_zsxq(tmp_path, run, "", "", "") == "ok"
+    pulled = [argv[argv.index("--group-id") + 1] for argv in seen if "--group-id" in argv]
+    assert pulled == ["1001"]
+    topic = json.loads(next((tmp_path / "news" / "inbox").glob("zsxq-*.json")).read_text(encoding="utf-8"))
+    assert topic["payload"][0]["group_id"] == "1001"
+    assert topic["payload"][0]["group_name"] == ""
+    assert (tmp_path / "news" / "cursors" / "zsxq-1001.txt").is_file()
+
+
+def test_zsxq_source_label_follows_group_and_digest_stays_small(tmp_path):
+    reset_store_for_tests(tmp_path / "news-zsxq.sqlite")
+    lexicon = Lexicon([
+        ("600519.SH", "贵州茅台", "600519"),
+        ("000001.SZ", "平安银行", "000001"),
+    ], [])
+    when = cn_now()
+    daily, _page = parse_zsxq_payload([{
+        "topic_id": "daily-1",
+        "title": "贵州茅台上调出厂价",
+        "content": "贵州茅台出厂价上调，正文写长一点以免被当成短讯。",
+        "create_time": when.isoformat(),
+        "group_id": "2002",
+        "group_name": "每日投研",
+    }])
+    nasdaq, _page = parse_zsxq_payload([{
+        "topic_id": "nasdaq-1",
+        "title": "贵州茅台回购",
+        "content": "贵州茅台回购股份。",
+        "create_time": when.isoformat(),
+        "group_id": "1001",
+        "group_name": "纳指星球调研",
+    }])
+    assert daily[0].source == "zsxq"
+    assert daily[0].raw["group_id"] == "2002"
+    assert daily[0].raw["group_name"] == "每日投研"
+    assert "digest" not in daily[0].raw
+    digest, _page = parse_zsxq_payload([{
+        "topic_id": "digest-1",
+        "title": "10月12日复盘",
+        "content": "1、贵州茅台大涨\n2、平安银行回购",
+        "create_time": when.isoformat(),
+        "group_id": "2002",
+        "group_name": "每日投研",
+    }])
+    assert digest[0].raw["digest"] is True
+    assert ingest_items([*daily, *nasdaq, *digest], lexicon)["inserted"] == 3
+    rows = get_store().items_for_symbol(["600519.SH", "000001.SZ"], when - timedelta(hours=1), 10)
+    labels = {message_view(row)["source_label"] for row in rows}
+    assert "知识星球·每日投研" in labels
+    assert "知识星球·纳指星球调研" in labels
+    from app.news.push import pick_refs
+    daily_view = next(message_view(row) for row in rows if row["title"] == "贵州茅台上调出厂价")
+    refs = pick_refs([daily_view])
+    assert refs == [{"kind": "name", "label": "知识星球·每日投研"}]
+    ranked = hot_candidates(kind="stock", window_hours=24, baseline_days=1)
+    keys = {item.key for item in ranked}
+    assert "600519.SH" in keys
+    assert "000001.SZ" not in keys
+
+    from app.news.hot_events import _expand_topic_rows
+    pieces = _expand_topic_rows({
+        "source": "zsxq",
+        "title": "10月12日复盘",
+        "clean_text": "1、贵州茅台上调出厂价10%\n2、平安银行宣布回购",
+        "mentions": [
+            {"kind": "stock", "key": "600519.SH", "name": "贵州茅台"},
+            {"kind": "stock", "key": "000001.SZ", "name": "平安银行"},
+        ],
+    })
+    assert len(pieces) == 1
+    assert pieces[0]["clean_text"] == "10月12日复盘"
+    assert pieces[0]["mentions"] == []
+    split = _expand_topic_rows({
+        "source": "zsxq",
+        "title": "晨会纪要",
+        "clean_text": "1、贵州茅台上调出厂价10%\n2、平安银行宣布回购股份",
+        "mentions": [],
+    })
+    assert len(split) == 2
 
 
 def test_private_group_ids_are_not_defaults():

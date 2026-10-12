@@ -69,7 +69,7 @@ from datetime import time as dt_time
 from functools import lru_cache
 
 from app.market_time import CN_TZ, cn_now, current_trading_day
-from app.news.collectors import is_red, parse_time
+from app.news.collectors import is_red, parse_time, zsxq_digest_title
 from app.news.extract import _usable_sector_name
 from app.news.store import NewsStore
 
@@ -1401,9 +1401,15 @@ def _mentions_for_part(mentions, part: str) -> list:
 def _expand_topic_rows(row: dict) -> list[dict]:
     """研究来源的多主题晨报按条拆开。单条仍用原来的标题。"""
     source = str(row.get("source") or "").strip().lower()
+    title = str(row.get("title") or "")
+    if source == "zsxq" and zsxq_digest_title(title):
+        # 一条复盘按编号拆开，会变成十几件热点，并把正文里的标的都算进去。
+        piece = dict(row)
+        piece["clean_text"] = title
+        piece["mentions"] = _mentions_for_part(row.get("mentions") or [], title)
+        return [piece]
     if source not in _RESEARCH_SOURCES:
         return [row]
-    title = str(row.get("title") or "")
     body = _summary_text(row)
     parts = _brief_parts(body)
     if len(parts) < 2:

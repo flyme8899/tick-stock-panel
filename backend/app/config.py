@@ -189,7 +189,10 @@ class Settings(BaseSettings):
     sec_user_agent: str = ""
     news_llm_extract: str = ""
     news_dws_group_id: str = ""
+    # 单个星球号，或逗号分隔的多个星球号。名称用 news_zsxq_groups。
     news_zsxq_group_id: str = ""
+    # 「星球号:名称」逗号分隔。非空时优先于 news_zsxq_group_id。
+    news_zsxq_groups: str = ""
     news_etf_flow_enabled: str = ""
     # ETF 申赎表格的视觉模型。和上面的 ai_api_key / ai_model 分开，避免把文本模型当成视觉模型。
     vision_ai_api_key: str = ""

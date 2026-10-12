@@ -12,6 +12,7 @@ from app.custom.dsa.news_bridge import (
     hot_news_rows,
     install,
     is_tsp_feed_url,
+    source_lookup_names,
 )
 from app.news.config import SOURCE_LABELS, SOURCE_ORDER
 
@@ -20,6 +21,8 @@ def test_bridge_sources_follow_the_news_catalog():
     keys = [row[0] for row in _SOURCES]
     assert keys == [*SOURCE_ORDER, "hot"]
     assert [row[1] for row in _SOURCES] == [SOURCE_LABELS[key] for key in keys]
+    assert source_lookup_names("知识星球") == ("知识星球", "知识星球纳指星球调研")
+    assert source_lookup_names("财联社") == ("财联社",)
 
 
 def test_feed_url_allowlist(monkeypatch):

@@ -307,7 +307,8 @@ class NewsStore:
         with self._lock:
             return list(self._conn.execute(
                 f"""
-                SELECT id, source, published_at, author, title, clean_text, url, level, extra_json
+                SELECT id, source, published_at, author, title, clean_text, url, level,
+                       extra_json, raw_json
                 FROM news_items
                 WHERE id IN ({marks})
                 ORDER BY published_at DESC
@@ -355,7 +356,7 @@ class NewsStore:
             return list(self._conn.execute(
                 """
                 SELECT i.source, i.source_id, i.published_at, i.author, i.title,
-                       i.clean_text, i.url, i.level, i.content_hash, i.extra_json
+                       i.clean_text, i.url, i.level, i.content_hash, i.extra_json, i.raw_json
                 FROM news_mentions m
                 JOIN news_items i ON i.id = m.item_id
                 WHERE m.kind = ? AND m.key = ? AND i.published_at >= ?
@@ -373,7 +374,7 @@ class NewsStore:
             return list(self._conn.execute(
                 f"""
                 SELECT DISTINCT i.source, i.published_at, i.author, i.title,
-                       i.clean_text, i.url, i.level, i.extra_json
+                       i.clean_text, i.url, i.level, i.extra_json, i.raw_json
                 FROM news_mentions m
                 JOIN news_items i ON i.id = m.item_id
                 WHERE m.kind = 'stock' AND m.key IN ({marks}) AND i.published_at >= ?

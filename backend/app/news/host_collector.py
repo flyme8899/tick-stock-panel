@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import time
 from datetime import timedelta
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from app.market_time import cn_now
 from app.news.collectors import parse_time, parse_zsxq_payload
-from app.news.config import group_id
+from app.news.config import group_id, zsxq_groups
 
 _READONLY = {
     ("dws", "auth", "status"),
@@ -94,10 +95,12 @@ def write_auth(data_dir: Path, source: str, state: str, detail: str) -> None:
     path.write_text(json.dumps({"auth": state, "detail": detail[:200]}, ensure_ascii=False), encoding="utf-8")
 
 
-def write_inbox(data_dir: Path, source: str, payload) -> Path:
+def write_inbox(data_dir: Path, source: str, payload, *, suffix: str = "") -> Path:
     inbox = data_dir / "news" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
-    target = inbox / f"{source}-{int(time.time())}.json"
+    token = str(int(time.time() * 1000))
+    extra = f"-{_cursor_name(suffix)}" if suffix else ""
+    target = inbox / f"{source}-{token}{extra}.json"
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(json.dumps({"source": source, "payload": payload}, ensure_ascii=False), encoding="utf-8")
     tmp.replace(target)
@@ -179,15 +182,21 @@ def dws_cursor_stamp(now=None) -> str:
     return (moment - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _cursor_name(source: str) -> str:
+    """游标键可以是 zsxq:<gid>。冒号不能做 Windows 文件名。"""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", source).strip("-")
+    return cleaned or "cursor"
+
+
 def read_cursor(data_dir: Path, source: str, default: str) -> str:
-    path = data_dir / "news" / "cursors" / f"{source}.txt"
+    path = data_dir / "news" / "cursors" / f"{_cursor_name(source)}.txt"
     if path.is_file():
         return path.read_text(encoding="utf-8").strip() or default
     return default
 
 
 def write_cursor(data_dir: Path, source: str, value: str) -> None:
-    path = data_dir / "news" / "cursors" / f"{source}.txt"
+    path = data_dir / "news" / "cursors" / f"{_cursor_name(source)}.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value, encoding="utf-8")
 
@@ -233,8 +242,8 @@ def _run_dws(data_dir: Path, run, webhook: str, secret: str) -> str:
 
 
 def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: str) -> str:
-    group = group_id("zsxq")
-    if not group:
+    groups = zsxq_groups()
+    if not groups:
         write_auth(data_dir, "zsxq", "missing", "未配置星球号")
         return "unconfigured"
     binary = which("zsxq-cli")
@@ -249,10 +258,25 @@ def _run_zsxq(data_dir: Path, run, webhook: str, secret: str, backfill_since: st
     if state != "ok":
         alert_expiry(data_dir, "zsxq", status.stderr or status.stdout, webhook, secret)
         return state
-    since = backfill_since or read_cursor(data_dir, "zsxq", (cn_now() - timedelta(days=2)).isoformat())
+    default_since = (cn_now() - timedelta(days=2)).isoformat()
     pages = 400 if backfill_since else 8
-    topics = collect_zsxq_pages(run, binary, group, since=since, max_pages=pages)
-    if topics:
-        write_inbox(data_dir, "zsxq", topics)
-    write_cursor(data_dir, "zsxq", cn_now().isoformat())
+    errors: list[str] = []
+    for gid, name in groups:
+        # 游标按星球分开。一个星球推进不能把另一个星球的新帖滤掉。
+        key = f"zsxq:{gid}"
+        since = backfill_since or read_cursor(data_dir, key, default_since)
+        try:
+            topics = collect_zsxq_pages(run, binary, gid, since=since, max_pages=pages)
+        except (RuntimeError, json.JSONDecodeError, OSError, ValueError) as exc:
+            errors.append(str(exc)[:200])
+            continue
+        for topic in topics:
+            topic["group_id"] = gid
+            topic["group_name"] = name
+        if topics:
+            write_inbox(data_dir, "zsxq", topics, suffix=gid)
+        write_cursor(data_dir, key, cn_now().isoformat())
+    if errors:
+        write_auth(data_dir, "zsxq", "ok", errors[0])
+        return "fetch-failed"
     return "ok"
