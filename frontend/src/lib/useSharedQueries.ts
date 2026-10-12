@@ -11,7 +11,7 @@ import { QK } from './queryKeys'
 // ===== 全局共享 =====
 
 /**
- * 盘中个股主力净流入。自选和个股详情共用同一查询键（按代码排序）。
+ * 盘中资金净额(同花顺)。自选和个股详情共用同一查询键（按代码排序）。
  * 后端约 6 分钟落一份快照，这里 60 秒看一次本地接口，不打外部源。
  */
 export function useIntradayFundFlow(symbols: readonly string[]) {

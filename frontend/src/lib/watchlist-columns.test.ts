@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
+import { INTRADAY_NET_HINT, intradayNetTitle } from './format'
 import { mergeColumns } from './list-columns'
 import { BUILTIN_COLUMNS, COLUMN_GROUPS } from './watchlist-columns'
 
@@ -96,12 +97,20 @@ describe('watchlist columns: 自选加入信息列', () => {
   })
 })
 
-describe('watchlist columns: 盘中主力净流入', () => {
+describe('watchlist columns: 盘中资金净额', () => {
   it('默认显示，并归入资金分组', () => {
     const col = BUILTIN_COLUMNS.find(c => c.source.type === 'builtin' && c.source.key === 'main_net_intraday')
     expect(col?.visible).toBe(true)
-    expect(col?.label).toBe('主力净流入')
+    expect(col?.label).toBe('盘中资金净额(同花顺)')
     const group = COLUMN_GROUPS.find(g => g.id === 'flow')
     expect(group?.keys).toContain('main_net_intraday')
+  })
+
+  it('悬停说明这是流入减流出，不是东财主力净流入', () => {
+    expect(INTRADAY_NET_HINT).toContain('流入减去流出')
+    expect(INTRADAY_NET_HINT).toContain('不是东财口径的主力净流入')
+    expect(intradayNetTitle('10:06', true)).toContain('快照 10:06')
+    expect(intradayNetTitle('10:06', false)).toContain('还没有今日快照')
+    expect(intradayNetTitle('10:06', false)).not.toContain('10:06')
   })
 })

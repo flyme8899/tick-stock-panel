@@ -755,7 +755,7 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
         </div>
 
         <p className="mb-4 text-[11px] leading-relaxed text-muted">
-          个股资金即时流向不走上面的行情源。同花顺全市场快照在交易日连续竞价（北京时间 9:30–11:30、13:00–15:00）每 6 分钟拉一次，请求走共用限流，单次连接 10 秒、读取 30 秒。总开关打开时默认开启，<span className="font-mono">FUND_FLOW_STOCK_INTRADAY=false</span> 可关掉。午休和收盘后不拉。
+          盘中资金净额(同花顺)不走上面的行情源。同花顺即时「净额」是资金流入减去流出，不是东财口径的主力净流入。全市场快照在交易日连续竞价（北京时间 9:30–11:30、13:00–15:00）每 6 分钟拉一次，请求走共用限流，单次连接 10 秒、读取 30 秒。总开关打开时默认开启，<span className="font-mono">FUND_FLOW_STOCK_INTRADAY=false</span> 可关掉。午休和收盘后不拉。
         </p>
 
         <div className="mb-4 rounded-lg border border-border bg-elevated/40 px-3 py-2.5 text-[11px] leading-relaxed text-muted">

@@ -5,6 +5,7 @@
  * 来自 list-columns，策略页等其它股票列表可复用同一底座。
  */
 
+import { INTRADAY_NET_LABEL } from '@/lib/format'
 import { storage } from '@/lib/storage'
 import {
   buildExtColumnsParam as buildExtColumnsParamBase,
@@ -90,8 +91,8 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:revenue_yoy', source: { type: 'builtin', key: 'revenue_yoy' }, label: '营收增速', visible: false, align: 'center' },
   { id: 'builtin:net_income_yoy', source: { type: 'builtin', key: 'net_income_yoy' }, label: '净利增速', visible: false, align: 'center' },
   { id: 'builtin:debt_ratio', source: { type: 'builtin', key: 'debt_ratio' }, label: '负债率', visible: false, align: 'center' },
-  // 盘中主力净流入 (同花顺即时快照, 默认显示)
-  { id: 'builtin:main_net_intraday', source: { type: 'builtin', key: 'main_net_intraday' }, label: '主力净流入', visible: true, align: 'center' },
+  // 同花顺即时净额（流入减流出，不是东财主力净流入）, 默认显示
+  { id: 'builtin:main_net_intraday', source: { type: 'builtin', key: 'main_net_intraday' }, label: INTRADAY_NET_LABEL, visible: true, align: 'center' },
   // 自选加入信息 (后端读时计算, 不落盘; 默认隐藏)
   { id: 'builtin:added_at', source: { type: 'builtin', key: 'added_at' }, label: '加入日期', visible: false, align: 'center' },
   { id: 'builtin:pct_since_added', source: { type: 'builtin', key: 'pct_since_added' }, label: '加入以来', visible: false, align: 'center' },

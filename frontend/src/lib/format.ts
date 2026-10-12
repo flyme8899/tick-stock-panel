@@ -26,7 +26,20 @@ export function priceColorClass(v: number | null | undefined): string {
   return v > 0 ? 'text-bull' : 'text-bear'
 }
 
-/** 主力净流入（元）。正数红、负数绿由 priceColorClass 决定；缺失是 —，不是 0。 */
+/** 自选和个股详情上的同花顺即时净额。不是东财主力净流入。 */
+export const INTRADAY_NET_LABEL = '盘中资金净额(同花顺)'
+
+/** 悬停说明：同花顺「净额」是流入减流出。 */
+export const INTRADAY_NET_HINT =
+  '同花顺即时「净额」是资金流入减去流出，不是东财口径的主力净流入（大单加超大单）。'
+
+/** 数值旁的提示。有快照才带时刻；这只股票没有行时说明留空。 */
+export function intradayNetTitle(clock: string, hasValue: boolean): string {
+  if (!hasValue) return `${INTRADAY_NET_HINT}还没有今日快照。`
+  return clock ? `${INTRADAY_NET_HINT}快照 ${clock}。` : INTRADAY_NET_HINT
+}
+
+/** 带符号的金额（元）。正数红、负数绿由 priceColorClass 决定；缺失是 —，不是 0。 */
 export function fmtSignedFlow(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return '—'
   if (v === 0) return '0'

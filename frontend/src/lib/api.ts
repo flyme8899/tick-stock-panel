@@ -2369,7 +2369,7 @@ export interface SectorRotationUniverseItem {
 export interface FundFlowIntradayItem {
   code: string
   name?: string | null
-  /** 主力净流入，单位元。缺失的代码不会出现在 items 里。 */
+  /** 同花顺即时净额（流入减流出），单位元。缺失的代码不会出现在 items 里。 */
   main_net: number | null
 }
 

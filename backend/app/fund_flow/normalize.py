@@ -113,9 +113,9 @@ def normalize_stock_intraday(
     trade_date: str,
     captured_at: str,
 ) -> list[dict]:
-    """同花顺个股即时榜收成一份快照。金额口径与当日排名相同，单位是元。
+    """同花顺个股即时榜收成一份快照。读「净额」（流入减流出），单位是元。
 
-    没有主力净额的行丢掉。不把缺失写成 0。
+    不是东财主力净流入。没有净额的行丢掉。不把缺失写成 0。
     """
     ranked = normalize_rank_rows(rows, trade_date=trade_date, source="akshare_ths", window="today")
     out = []
