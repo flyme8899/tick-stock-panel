@@ -36,6 +36,14 @@ _NUMERIC_FIELDS = (
 )
 _TEXT_FIELDS = ("board_heat_summary", "board_heat_state")
 _HEAT_FIELDS = (*_NUMERIC_FIELDS, *_TEXT_FIELDS)
+# Snapshot files and the Tonghuashun industry table do not share one header.
+# The first non-empty alias wins so a blank "code"/"industry" column does not
+# hide 股票代码 / 所属同花顺行业.
+_CODE_KEYS = ("code", "代码", "股票代码", "symbol", "ts_code", "证券代码")
+# 所属同花顺行业 is the mapping table. It wins over a generic industry column
+# that may be blank or a provider label the buckets do not recognize.
+_INDUSTRY_KEYS = ("所属同花顺行业", "行业名称", "所属行业", "行业", "industry")
+_CONCEPT_KEYS = ("concepts", "概念", "概念题材", "所属概念")
 _FIELD_ALIASES = {
     "industry_rank": ["industry_rank", "行业排名", "板块排名", "排名"],
     "industry_change_pct": ["industry_change_pct", "行业涨跌幅", "板块涨跌幅", "涨跌幅"],
@@ -151,11 +159,11 @@ def load_industry_map(path_like: str | Path) -> dict[str, dict[str, object]]:
 
     mapping: dict[str, dict[str, object]] = {}
     for row in rows:
-        code = _normalize_code(row.get("code") or row.get("代码"))
+        code = _normalize_code(_first_nonempty_text(row, _CODE_KEYS))
         if not code or code == "000000":
             continue
-        industry = _safe_text(row.get("industry") or row.get("行业") or row.get("所属行业"))
-        concepts = _safe_text(row.get("concepts") or row.get("概念") or row.get("概念题材"))
+        industry = _first_nonempty_text(row, _INDUSTRY_KEYS)
+        concepts = _first_nonempty_text(row, _CONCEPT_KEYS)
         item: dict[str, object] = {
             "industry": industry,
             "concepts": concepts,
@@ -343,9 +351,13 @@ def _mapping_dataframe(mapping: dict[str, dict[str, object]]) -> pd.DataFrame:
 
 
 def _apply_industry_column(output: pd.DataFrame, merged: pd.DataFrame) -> int:
+    # The mapping table is the industry source used by diversification.
+    # Snapshot industry is often blank or a label that does not match those
+    # buckets ("Other", a vendor code, an English name). Keep the snapshot
+    # text only when the map has no industry for that code.
     current = output["industry"].map(_safe_text)
     incoming = merged["__map_industry"].map(_safe_text)
-    mask = current.eq("") & incoming.ne("")
+    mask = incoming.ne("") & current.ne(incoming)
     if mask.any():
         output.loc[mask, "industry"] = incoming[mask].to_numpy()
     return int(mask.sum())
@@ -761,6 +773,17 @@ def _merge_summary_text(left: object, right: object, *, limit: int = 8) -> str:
                 seen.add(label)
                 labels.append(label)
     return " | ".join(labels[:limit])
+
+
+def _first_nonempty_text(row: dict | pd.Series, columns: tuple[str, ...] | list[str]) -> str:
+    """Return the first alias that is present and not a null spelling."""
+    for column in columns:
+        if column not in row:
+            continue
+        text = _safe_text(row.get(column))
+        if text:
+            return text
+    return ""
 
 
 def _first_row_value(row: dict | pd.Series, columns: list[str]) -> object:

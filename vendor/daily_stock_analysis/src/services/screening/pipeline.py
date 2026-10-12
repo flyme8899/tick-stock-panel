@@ -35,7 +35,11 @@ from src.services.screening.normalize import (
 )
 from src.services.screening.post_analysis import normalize_post_analyzers, run_post_analyzers
 from src.services.screening.ranker import rank_candidates_with_metadata
-from src.services.screening.risk import apply_portfolio_overlay, apply_risk_overlay
+from src.services.screening.risk import (
+    apply_portfolio_overlay,
+    apply_risk_overlay,
+    limit_picks_per_industry,
+)
 from src.services.screening.scorer import (
     compute_screen_scores,
     factor_score_columns,
@@ -514,6 +518,21 @@ def screen(
         )
         degradation.extend(post_degradation)
 
+    # Hard cap after final scores. The penalty above only reorders; without
+    # this pass a second name in the same bucket can still occupy the shortlist
+    # when the score gap is larger than the penalty, or when industry was empty.
+    if config.portfolio_diversity_enabled:
+        before_cap = len(picks)
+        picks = limit_picks_per_industry(
+            picks,
+            max_same_sector=config.portfolio_max_same_llm_sector,
+            profile=screening.portfolio_profile,
+        )
+        if len(picks) < before_cap:
+            degradation.append(
+                f"Industry cap kept {len(picks)} of {before_cap} candidates"
+            )
+
     # Apply selection variant after post-analyzers to ensure rotation respects
     # final_score adjustments made by L3 analyzers (e.g. scorecard/dsa).
     selection_variant = apply_seeded_selection_variant(
@@ -602,7 +621,7 @@ def _df_to_picks(df: pd.DataFrame) -> list[Pick]:
             volume_ratio=_safe_float(row.get("volume_ratio", row.get("量比"))),
             pe_ratio=_safe_float(row.get("pe_ratio", row.get("市盈率"))),
             pb_ratio=_safe_float(row.get("pb_ratio", row.get("市净率"))),
-            industry=_safe_text(row.get("industry", row.get("行业", row.get("所属行业", "")))),
+            industry=_candidate_industry(row),
             concepts=_safe_text(row.get("concepts", row.get("概念", row.get("概念题材", "")))),
             industry_rank=_safe_int(row.get("industry_rank")),
             industry_change_pct=_safe_float(row.get("industry_change_pct")),
@@ -771,3 +790,37 @@ def _format_filter_waterfall(steps: list[dict[str, object]], *, limit: int = 8) 
 
 def _safe_text(v: object) -> str:
     return safe_text(v, max_len=120)
+
+
+# Same null labels as risk._UNUSABLE_INDUSTRY. A snapshot cell with one of
+# these must not hide 所属同花顺行业 / 行业 on the same row.
+_INDUSTRY_COLUMNS = ("所属同花顺行业", "行业名称", "所属行业", "行业", "industry")
+_UNUSABLE_INDUSTRY_LABELS = {
+    "",
+    "-",
+    "--",
+    "other",
+    "unknown",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "未分类",
+    "未知",
+    "其他",
+}
+
+
+def _candidate_industry(row: pd.Series) -> str:
+    """Industry attached to a candidate.
+
+    Prefer the mapping-table column. Fall back to the snapshot industry when
+    that column is missing. Blank and placeholder labels are not an industry.
+    """
+    for key in _INDUSTRY_COLUMNS:
+        if key not in row.index:
+            continue
+        text = _safe_text(row.get(key))
+        if text and text.casefold() not in _UNUSABLE_INDUSTRY_LABELS:
+            return text
+    return ""
