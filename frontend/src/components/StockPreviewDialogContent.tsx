@@ -12,6 +12,7 @@ import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { NavPager, NavWrapToast } from '@/components/NavPager'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
+import { TradeMarksOverlay } from '@/components/trade-marks/TradeMarksPanel'
 import { DatePicker } from '@/components/DatePicker'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
@@ -227,11 +228,13 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
 
   const handleRefresh = () => {
     if (!symbol) return
+    qc.invalidateQueries({ queryKey: ['trade-signals', symbol] })
     if (view === 'daily') {
       qc.invalidateQueries({ queryKey: ['kline', symbol] })
+      qc.invalidateQueries({ queryKey: ['kline-minute', symbol] })
     } else {
       qc.invalidateQueries({ queryKey: ['kline-minute-range', symbol] })
-      qc.invalidateQueries({ queryKey: ['kline-minute', symbol!] })
+      qc.invalidateQueries({ queryKey: ['kline-minute', symbol] })
     }
   }
 
@@ -557,14 +560,27 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                   intradayDays={effectiveIntradayDays}
                   addedDate={addedDate}
                 />
-                <StockMultiDayIntradayChart
+                <TradeMarksOverlay
                   symbol={symbol}
-                  days={effectiveIntradayDays}
-                  height={480}
+                  start={dateRange.start}
+                  end={dateRange.end}
+                  intradayDate={dateRange.end}
+                  extraPriceLines={monitorPriceLines}
                   refetchIntervalMs={intradayRefetchMs}
-                  priceLines={monitorPriceLines}
-                  onPriceDoubleClick={openPriceAlert}
-                />
+                >
+                  {overlay => (
+                    <StockMultiDayIntradayChart
+                      symbol={symbol}
+                      days={effectiveIntradayDays}
+                      height={480}
+                      refetchIntervalMs={intradayRefetchMs}
+                      priceLines={overlay.minutePriceLines}
+                      tradeMarks={overlay.minuteMarks}
+                      showT={overlay.showT}
+                      onPriceDoubleClick={openPriceAlert}
+                    />
+                  )}
+                </TradeMarksOverlay>
                 </div>
               )}
               </div>

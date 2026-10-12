@@ -21,6 +21,7 @@ from app.services.trade_marks import (
     replay_t_marks,
     strategy_signal_marks,
     summarize_entries,
+    t_trade_from_bars,
 )
 
 
@@ -259,6 +260,11 @@ def test_t_replay_skips_first_bar_and_respects_60_minute_cooldown():
     assert above[0]["side"] == "sell"
     assert above[0]["time"] == "09:36"
     assert above[1]["time"] != "09:46"
+    stamped = t_trade_from_bars(bars, symbol="600519.SH", day="2024-06-03", prev_close=10)
+    assert stamped["date"] == "2024-06-03"
+    assert stamped["marks"][0]["date"] == "2024-06-03"
+    assert t_trade_from_bars([], symbol="600519.SH", day="2024-06-03")["marks"] == []
+    assert t_trade_from_bars(None, symbol="600519.SH", day=None)["marks"] == []
 
 
 def test_paper_fills_keep_this_symbol_inside_the_window(tmp_path: Path):
@@ -271,17 +277,34 @@ def test_paper_fills_keep_this_symbol_inside_the_window(tmp_path: Path):
     rows = [
         {"kind": "fill", "symbol": "600519.SH", "date": "2024-03-01", "side": "buy", "price": 10.5, "qty": 100},
         {"kind": "fill", "symbol": "000001.SZ", "date": "2024-03-01", "side": "buy", "price": 8, "qty": 100},
-        {"kind": "fill", "symbol": "600519.SH", "date": "2024-05-01", "side": "sell", "price": 12, "qty": 100},
-        {"kind": "corp_action", "symbol": "600519.SH", "date": "2024-03-02", "side": "buy", "price": 1, "qty": 1},
+        {
+            "kind": "fill", "symbol": "600519.SH", "date": "2024-03-02", "side": "sell",
+            "price": 11, "qty": 50, "ts": "2024-03-02T10:15:08+08:00",
+        },
+        {
+            "kind": "fill", "symbol": "600519.SH", "date": "2024-05-01",
+            "side": "sell", "price": 12, "qty": 100,
+        },
+        {
+            "kind": "corp_action", "symbol": "600519.SH", "date": "2024-03-02",
+            "side": "buy", "price": 1, "qty": 1,
+        },
     ]
     (account / "fills.jsonl").write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
         encoding="utf-8",
     )
     found = paper_fills(tmp_path, "600519.SH", "2024-01-01", "2024-04-01")
-    assert found == [{
-        "date": "2024-03-01", "side": "buy", "price": 10.5, "qty": 100, "account": "default",
-    }]
+    assert found == [
+        {
+            "date": "2024-03-01", "side": "buy", "price": 10.5, "qty": 100,
+            "account": "default", "time": None,
+        },
+        {
+            "date": "2024-03-02", "side": "sell", "price": 11, "qty": 50,
+            "account": "default", "time": "10:15",
+        },
+    ]
 
 
 def test_api_unknown_strategy_empty_window_and_cache(tmp_path: Path):
@@ -313,6 +336,7 @@ def test_api_unknown_strategy_empty_window_and_cache(tmp_path: Path):
     body = ok.json()
     assert body["markers"][0]["side"] == "buy"
     assert body["markers"][0]["date"] == "2024-01-03"
+    assert body["markers"][0]["time"] == "15:00"
     assert body["stats"]["signal_count"] == 1
     assert body["stats"]["win_rate"] is None
     assert body["levels"] == []

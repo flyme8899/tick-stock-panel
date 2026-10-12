@@ -10,7 +10,7 @@ import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/st
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { TradeMarksOverlay } from '@/components/trade-marks/TradeMarksPanel'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
-import { api, type KlineRow, type ResearchReport, type StockLevels } from '@/lib/api'
+import { api, type ImaResearchReport, type KlineRow, type ResearchReport, type StockLevels } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -283,7 +283,9 @@ function StockAnalysisChart({
                     height={280}
                     prevClose={prev?.close}
                     vwapBand={overlay.vwapBand}
-                    tMarks={overlay.tMarks}
+                    priceLines={overlay.minutePriceLines}
+                    tradeMarks={overlay.minuteMarks}
+                    showT={overlay.showT}
                   />
                 </div>
               )}
@@ -303,12 +305,13 @@ function ResearchReports({ symbol }: { symbol: string }) {
     staleTime: 5 * 60_000,
   })
   const rows = reports.data?.reports ?? []
+  const imaRows = reports.data?.ima_reports ?? []
 
   return (
     <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
       <div className="px-4 py-3 border-b border-border/40 flex items-center gap-2">
         <span className="text-sm font-medium text-foreground">机构研报</span>
-        <span className="text-[10px] text-muted">标题、机构、评级和 EPS。PDF 只打开外链</span>
+        <span className="text-[10px] text-muted">东财列表给标题和 PDF。知识库研报带正文</span>
       </div>
       {reports.isLoading ? (
         <div className="flex items-center justify-center py-8">
@@ -325,19 +328,57 @@ function ResearchReports({ symbol }: { symbol: string }) {
             重试
           </button>
         </div>
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && imaRows.length === 0 ? (
         <div className="px-4 py-8 text-center">
           <p className="text-xs text-muted">暂无机构研报</p>
           <p className="text-[10px] text-muted/60 mt-1">自选和热门事件里的股票会在收盘后增量同步</p>
         </div>
       ) : (
-        <ul className="divide-y divide-border/40">
-          {rows.map(row => (
-            <ResearchRow key={row.info_code} row={row} />
-          ))}
-        </ul>
+        <>
+          {rows.length > 0 && (
+            <ul className="divide-y divide-border/40">
+              {rows.map(row => (
+                <ResearchRow key={row.info_code} row={row} />
+              ))}
+            </ul>
+          )}
+          {imaRows.length > 0 && (
+            <div className={rows.length > 0 ? 'border-t border-border/40' : ''}>
+              <div className="px-4 pt-3 text-[10px] text-muted">知识库研报 · 提及这只股票</div>
+              <ul className="divide-y divide-border/40">
+                {imaRows.map(row => (
+                  <ImaResearchRow key={row.media_id} row={row} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
       )}
     </div>
+  )
+}
+
+function ImaResearchRow({ row }: { row: ImaResearchReport }) {
+  const names = row.symbols.map(item => item.name || item.symbol).filter(Boolean).join('、')
+  return (
+    <li className="px-4 py-2.5">
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="min-w-0 text-xs text-foreground truncate">{row.title}</span>
+        <span className="ml-auto shrink-0 text-[10px] font-mono text-muted">{row.publish_date}</span>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-muted">
+        {row.broker && <span>{row.broker}</span>}
+        {names && <span>{names}</span>}
+      </div>
+      {row.summary && <p className="mt-1 text-[11px] text-muted line-clamp-2">{row.summary}</p>}
+      {row.body && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[11px] text-sky-300">查看正文</summary>
+          {row.source_note && <p className="mt-1 text-[10px] text-muted">{row.source_note}</p>}
+          <p className="mt-1 whitespace-pre-wrap text-[11px] leading-5 text-foreground/90">{row.body}</p>
+        </details>
+      )}
+    </li>
   )
 }
 

@@ -283,6 +283,16 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("market-feeds worker init failed: %s", e)
 
+    # ima 券商研报全文。开关默认关，测试进程里线程起来也不出网。
+    try:
+        from app.research_reports.ima_schedule import get_worker as get_ima_research_worker
+
+        ima_research_worker = get_ima_research_worker()
+        ima_research_worker.start()
+        app.state.ima_research_worker = ima_research_worker
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ima research worker init failed: %s", e)
+
     # 选股补充字段。开关默认关，线程起来也不出网，不占重任务槽。
     try:
         from app.selection_fields.scheduler import get_worker as get_selection_worker
@@ -452,6 +462,9 @@ async def _application_lifespan(app: FastAPI):
         market_feed_worker = getattr(app.state, "market_feed_worker", None)
         if market_feed_worker:
             market_feed_worker.stop()
+        ima_research_worker = getattr(app.state, "ima_research_worker", None)
+        if ima_research_worker:
+            ima_research_worker.stop()
         selection_worker = getattr(app.state, "selection_worker", None)
         if selection_worker:
             selection_worker.stop()

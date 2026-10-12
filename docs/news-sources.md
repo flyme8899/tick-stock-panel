@@ -23,6 +23,7 @@
 | Reddit | TSP 进程 | wallstreetbets、stocks、investing 的新帖 Atom。只存标题、摘要、链接、作者和时间。每次只请求一个子版 |
 | SEC 8-K | TSP 进程 | 最新 8-K Atom。只存标题、摘要和申报链接 |
 | 研报 | 面板后台线程 | 东财个股研报和行业研报。来源键 `research`。只存标题、机构、评级、EPS 预测和 PDF 地址，不下载 PDF |
+| ima券商研报 | 面板后台线程 | 个人 ima 知识库的券商研报全文。来源键 `ima_research`。全文在 `data/research/ima_reports.sqlite`，热门事件每轮最多 24 条标题加短摘要 |
 | 公告 | 事件上下文线程 | 东财全市场公告。来源键 `notice`。全量落在事件上下文，供个股分析使用。业绩预告、重组、回购、增减持、立案每次最多 40 条进入热门事件。开关是 `EVENT_CONTEXT_NOTICE`，健康页锁定，不在轮询线程里重复拉取 |
 
 钉钉和知识星球的登录态在宿主机，不在容器里。宿主机脚本把 JSON 写到 `data/news/inbox/`，TSP 再入库。不开放无鉴权的 HTTP 写入接口。
@@ -100,6 +101,12 @@ NEWS_SEC_ENABLED=false
 ```
 
 ima 还要 `IMA_CLIENT_ID` 和 `IMA_API_KEY`，缺一则保持关闭。可选 `IMA_KB_ID`；留空时按知识库名称查找。
+
+ima 券商研报另外要 `IMA_RESEARCH_KB_ID`（个人知识库 ID，不写进代码）。`IMA_RESEARCH_TIMES` 是北京时间的时刻，逗号分隔，默认 `06:30,08:30`。知识库从每天 0:30 开始转入前一天的稿，所以这两档放在转存之后。`NEWS_IMA_RESEARCH_ENABLED` 或热门事件页的开关打开后才会拉取；没配 ID 或密钥时保持未配置。拉取不走上面的轮询间隔。
+
+知识库根目录是券商文件夹，下面是日期文件夹（如 `2026-10-11`），再下面是 Markdown，标题形如「券商｜标题」，文件头可以有来源注释。每个券商只读最近 2 个日期文件夹。列表每页最多 20 条。新的 `media_id` 才调用 `get_media_info`，拿到签名链接后立刻下载正文，链接不缓存。相邻请求至少间隔 0.6 秒，并带超时。已入库的 `media_id` 不再下载。
+
+全文、券商、发布日、标题和提及个股写在 `data/research/ima_reports.sqlite`，保留 60 天。个股页和 DSA 个股分析读这张表。热门事件和 DSA 情报桥只收标题和不超过 160 字的摘要，每轮最多 24 篇，有提及个股的优先。不要把长正文写入资讯库。健康页显示这个来源的状态，以及最近一轮写入全文表的篇数。
 
 SEC 8-K 还要 `SEC_USER_AGENT`，字符串里必须有联系邮箱，例如 `TSP-News ops@example.com`。没有邮箱时来源保持未配置，不会请求 sec.gov。这一批外文源没有 API key。
 

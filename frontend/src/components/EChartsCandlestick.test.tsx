@@ -165,3 +165,35 @@ it('买卖点用三角、菱形和圆点，旧箭头标记保持不变', async (
   })
   expect(hover).toHaveBeenCalledWith(null)
 })
+
+it('形态标签是短字小字号半透明底，不画箭头', async () => {
+  await act(async () => root.render(
+    <EChartsCandlestick
+      data={rows(10)}
+      height={400}
+      showInfoBar={false}
+      visibleBars="all"
+      activeIndicators={[]}
+      markers={[
+        { date: DAYS[10], kind: 'buy', label: '吞没', patternTag: true, above: false },
+        { date: DAYS[16], kind: 'sell', label: '暮星', patternTag: true, above: true },
+      ]}
+    />,
+  ))
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  const points = option.series.find((series: any) => series.name === 'K').markPoint.data
+  const bull = points.find((point: any) => point.name === '吞没')
+  const bear = points.find((point: any) => point.name === '暮星')
+  expect(bull.symbol).toBe('circle')
+  expect(bull.symbolSize).toBe(1)
+  expect(bull.itemStyle.color).toBe('transparent')
+  expect(bull.label.formatter).toBe('吞没')
+  expect(bull.label.fontSize).toBeLessThanOrEqual(9)
+  expect(bull.label.backgroundColor).toContain('rgba(199,64,64')
+  expect(bull.label.position).toBe('bottom')
+  expect(bull.coord[1]).toBe(rows(10)[10].low)
+  expect(bear.label.color).toBe('#2D9B65')
+  expect(bear.label.position).toBe('top')
+  expect(bear.coord[1]).toBe(rows(10)[16].high)
+  expect(option.yAxis[0].boundaryGap[0]).toBeGreaterThan(0.03)
+})

@@ -251,6 +251,8 @@ def paper_fills(data_dir: Path, symbol: str, start: str, end: str) -> list[dict]
                 "price": round(price, 4),
                 "qty": qty,
                 "account": account_id,
+                # 分时图按成交时刻落点. 没有时钟的历史记录由前端回退到收盘分钟.
+                "time": _hhmm(row.get("ts") or row.get("filled_at")) or None,
             })
     found.sort(key=lambda item: (item["date"], item["side"], item["account"]))
     return found
@@ -562,15 +564,49 @@ def _fills_mtime(data_dir: Path) -> int:
     return latest
 
 
-def _t_trade_block(repo, panel, symbol: str, intraday: date | None) -> dict:
+def t_trade_from_bars(
+    bars: list[dict] | None,
+    *,
+    symbol: str,
+    day: str | None,
+    prev_close: Any = None,
+) -> dict:
+    """用同一批分钟 K 重放做T. 无 K 或失败时 marks 为空, 不把异常抛给分时图."""
     block = {
-        "date": intraday.isoformat() if intraday else None,
+        "date": day,
         "band": VWAP_BAND,
         "cooldown_min": T_COOLDOWN_MIN,
         "marks": [],
     }
-    if intraday is None or not hasattr(repo, "get_minute"):
+    if not bars:
         return block
+    prev = None
+    if prev_close is not None and not isinstance(prev_close, bool):
+        try:
+            prev = _finite(float(prev_close))
+        except (TypeError, ValueError):
+            prev = None
+    try:
+        marks = replay_t_marks(
+            list(bars),
+            symbol=symbol,
+            prev_close=prev,
+            cooldown_min=T_COOLDOWN_MIN,
+        )
+    except Exception:  # noqa: BLE001 — 分时图不能因标记失败丢掉 K 线
+        logger.warning("t marks failed %s %s", symbol, day, exc_info=True)
+        return block
+    if day:
+        for mark in marks:
+            mark.setdefault("date", day)
+    block["marks"] = marks
+    return block
+
+
+def _t_trade_block(repo, panel, symbol: str, intraday: date | None) -> dict:
+    day = intraday.isoformat() if intraday else None
+    if intraday is None or not hasattr(repo, "get_minute"):
+        return t_trade_from_bars([], symbol=symbol, day=day)
     asset_type = "stock"
     if hasattr(repo, "resolve_asset_type"):
         try:
@@ -581,13 +617,12 @@ def _t_trade_block(repo, panel, symbol: str, intraday: date | None) -> dict:
         minute = repo.get_minute(symbol, intraday, asset_type)
     except Exception:  # noqa: BLE001 — 图表叠加失败时留空，不把错误价位当成信号
         logger.warning("minute read failed %s %s", symbol, intraday, exc_info=True)
-        return block
+        return t_trade_from_bars([], symbol=symbol, day=day)
     if minute is None or minute.is_empty():
-        return block
+        return t_trade_from_bars([], symbol=symbol, day=day)
     bars = minute.sort("datetime").to_dicts() if "datetime" in minute.columns else minute.to_dicts()
-    prev = _previous_raw_close(panel, symbol, intraday.isoformat()) if panel is not None else None
-    block["marks"] = replay_t_marks(bars, symbol=symbol, prev_close=prev, cooldown_min=T_COOLDOWN_MIN)
-    return block
+    prev = _previous_raw_close(panel, symbol, day) if panel is not None and day else None
+    return t_trade_from_bars(bars, symbol=symbol, day=day, prev_close=prev)
 
 
 def _previous_raw_close(panel: pl.DataFrame, symbol: str, day: str) -> float | None:
@@ -749,6 +784,7 @@ def _markers_from_edges(defn, dates, entry, exit_, entry_ids, exit_ids, *, start
 
 
 def _marker(defn, day: str, side: str, style: str, signal_ids) -> dict:
+    # 日线信号在收盘确认, 分时图对齐到 15:00 这根, 不另建分钟信号.
     return {
         "id": f"{side}:{day}:{style}",
         "date": day,
@@ -758,6 +794,7 @@ def _marker(defn, day: str, side: str, style: str, signal_ids) -> dict:
         "price": None,
         "fwd5": None,
         "fwd20": None,
+        "time": "15:00",
     }
 
 

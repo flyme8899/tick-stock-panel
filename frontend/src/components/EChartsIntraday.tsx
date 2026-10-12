@@ -3,9 +3,12 @@ import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
 import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES, summarizeMinutes, type DailySummary } from '@/lib/intraday-chart'
+import { intradayMarkPoints, type IntradayTradeMark } from '@/lib/trade-marks'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
+
+const EMPTY_MARKS: IntradayTradeMark[] = []
 
 // 序列颜色 (双主题通用); 画布轴/网格/十字线等主题相关色走 ChartTheme
 const THEME = {
@@ -31,8 +34,8 @@ interface Props {
   showAvgLine?: boolean
   /** 分时均价上下带，例如 0.015。空则不画。 */
   vwapBand?: number | null
-  /** 做T提醒标记，time 为 HH:MM。 */
-  tMarks?: { time: string; side: 'buy' | 'sell' | 'neutral'; price?: number | null }[]
+  /** 买卖点。空数组或对不上分钟时不画。 */
+  tradeMarks?: IntradayTradeMark[]
 }
 
 function fmtAmt(v: number | null | undefined): string {
@@ -79,31 +82,19 @@ function bandSeries(avgData: (number | null)[], band: number) {
   ]
 }
 
-function tMarkPoints(
-  marks: Props['tMarks'],
+function placeMinuteMark(
+  mark: IntradayTradeMark,
   closes: (number | null)[],
-  avgData: (number | null)[],
   timeIndexMap: Map<string, number>,
-) {
-  const data = (marks ?? []).flatMap(mark => {
-    const idx = timeIndexMap.get(mark.time)
-    if (idx == null) return []
-    const y = mark.price ?? closes[idx] ?? avgData[idx]
-    if (y == null || !Number.isFinite(y)) return []
-    const color = mark.side === 'buy' ? '#12B76A' : mark.side === 'sell' ? '#F04438' : '#A1A1AA'
-    return [{
-      name: mark.time,
-      coord: [mark.time, y],
-      symbol: 'circle',
-      symbolSize: 10,
-      itemStyle: { color },
-      label: { show: true, formatter: 'T', color: '#fff', fontSize: 8, fontWeight: 'bold' as const },
-    }]
-  })
-  return data.length > 0 ? { data, animation: false } : undefined
+): { x: string; y: number } | null {
+  const idx = timeIndexMap.get(mark.time)
+  if (idx == null) return null
+  const y = mark.price ?? closes[idx]
+  if (y == null || !Number.isFinite(y) || y <= 0) return null
+  return { x: mark.time, y }
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], vwapBand: number | null = null, tMarks: Props['tMarks'] = []): EChartsOption {
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: (number | null)[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], vwapBand: number | null = null, tradeMarks: IntradayTradeMark[] = []): EChartsOption {
   // 无涨跌幅标的 (注册制新股上市初期窗口, 后端 no_limit 标记): 不存在可信
   // 涨跌停带, 自适应/涨跌停两类模式都退化为纯数据对称范围, 也不画涨跌停虚线
   const limitLinesActive = showLimitLines && !priceLimit?.no_limit
@@ -204,9 +195,13 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       }
     }
 
-    const monitoredDiff = priceLines.reduce((largest, line) => (
-      Number.isFinite(line.value) && line.value > 0
-        ? Math.max(largest, Math.abs(line.value - prevClose))
+    const anchored = [
+      ...priceLines.map(line => line.value),
+      ...tradeMarks.map(mark => mark.price ?? Number.NaN),
+    ]
+    const monitoredDiff = anchored.reduce((largest, value) => (
+      Number.isFinite(value) && value > 0
+        ? Math.max(largest, Math.abs(value - prevClose))
         : largest
     ), 0) * 1.05
 
@@ -428,7 +423,10 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         areaStyle,
         connectNulls: true,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
-        markPoint: tMarkPoints(tMarks, closes, avgData, timeIndexMap),
+        markPoint: (() => {
+          const points = intradayMarkPoints(tradeMarks, mark => placeMinuteMark(mark, closes, timeIndexMap))
+          return points.length > 0 ? { data: points, animation: false } : undefined
+        })(),
       },
       ...(showAvgLine ? [{
         name: '均价',
@@ -467,7 +465,7 @@ export function EChartsIntraday({
   showLimitLines = true,
   showAvgLine = true,
   vwapBand = null,
-  tMarks,
+  tradeMarks = EMPTY_MARKS,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -486,6 +484,7 @@ export function EChartsIntraday({
   const fullDayToDataIdx = useRef<Map<number, number>>(new Map())
 
   const [infoIdx, setInfoIdx] = useState(-1)
+  const [markTip, setMarkTip] = useState<{ text: string; x: number; y: number } | null>(null)
   const [yMode, setYMode] = useState<YMode>('adaptive')
   const ct = useChartTheme()
   const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
@@ -500,6 +499,7 @@ export function EChartsIntraday({
 
   useEffect(() => {
     setInfoIdx(-1)
+    setMarkTip(null)
   }, [date])
 
   useEffect(() => {
@@ -550,7 +550,23 @@ export function EChartsIntraday({
 
       chart.on('globalout', () => {
         setInfoIdx(-1)
+        setMarkTip(null)
         onPriceHoverRef.current?.(null)
+      })
+
+      chart.on('mouseover', (params: any) => {
+        if (params?.componentType !== 'markPoint') return
+        const text = params.data?.tip
+        if (!text) return
+        const ev = params.event
+        setMarkTip({
+          text: String(text),
+          x: typeof ev?.offsetX === 'number' ? ev.offsetX : 8,
+          y: typeof ev?.offsetY === 'number' ? ev.offsetY : 8,
+        })
+      })
+      chart.on('mouseout', (params: any) => {
+        if (params?.componentType === 'markPoint') setMarkTip(null)
       })
 
       const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
@@ -580,17 +596,19 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, vwapBand, tMarks), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, vwapBand, tradeMarks), true)
     } else {
       fullDayToDataIdx.current = new Map()
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, vwapBand, tMarks])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines, vwapBand, tradeMarks])
 
   useEffect(() => {
     return () => {
       chartRef.current?.off('updateAxisPointer')
       chartRef.current?.off('globalout')
+      chartRef.current?.off('mouseover')
+      chartRef.current?.off('mouseout')
       if (priceDoubleClickHandlerRef.current) {
         chartRef.current?.getZr().off('dblclick', priceDoubleClickHandlerRef.current)
       }
@@ -680,7 +698,20 @@ export function EChartsIntraday({
           )}
         </div>
       </div>
-      <div ref={containerRef} className="w-full" style={{ height: height - 42, cursor: 'crosshair' }} />
+      <div className="relative w-full" style={{ height: height - 42 }}>
+        <div ref={containerRef} className="h-full w-full" style={{ cursor: 'crosshair' }} />
+        {markTip && (
+          <div
+            className="pointer-events-none absolute z-20 max-w-[9.5rem] whitespace-pre-line break-words rounded border border-border bg-surface/95 px-1.5 py-1 text-[10px] leading-snug text-foreground shadow"
+            style={{
+              left: Math.max(4, Math.min(markTip.x + 10, Math.max(4, (containerRef.current?.clientWidth ?? 220) - 148))),
+              top: Math.max(4, markTip.y - 28),
+            }}
+          >
+            {markTip.text}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

@@ -4,7 +4,7 @@
 // Prod:同源(FastAPI 托管前端 dist)
 
 import { toast } from '@/components/Toast'
-import type { TradeSignalsResponse } from '@/lib/trade-marks'
+import type { TradeSignalsResponse, TradeTBlock } from '@/lib/trade-marks'
 
 const BASE = ''
 
@@ -266,6 +266,8 @@ export interface MinuteKlineSession {
   date: string
   prev_close: number | null
   rows: MinuteKlineRow[]
+  /** 与日K买卖点同一套做T字段。没有时前端不画。 */
+  t_trade?: TradeTBlock
 }
 
 export interface PriceLimitInfo {
@@ -1400,6 +1402,17 @@ export interface ResearchReport {
   industry_name?: string
 }
 
+export interface ImaResearchReport {
+  media_id: string
+  broker: string
+  title: string
+  publish_date: string
+  summary: string
+  body: string
+  source_note: string
+  symbols: { symbol: string; name: string; code: string }[]
+}
+
 // ===== Backtest =====
 export interface BacktestResult {
   run_id: string
@@ -2500,6 +2513,8 @@ export interface NewsSourceHealth {
   last_ok_at: string | null
   last_error: string
   items_ingested: number
+  /** 最近一轮写入研报表的篇数。只有跑过的来源才有。 */
+  last_inserted?: number | null
 }
 
 export interface NewsHealth {
@@ -3117,6 +3132,7 @@ export const api = {
       asset_type?: 'stock' | 'etf' | 'index'
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
+      t_trade?: TradeTBlock
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
@@ -3394,7 +3410,7 @@ export const api = {
     }),
 
   researchForStock: (symbol: string, limit = 20) =>
-    request<{ symbol: string; reports: ResearchReport[] }>(
+    request<{ symbol: string; reports: ResearchReport[]; ima_reports?: ImaResearchReport[] }>(
       `/api/research/stock/${encodeURIComponent(symbol)}?limit=${limit}`,
     ),
 

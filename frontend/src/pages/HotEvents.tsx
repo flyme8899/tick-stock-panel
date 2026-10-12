@@ -488,6 +488,7 @@ export function HotEvents() {
                 <div className="mt-1 text-xs text-muted">
                   {authLabel(source)}
                   {source.locked ? ' · 由环境变量锁定' : ''}
+                  {source.last_inserted != null ? ` · 最近入库 ${source.last_inserted}` : ''}
                   {source.items_ingested ? ` · 已入库 ${source.items_ingested}` : ''}
                 </div>
                 {source.last_error && (

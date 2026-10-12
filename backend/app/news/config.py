@@ -12,6 +12,7 @@ SOURCE_ORDER = (
     "dws", "zsxq", "ima", "cls", "wscn", "etf_flow",
     "cnbc", "marketwatch", "wsj", "bloomberg", "scmp", "reuters", "reddit", "sec",
     "research",
+    "ima_research",
     "notice",
 )
 
@@ -31,6 +32,7 @@ SOURCE_LABELS = {
     "reddit": "Reddit",
     "sec": "SEC 8-K",
     "research": "研报",
+    "ima_research": "ima券商研报",
     "notice": "公告",
     "hot": "TSP热门候选",
 }
@@ -42,6 +44,9 @@ VISION_OCR_MAX_TOKENS = 8192
 # 短任务关掉思考后，正文不跟 reasoning 抢同一段预算。
 VISION_SHORT_MAX_TOKENS = 1024
 _EMAIL_IN_UA = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+# 不走资讯轮询。东财研报、公告和 ima 券商全文各自有后台线程。
+BACKGROUND_SOURCES = frozenset({"research", "notice", "ima_research"})
 
 _TRUE = {"1", "true", "yes", "on"}
 _FALSE = {"0", "false", "no", "off"}
@@ -63,6 +68,28 @@ def _flag(name: str) -> bool | None:
 
 def ima_configured() -> bool:
     return bool(settings.ima_client_id.strip() and settings.ima_api_key.strip())
+
+
+def ima_research_kb_id() -> str:
+    """个人知识库 ID。只从环境变量读取，代码里不写默认库。"""
+    raw = os.environ.get("IMA_RESEARCH_KB_ID")
+    if raw is not None and raw.strip():
+        return raw.strip()
+    return str(getattr(settings, "ima_research_kb_id", "") or "").strip()
+
+
+def ima_research_configured() -> bool:
+    return ima_configured() and bool(ima_research_kb_id())
+
+
+def ima_research_times() -> tuple[str, ...]:
+    """北京时间的拉取时刻。非法或留空时用 06:30 和 08:30。"""
+    from app.research_reports.ima_schedule import parse_clocks
+
+    raw = os.environ.get("IMA_RESEARCH_TIMES")
+    if raw is None or not str(raw).strip():
+        raw = str(getattr(settings, "ima_research_times", "") or "")
+    return parse_clocks(str(raw)) or ("06:30", "08:30")
 
 
 def group_id(source: str) -> str:
@@ -175,6 +202,8 @@ def source_configured(source: str) -> bool:
         return bool(vision_api_key())
     if source == "ima":
         return ima_configured()
+    if source == "ima_research":
+        return ima_research_configured()
     if source in {"dws", "zsxq"}:
         return bool(group_id(source))
     if source == "sec":

@@ -71,6 +71,8 @@ def test_minute_range_returns_latest_sessions_with_previous_closes():
         11.1,
     ]
     assert result["sessions"][0]["rows"][0]["close"] == 11.1
+    assert result["sessions"][0]["t_trade"]["date"] == "2026-08-06"
+    assert result["sessions"][0]["t_trade"]["marks"] == []
 
 
 def test_minute_range_does_not_read_stock_store_for_index():

@@ -5,6 +5,7 @@ import { api, type MinuteKlineSession } from '@/lib/api'
 import { klineMinuteQueryOptions, klineMinuteRangeQueryOptions, minuteRefetchInterval } from '@/lib/kline'
 import { toast } from '@/components/Toast'
 import { EChartsMultiDayIntraday } from '@/components/EChartsMultiDayIntraday'
+import { intradayTradeMarks, preferBarTMarks, type IntradayTradeMark } from '@/lib/trade-marks'
 
 interface Props {
   symbol: string
@@ -13,6 +14,8 @@ interface Props {
   refetchIntervalMs?: number
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   priceLines?: { value: number; label?: string; color?: string }[]
+  tradeMarks?: IntradayTradeMark[]
+  showT?: boolean
 }
 
 function errorMessage(error: unknown): string {
@@ -26,6 +29,8 @@ export function StockMultiDayIntradayChart({
   refetchIntervalMs,
   onPriceDoubleClick,
   priceLines,
+  tradeMarks,
+  showT = false,
 }: Props) {
   const queryClient = useQueryClient()
   const history = useQuery({
@@ -51,6 +56,7 @@ export function StockMultiDayIntradayChart({
         date: latestDate,
         prev_close: latest.data?.prev_close ?? existing?.prev_close ?? null,
         rows: latestRows,
+        t_trade: latest.data?.t_trade ?? existing?.t_trade,
       })
     }
 
@@ -58,6 +64,23 @@ export function StockMultiDayIntradayChart({
       .sort((left, right) => left.date.localeCompare(right.date))
       .slice(-days)
   }, [days, history.data?.sessions, latest.data])
+
+  const drawnMarks = useMemo(() => {
+    const base = tradeMarks ?? []
+    if (!showT) return base.filter(mark => mark.source !== 't')
+    const covered: string[] = []
+    const barMarks: IntradayTradeMark[] = []
+    for (const session of sessions) {
+      if (!session.t_trade) continue
+      covered.push(session.date)
+      barMarks.push(...intradayTradeMarks({
+        tMarks: session.t_trade.marks ?? [],
+        showT: true,
+        tDate: session.t_trade.date || session.date,
+      }))
+    }
+    return preferBarTMarks(base, barMarks, covered)
+  }, [sessions, showT, tradeMarks])
 
   const syncMinute = useMutation({
     mutationFn: () => api.syncMinuteSingle(symbol, days),
@@ -195,6 +218,7 @@ export function StockMultiDayIntradayChart({
         height={chartHeight}
         onPriceDoubleClick={onPriceDoubleClick}
         priceLines={priceLines}
+        tradeMarks={drawnMarks}
       />
       {syncMinute.isError && (
         <div className="px-3 pt-1 text-center text-[11px] text-danger">{errorMessage(syncMinute.error)}</div>

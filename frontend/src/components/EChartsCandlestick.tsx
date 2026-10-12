@@ -41,6 +41,11 @@ export interface ChartMarker {
    * triangle = 三角，breakout = 突破菱形，circle = 模拟盘 B/S。
    */
   style?: 'triangle' | 'breakout' | 'circle'
+  /**
+   * 形态短标签。无箭头，小字号，半透明底，贴在影线外侧。
+   * 与 style 分开，避免把展示样式写进买卖点样式。
+   */
+  patternTag?: boolean
   /** 悬停卡片用的稳定 id。 */
   markerId?: string
 }
@@ -493,6 +498,39 @@ function buildMarkPointData(
     const isBuy = m.kind === 'buy'
     const isSell = m.kind === 'sell'
 
+    if (m.patternTag) {
+      const placeAbove = !!m.above
+      const color = isSell ? THEME.bear : isBuy ? THEME.bull : CT().text
+      const backgroundColor = isSell
+        ? 'rgba(45,155,101,0.18)'
+        : isBuy
+          ? 'rgba(199,64,64,0.18)'
+          : 'rgba(161,161,170,0.18)'
+      markPointData.push({
+        name: m.label ?? '',
+        coord: [m.date, placeAbove ? d.high : d.low],
+        // symbol 为 none 时 ECharts 不画这个点，文字也会一起丢掉
+        symbol: 'circle',
+        symbolSize: 1,
+        itemStyle: { color: 'transparent' },
+        label: {
+          show: !!m.label,
+          formatter: m.label ?? '',
+          position: placeAbove ? 'top' : 'bottom',
+          distance: compact ? 2 : 4,
+          color,
+          fontSize: compact ? 8 : 9,
+          fontWeight: 'normal',
+          fontFamily: 'JetBrains Mono, monospace',
+          backgroundColor,
+          borderRadius: 2,
+          padding: [1, 3],
+        },
+        z: 80,
+      })
+      continue
+    }
+
     if (m.style) {
       const placeBelow = m.kind !== 'sell'
       const color = m.color ?? (isBuy ? TRADE_BUY : isSell ? TRADE_SELL : CT().text)
@@ -609,6 +647,9 @@ function buildOption(
   const series: any[] = []
   const xAxisIndices: number[] = []
 
+  const hasPatternTag = (markers ?? []).some(marker => marker.patternTag)
+  // 形态短标签贴在影线外，轴边距加大一点，避免顶底那根的字被裁掉
+  const pricePad = hasPatternTag ? 0.1 : 0.03
   const priceLineValues = (priceLines ?? [])
     .map(line => line.value)
     .filter(value => Number.isFinite(value) && value > 0)
@@ -616,14 +657,14 @@ function buildOption(
     ? ({ min, max }: { min: number; max: number }) => {
         const nextMin = Math.min(min, ...priceLineValues)
         const nextMax = Math.max(max, ...priceLineValues)
-        return nextMin - Math.max((nextMax - nextMin) * 0.03, nextMax * 0.001)
+        return nextMin - Math.max((nextMax - nextMin) * pricePad, nextMax * 0.001)
       }
     : undefined
   const axisMax = priceLineValues.length > 0
     ? ({ min, max }: { min: number; max: number }) => {
         const nextMin = Math.min(min, ...priceLineValues)
         const nextMax = Math.max(max, ...priceLineValues)
-        return nextMax + Math.max((nextMax - nextMin) * 0.03, nextMax * 0.001)
+        return nextMax + Math.max((nextMax - nextMin) * pricePad, nextMax * 0.001)
       }
     : undefined
 
@@ -640,8 +681,8 @@ function buildOption(
     scale: true,
     min: axisMin,
     max: axisMax,
-    // 上下各留 3% 边距: 防止最高/最低点的蜡烛贴边, 涨停/炸板标签被遮挡
-    boundaryGap: [0.03, 0.03],
+    // 上下留边距: 防止最高/最低点的蜡烛贴边, 涨停/炸板或形态标签被遮挡
+    boundaryGap: [pricePad, pricePad],
     splitArea: { show: false },
     axisLine: { show: false }, axisTick: { show: false },
     splitLine: { lineStyle: { color: CT().grid } },
@@ -731,7 +772,12 @@ function buildOption(
       borderColor: THEME.bull, borderColor0: THEME.bear,
       cursor: 'pointer',
     },
-    markPoint: markPointData.length > 0 ? { data: markPointData, animation: false } : undefined,
+    markPoint: markPointData.length > 0 ? {
+      data: markPointData,
+      animation: false,
+      // 形态短标签贴在影线外，允许画出网格，避免顶底被裁掉
+      ...(hasPatternTag ? { clip: false } : {}),
+    } : undefined,
     markArea: markAreaData.length > 0 ? { silent: true, data: markAreaData } : undefined,
     markLine: markLineData.length > 0 ? { silent: true, symbol: 'none', data: markLineData, animation: false } : undefined,
   })
@@ -1250,7 +1296,11 @@ export function EChartsCandlestick({
     if (mkrs?.length) {
       seriesUpdates.push({
         name: 'K',
-        markPoint: markPointData.length > 0 ? { data: markPointData, animation: false } : undefined,
+        markPoint: markPointData.length > 0 ? {
+          data: markPointData,
+          animation: false,
+          ...(mkrs.some(marker => marker.patternTag) ? { clip: false } : {}),
+        } : undefined,
       })
     }
     if (activeIndicatorsRef.current.includes('vol')) {
