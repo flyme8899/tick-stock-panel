@@ -1093,8 +1093,10 @@ class MonitorRuleEngine:
         board = row.get("board") or ""
         tag = f"{board}{'·ST' if row.get('st') else ''}"
         state = "已达异常波动阈值" if closeness >= 1 else "接近异常波动阈值"
+        raw_window = str(window or "")
+        window_text = f"{raw_window[:-1]}日" if raw_window[:-1].isdigit() and raw_window.lower().endswith("d") else "窗口"
         return (
-            f"{row.get('name') or row.get('symbol')} {window}偏离值 "
+            f"{row.get('name') or row.get('symbol')} {window_text}偏离值 "
             f"{value * 100:+.2f}%/阈值{threshold * 100:.0f}% ({tag}) "
             f"接近度{closeness * 100:.0f}%, {state}"
         )
@@ -1558,7 +1560,7 @@ class MonitorRuleEngine:
         if "_volume_delta_span" in scoped.columns and scoped.height > 0:
             v = scoped["_volume_delta_span"][0]
             span_s = float(v) if v is not None else 0.0
-        span_text = f" (间隔 {span_s:.0f}s)" if span_s > 0 else ""
+        span_text = f" (间隔 {span_s:.0f}秒)" if span_s > 0 else ""
 
         candidate = scoped
         bf = rule.get("basic_filter") or {}

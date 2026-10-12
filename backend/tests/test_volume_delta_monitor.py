@@ -53,7 +53,7 @@ def test_volume_delta_hits_above_threshold():
     assert [e["symbol"] for e in events] == ["S1.SH"]
     ev = events[0]
     assert ev["source"] == "volume_delta"
-    assert "9,500" in ev["message"] and "9,000" in ev["message"] and "间隔 6s" in ev["message"]
+    assert "9,500" in ev["message"] and "9,000" in ev["message"] and "间隔 6秒" in ev["message"]
     assert ev["volume_delta"] == 9500.0
 
 
