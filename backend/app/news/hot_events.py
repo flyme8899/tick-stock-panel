@@ -91,6 +91,9 @@ _TITLE_SLICE = _TITLE_LIMIT * 4
 # 累计成功率 >93%，平均只花 1.5~2 次调用。**不拆半**：拆半后每半各自只有 50%
 # 成功率，实测花 3~4 次调用才拿到 8~9/20，比原地重发（1~2 次拿 20/20）更贵更差。
 _BLANK_RESEND = 3
+# 多行资讯里「首行短得像标题」的判定上限。财经快讯的标题极少超过这个长度，
+# 超过就认为首行本身也是正文（不能丢），交给按句子重合度的剥离逻辑处理。
+_FIRST_LINE_TITLE_MAX = 40
 # 展示用的分句可以比模型标题稍长，避免为了卡 20 字把宾语、数字或动词从中间切开。
 _TITLE_HARD = 28
 # 一句话要点仍用这道完整句检查。超过 48 字或短于 6 字直接丢掉。
@@ -108,8 +111,14 @@ _CJK_SLASH = re.compile(r"[\u4e00-\u9fff]\s*[/／]\s*[\u4e00-\u9fff]")
 _TITLE_DISPLAY_MAX = 80
 # 标题缓存按这个版本取。漏编号被记成未采用的 v15 结果不再套用。
 # v17: 要点新增长度上限与「事实必须出自正文」核对，旧缓存里超长/无据的要点作废。
-_TITLE_CACHE_VERSION = 17
-# 钉钉作文、知识星球、ima。这些研究聊天不当主标题。
+# v18: 取文改成「单行快讯也算正文」（见 _body_from_text）。cls/wscn/reuters/
+#      bloomberg 的快讯大量是单行，早先一律判无正文，这些条目被记成 _miss 缓存
+#      下来；不升版本的话，明明已经能取到正文，仍会被旧 _miss 直接跳过 ——
+#      线上表现为「切片 80 条里只有 3 条无正文，却仍有 7 条前 20 拿不到要点」。
+# v19: 取文改成「候选与同簇候选比对」（见 _candidate_in_event）。早先拿候选
+#      标题去比跨源重写过的主标题（Jaccard≥0.5），主标题措辞与任何候选都对不上，
+#      被漏掉的 8 条事件正文一条都取不到；v18 把它们的失败写进了 _miss。
+_TITLE_CACHE_VERSION = 19
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -454,6 +463,13 @@ _STAT_PREFIXES = ("数据显示", "统计显示", "据统计", "同比", "环比
 
 _CACHE: dict[tuple, dict] = {}
 _LLM_CACHE: dict[str, dict] = {}
+# `_miss`（问过但没拿到要点）缓存的有效期。同一批原文重发就能恢复的情况不少，
+# 永久跳过等于把一次偶发失败钉死到底；而且上游/正文侧改善后本可以写出来。
+# 缓存键是簇成员标题的 sha1（`_fp`），簇不变就一直命中 —— 所以窗口必须**短于**
+# 热点刷新周期（HOT_REFRESH_SECONDS=300），否则一个偶发空返回会在接连两个周期
+# 里被跳过，线上表现为「同一批素材、前 20 要点覆盖率在两个周期里都是 13/20」。
+# 取 240 秒：同一周期内不重复问（省一次 LLM 调用），下个周期必定重试。
+_MISS_TTL_S = 240.0
 
 
 def clear_hot_event_cache(*, llm: bool = True) -> None:
@@ -2573,8 +2589,17 @@ def _title_cache_key(fingerprint: str) -> str:
 
 def _purge_stale_title_cache() -> None:
     prefix = f"title-v{_TITLE_CACHE_VERSION}:"
+    now = time.monotonic()
     for key in [key for key in _LLM_CACHE if not str(key).startswith(prefix)]:
         _LLM_CACHE.pop(key, None)
+    # 过期的 _miss 也要清掉，否则长期运行会越堆越多（同一次长会话里反复重算快照）。
+    for key, cached in [
+        (key, cached) for key, cached in _LLM_CACHE.items()
+        if isinstance(cached, dict) and cached.get("_miss")
+    ]:
+        at = cached.get("_miss_at")
+        if not isinstance(at, (int, float)) or (now - at) >= _MISS_TTL_S:
+            _LLM_CACHE.pop(key, None)
 
 
 def _hint(now: datetime, trading: date, chosen: date, fallback: bool, updated_hm: str) -> str:
@@ -3437,6 +3462,10 @@ _SUBTITLE_SAME_TOPIC = 0.7
 # 主标题常有差异（主标题取的是「最完整原标题」，可能是另一条候选的），
 # 卡太死会把正确候选也挡掉。0.5 只拦「肉眼可见讲的是别的事」那种。
 _BODY_TITLE_MIN = 0.5
+# 候选归属的第二条通路：候选标题与**同簇其它候选标题**的字符覆盖率。
+# 见 `_candidate_in_event`。0.6 的分界实测很宽：同事件的候选之间覆盖率
+# 落在 0.97~1.00，不同事件的落在 0.00~0.26。
+_BODY_PEER_COVER = 0.6
 
 
 def _subtitle_entities(text: str) -> set[str]:
@@ -3632,7 +3661,12 @@ def _subtitle_reject_reason(title: str, source: str = "") -> str:
 
 def _cached_title_usable(cached: dict) -> bool:
     if cached.get("_miss"):
-        return True
+        # 过期就不再认这条缓存 —— 见 _MISS_TTL_S。老缓存没有 _miss_at 字段，
+        # 按「已过期」处理，让它们重问一次拿到正确结果。
+        at = cached.get("_miss_at")
+        if not isinstance(at, (int, float)):
+            return False
+        return (time.monotonic() - at) < _MISS_TTL_S
     title = str(cached.get("title") or "")
     return not title or _subtitle_reject_reason(title) == ""
 
@@ -3651,17 +3685,138 @@ def _event_source_text(event: dict) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _title_cover(left: str, right: str) -> float:
+    """左侧标题的 bigram 有多大比例能在右侧找到（谁短看谁，取双向最大值）。
+
+    与 ``_headline_similarity``（bigram Jaccard）的区别在这里是决定性的：
+    Jaccard 的分母是**并集**，长度差一大就掉到 0.2 以下；覆盖率的分母是
+    短的一侧，只问「短的那句话有没有被长的那篇盖住」。聚类后的事件主标题
+    往往只有十几个字，而候选的原始标题是完整的一句话（「【冰轮环境】子公司
+    顿汉布什近期收到4份海外数据中心冷源装备采购订单…」），拿 Jaccard 去量
+    天然吃亏 —— 实测「顿汉布什获4份海外订单合计1.1亿美元」与其正文候选的
+    Jaccard 只有 0.185、覆盖率却有 0.706，于是正文取不到、要点全空。
+    """
+    aa, bb = _norm_title(left), _norm_title(right)
+    if not aa or not bb:
+        return 0.0
+    if aa == bb:
+        return 1.0
+    ga, gb = _title_grams(left), _title_grams(right)
+    if not ga or not gb:
+        return 0.0
+    return max(len(ga & gb) / len(ga), len(ga & gb) / len(gb))
+
+
+def _peer_titles(event: dict, *, exclude: str) -> list[str]:
+    """同簇候选的原始标题，**排除与 ``exclude`` 同一个的那条**。
+
+    排除很重要：簇的代表标题（headline）常常就是某条候选自己的标题，不排掉的话
+    「拿自己比自己」覆盖率恒为 1.0，任何候选都会被采纳，等于没判。
+    """
+    bare = _compact(exclude)
+    titles: list[str] = []
+    for row in event.get("_candidates") or []:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if title and _compact(title) != bare:
+            titles.append(title)
+    for title in (event.get("headlines") or []):
+        text = str(title).strip()
+        if text and _compact(text) != bare:
+            titles.append(text)
+    headline = str(event.get("headline") or "").strip()
+    if headline and _compact(headline) != bare:
+        titles.append(headline)
+    return titles
+
+
+def _candidate_in_event(row: dict, event: dict) -> bool:
+    """这条候选讲的是不是本事件这件事。
+
+    只用 ``_headline_similarity(候选标题, 主标题) >= _BODY_TITLE_MIN`` 判会漏：
+    主标题是**跨源重写**过的（模型/清洗产出），和任何一条候选的原始措辞都对不上。
+    实测交易日 MISS 掉的 8 条，候选与主标题的 Jaccard 全部落在 0.13~0.24，
+    离 0.5 差得远 —— 正文一条都取不到，要点只能留空（覆盖率卡在 13/20）。
+
+    这里补一条更贴合事实的通路：候选标题与**同簇其它候选标题**比对。簇是先由
+    ``_can_merge``（主体+动作+时间窗）聚出来的，簇内候选本来就都是同一件事，
+    原始标题之间措辞天然接近 —— 实测同事件的覆盖率 0.97~1.00，不同事件的
+    0.00~0.26，用 0.6 分开既捞得回漏掉的，也拦得住「簇里混进别条」。
+
+    没有别的候选可比对时（单条稿的簇）直接采纳：整簇就是这一件事，不存在
+    「混进别条」的风险，不认反而会把唯一的一篇正文丢掉。
+
+    主体的显式实体命中仍然保留，用来兜住覆盖率因措辞改写而偏低的情况。
+    """
+    title = _compact(str(row.get("title") or ""))
+    if not title:
+        return False
+    name = _compact(str(event.get("name") or ""))
+    if name and (name in title or _headline_similarity(title, name) >= _BODY_TITLE_MIN):
+        return True
+    peers = _peer_titles(event, exclude=str(row.get("title") or ""))
+    if not peers:
+        return True
+    return any(_title_cover(title, peer) >= _BODY_PEER_COVER for peer in peers)
+
+
+def _body_from_text(name: str, text: str) -> str:
+    """从一条资讯原文里取正文：剥掉开头的标题部分，返回剩下的新内容。
+
+    **不能按「有没有换行」来判断哪部分是正文**。早先这里是
+    ``body = "\\n".join(lines[1:]) if len(lines) > 1 else ""`` —— 假定第 1 行是
+    标题、第 2 行起是正文。可是 cls(财联社)/wscn(华尔街见闻)/reuters/bloomberg/
+    cnbc 的快讯大量是**单行**格式（``【标题】正文……`` 或 ``导语。正文……`` 全挤在
+    一行，没有换行），这条判断会把一整段实质正文当成「无正文」直接丢掉，要点
+    只能留空。实测交易日 421 条里「单行且 >60 字」（有正文却被丢）的占 42%：
+    cls 68/91、wscn 37/76、reuters 21/26、bloomberg 18/19、cnbc 8/8 ——
+    线上展示前 20 的要点覆盖率因此只有 10/20（评审门槛 14/20）。
+
+    更要紧的是下游 ``_strip_repeated_lead`` **本来就处理了**「``【标题】正文``
+    同一行」的剥离，但被这里的前置判断挡在门外，永远执行不到 —— 两处修复互相
+    打架。所以这里改成：**单行文本不做任何前置淘汰，直接交给剥离逻辑**，
+    剥离后还剩得下新内容就算正文，确实是纯标题/纯公告一句才判空。
+
+    换行只是在「首行确实是标题」时的一个便利切分：首行与主标题对得上（或本身
+    就短得像标题）才丢掉首行；对不上就把整段交出去，让 ``_strip_repeated_lead``
+    按句子重合度去剥 —— 否则「导语在第一行、正文在第二行」的稿件会被连正文
+    一起丢掉。
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if len(lines) == 1:
+        return lines[0]
+    head = _compact(lines[0])
+    # 首行像标题（与主标题重合，或本身就短）才丢；否则认为首行也是正文。
+    looks_like_title = bool(head) and (
+        (name and (name in head or _headline_similarity(name, head) >= _BODY_TITLE_MIN))
+        or len(head) <= _FIRST_LINE_TITLE_MAX
+    )
+    if looks_like_title:
+        return "\n".join(lines[1:]).strip()
+    return text
+
+
 def _event_body(event: dict) -> str:
     """事件里最完整的一条正文，去掉标题行、以及与主标题重合的开头后返回。
 
     要点要写「主标题没提到的事实」，素材必须来自正文。只给标题的话，模型手里
     没有任何新信息，只能把主标题换个说法（实测 20 条要点 20 条都是同义改写）。
 
-    **只用和主标题对得上的那条候选**：候选标题要与主标题重合度达标才认。早先
+    **只用和本事件对得上的那条候选**（见 ``_candidate_in_event``）。早先
     在匹配不到时退而取簇里最长的一条，簇里混进别的新闻时就把要点带偏 ——
     实测「中信证券：用景气和供给出清来应对高利率…」的要点写成了「沃勒预计还需
     加息两次」，那句来自同簇另一条「美联储理事沃勒表示…」的正文，中信这条正文
     里根本没有沃勒，`_unbacked_facts` 对着同一份错正文校验自然放行。
+
+    判据早先是「候选标题与主标题的 bigram Jaccard ≥ 0.5」，但主标题是跨源重写
+    出来的，与任何一条候选的原始措辞都对不上 —— 实测交易日被漏掉的 8 条事件，
+    Jaccard 全在 0.13~0.24，正文一条都取不到，要点只能留空。改为「候选标题与
+    同簇其它候选标题的字符覆盖率 ≥ 0.6」后，原始标题之间措辞天然接近，同事件
+    0.97~1.00、不同事件 0.00~0.26，既捞回了漏掉的也拦得住混入的（见
+    ``_title_cover`` / ``_candidate_in_event``）。
 
     对不上就返回空串（不喂正文、要点留空），宁缺勿错。正文和主标题重合
     （只是把标题重复一遍）的也当没有正文处理，免得白占 token。
@@ -3680,8 +3835,7 @@ def _event_body(event: dict) -> str:
         text = str(row.get("text") or "").strip()
         if not text:
             continue
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        body = "\n".join(lines[1:]) if len(lines) > 1 else ""
+        body = _body_from_text(name, text)
         if not body:
             continue
         if _body_repeats_title(name, body):
@@ -3694,14 +3848,11 @@ def _event_body(event: dict) -> str:
             if len(body) > len(best):
                 best = body
             continue
-        title = _compact(str(row.get("title") or ""))
-        # 候选标题要和主标题对得上（整句包含，或重合度过门槛），否则这条正文
-        # 讲的很可能不是主标题这件事，不认。
-        if not title:
+        # 候选要讲的是本事件这件事，才认它的正文（见 _candidate_in_event）。
+        if not _candidate_in_event(row, event):
             continue
-        if name in title or _headline_similarity(title, name) >= _BODY_TITLE_MIN:
-            return body
-    # 有正文但标题都对不上：宁可不喂，也不要拿别人的正文编要点。
+        return body
+    # 有正文但都对不上本事件：宁可不喂，也不要拿别人的正文编要点。
     return best
 
 
@@ -4039,7 +4190,10 @@ def _label_batch_with_llm(
             blank = dict(parsed)
             blank["title"] = ""
             _apply_llm(event, blank)
-            _LLM_CACHE[_title_cache_key(str(event.get("_fp") or ""))] = {"_miss": True}
+            _LLM_CACHE[_title_cache_key(str(event.get("_fp") or ""))] = {
+                "_miss": True,
+                "_miss_at": time.monotonic(),
+            }
             if not str(parsed.get("title") or "").strip():
                 # 模型主动留空。记一行带 body 长度，方便区分两类空。
                 body = _event_body(event)
