@@ -1,4 +1,6 @@
-"""利好利空判定：无信号留空（中性），不再默认利好；概念撞车监控。
+"""利好利空判定回归：无信号留空（中性）+ 反向语义修正。
+
+## 一、无信号留空（PR #109）
 
 背景（2026-10-12 线上快照实测，349 事件）：全量方向分布利好 300 : 利空 49
 （85.7% 偏置）。根因是 `_direction_for` / `_annotate_directions` / `_apply_llm`
@@ -10,6 +12,23 @@
 同时守护聚合层「概念撞车」监控：线上实测「证监会座谈会」与「上交所监管
 工作函」两条无关事件共享同一组东百收购概念且成员零重叠（双写残差），
 `_log_suspect_event_pairs` 对此打 warning。
+
+## 二、反向语义修正（PR #110）
+
+`_direction_signal` 只认词面，利空词表里「加息」「关税」「制裁」「收紧」
+命中就判利空，不识别后面的修饰翻转。线上实测 4 例全部误判：
+
+    '…非农不及预期加息预期退潮，短期金属估值压力缓和'  -> 利空（应为利好）
+    '…10月加息预期回落，稀土钨钼望迎节后补库'          -> 利空（应为利好）
+    '美联储加息预期降温'                                -> 利空（应为利好）
+    '加息预期下修'                                      -> 利空（应为利好）
+
+而真加息 '央行加息25个基点' 判利空是对的，修复不能把它翻过来。
+
+修复：极性 = 词根极性 × 修饰极性。预期类利空词根（加息/关税/制裁/收紧）后
+紧跟预期/概率/几率/可能性再跟退潮、回落、降温、减弱、放缓、趋缓、消退等修饰时
+记为利好；纯真动作不受影响。中间至多夹 3 个非主体字，不容许「美股/股指/油价」
+这类主体词——否则「美联储加息美股回落」会被误翻。
 """
 from __future__ import annotations
 
@@ -20,11 +39,17 @@ from app.market_time import CN_TZ
 from app.news.hot_events import (
     _annotate_directions,
     _direction_for,
+    _direction_signal,
     _log_suspect_event_pairs,
     _score_event,
 )
 
 NOW = datetime(2026, 10, 12, 20, 0, tzinfo=CN_TZ)
+
+
+# --------------------------------------------------------------------------
+# 一、无信号留空（PR #109）
+# --------------------------------------------------------------------------
 
 
 def test_direction_for_returns_empty_when_no_signal() -> None:
@@ -122,3 +147,68 @@ def test_log_suspect_event_pairs_warns_on_disjoint_same_concepts(caplog) -> None
     assert "ev_a" in warned[0].getMessage() and "ev_b" in warned[0].getMessage()
     # ev_c 与 ev_a 共享成员 1、与 ev_b 共享成员 3 —— 有重叠不算撞车。
     assert "ev_c" not in warned[0].getMessage()
+
+
+# --------------------------------------------------------------------------
+# 二、反向语义修正（PR #110）
+# --------------------------------------------------------------------------
+
+
+def test_expectation_weakening_flips_bear_to_bull() -> None:
+    """加息预期退潮/回落/降温/减弱/放缓 一律判利好。"""
+    bull = [
+        "有色金属行业周报：非农不及预期加息预期退潮，短期金属估值压力缓和",
+        "有色金属行业周报：10月加息预期回落，稀土钨钼望迎节后补库",
+        "美联储加息预期降温",
+        "美联储加息预期减弱",
+        "美联储加息预期放缓",
+        "关税预期降温",
+        "制裁预期消退，风险偏好回升",
+        "加息预期有所回落",
+        "加息预期大幅降温",
+        "加息预期情绪降温",
+    ]
+    for text in bull:
+        assert _direction_signal(text, "") == "利好", text
+
+
+def test_expect_root_with_subject_word_does_not_flip() -> None:
+    """「加息 + 美股/股指回落」不是预期退潮，不能翻成利好。"""
+    bear = [
+        "美联储加息美股回落",
+        "美联储加息美股放缓",
+        "加息股指走弱",
+    ]
+    for text in bear:
+        assert _direction_signal(text, "") == "利空", text
+
+
+def test_real_rate_hike_still_bearish() -> None:
+    """真加息没有预期修饰，必须仍是利空。"""
+    bear = [
+        "央行加息25个基点",
+        "加息",
+        "美联储宣布加息",
+        "央行加息，但经济增速放缓",
+    ]
+    for text in bear:
+        assert _direction_signal(text, "") == "利空", text
+
+
+def test_true_tariff_still_bearish() -> None:
+    """真关税加征不能被当成预期退潮。"""
+    for text in ["美国宣布对华关税加征", "对进口钢铁加征关税", "关税"]:
+        assert _direction_signal(text, "") == "利空", text
+
+
+def test_intensifying_expectation_stays_bearish() -> None:
+    """强化/升温不在翻转词表内，仍判利空。"""
+    for text in ["美联储加息预期强化", "加息预期升温"]:
+        assert _direction_signal(text, "") == "利空", text
+
+
+def test_weakening_only_applies_to_expect_roots() -> None:
+    """非预期词根（走低/下跌）后面的放缓不改极性。"""
+    # 「放缓」紧跟在非预期词根后，但词根不是预期式 -> 不翻转，仍是利空
+    assert _direction_signal("业绩增速放缓", "") == ""
+    assert _direction_signal("营收走低", "") == "利空"
