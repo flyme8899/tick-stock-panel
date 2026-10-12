@@ -136,7 +136,11 @@ _TITLE_DISPLAY_MAX = 80
 # v20: 标题准入 4 处误杀修复 + importance 覆盖后分数对齐（见 _resync_importance_score）。
 #      缓存里存着旧口径 importance 的要点作废重问，push 也靠 HOT_RULES_VERSION
 #      识别新旧快照，避免部署后第一轮把口径差报成「升温」。
-_TITLE_CACHE_VERSION = 20
+# v21: 标题准入再修误伤并放开截断恢复（_recover_truncated_title，PR #97 复审
+#      Nit）。恢复出的标题会改变指纹、自然重问，但旧口径写下的 _miss 缓存
+#      （「此事件没有合格原标题」）不会——被误判截断而丢弃标题的事件会被旧
+#      _miss 一直压着。升版本把旧 _miss 一并作废（PR #97 复审，2026-10-12）。
+_TITLE_CACHE_VERSION = 21
 # 热门计分/准入口径版本。改 _score_event 的计分、_original_reject_reason 的准入或
 # _resync_importance_score 的同步方式时 +1。push 比较前后两轮快照前校验它：
 # 版本不匹配说明上一轮快照的分数是新口径算不出来的，只建基线不比较，否则
