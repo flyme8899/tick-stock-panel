@@ -173,7 +173,11 @@ _TITLE_CACHE_VERSION = 22
 #     方向后整批少这 5 分——分数与名次整体变动，push 的「新进前 N/升温」若不
 #     升版本会把口径差报成新热点。此为有意为之：无方向的映射不再拿方向分。
 #     （合并顺序 #107 → #108(v4) → #109(v5) → #110(v6)，见各段注释。）
-HOT_RULES_VERSION = 5
+# v6: 方向判定的反向语义修正（_direction_signal，2026-10-12）。预期类利空词根
+#     （加息/关税/制裁/收紧）被退潮、回落、降温等修饰时翻成利好，此前一律判
+#     利空——线上实测「加息预期退潮」等 4 例全判反。方向影响 _MAPPING_DIRECTION
+#     计分，分数因此变动，旧快照算不出新分，升版本只建基线不比较。
+HOT_RULES_VERSION = 6
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -2676,6 +2680,17 @@ _POLICY_BULL = (
     "取消购房限制",
 )
 _EASING = re.compile(r"缓和[^，。；！？\n]{0,6}冲突|冲突[^，。；！？\n]{0,6}缓和")
+# 弱化修饰：把前面利空词根的语气翻过来的说法（加息预期退潮 → 利好）。
+# 必须走「预期式」写法：词根后紧跟预期/概率/几率/可能性，中间可夹副词或抽象
+# 名词（有所/大幅/明显/情绪/压力…），再跟修饰词。中间不容许「美股/股指/油价」
+# 这类主体词——否则「美联储加息美股回落」会被误翻成利好（用否定环视挡掉）。
+_WEAKEN_FILLER = r"(?:(?!美股|股指|油价|金价|汇率|A股|港股|大盘)[\u4e00-\u9fff]){0,3}"
+_WEAKEN_AFTER = re.compile(
+    r"^(?:预期|概率|几率|可能性)" + _WEAKEN_FILLER +
+    r"(?:退潮|回落|降温|减弱|放缓|放慢|趋缓|消退)"
+)
+# 预期类利空词根：加息预期/关税预期/制裁预期。修饰翻转只对这类生效。
+_EXPECT_ROOTS = {"加息", "关税", "制裁", "收紧"}
 # 「未来」里的未不是否定。否定要紧挨着后面的利空词，中间可以隔几个字。
 _NEG_PREFIX = re.compile(
     r"(?:不会|暂不|并未|尚未|暂未|否认|(?<!将)未(?!来))[\u4e00-\u9fff]{0,8}$"
@@ -2731,11 +2746,26 @@ def _suffix_negated(blob: str, index: int, verb: str) -> bool:
     return _NEG_SUFFIX.search(right) is not None
 
 
+def _weakened_after(blob: str, end: int) -> bool:
+    """利空词后面跟着退潮/回落/降温等修饰，整句翻成利好。
+
+    只管「加息预期退潮」这类预期式写法，真加息（加息25个基点）不受影响。
+    """
+    right = blob[end:end + 8]
+    for sep in "。；！？\n":
+        cut = right.find(sep)
+        if cut >= 0:
+            right = right[:cut]
+    return _WEAKEN_AFTER.search(right) is not None
+
+
 def _direction_signal(text: str, action: str) -> str:
-    """有明确动作时返回利好或利空。对不上则返回空（中性/未知），不默认利好。
+    """有明确动作时返回利好或利空；对不上返回空（中性/未知），由调用方决定怎么处理。
 
     否定先于利空词：概率低、不会、未、否认、暂不盖住后面的制裁、加息。
     下调准备金、下调利率、取消限购、缓和冲突整句是利好，里面的下调、取消、冲突不算利空。
+    预期退潮：加息预期退潮、关税预期降温这类，利空词根被退潮、回落、降温等修饰翻成利好；
+    只对预期式写法生效，真加息、真关税不受影响。
     """
     blob = text or ""
     masked = [False] * len(blob)
@@ -2785,6 +2815,10 @@ def _direction_signal(text: str, action: str) -> str:
                 # 否定利空是明确利好（「制裁概率偏低」「加征关税概率回落」的
                 # 反面），记利好而不是留空 —— 留空会被下游当中性丢掉这个信号，
                 # 而旧代码靠默认利好兜底，正是 85.7% 利好偏置的来源之一。
+                remember("利好", index)
+                continue
+            if verb in _EXPECT_ROOTS and _weakened_after(blob, index + len(verb)):
+                # 预期退潮/回落：词根利空 × 修饰翻转 = 利好。
                 remember("利好", index)
                 continue
             remember("利空", index)
