@@ -118,6 +118,31 @@ interface Props {
 
 const VOL_PANE_H = 90
 
+/**
+ * 叠加线参与 Y 轴缩放的允许偏离。日K 视图跨度大(1日~多日), 用比日K单根
+ * 波动宽得多的 20% 作为上限: 正常的技术支撑/压力/买入/止损都在带内,
+ * 明显错位的目标价(如现价 337 却给「目标 5.00」)会被挡掉。
+ */
+export const KCHART_OVERLAY_BAND = 0.2
+
+function withinBand(value: number | null | undefined, reference: number | null | undefined): boolean {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return false
+  if (typeof reference !== 'number' || !Number.isFinite(reference) || reference <= 0) return false
+  return Math.abs(value - reference) / reference <= KCHART_OVERLAY_BAND
+}
+
+/** 可见区(zoonStart 之后)最后一根 K 的收盘价, 作为叠加线的参照价。 */
+function visibleRefClose(rows: KlineRow[], zoomStart: number): number | null {
+  if (rows.length === 0) return null
+  const from = Math.min(rows.length - 1, Math.floor((zoomStart / 100) * rows.length))
+  for (let i = rows.length - 1; i >= from; i--) {
+    const close = rows[i]?.close
+    if (typeof close === 'number' && Number.isFinite(close) && close > 0) return close
+  }
+  const last = rows[rows.length - 1]?.close
+  return typeof last === 'number' && Number.isFinite(last) && last > 0 ? last : null
+}
+
 export function AnalysisKChart({
   rows,
   levels,
@@ -355,8 +380,13 @@ export function AnalysisKChart({
     }
     seriesKeyMapRef.current = keyMap
 
+    // 叠加线(买卖点/DSA 价位)只在离「可见区参考价」±OVERLAY_BAND 以内才画。
+    // 理由同分时图: 取错字段或旧报告残留的目标价会把 Y 轴撑开(300502.SZ 的
+    // 「目标 5.00」), 日K/5日/10日/20日各视图都受影响。
+    const refClose = visibleRefClose(rows, zoomStart)
     for (const line of extraPriceLines ?? []) {
       if (!Number.isFinite(line.value) || line.value <= 0) continue
+      if (!withinBand(line.value, refClose)) continue
       series.push({
         name: line.label ?? '价位',
         type: 'line',
@@ -380,6 +410,24 @@ export function AnalysisKChart({
         } : undefined,
       })
     }
+
+    // Y 轴硬钳制: 只在「可见区蜡烛高低点 ± 边距」内取值。
+    // 这是「Y 轴只按价格自适应」这条要求的兜底 —— 即便有叠加线漏过上面的过滤,
+    // 也无法把坐标轴撑到可见价格区间之外(300502.SZ「目标 5.00」把轴撑成 0-400)。
+    const axisClamp = (() => {
+      const from = Math.min(Math.max(rows.length - 1, 0), Math.floor((zoomStart / 100) * rows.length))
+      let lo = Infinity
+      let hi = -Infinity
+      for (let i = from; i < rows.length; i++) {
+        const low = rows[i]?.low
+        const high = rows[i]?.high
+        if (typeof low === 'number' && Number.isFinite(low) && low > 0) lo = Math.min(lo, low)
+        if (typeof high === 'number' && Number.isFinite(high) && high > 0) hi = Math.max(hi, high)
+      }
+      if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return {}
+      const pad = Math.max((hi - lo) * 0.08, hi * 0.005)
+      return { min: lo - pad, max: hi + pad }
+    })()
 
     return {
       animation: false,
@@ -405,7 +453,7 @@ export function AnalysisKChart({
         },
       ],
       yAxis: [
-        { scale: true, splitLine: { lineStyle: { color: CT().grid } },
+        { scale: true, ...axisClamp, splitLine: { lineStyle: { color: CT().grid } },
           axisLabel: { color: CT().text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' } },
         { scale: true, gridIndex: 1, splitNumber: 2,
           // 成交量区不画背景横线

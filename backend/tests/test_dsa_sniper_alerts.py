@@ -128,14 +128,21 @@ def test_chart_merges_local_lines_with_report_levels(tmp_path: Path, monkeypatch
         return 200, body, "application/json", {}
 
     monkeypatch.setattr("app.custom.dsa.proxy.forward", forward)
+    # 不给参考价: 本地线(100/90/120) + 报告线(50/80/70/140) 全部保留, 旧口径
     levels = {row["kind"]: row["price"] for row in load_dsa_levels("600519.SH")}
     assert levels == {"buy": 100, "stop": 90, "target": 120, "support": 70, "resistance": 140}
+
+    # 现价 110: 只有 ±20%(88~132) 内的留下 —— support 70 / resistance 140 被剔除, buy 100 留下
+    kept_band = {row["kind"]: row["price"] for row in load_dsa_levels("600519.SH", reference=110.0)}
+    assert kept_band == {"buy": 100, "stop": 90, "target": 120}
+    assert 140 not in kept_band.values()
+    assert 70 not in kept_band.values()
 
     def fail(*args, **kwargs):
         raise OSError("dsa down")
 
     monkeypatch.setattr("app.custom.dsa.proxy.forward", fail)
-    kept = [row["kind"] for row in load_dsa_levels("600519.SH")]
+    kept = [row["kind"] for row in load_dsa_levels("600519.SH", reference=110.0)]
     assert kept == ["buy", "stop", "target"]
 
 

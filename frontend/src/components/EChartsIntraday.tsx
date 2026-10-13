@@ -49,6 +49,21 @@ function isValidPrice(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0
 }
 
+/**
+ * 叠加线(价位线/买卖点)参与 Y 轴缩放的允许偏离。
+ *
+ * 分时图的 Y 轴只该反映当天价格。叠加线是辅助参照, 一旦某条线离现价太远
+ * (取错字段、旧报告残留的远期目标价)就会把坐标轴撑开, 当天走势压成一条直线。
+ * 超出这条线的叠加线不画。
+ */
+export const OVERLAY_BAND = 0.2
+
+/** 叠加线离现价是否在可画 / 可参与缩放的范围内。参照价不合法时一律不画。 */
+export function withinOverlayBand(value: number | null | undefined, reference: number | null | undefined): boolean {
+  if (!isValidPrice(value) || !isValidPrice(reference)) return false
+  return Math.abs(value - reference) / reference <= OVERLAY_BAND
+}
+
 /** 计算实际涨跌停价 (四舍五入到2位小数) 和实际涨跌停幅度 */
 function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
   limitUp: number      // 涨停价 (四舍五入)
@@ -156,6 +171,8 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
   }
   for (const line of priceLines) {
     if (!Number.isFinite(line.value) || line.value <= 0) continue
+    // 离现价太远的不画, 也不让它影响 Y 轴 (300502.SZ「目标 5.00」bug)
+    if (!withinOverlayBand(line.value, prevClose)) continue
     markLineData.push({
       yAxis: line.value,
       lineStyle: { color: line.color ?? ct.text, type: 'dashed', width: 1, opacity: 0.92 },
@@ -195,15 +212,24 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       }
     }
 
+    // 叠加线(价位线/买卖点)只在离现价 ±OVERLAY_BAND 以内才参与缩放。
+    // 超出的一律不画 —— 典型坏数据是后端把机构研报的远期目标价、或者旧报告
+    // 残留的目标价当成当前价位线(300502.SZ: 价格 337, 却有一条「目标 5.00」),
+    // 一旦让它参与 maxDiff, Y 轴会被撑成 0~400, 当天走势挤成一条直线看不清。
     const anchored = [
-      ...priceLines.map(line => line.value),
-      ...tradeMarks.map(mark => mark.price ?? Number.NaN),
+      ...priceLines.filter(line => withinOverlayBand(line.value, prevClose)).map(line => line.value),
+      ...tradeMarks.filter(mark => withinOverlayBand(mark.price, prevClose)).map(mark => mark.price as number),
     ]
+    // 叠加线的参与上限: 即使线本身在带内, 也不让它比当天真实价格范围多撑出太多,
+    // 保证「Y 轴只按当天价格自适应」这条不变量。
+    const dayDiff = maxDiff
     const monitoredDiff = anchored.reduce((largest, value) => (
       Number.isFinite(value) && value > 0
         ? Math.max(largest, Math.abs(value - prevClose))
         : largest
     ), 0) * 1.05
+    const capDiff = Math.max(dayDiff * 1.5, prevClose * OVERLAY_BAND)
+    const overlayDiff = Math.min(monitoredDiff, capDiff)
 
     if (limitLinesActive && yMode === 'limit') {
       const { limitUp, limitDown } = getLimitPrices(prevClose, priceLimit)
@@ -212,7 +238,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       const limitDiff = Math.max(limitDiffUp, limitDiffDown)
       // 涨跌停模式: Y 轴按实际涨跌停价, 但不小于实际数据范围 (数据超带 =
       // 涨跌幅规则不适用或数据异常, 钳制会把曲线推出图外)
-      maxDiff = Math.max(limitDiff, maxDiff, monitoredDiff)
+      maxDiff = Math.max(limitDiff, dayDiff, overlayDiff)
       yMin = prevClose - maxDiff
       yMax = prevClose + maxDiff
       // 加 markLine 标注涨停价和跌停价 (仅虚线, 不显示文字)
@@ -234,13 +260,15 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       // 自适应模式: Y 轴按实际涨跌幅对称。不做涨跌停带上限钳制 — 带内数据
       // maxDiff 本就 ≤ limitDiff (钳制是恒等), 而数据超带时 (无涨跌幅新股/
       // 数据异常) 钳制会把曲线推出图外 (issue: C沈鼓 分时被夹在 ±10% 内)
-      if (!limitLinesActive && maxDiff > 0) {
-        maxDiff *= 1.1
+      if (!limitLinesActive && dayDiff > 0) {
+        maxDiff = dayDiff * 1.1
       }
       // 至少保证一个可视范围 (防止数据平时 maxDiff=0)。指数不使用涨跌停范围，最小范围要更紧，否则低波动指数会被压成横线。
       const minDiff = limitLinesActive ? prevClose * 0.01 : prevClose * 0.001
       if (maxDiff < minDiff) maxDiff = minDiff
-      maxDiff = Math.max(maxDiff, monitoredDiff)
+      // 叠加线只在 capDiff 内放宽视野, 且不得超出 ±OVERLAY_BAND
+      const upper = Math.max(capDiff, maxDiff)
+      maxDiff = Math.min(Math.max(maxDiff, overlayDiff), upper)
       yMin = prevClose - maxDiff
       yMax = prevClose + maxDiff
     }

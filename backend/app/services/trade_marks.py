@@ -37,13 +37,14 @@ _LEVEL_LABEL = {
     "support": "支撑",
     "resistance": "压力",
 }
+# 只有这些键在 DSA 报告里存的是「干净价格」。注意 take_profit / 目标价 / 目标位
+# 被刻意排除在外: 报告里它们是自由文本(如「反弹目标位：MA5 375.64元 / MA10 407.58元」),
+# 取第一个数字会闘出 375.64 这种「均线值」当成目标价, 更糟的是会把正文里
+# 「机构目标价: 701元」这类新闻数字当成当前可用价位, 把图表 Y 轴撑爆。
 _KEY_KIND = {
     "ideal_buy": "buy",
     "理想买入": "buy",
     "理想买入点": "buy",
-    "take_profit": "target",
-    "目标价": "target",
-    "目标位": "target",
     "support_level": "support",
     "support": "support",
     "支撑": "support",
@@ -59,15 +60,12 @@ _KEY_KIND = {
     "止损价": "stop",
     "止损位": "stop",
 }
-_TEXT_PATTERNS = (
-    ("buy", re.compile(r"理想买入(?:点|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
-    ("target", re.compile(r"目标(?:位|价)\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
-    ("support", re.compile(r"支撑(?:位|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
-    ("resistance", re.compile(r"压力(?:位|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
-    ("stop", re.compile(r"止损(?:位|价)?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)")),
-)
 _LEVEL_ORDER = ("buy", "stop", "target", "support", "resistance")
 _PRICE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)")
+# 价位离参考价(现价/最近收盘)超过这个比例就丢掉。依据: 图表叠加线的职责是
+# 给「当前这笔交易」做参照, ±25% 已经覆盖 A 股一个月的极端波段; 超出基本是
+# 取错字段(单位、旧报告、正文里的机构目标价), 画上去只会把坐标轴撑开。
+_LEVEL_MAX_DEVIATION = 0.25
 _CROSS_SECTION_NOTE = (
     "基本面预设依赖全市场截面（行业名次、入选数量）。"
     "当前没有覆盖该区间的全市场日K缓存，不能按同一口径计算，因此不标买卖点。"
@@ -133,8 +131,16 @@ def parse_price(value: Any) -> float | None:
     return None
 
 
-def parse_dsa_levels(report: Any) -> list[dict]:
-    """从最新 DSA 报告里取支撑 / 压力 / 止损。没有则空列表。"""
+def parse_dsa_levels(report: Any, *, reference: float | None = None) -> list[dict]:
+    """从最新 DSA 报告里取理想买入 / 支撑 / 压力 / 止损。没有则空列表。
+
+    只认结构化字段的干净数值。历史实现会退到「全文正则抓 目标价: 数字」, 那条
+    路径把机构研报正文里的目标价(如「最新目标价:701元」)也当成了价位线,
+    是 300502.SZ 分时图被「目标 5.00」撑爆 Y 轴的根因, 已移除。
+
+    reference 是现价或最近收盘。给了它就丢弃偏离超过 _LEVEL_MAX_DEVIATION 的
+    价位 —— 参数缺失时不过滤(保持旧行为的可测性), 但生产调用一律传。
+    """
     found: dict[str, float] = {}
     if not isinstance(report, dict):
         return []
@@ -144,12 +150,12 @@ def parse_dsa_levels(report: Any) -> list[dict]:
         if price is not None:
             found["stop"] = price
     _walk_levels(report, found, depth=0)
-    if len(found) < 3:
-        _scan_level_text(report, found, depth=0)
     ordered = []
     for kind in _LEVEL_ORDER:
         price = found.get(kind)
         if price is None:
+            continue
+        if reference is not None and not _within_deviation(price, reference):
             continue
         ordered.append({
             "kind": kind,
@@ -157,6 +163,13 @@ def parse_dsa_levels(report: Any) -> list[dict]:
             "price": round(price, 4),
         })
     return ordered
+
+
+def _within_deviation(price: float, reference: float) -> bool:
+    """价位离参考价是否在允许偏离内。参考价不合法时放行(不拿坏参照删好数据)。"""
+    if not math.isfinite(reference) or reference <= 0:
+        return True
+    return abs(price - reference) / reference <= _LEVEL_MAX_DEVIATION
 
 
 def replay_t_marks(
@@ -406,7 +419,7 @@ def build_payload(
         "strategies": strategies,
         "markers": markers,
         "stats": stats,
-        "levels": (dsa_loader or load_dsa_levels)(symbol),
+        "levels": (dsa_loader or load_dsa_levels)(symbol, reference=_latest_close(symbol_panel, symbol)),
         "fills": paper_fills(data_dir, symbol, start_s, end_s),
         "t_trade": _t_trade_block(repo, symbol_panel, symbol, intraday),
     }
@@ -414,8 +427,19 @@ def build_payload(
     return payload
 
 
-def load_dsa_levels(symbol: str) -> list[dict]:
-    """本地提醒线和 DSA 报告价位合并。同一种以本地为准，报告里的支撑压力仍保留。"""
+def _latest_close(panel: pl.DataFrame | None, symbol: str) -> float | None:
+    """区间最后一根有效收盘价。给叠加线做「离现价多远」的参照。"""
+    for _day, close in reversed(_close_series(panel, symbol)):
+        if close is not None and close > 0:
+            return close
+    return None
+
+
+def load_dsa_levels(symbol: str, *, reference: float | None = None) -> list[dict]:
+    """本地提醒线和 DSA 报告价位合并。同一种以本地为准，报告里的支撑压力仍保留。
+
+    reference 是现价/最近收盘, 透传给报告解析做异常价位剔除。
+    """
     local: list[dict] = []
     try:
         from app.custom.dsa.sniper_alerts import chart_levels
@@ -423,10 +447,10 @@ def load_dsa_levels(symbol: str) -> list[dict]:
         local = chart_levels(symbol) or []
     except Exception:  # noqa: BLE001 — 图表叠加失败时留空，不把错误价位当成信号
         logger.warning("local dsa levels unreadable", exc_info=True)
-    return _merge_level_rows(local, _remote_dsa_levels(symbol))
+    return _merge_level_rows(local, _remote_dsa_levels(symbol, reference=reference), reference=reference)
 
 
-def _remote_dsa_levels(symbol: str) -> list[dict]:
+def _remote_dsa_levels(symbol: str, *, reference: float | None = None) -> list[dict]:
     try:
         from app.custom.dsa.proxy import InvalidUpstreamPathError, UpstreamError, enabled, forward
     except Exception:  # noqa: BLE001 — 图表叠加失败时留空，不把错误价位当成信号
@@ -454,7 +478,7 @@ def _remote_dsa_levels(symbol: str) -> list[dict]:
             status, body, _media, _extra = forward("GET", f"history/{record_id}", timeout=8)
             if status >= 400:
                 continue
-            levels = parse_dsa_levels(json.loads(body))
+            levels = parse_dsa_levels(json.loads(body), reference=reference)
             if levels:
                 return levels
     except (UpstreamError, InvalidUpstreamPathError, ValueError, OSError, TypeError):
@@ -462,7 +486,12 @@ def _remote_dsa_levels(symbol: str) -> list[dict]:
     return []
 
 
-def _merge_level_rows(local: list[dict], remote: list[dict]) -> list[dict]:
+def _merge_level_rows(local: list[dict], remote: list[dict], *, reference: float | None = None) -> list[dict]:
+    """本地(用户手设提醒线) 覆盖远端(报告解析), 再统一做异常价位剔除。
+
+    剔除放在合并之后: 两条来源都可能留下旧数据或远期目标价, 叠加线只该
+    反映「当前这笔交易」的参照位, 任何一条撑开 Y 轴都会让走势看不清。
+    """
     chosen: dict[str, dict] = {}
     for row in remote:
         kind = row.get("kind") if isinstance(row, dict) else None
@@ -472,7 +501,20 @@ def _merge_level_rows(local: list[dict], remote: list[dict]) -> list[dict]:
         kind = row.get("kind") if isinstance(row, dict) else None
         if kind:
             chosen[str(kind)] = row
-    return [chosen[kind] for kind in _LEVEL_ORDER if kind in chosen]
+    rows = [chosen[kind] for kind in _LEVEL_ORDER if kind in chosen]
+    if reference is None:
+        return rows
+    kept = []
+    for row in rows:
+        price = _finite(row.get("price"))
+        if price is None or not _within_deviation(price, reference):
+            logger.info(
+                "drop overlay level %s=%s too far from reference %s",
+                row.get("kind"), row.get("price"), reference,
+            )
+            continue
+        kept.append(row)
+    return kept
 
 
 def _strategy_is_fundamental(strategies: list[dict], strategy_id: str) -> bool:
@@ -890,13 +932,18 @@ def _has_other_symbols(panel: pl.DataFrame, symbol: str) -> bool:
 
 
 def _walk_levels(node: Any, found: dict[str, float], depth: int) -> None:
+    """递归找结构化价位键。只认「干净数值」, 字符串一律不解析。
+
+    护栏: 像 strategy.take_profit = 「反弹目标位：MA5 375.64元」这种自由文本,
+    取第一个数字会把均线值冒充成目标价, 所以非纯数字字符串直接跳过。
+    """
     if depth > 8 or len(found) >= len(_LEVEL_ORDER):
         return
     if isinstance(node, dict):
         for key, value in node.items():
             kind = _KEY_KIND.get(str(key))
             if kind and kind not in found:
-                price = parse_price(value)
+                price = _plain_number(value)
                 if price is not None:
                     found[kind] = price
                     continue
@@ -906,23 +953,29 @@ def _walk_levels(node: Any, found: dict[str, float], depth: int) -> None:
             _walk_levels(item, found, depth + 1)
 
 
-def _scan_level_text(node: Any, found: dict[str, float], depth: int) -> None:
-    if depth > 8 or len(found) >= 3:
-        return
-    if isinstance(node, str):
-        for kind, pattern in _TEXT_PATTERNS:
-            if kind in found:
-                continue
-            match = pattern.search(node)
-            if match:
-                found[kind] = float(match.group(1))
-        return
-    if isinstance(node, dict):
-        for value in node.values():
-            _scan_level_text(value, found, depth + 1)
-    elif isinstance(node, list):
-        for item in node[:40]:
-            _scan_level_text(item, found, depth + 1)
+def _plain_number(value: Any) -> float | None:
+    """取「本来就是数字」的价位。
+
+    数字类型直接收; 字符串要求「整体就是一个数」(可带千分位/正负号/单位后缀
+    如 "1800元")才收, 不做正则抠数。这样 strategy.ideal_buy = "1800" 这类
+    白名单键的正常写法仍然能用, 而「反弹目标位：MA5 375.64元 / MA10 407.58元」
+    这种自由文本会被挡掉。
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if number > 0 and math.isfinite(number) else None
+    if isinstance(value, str):
+        text = value.strip().replace(",", "").removesuffix("元").strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        return number if number > 0 and math.isfinite(number) else None
+    return None
 
 
 def _dsa_codes(symbol: str) -> list[str]:
