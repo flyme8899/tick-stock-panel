@@ -567,9 +567,10 @@ def test_next_open_day_after_the_calendar_uses_weekdays(monkeypatch):
 def test_state_separates_unverifiable_from_unconfirmed():
     """`state` 把「无标可验」与「验证未兑现」分开 —— 二者都是 score=0 + strength="无"。
 
-    规格来源：会诊裁定 A。线上实测（16:09 快照 381 条）两者同时存在：
-    约 130 条无标可验、约 11 条有观测未兑现（如「奥克股份终止重组复牌」，
-    excess=-4.96%、看过 4 个窗口仍不认）。在此之前只能靠 score 猜，是异质簇。
+    规格来源：会诊裁定 A。线上实测（16:09 快照，`score=0` 共 381 条）两者同时存在：
+    `unverifiable` 185 条（48.6%）、`unconfirmed` 40 条（10.5%）
+    （如「奥克股份终止重组复牌」，excess=-4.96%、看过 4 个窗口仍不认）。
+    在此之前只能靠 score 猜，是异质簇。
     """
     # ① 有标的、有观测，但盘面不认（消息前已涨停，事后不涨）→ 验证未兑现。
     bars = [
@@ -639,7 +640,121 @@ def test_unverifiable_state_keeps_legacy_score_and_strength():
     assert r["pending"] is False
 
     # 未显式传 state 时按旧字段兜底推断，不返回空串。
+    # `(score=0, strength="无", pending=False)` 的兜底结果**只能**是 unverifiable ——
+    # 断言具体值而非 `in {...}`，否则将来兜底逻辑漂移（例如误判成 scored）也不会有测试报警。
     legacy = _result(0, False, "无", "无", "暂无行情", None, False, {})
-    assert legacy["state"] in {"unverifiable", "pending", "scored"}
+    assert legacy["state"] == "unverifiable"
     assert _result(50, True, "强", "持续", "最近交易日", None, False, {},
                    state="scored")["state"] == "scored"
+
+
+def test_scored_state_requires_nonempty_strength_end_to_end():
+    """评审必修 1（回归）：`state="scored"` 与 `strength="无"` 不得共存 —— 端到端。
+
+    `total = move + strength_points + persist_points`，而两个打分函数的档位阈值不同：
+        excess ∈ [0.3%, 0.5%) → `_move_points` 给 3 分，`_strength_points` 给 0 分。
+    若又无持续性（`persist_points == 0`），就得到 `total=3` 而 `strength="无"`。
+    旧写法按 `total > 0` 判 scored → 这类事件被 `event_is_verified` 判为「已验证」
+    进钉钉推送，而前端仍按 `strength === "无"` 显示无验证，两边结论相反。
+    现统一为 `strength != "无"`。
+
+    构造：消息 10/9(周五) 收盘后首见 → 确认时点推到 10/12(周一) 9:25 竞价。
+    标的竞价相对前收 +0.4%，指数竞价持平 → `excess = +0.4%`，落入该档位。
+    """
+    from app.market_time import CN_TZ as _CN_TZ
+
+    def _qbar(day, hour, minute, price, volume=20_000):
+        return {
+            "at": datetime(2026, 10, day, hour, minute, tzinfo=_CN_TZ),
+            "open": price, "high": price, "low": price, "close": price,
+            "volume": volume, "kind": "minute",
+        }
+
+    event = _event("平安银行回购", "利好", 15, 30)
+    tape = {
+        "session": "2026-10-12",
+        "live": False,
+        "members": {},
+        "index_bars": [
+            {"at": datetime(2026, 10, 12, 9, 15, tzinfo=_CN_TZ), "open": 4000.0, "close": 4000.0, "kind": "minute"},
+            {"at": datetime(2026, 10, 12, 9, 25, tzinfo=_CN_TZ), "open": 4000.0, "close": 4000.0, "kind": "minute"},
+        ],
+        "stocks": {
+            "601318.SH": {
+                "name": "中国平安",
+                "prev_close": 10.0,
+                "baseline_volume": 1_000_000,
+                # 竞价收 10.04 → 相对前收 +0.4%，恰在「move>0 但 strength_points==0」档
+                "bars": [_qbar(12, 9, 20, 10.0), _qbar(12, 9, 25, 10.04)],
+                "flows": [],
+            },
+        },
+        "concepts": {"保险": []},
+    }
+    now = datetime(2026, 10, 12, 10, 0, tzinfo=_CN_TZ)
+    result = score_confirmation(event, tape, now)
+
+    # 前提：确实命中了「有异动分、无强度分」的那个档位（否则这条测试没测到东西）。
+    assert result["strength"] == "无", f"场景未进入目标档位：strength={result['strength']}"
+    assert result["score"] > 0, "该场景应有 move 分（否则无需区分 state）"
+    # 核心断言：不得把「只有异动、没有强度」说成「已验证」。
+    assert result["state"] != "scored", (
+        f"strength=无 却标 scored，会被 event_is_verified 误判为已验证进推送："
+        f"state={result['state']} score={result['score']}"
+    )
+    assert result["state"] == "unconfirmed"
+
+
+def test_no_stock_observation_does_not_borrow_index_move_auction():
+    """评审必修 2（回归）：无标的观测时，不得把指数涨跌当成标的超额收益。
+
+    盘面验证里 `basket = sum(opens)/len(opens) if opens else 0.0`，`_score_auction`
+    随后 `excess = (basket - index_ret)`。**标的没有竞价观测时 `opens` 为空 → `basket=0`**，
+    于是 `excess = -index_ret`（利好时）—— 指数竞价跌 1.5% 就让一个 `windows=0`、
+    `auction_open_pct=0` 的事件拿到 `score=16, strength="中", state="scored",
+    abnormal=True`，并因 `event_is_verified` 进钉钉推送。指数一下跌就"给利好事件发验证"。
+
+    修复后按 `not opens and not flows` 直接判 `unconfirmed`（score=0）。
+
+    这条走的是**竞价路径**（收盘后消息的确认时点被推到下一开市 9:25），
+    是实测中该 bug 真正可达的路径。
+    """
+    from app.market_time import CN_TZ as _CN_TZ
+
+    def _qbar(day, hour, minute, price, volume=20_000):
+        return {
+            "at": datetime(2026, 10, day, hour, minute, tzinfo=_CN_TZ),
+            "open": price, "high": price, "low": price, "close": price,
+            "volume": volume, "kind": "minute",
+        }
+
+    # 消息 10/9(周五) 15:30 首见 → 确认时点被推到 10/12(周一) 9:25 竞价。
+    event = _event("平安银行回购", "利好", 15, 30)
+    # 标的有 10/12 的竞价 bar（借以路由到竞价路径），但 prev_close 缺失
+    # → `opens` 为空 → 无任何标的观测。指数竞价下跌 1.5%。
+    tape = {
+        "session": "2026-10-12",
+        "live": False,
+        "members": {},
+        "index_bars": [
+            {"at": datetime(2026, 10, 12, 9, 15, tzinfo=_CN_TZ), "open": 4000.0, "close": 4000.0, "kind": "minute"},
+            {"at": datetime(2026, 10, 12, 9, 25, tzinfo=_CN_TZ), "open": 4000.0, "close": 3940.0, "kind": "minute"},
+        ],
+        "stocks": {
+            "601318.SH": {
+                "name": "中国平安",
+                "prev_close": None,  # 缺前收 → 算不出 opens
+                "baseline_volume": 1_000_000,
+                "bars": [_qbar(12, 9, 20, 10.0), _qbar(12, 9, 25, 10.1)],
+                "flows": [],
+            },
+        },
+        "concepts": {"保险": []},
+    }
+    now = datetime(2026, 10, 12, 10, 0, tzinfo=_CN_TZ)  # gate(9:25) 已过
+    result = score_confirmation(event, tape, now)
+
+    assert result["score"] == 0, f"无标的观测却得了分：score={result['score']}"
+    assert result["strength"] == "无", f"无标的观测却拿到强度：strength={result['strength']}"
+    assert result["abnormal"] is False, "无标的观测不该判异动"
+    assert result["state"] != "scored", f"无标的观测却标 scored：state={result['state']}"
