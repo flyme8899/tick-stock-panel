@@ -692,6 +692,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                           <div className="text-[10px] leading-4 text-muted/70">
                             叠加条件直接过滤策略候选，选股 / 回测 / 监控一致生效；只影响新入场，不触发已持仓卖出；字段数据缺失的日期不入选（如扩展数据未回补的交易日）。
                             {isMatrixBackend && ' matrix 策略不支持字符串字段条件。'}
+                            {' '}改动叠加条件会清掉该策略的结果缓存，策略页/选股页下次会重新计算（因此结果数值变化属正常，不是 bug）。
                           </div>
                         </div>
                       ) : (

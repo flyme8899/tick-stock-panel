@@ -521,6 +521,8 @@ export interface ScreenerRunAllSummary {
   started_at?: number | null
   /** 已跳过的失效策略 ID (策略池残留, 前端应从池中移除) */
   skipped_unknown?: string[]
+  /** 已跳过的当前不可运行策略 ID (如草稿态 research_only; 前端仅提示, 不移出池) */
+  skipped_unavailable?: string[]
 }
 
 export interface ScreenerCachedResult {

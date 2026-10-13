@@ -334,7 +334,13 @@ export function Screener() {
       // 这里从池中清掉并提示一次, 空库场景 prune(按有效列表) 清不掉的兜底。
       if (data.skipped_unknown?.length) {
         for (const id of data.skipped_unknown) removeFromPool(id)
-        toast(`已跳过 ${data.skipped_unknown.length} 个不存在的策略，并从策略池移除`, 'success')
+        toast(`已跳过 ${data.skipped_unknown.length} 个不存在的策略（${data.skipped_unknown.join('、')}），并从策略池移除`, 'success')
+      }
+      // 存在但当前不可跑 (如 AI 草稿态 research_only): 只提示, 不自动移出策略池
+      // —— 草稿可能是用户刻意保留的, 静默删掉更糟。toast 无 warning 级别, 用 error
+      // 样式承载「未移除」的语义(文案里写明保留)。
+      if (data.skipped_unavailable?.length) {
+        toast(`已跳过 ${data.skipped_unavailable.length} 个当前不可运行的策略（${data.skipped_unavailable.join('、')}，草稿/未发布），保留在策略池中`, 'error')
       }
       for (const [id, message] of Object.entries(data.errors ?? {})) {
         if (message) noteStrategyError(id, message)

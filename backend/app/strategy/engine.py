@@ -1434,7 +1434,7 @@ class StrategyEngine:
                     dtype=bool,
                     count=len(market.symbols),
                 )
-                entry_active = np.where(allowed, entry_active, 0)
+                entry_active = np.where(allowed, entry_active, 0).astype(entry_active.dtype)
         entry_signal_hits = self._matrix_signal_hits(
             entry_active,
             signals.entry_signal_code[target_time],
