@@ -1474,3 +1474,51 @@ def test_blocked_clustering_matches_pairwise_rank_and_merges(tmp_path, monkeypat
         ]
 
     assert signature(fast) == signature(naive)
+
+
+def test_selectable_note_and_capped_flag_explain_the_zero():
+    """选项透出的 selectable_note / selectable_capped 要能解释「为什么是 0」与「是不是上限」。
+
+    前端不能一律显示「暂无对应个股」—— 维表未同步和事件真没映射是两回事。
+    """
+    from app.services.picker import _hot_group
+
+    def ev(key, name, importance, concepts):
+        return {
+            "key": key, "name": name, "importance": importance, "concepts": concepts,
+            "mentions": 1, "source_count": 1,
+        }
+
+    dims = Dimensions(concepts={"000001.SZ": ["机器人"]})
+    events = [
+        ev("mapped", "有映射的事件", "重要", ["机器人"]),
+        ev("noconcept", "中东局势", "重大", ["中东"]),      # 概念在维表里查无此词
+    ]
+    group = _hot_group({"events": events}, None, dims)
+    by_name = {item["name"]: item for item in group["items"]}
+
+    ok = by_name["有映射的事件"]
+    assert ok["selectable_count"] == 1
+    assert ok["selectable_note"] is None          # 有映射就不该有原因
+    assert ok["selectable_capped"] is False       # 1 只远未触顶
+
+    bad = by_name["中东局势"]
+    assert bad["selectable_count"] == 0
+    # 事件「没有匹配到成分股」是具体原因, 不能是 None 也不能是空串。
+    assert bad["selectable_note"] and "没有匹配到成分股" in bad["selectable_note"]
+    assert bad["selectable_capped"] is False
+
+
+def test_selectable_capped_marks_the_thirty_ceiling():
+    """命中数达到 _CONCEPT_CONSTITUENT_CAP 时要标 capped —— N 是上限, 不能说「约 N 只」。"""
+    from app.services.picker import _hot_group, _CONCEPT_CONSTITUENT_CAP
+
+    dims = Dimensions(concepts={f"{i:06d}.SZ": ["宽板块"] for i in range(1, 200)})
+    events = [{
+        "key": "wide", "name": "宽板块事件", "importance": "重要",
+        "concepts": ["宽板块"], "mentions": 1, "source_count": 1,
+    }]
+    group = _hot_group({"events": events}, None, dims)
+    item = group["items"][0]
+    assert item["selectable_count"] == _CONCEPT_CONSTITUENT_CAP
+    assert item["selectable_capped"] is True

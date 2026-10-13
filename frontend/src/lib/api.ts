@@ -2659,7 +2659,11 @@ export interface PickerSourceItem {
   /** 该事件的概念总数。 */
   concept_total?: number
   /** 映射广度：usable=有区分度 / broad=命中过宽板块 / none=选不出股。 */
-  mapping_breadth?: string
+  mapping_breadth?: 'usable' | 'broad' | 'none' | string
+  /** 选不出股时的原因(区分维表未同步/事件无映射/代码对不上)。 */
+  selectable_note?: string | null
+  /** selectable_count 是否被 30 只上限截断(截断时 N 是「至少」不是「约」)。 */
+  selectable_capped?: boolean
 }
 
 export interface PickerSourceGroup {

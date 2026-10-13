@@ -523,6 +523,48 @@ def resolve_event_symbols(
     }
 
 
+def _mapping_note(
+    event: dict,
+    *,
+    symbols: set[str],
+    concepts: list[str],
+    has_dimensions: bool,
+    known_symbols: set[str] | None,
+) -> str | None:
+    """事件映射的「为什么选不出/选了哪些」说明, 供实跑与选项预览共用。
+
+    区分三种本质不同的「空」: 维表未同步 / 事件真没映射到成分股 / 提及个股对不上代码。
+    前端据此给不同文案, 不能一律「暂无对应个股」。
+    """
+    name = str(event.get("name") or event.get("key") or "")
+    key = str(event.get("key") or "")
+    mentioned = event.get("mentioned_stocks")
+    if not isinstance(mentioned, list):
+        mentioned = event.get("frequent_stocks") or []
+    unresolved = 0
+    for stock in mentioned:
+        if not isinstance(stock, dict):
+            continue
+        raw_key = str(stock.get("key") or "")
+        stock_name = str(stock.get("name") or "")
+        if _mentioned_is_fund(raw_key, stock_name):
+            continue
+        if resolve_mentioned_stock(raw_key, known_symbols or set()) is None:
+            unresolved += 1
+    resolved = bool(symbols)
+    if concepts and not has_dimensions and resolved:
+        return "尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股"
+    if concepts and not has_dimensions and not resolved:
+        return "尚未同步同花顺行业/概念，无法映射成分股"
+    if not symbols:
+        return f"「{name or key}」没有匹配到成分股"
+    if unresolved and not resolved:
+        return "热门个股无法对应本地代码"
+    if unresolved:
+        return "部分热门个股无法对应本地代码"
+    return None
+
+
 def map_selected_hot_event(
     event: dict,
     dimensions: Dimensions,
@@ -553,32 +595,13 @@ def map_selected_hot_event(
         known_symbols=known_symbols,
         market_caps=market_caps,
     )
-    # 提及个股里有没有「连本地代码都找不到」的, 用于给用户提示。
-    mentioned = event.get("mentioned_stocks")
-    if not isinstance(mentioned, list):
-        mentioned = event.get("frequent_stocks") or []
-    unresolved = 0
-    for stock in mentioned:
-        if not isinstance(stock, dict):
-            continue
-        raw_key = str(stock.get("key") or "")
-        stock_name = str(stock.get("name") or "")
-        if _mentioned_is_fund(raw_key, stock_name):
-            continue
-        if resolve_mentioned_stock(raw_key, known_symbols) is None:
-            unresolved += 1
-    resolved = bool(symbols - set())
-    note = None
-    if concepts and not has_dimensions and resolved:
-        note = "尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股"
-    elif concepts and not has_dimensions and not resolved:
-        note = "尚未同步同花顺行业/概念，无法映射成分股"
-    elif not symbols:
-        note = f"「{name or key}」没有匹配到成分股"
-    elif unresolved and not resolved:
-        note = "热门个股无法对应本地代码"
-    elif unresolved:
-        note = "部分热门个股无法对应本地代码"
+    note = _mapping_note(
+        event,
+        symbols=symbols,
+        concepts=concepts,
+        has_dimensions=has_dimensions,
+        known_symbols=known_symbols,
+    )
     return (
         {symbol: score for symbol in symbols},
         {symbol: label for symbol in symbols},
@@ -1008,8 +1031,35 @@ def _selectable_symbols(
 
     直接复用 `resolve_event_symbols`, 不另写一套 —— 早前预览数与真实跑出来的
     股数对不上(预览没做 30 只截断、没过滤基金), 会系统性高估, 前端因此误导用户。
+
+    `known_symbols=None` 仍与实跑有细微差别: 预览阶段没有行情表, 提及个股跳过
+    代码校验(见 resolve_event_symbols 注释)。所以这里的数**是上限**, 不是精确值。
     """
     return resolve_event_symbols(event, dimensions, label_index, known_symbols=None)
+
+
+def _selectable_detail(
+    event: dict,
+    dimensions: Dimensions,
+    label_index: dict[str, set[str]],
+) -> tuple[int, str | None]:
+    """可选股数 + 选不出的原因。
+
+    `resolve_event_symbols` 第三返回值是 note —— 它区分了「数据没就绪」「事件无映射」
+    「代码对不上」三种本质不同的 0。前端要按原因给出不同文案, 不能一律「暂无对应个股」
+    (那会把「重大政策新闻暂时映射不上」和「冷门事件真没股」画等号)。
+    """
+    symbols = resolve_event_symbols(
+        event, dimensions, label_index, known_symbols=None,
+    )
+    note = _mapping_note(
+        event,
+        symbols=symbols,
+        concepts=_event_concept_names(event),
+        has_dimensions=bool(dimensions.concepts or dimensions.industry_path),
+        known_symbols=None,
+    )
+    return len(symbols), note
 
 
 def _event_pick_rank(event: dict, selectable: int, *, index_ready: bool) -> tuple:
@@ -1077,10 +1127,17 @@ def _hot_group(
     raw_events = [e for e in (snapshot.get("events") or []) if isinstance(e, dict) and str(e.get("key") or "").strip()]
     label_index = build_label_index(dimensions) if dimensions is not None else {}
     index_ready = bool(label_index)
-    ranked: list[tuple[tuple, dict, int]] = []
+    ranked: list[tuple[tuple, dict, int, str | None]] = []
     for event in raw_events:
-        selectable = len(_selectable_symbols(event, dimensions, label_index)) if index_ready else 0
-        ranked.append((_event_pick_rank(event, selectable, index_ready=index_ready), event, selectable))
+        if index_ready:
+            selectable, note = _selectable_detail(event, dimensions, label_index)
+        else:
+            # 行业/概念维表还没就绪: 此时全 0 是「未同步」导致的, 不是事件本身没映射,
+            # 前端要据此说「数据同步中」而不是「暂无对应个股」。
+            selectable, note = 0, "尚未同步同花顺行业/概念，无法映射成分股"
+        ranked.append(
+            (_event_pick_rank(event, selectable, index_ready=index_ready), event, selectable, note)
+        )
     ranked.sort(key=lambda row: row[0])
 
     # 保底席位: 若按可映射性取出的前 N 里「重大」档少于 _MAJOR_RESERVED_SLOTS 条,
@@ -1121,7 +1178,7 @@ def _hot_group(
     selected = picked
 
     items = []
-    for _rank, event, selectable in selected:
+    for _rank, event, selectable, note in selected:
         if len(items) >= _TOP_HOT_EVENTS:
             break
         key = str(event.get("key") or "").strip()
@@ -1174,6 +1231,13 @@ def _hot_group(
             # 映射广度: usable=有区分度(1..上限) / broad=命中过宽板块 / none=选不出股。
             # 前端据此决定这条能不能点、要不要提示「范围较大」。
             "mapping_breadth": _mapping_breadth(selectable),
+            # 选不出股时的**原因**(区分「维表没同步」「事件无映射」「个股代码对不上」)。
+            # 前端按原因给不同文案, 不能一律「暂无对应个股」——那会把「重大政策新闻
+            # 暂时映射不上」和「冷门事件真没股」混为一谈, 藏掉重要信息。
+            "selectable_note": note,
+            # 是否被 `_CONCEPT_CONSTITUENT_CAP` 截断。截断了就不能说「约 N 只」,
+            # 要说「至少 N 只」——N 是上限不是全集。
+            "selectable_capped": bool(selectable >= _CONCEPT_CONSTITUENT_CAP),
         })
     return {
         "id": "hot_events",

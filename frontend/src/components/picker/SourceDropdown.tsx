@@ -19,22 +19,31 @@ export interface SourceOption {
   importance?: string
   confirmationLabel?: string
   mappedStocks?: string[]
-  /** 真实可选股数(与实跑同一把尺)。0 表示这条事件当前选不出任何个股。 */
+  /** 真实可选股数(与实跑同一把尺)。0 表示这条事件当前选不出任何个股。这是**上限**。 */
   selectableCount?: number
   /** 映射广度：usable=有区分度 / broad=命中过宽 / none=选不出股 / undefined=后端未透出。 */
-  mappingBreadth?: string
+  mappingBreadth?: 'usable' | 'broad' | 'none' | string
+  /** 选不出股的原因(后端 note)。用来区分「维表没同步」和「事件真没股」。 */
+  selectableNote?: string | null
+  /** 可选数是否被 30 只上限截断。截断了要说「至少 N 只」而不是「约 N 只」。 */
+  selectableCapped?: boolean
 }
 
 function selectableBadge(item: SourceOption): { text: string; className: string } | null {
   const count = item.selectableCount
   if (count == null) return null
   if (count <= 0) {
-    return { text: '暂无对应个股', className: 'bg-muted/15 text-muted' }
+    // 原因由后端 note 给出: 维表未同步 / 事件无映射 / 代码对不上, 三种不该长一个样。
+    return { text: item.selectableNote || '暂无对应个股', className: 'bg-muted/15 text-muted' }
   }
   if (item.mappingBreadth === 'broad') {
     return { text: '范围较大', className: 'bg-amber-500/15 text-amber-600 dark:text-amber-400' }
   }
-  return { text: `约 ${count} 只`, className: 'bg-accent/15 text-accent' }
+  // 被 30 只上限截断时, N 是「至少」不是「约」——不能让人以为这就是全部可选范围。
+  if (item.selectableCapped) {
+    return { text: `至少 ${count} 只`, className: 'bg-accent/15 text-accent' }
+  }
+  return { text: `${count} 只`, className: 'bg-accent/15 text-accent' }
 }
 
 interface Props {
@@ -120,27 +129,33 @@ export function SourceDropdown({
         {visible.length === 0 && (empty ?? <p className="px-2 py-3 text-xs text-muted">没有匹配项</p>)}
         {visible.map(item => {
           const on = selected.has(item.id)
-          // 选不出股的事件不提供新增勾选 (勾了也是空炮), 但**绝不能**让已勾选的
-          // 条目失去可点性 —— 否则用户取消不掉。
-          const canPick = !(item.selectableCount != null && item.selectableCount <= 0)
+          // 选不出股的事件不提供**新增**勾选 (勾了也是空炮)。
+          const lacksMapping = item.selectableCount != null && item.selectableCount <= 0
+          // 关键: 只要**已勾选**, 就必须保留勾选框形态与可点性 —— 否则用户取消不掉,
+          // 而且「选中态」会在 count 归零后凭空消失(渲染与交互用了同一个条件时会这样)。
+          // 这里刻意分成两个判断: `on` 决定**渲染成勾选框**, `blocked` 只决定**能否响应点击**。
+          const showCheckbox = on || !lacksMapping
+          const blocked = !on && lacksMapping
           const badge = selectableBadge(item)
-          const blocked = !on && !canPick
           return (
             <button
               key={item.id}
               type="button"
+              role="checkbox"
+              aria-checked={on}
+              aria-disabled={blocked || undefined}
               title={item.headline || undefined}
-              disabled={blocked}
               onClick={() => { if (!blocked) onToggle(item.id) }}
               className={cn(
                 'flex w-full items-start gap-2 rounded-btn px-2 py-1.5 text-left',
                 blocked ? 'cursor-not-allowed opacity-60' : 'hover:bg-elevated',
               )}
             >
-              {canPick ? (
+              {showCheckbox ? (
                 <span className={cn(
                   'mt-0.5 grid h-3.5 w-3.5 shrink-0 place-items-center rounded border',
                   on ? 'border-accent bg-accent text-white' : 'border-border',
+                  blocked && 'opacity-50',
                 )}>
                   {on && <Check className="h-2.5 w-2.5" />}
                 </span>
@@ -153,34 +168,34 @@ export function SourceDropdown({
                 <span className="block whitespace-normal break-words text-xs text-foreground">
                   {item.name}
                   {(item.redCount ?? 0) > 0 && (
-                    <span className="ml-1 rounded bg-bull/15 px-1 text-[11px] leading-4 text-bull">加红</span>
+                    <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
                   )}
                   {badge && (
-                    <span className={cn('ml-1 rounded px-1 text-[11px] leading-4', badge.className)}>{badge.text}</span>
+                    <span className={cn('ml-1 rounded px-1 text-[10px] leading-4', badge.className)}>{badge.text}</span>
                   )}
                 </span>
                 {item.subtitle && (
-                  <span className="mt-0.5 block text-[11px] leading-snug text-muted">{item.subtitle}</span>
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">{item.subtitle}</span>
                 )}
                 {(item.importance || item.category || item.direction) && (
-                  <span className="mt-0.5 block text-[11px] leading-snug text-muted">
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
                     {[item.importance, item.confirmationLabel, item.category, item.direction, ...(item.mappedStocks ?? []).slice(0, 2)].filter(Boolean).join(' · ')}
                   </span>
                 )}
                 {item.concepts && item.concepts.length > 0 && (
                   <span className="mt-0.5 flex flex-wrap gap-1">
                     {item.concepts.map(tag => (
-                      <span key={tag} className="rounded bg-accent/10 px-1 text-[11px] leading-4 text-accent">{tag}</span>
+                      <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
                     ))}
                   </span>
                 )}
                 {item.mentions != null ? (
-                  <span className="mt-0.5 block text-[11px] leading-snug text-muted">
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">
                     提及 {item.mentions} · 来源 {item.sourceCount ?? 0}
                     {item.updatedAt ? ` · 首见 ${item.updatedAt}` : ''}
                   </span>
                 ) : item.description ? (
-                  <span className="mt-0.5 block text-[11px] leading-snug text-muted">{item.description}</span>
+                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">{item.description}</span>
                 ) : null}
               </span>
             </button>
@@ -203,16 +218,16 @@ export function SourceDropdown({
       >
         <span className="min-w-0 flex-1 truncate">{label}</span>
         {badge && (
-          <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-500">
+          <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-500">
             {badge}
           </span>
         )}
         {selectedIds.length > 0 && (
-          <span className="rounded-full bg-accent/15 px-1.5 text-[11px] font-medium text-accent">{selectedIds.length}</span>
+          <span className="rounded-full bg-accent/15 px-1.5 text-[10px] font-medium text-accent">{selectedIds.length}</span>
         )}
         <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted" />
       </button>
-      {hint && <p className={cn('mt-1 text-[11px] leading-snug text-muted', hintClassName)}>{hint}</p>}
+      {hint && <p className={cn('mt-1 text-[10px] leading-snug text-muted', hintClassName)}>{hint}</p>}
       {open && desktop && panel}
       {open && !desktop && (
         <div className="fixed inset-0 z-40 flex items-end bg-black/50" onClick={() => setOpen(false)}>
