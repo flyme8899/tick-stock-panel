@@ -106,6 +106,24 @@ ENRICHED_STORAGE_COLS = [
     "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
 ]
 
+# 从窄表重算指标时必须读入的存储列。
+# turnover_rate / 连板数依赖历史股本或递推状态, 不能从 OHLCV 回推;
+# 读列白名单漏掉它们时, 无 instruments 重算路径会把列丢掉, 选股叠加条件
+# 和矩阵特征会报「列不存在」/ missing field。quote_ts 不参与这些计算。
+ENRICHED_RECOMPUTE_COLS: tuple[str, ...] = (
+    "symbol", "date",
+    "open", "high", "low", "close", "volume", "amount",
+    "raw_close", "raw_high", "raw_low",
+    "turnover_rate",
+    "consecutive_limit_ups", "consecutive_limit_downs",
+)
+
+
+def enriched_recompute_columns(available) -> list[str]:
+    """按存储顺序返回 available 里实际存在、重算时必须带走的列。"""
+    have = set(available)
+    return [name for name in ENRICHED_RECOMPUTE_COLS if name in have]
+
 # 涨跌停参考价公式版本。signal_limit_up/down 不在 ENRICHED_STORAGE_COLS 里,
 # 读取时由 compute_limit_signals 重算; 落盘且依赖该公式的是
 # consecutive_limit_ups / consecutive_limit_downs。

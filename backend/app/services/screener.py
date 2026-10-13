@@ -202,15 +202,12 @@ class ScreenerService:
             compute_indicators,
             compute_limit_signals,
             compute_signals,
+            enriched_recompute_columns,
         )
 
         # 加载 warmup 历史 (目标日期前 ~120 天)
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         start = target_date - timedelta(days=150)
-        # turnover_rate 是 enriched 存储列, 必须随行透传: 否则即时计算后该列
-        # 丢失, 自定义 SQL 用它做条件会 Binder Error 被吞成空结果 (#187)
-        read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
 
         try:
             lf = (
@@ -221,7 +218,9 @@ class ScreenerService:
                 )
                 .sort(["symbol", "date"])
             )
-            available = [c for c in read_cols if c in lf.schema]
+            # 换手率/连板数是存储列, 必须随行透传: 否则即时计算后该列丢失,
+            # 自定义 SQL 与叠加条件会找不到列 (#187)
+            available = enriched_recompute_columns(lf.collect_schema().names())
             df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
             logger.warning("warmup history load failed: %s", e)
@@ -294,15 +293,13 @@ class ScreenerService:
             compute_indicators,
             compute_limit_signals,
             compute_signals,
+            enriched_recompute_columns,
         )
 
         warmup = 60
         start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
 
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
-        read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
 
         try:
             lf = (
@@ -310,7 +307,8 @@ class ScreenerService:
                 .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
                 .sort(["symbol", "date"])
             )
-            available = [c for c in read_cols if c in lf.collect_schema().names()]
+            # 同 _compute_enriched_full: 换手率/连板数存储列随行透传 (#187)
+            available = enriched_recompute_columns(lf.collect_schema().names())
             df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_history failed: %s", e)

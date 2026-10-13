@@ -993,6 +993,8 @@ export interface CustomSignalOptions {
   /** string 扩展字段 (概念/行业归属): 这些字段用 stringOperators + 字符串右值 */
   stringFields?: string[]
   stringOperators?: string[]
+  /** 右值按小数填写的收益率/振幅字段 (0.03 = 3%) */
+  decimalFields?: string[]
   kinds: { key: string; label: string }[]
 }
 

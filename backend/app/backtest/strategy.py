@@ -143,36 +143,10 @@ _OVERLAY_NP_OPS = {
 
 
 def _overlay_numeric_fields(overrides: dict) -> set[str]:
-    """叠加条件 (overlay_filter) 引用的数值字段集合, 含 field: 右值引用。
+    """叠加条件引用的数值字段。实现在 custom_signals, 引擎选股与回测共用。"""
+    from app.strategy.custom_signals import overlay_numeric_fields
 
-    matrix 路径专用: 矩阵 fields 是 float 数组, 字符串扩展列进不了矩阵 —
-    引用字符串字段时抛 ValueError (保存期校验已拦, 这里是运行期双保险)。
-    """
-    conditions = (overrides or {}).get("overlay_filter")
-    if not isinstance(conditions, list) or not conditions:
-        return set()
-    from app.factors.ext_factors import ext_string_fields
-
-    string_fields = ext_string_fields()
-    fields: set[str] = set()
-    for i, c in enumerate(conditions):
-        if not isinstance(c, dict):
-            raise ValueError(f"第 {i+1} 个叠加条件格式错误")
-        left = str(c.get("left", ""))
-        if left in string_fields:
-            raise ValueError(
-                f"第 {i+1} 个叠加条件: matrix_native 策略不支持字符串字段 {left!r}"
-            )
-        fields.add(left)
-        right = c.get("right")
-        if isinstance(right, str) and right.startswith("field:"):
-            col = right[len("field:"):]
-            if col in string_fields:
-                raise ValueError(
-                    f"第 {i+1} 个叠加条件: matrix_native 策略不支持字符串字段引用 {col!r}"
-                )
-            fields.add(col)
-    return fields
+    return overlay_numeric_fields(overrides)
 
 
 class StrategyDependencyResolver:

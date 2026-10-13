@@ -147,6 +147,8 @@ def get_options():
         "operators": [">", ">=", "<", "<=", "==", "!="],
         "stringFields": [e["key"] for e in str_entries],
         "stringOperators": ["contains", "==", "!="],
+        # 右值按小数填写的收益率/振幅字段 (0.03 = 3%); 换手率不在内
+        "decimalFields": sorted(custom_signals.DECIMAL_RATIO_FIELDS),
         "kinds": [
             {"key": "entry", "label": "入场"},
             {"key": "exit", "label": "出场"},

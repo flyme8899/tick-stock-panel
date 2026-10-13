@@ -1320,6 +1320,10 @@ class StrategyEngine:
         order_by = strategy.meta.get("order_by")
         if order_by and order_by != "score":
             fields.add(str(order_by))
+        # 叠加条件引用的存储列 (turnover_rate 等) 不在 required_fields/scoring 里时
+        # 也要装进矩阵, 与回测 StrategyDependencyResolver 同一口径。
+        from app.strategy.custom_signals import overlay_numeric_fields
+        fields.update(overlay_numeric_fields(overrides))
         return fields
 
     def _run_matrix_strategy(

@@ -686,7 +686,13 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
                           <ConditionEditor
                             conditions={overlayFilter}
                             onChange={setOverlayFilter}
-                            options={{ fields: overlayFields, groups: overlayGroups, stringFields: overlayStringFields, hideDays: true }}
+                            options={{
+                              fields: overlayFields,
+                              groups: overlayGroups,
+                              stringFields: overlayStringFields,
+                              hideDays: true,
+                              decimalFields: overlayOptionsData?.decimalFields ?? [],
+                            }}
                             title="叠加过滤（多条件为「且」关系，硬过滤）"
                           />
                           <div className="text-[10px] leading-4 text-muted/70">

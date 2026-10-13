@@ -62,6 +62,24 @@ ALLOWED_FIELDS: frozenset[str] = frozenset({
     "deviate_3d", "deviate_10d", "deviate_30d",
 })
 
+# 条件右值按小数比较的收益率/振幅类字段 (0.03 = 3%)。
+# 与 enriched 存储口径一致, 不改变已保存信号的数值。
+# 换手率 turnover_rate 及由其派生的水平量是百分数值 (5 = 5%), 不在此列。
+DECIMAL_RATIO_FIELDS: frozenset[str] = frozenset({
+    "change_pct", "amplitude",
+    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
+    "momentum_120d", "mom_accel_20_60",
+    "annual_vol_20d", "downside_vol_20d", "atr_pct", "amplitude_trend_20_60",
+    "deviate_3d", "deviate_10d", "deviate_30d",
+    "ma5_bias", "ma10_bias", "ma20_bias", "ma30_bias", "ma60_bias",
+    "ema5_bias", "ema10_bias", "ema20_bias", "ema30_bias", "ema60_bias",
+    "gap_return", "intraday_return",
+    "distance_to_high_60d", "distance_from_low_60d", "distance_to_high_240d",
+    "vwap_bias", "max_ret_20d",
+    "overnight_ret_20d", "intraday_ret_20d",
+    "macd_dif_pct", "macd_dea_pct", "macd_hist_pct",
+})
+
 # 运算符 → Polars 表达式构造器（输入 col_expr, value）
 _OP_BUILDERS = {
     ">":   lambda c, v: c > v,
@@ -361,6 +379,38 @@ def build_overlay_expr(conditions: list[dict]) -> pl.Expr | None:
     for p in parts[1:]:
         combined = combined & p
     return combined
+
+
+def overlay_numeric_fields(overrides: dict | None) -> set[str]:
+    """叠加条件引用的数值字段集合, 含 field: 右值引用。
+
+    matrix 路径专用: 矩阵 fields 是 float 数组, 字符串扩展列进不了矩阵 —
+    引用字符串字段时抛 ValueError (保存期校验已拦, 这里是运行期双保险)。
+    引擎选股与回测依赖解析共用, 避免一侧漏装存储列。
+    """
+    conditions = (overrides or {}).get("overlay_filter")
+    if not isinstance(conditions, list) or not conditions:
+        return set()
+    string_fields = _string_ext_fields()
+    fields: set[str] = set()
+    for i, c in enumerate(conditions):
+        if not isinstance(c, dict):
+            raise ValueError(f"第 {i+1} 个叠加条件格式错误")
+        left = str(c.get("left", ""))
+        if left in string_fields:
+            raise ValueError(
+                f"第 {i+1} 个叠加条件: matrix_native 策略不支持字符串字段 {left!r}"
+            )
+        fields.add(left)
+        right = c.get("right")
+        if isinstance(right, str) and right.startswith("field:"):
+            col = right[len("field:"):]
+            if col in string_fields:
+                raise ValueError(
+                    f"第 {i+1} 个叠加条件: matrix_native 策略不支持字符串字段引用 {col!r}"
+                )
+            fields.add(col)
+    return fields
 
 
 def overlay_missing_columns(conditions: list[dict], columns) -> list[str]:
