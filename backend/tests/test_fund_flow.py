@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import polars as pl
 import pytest
@@ -434,26 +434,96 @@ def test_stale_intraday_result_is_discarded(tmp_path, monkeypatch) -> None:
 
     评审指出：Python 线程杀不掉，超时重启只是叠加一个新线程。旧线程若之后解卡，
     会和新线程同时写盘、同时标成功，可能用一份过时快照掩盖新代的失败。
+
+    复审进一步指出：光在 ``sync_stock_intraday`` **返回之后**查世代是不够的 ——
+    写盘发生在该函数**内部**。所以这里**走真实的 ``sync_stock_intraday``**，
+    并断言旧代**没有留下分区**，而不只是「没标成功」。
+    """
+    monkeypatch.delenv("FUND_FLOW_INTRADAY_PRIMARY", raising=False)
+    day = "2026-10-13"
+
+    def ak(name, **kwargs):
+        assert name == "stock_individual_fund_flow_rank"
+        return _eastmoney_rank_rows()
+
+    clients = SourceClients(ak_call=ak)
+
+    # 旧代迟到的这一次：回调说「你已经不是当前代了」。
+    stale = jobs.sync_stock_intraday(
+        tmp_path,
+        clients,
+        trade_date=day,
+        captured_at=f"{day}T13:44:50",
+        breaker=_breaker(),
+        is_current=lambda: False,
+    )
+    assert stale.errors == [jobs.STALE_GENERATION]
+    assert stale.wrote == 0
+    # 关键断言：旧代没有留下任何分区，状态也没被碰过。
+    assert store.read_partition(tmp_path, "stock_intraday", day).is_empty()
+    assert not (tmp_path / "stock_intraday").exists()
+
+    # 当前代同样数据 → 正常落盘。
+    fresh = jobs.sync_stock_intraday(
+        tmp_path,
+        clients,
+        trade_date=day,
+        captured_at=f"{day}T13:45:00",
+        breaker=_breaker(),
+        is_current=lambda: True,
+    )
+    assert fresh.errors == []
+    assert fresh.wrote == store.FULL_MARKET_MIN
+    assert store.read_partition(tmp_path, "stock_intraday", day).height == store.FULL_MARKET_MIN
+
+
+def test_stale_generation_also_guards_ths_fallback(tmp_path, monkeypatch) -> None:
+    """同花顺兜底那条路也要拦 —— 它走的是 ``_write_intraday``，另一个落盘点。
+
+    东财行数不够（或直接报错）时改走同花顺即时榜，落盘发生在 ``_write_intraday``
+    里。只堵东财那一处等于没堵，旧代照样能从兜底路径写进去。
+    """
+    monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "eastmoney")
+    day = "2026-10-13"
+
+    def ak(name, **kwargs):
+        if name == "stock_individual_fund_flow_rank":
+            raise TimeoutError("read timed out")
+        return [{"股票代码": "600519", "股票简称": "贵州茅台", "净额": "1.5亿"}]
+
+    stale = jobs.sync_stock_intraday(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_date=day,
+        captured_at=f"{day}T13:44:50",
+        breaker=_breaker(),
+        is_current=lambda: False,
+    )
+    assert stale.errors == [jobs.STALE_GENERATION]
+    assert stale.wrote == 0
+    assert not (tmp_path / "stock_intraday").exists(), "旧代不该从兜底路径写进分区"
+
+
+def test_stale_generation_skips_breaker_persist(tmp_path, monkeypatch) -> None:
+    """过期代连熔断状态都不回写 —— 那是新一代的账。
+
+    复审 2 的后半条：``finally`` 里无条件 ``_persist_breakers`` 会让旧代把
+    「解卡后迟到的成功」写进熔断状态，把新代的失败盖掉。
     """
     monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
     worker = scheduler.FundFlowWorker()
-    runs: list[str] = []
+    persisted: list[int] = []
+    monkeypatch.setattr(
+        worker, "_persist_breakers", lambda data_dir: persisted.append(1)
+    )
 
-    class Result:
-        def __init__(self) -> None:
-            self.errors: list[str] = []
-            self.wrote = 1
-
-    def fake_sync(data_dir, clients, *, trade_date, captured_at, breaker):
-        runs.append(captured_at)
-        return Result()
+    def fake_sync(data_dir, clients, *, trade_date, captured_at, breaker, is_current=None):
+        # 真实实现里这里会落盘；本用例只关心熔断状态回写，用不着真数据。
+        return scheduler.jobs.RunResult(kind="stock_intraday", wrote=1)
 
     monkeypatch.setattr(scheduler.jobs, "sync_stock_intraday", fake_sync)
 
-    # 旧代（gen=1）被判卡死后，当前代已推进到 2。
-    worker._intraday_generation = 2
-    day = date(2026, 10, 13)
-    # 直接驱动 _spawn 生成的 target：旧代线程在启动时拿的是它那一刻的 generation。
+    # 旧代：_spawn 之后立刻把世代推进，模拟「新代已经接手」。
     worker._spawn_stock_intraday(
         tmp_path,
         datetime(2026, 10, 13, 13, 44, 50),
@@ -461,12 +531,20 @@ def test_stale_intraday_result_is_discarded(tmp_path, monkeypatch) -> None:
         trading=True,
         known_days=[],
     )
-    # _spawn 会把当前代自增到 3 并起一个真线程；等它跑完。
+    worker._intraday_generation += 1
     worker.wait_intraday(timeout=5)
-    assert runs, "新代应该真的跑了一次"
-    # 上一次尝试里 gen=2 的那次已过期，不会标成功（最新 gen=3 才是当前代）。
-    state = store.load_state(tmp_path)["kinds"].get("stock_intraday") or {}
-    assert state.get("last_success_date") == day.isoformat()
+    assert persisted == [], "过期代不该写回熔断状态"
+
+    # 当前代：正常回写。
+    worker._spawn_stock_intraday(
+        tmp_path,
+        datetime(2026, 10, 13, 13, 46, 0),
+        SourceClients(),
+        trading=True,
+        known_days=[],
+    )
+    worker.wait_intraday(timeout=5)
+    assert persisted == [1], "当前代应该回写一次"
 
 
 def test_etf_baseline_uses_record_count_not_trading_days(tmp_path) -> None:
@@ -1713,6 +1791,34 @@ def test_intraday_fresh_line_is_close_clock() -> None:
     assert query._intraday_still_fresh(None, datetime(2026, 10, 13, 10, 0)) is False
     assert query._intraday_still_fresh("2026-10-12T14:55:00", datetime(2026, 10, 13, 10, 0)) is False
     assert query._intraday_still_fresh("坏时间", datetime(2026, 10, 13, 10, 0)) is False
+
+
+def test_intraday_freshness_converts_timezone_not_just_drops_it() -> None:
+    """非东八区的 aware 时间要先换算到东八区再比，不能只丢掉时区标记。
+
+    复审 3：原来的 ``replace(tzinfo=None)`` 只是把时区标记抹掉，数值原样留下。
+    传入 UTC 的时间会当成东八区去比，差 8 小时：东八区的 14:45 实际是 UTC 06:45，
+    被抹标后落回 06:45，收盘后就误判成「午盘快照」而丢弃。
+    """
+    utc = UTC
+    west5 = timezone(timedelta(hours=-5))
+    # 东八区 17:00 对应 UTC 09:00。用它当「收盘后」的墙上时钟。
+    close = datetime(2026, 10, 13, 9, 0, tzinfo=utc)
+    # UTC 06:45 == 东八区 14:45，正卡在收盘前快照的下界上 → 收盘后仍算新鲜。
+    assert query._intraday_still_fresh("2026-10-13T06:45:00+00:00", close) is True
+    # UTC 05:44 == 东八区 13:44，定格在午盘 → 收盘后判陈旧。
+    assert query._intraday_still_fresh("2026-10-13T05:44:00+00:00", close) is False
+    # 同一个时刻换个时区表达，结论必须一致。
+    assert query._intraday_still_fresh(
+        "2026-10-13T06:45:00+00:00", datetime(2026, 10, 13, 17, 0, tzinfo=CN)
+    ) is True
+    # 比较基准也换算：西五区 10-12 23:00 == 东八区 10-13 12:00，属盘中 → 新鲜。
+    # 若只丢标记，就会拿 10-12 去比快照的 10-13，误判成跨日。
+    assert query._intraday_still_fresh(
+        "2026-10-13T06:45:00+00:00", datetime(2026, 10, 12, 23, 0, tzinfo=west5)
+    ) is True
+    # 快照时间是 naive（落盘格式就是本地时间）→ 按东八区解释，同样判新鲜。
+    assert query._intraday_still_fresh("2026-10-13T14:45:00", close) is True
 
 
 def test_stocks_today_uses_late_intraday_before_close_partition(tmp_path, monkeypatch) -> None:

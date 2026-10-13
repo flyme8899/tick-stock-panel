@@ -11,7 +11,7 @@ import polars as pl
 from app.fund_flow import factors, normalize, store
 from app.fund_flow.scheduler import current_flags, get_worker
 from app.fund_flow.units import percent_points_to_decimal
-from app.market_time import cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today
 
 # 收盘时刻。过了这个点，当天盘中快照就不再代表「今日」，改读当天收盘分区。
 # 用 15:00 而不是收盘数据就绪的 16:30：15:00 一过，盘中快照的技术含义就变了
@@ -559,17 +559,19 @@ def _intraday_still_fresh(captured: str | None, now: datetime | None = None) -> 
         stamp = datetime.fromisoformat(str(captured))
     except ValueError:
         return False
-    current = now or cn_now()
-    if current.tzinfo is not None:
-        current = current.replace(tzinfo=None)
-    if stamp.tzinfo is not None:
-        stamp = stamp.replace(tzinfo=None)
+    current = (now or cn_now()).astimezone(CN_TZ).replace(tzinfo=None)
+    # 快照时间戳可能是 aware 也可能是 naive。naive 的按东八区解释（落盘的就是
+    # 中国本地时间），aware 的先转东八区再丢时区 —— 直接 ``replace(tzinfo=None)``
+    # 只是丢掉时区标记，非东八区的 aware 时间会比出来差好几个小时。
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=CN_TZ)
+    stamp = stamp.astimezone(CN_TZ).replace(tzinfo=None)
     # 快照日期不是今天 → 不新鲜（非交易日、跨日残留都走这条）。
     if stamp.date() != current.date():
         return False
-    if current.timetz() < _INTRADAY_FRESH_UNTIL:
+    if current.time() < _INTRADAY_FRESH_UNTIL:
         return True
-    return stamp.timetz() >= _STALE_INTRADAY_BEFORE
+    return stamp.time() >= _STALE_INTRADAY_BEFORE
 
 
 def _stocks_today(root: Path, *, now: datetime | None = None) -> dict:
@@ -595,15 +597,13 @@ def _stocks_today(root: Path, *, now: datetime | None = None) -> dict:
         ranked = _stock_sides(root, intra, "main_net")
     if ranked is not None:
         inflow, outflow = ranked
-        current = now or cn_now()
-        if current.tzinfo is not None:
-            current = current.replace(tzinfo=None)
+        current = (now or cn_now()).astimezone(CN_TZ).replace(tzinfo=None)
         return {
             "trade_date": day,
             "snapshot": "intraday",
             "captured_at": captured,
             # 收盘后采用的盘中快照是「收盘前」的定格，标出来免得被当成实时。
-            "stale_after_close": current.timetz() >= _INTRADAY_FRESH_UNTIL,
+            "stale_after_close": current.time() >= _INTRADAY_FRESH_UNTIL,
             "source": _snapshot_source(intra),
             "partial": False,
             "note": board_gap_note(board_gaps(root, intra)),

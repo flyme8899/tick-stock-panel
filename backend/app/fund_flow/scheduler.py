@@ -651,15 +651,23 @@ class FundFlowWorker:
         self._intraday_generation += 1
         generation = self._intraday_generation
 
+        def current_generation() -> bool:
+            """这一代是否仍是当前代。线程之间只读一个 int，无需加锁。"""
+            return generation == self._intraday_generation
+
         def target() -> None:
             try:
+                # 世代回调一路传进 jobs：``sync_stock_intraday`` **内部**就会落盘，
+                # 校验必须发生在写之前。等函数返回再查就晚了 —— 旧代已经写进去了。
                 result = jobs.sync_stock_intraday(
-                    data_dir, clients, trade_date=trade_day, captured_at=captured, breaker=breaker,
+                    data_dir,
+                    clients,
+                    trade_date=trade_day,
+                    captured_at=captured,
+                    breaker=breaker,
+                    is_current=current_generation,
                 )
-                # 卡死重启后新旧两代会同时在跑。只有当前代才允许落盘标成功；
-                # 旧代（通常是解卡后迟到的请求）结果一律丢弃，否则会用一份过时
-                # 的快照把新代的失败盖成成功。
-                if generation != self._intraday_generation:
+                if not current_generation():
                     logger.warning(
                         "盘中快照 gen=%d 已过期（当前 gen=%d），丢弃本次结果 %s",
                         generation,
@@ -678,10 +686,13 @@ class FundFlowWorker:
             except Exception:
                 logger.exception("盘中个股主力净流入拉取失败")
             finally:
-                try:
-                    self._persist_breakers(data_dir)
-                except Exception:
-                    logger.exception("盘中个股主力净流入写回熔断状态失败")
+                # 过期代连熔断状态都不该回写：那是新一代的账，旧代写进去只会
+                # 用「解卡后迟到的成功」把新代的失败盖掉。
+                if current_generation():
+                    try:
+                        self._persist_breakers(data_dir)
+                    except Exception:
+                        logger.exception("盘中个股主力净流入写回熔断状态失败")
 
         thread = threading.Thread(target=target, name="fund-flow-intraday", daemon=True)
         self._intraday_thread = thread
