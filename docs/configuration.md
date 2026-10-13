@@ -189,7 +189,7 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 ## A 股资金进出（可选）
 
-个股账单、板块资金、两融、ETF 份额、南向和龙虎榜备份。代码默认关闭。本仓库 `.env.example` 里为本 HK 部署写了打开值，复制到 `.env` 后才会拉数。字段、时刻和禁止使用的接口见 [fund-flow.md](./fund-flow.md)。妙想密钥是 `MX_APIKEY`，留空则不补个股。
+个股账单、板块资金、两融、ETF 份额、南向和龙虎榜备份。代码默认关闭。本仓库 `.env.example` 里为本 HK 部署写了打开值，复制到 `.env` 后才会拉数。盘中个股主力净流入默认走东财当日排名，失败或行数不足时改同花顺。`FUND_FLOW_INTRADAY_PRIMARY` 写成 `eastmoney` 或 `ths`，缺省是 eastmoney。字段、时刻和禁止使用的接口见 [fund-flow.md](./fund-flow.md)。妙想密钥是 `MX_APIKEY`，留空则不补个股。
 
 ## 打板与研报
 

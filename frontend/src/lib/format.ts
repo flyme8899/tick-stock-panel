@@ -26,17 +26,35 @@ export function priceColorClass(v: number | null | undefined): string {
   return v > 0 ? 'text-bull' : 'text-bear'
 }
 
-/** 自选和个股详情上的同花顺即时净额。不是东财主力净流入。 */
-export const INTRADAY_NET_LABEL = '盘中资金净额(同花顺)'
+/** 自选和个股详情上的盘中主力净流入。东财快照用这个名字。 */
+export const INTRADAY_NET_LABEL = '盘中主力净流入'
 
-/** 悬停说明：同花顺「净额」是流入减流出。 */
+/** 同花顺备用快照。这是流入减流出，不是东财主力净流入。 */
+export const INTRADAY_NET_LABEL_THS = '盘中资金净额(同花顺)'
+
+/** 悬停说明：东财今日主力净流入，单位元。 */
 export const INTRADAY_NET_HINT =
-  '同花顺即时「净额」是资金流入减去流出，不是东财口径的主力净流入（大单加超大单）。'
+  '东财今日主力净流入（超大单加大单），单位元。正数是净流入，负数是净流出。'
+
+/** 同花顺备用源的悬停说明。 */
+export const INTRADAY_NET_HINT_THS =
+  '同花顺即时「净额」是资金流入减去流出，不是东财口径的主力净流入（大单加超大单）。这一份快照来自同花顺备用源。'
+
+/** 按接口返回的 source 选标签。没有快照时用东财默认名。 */
+export function intradayNetLabel(source: string | null | undefined): string {
+  return source === 'akshare_ths' ? INTRADAY_NET_LABEL_THS : INTRADAY_NET_LABEL
+}
+
+/** 按接口返回的 source 选悬停说明。 */
+export function intradayNetHint(source: string | null | undefined): string {
+  return source === 'akshare_ths' ? INTRADAY_NET_HINT_THS : INTRADAY_NET_HINT
+}
 
 /** 数值旁的提示。有快照才带时刻；这只股票没有行时说明留空。 */
-export function intradayNetTitle(clock: string, hasValue: boolean): string {
-  if (!hasValue) return `${INTRADAY_NET_HINT}还没有今日快照。`
-  return clock ? `${INTRADAY_NET_HINT}快照 ${clock}。` : INTRADAY_NET_HINT
+export function intradayNetTitle(clock: string, hasValue: boolean, source?: string | null): string {
+  const hint = intradayNetHint(source)
+  if (!hasValue) return `${hint}还没有今日快照。`
+  return clock ? `${hint}快照 ${clock}。` : hint
 }
 
 /** 带符号的金额（元）。正数红、负数绿由 priceColorClass 决定；缺失是 —，不是 0。 */

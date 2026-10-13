@@ -1,6 +1,8 @@
 """资金进出：单位、落盘、换源、调度和只读接口。不访问网络。"""
 from __future__ import annotations
 
+import logging
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 import polars as pl
@@ -48,10 +50,11 @@ def test_flags_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "FUND_FLOW_ENABLED", "FUND_FLOW_STOCK", "FUND_FLOW_STOCK_INTRADAY", "FUND_FLOW_SECTOR",
         "FUND_FLOW_MARGIN", "FUND_FLOW_ETF_SHARES", "FUND_FLOW_SOUTHBOUND",
-        "FUND_FLOW_NORTHBOUND_TURNOVER", "FUND_FLOW_LHB_BACKUP",
+        "FUND_FLOW_NORTHBOUND_TURNOVER", "FUND_FLOW_LHB_BACKUP", "FUND_FLOW_INTRADAY_PRIMARY",
     ):
         monkeypatch.delenv(name, raising=False)
     assert config.enabled() is False
+    assert config.intraday_primary() == "eastmoney"
     assert config.stock_enabled() is False
     monkeypatch.setenv("FUND_FLOW_STOCK", "true")
     assert config.stock_enabled() is False
@@ -1641,6 +1644,7 @@ def test_stock_intraday_respects_session_and_gap() -> None:
 
 def test_intraday_snapshot_is_latest_today_only(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
+    monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "ths")
     for name in (
         "FUND_FLOW_STOCK", "FUND_FLOW_STOCK_INTRADAY", "FUND_FLOW_SECTOR",
         "FUND_FLOW_MARGIN", "FUND_FLOW_ETF_SHARES", "FUND_FLOW_SOUTHBOUND",
@@ -1674,12 +1678,18 @@ def test_intraday_snapshot_is_latest_today_only(tmp_path, monkeypatch) -> None:
         ["600519.SH", "000002.SZ"], data_dir=tmp_path, today="2026-10-09",
     )
     assert latest["captured_at"] == "2026-10-09T10:06:00"
-    assert latest["items"] == [{"code": "600519", "name": "贵州茅台", "main_net": 2e8}]
+    assert latest["source"] == "akshare_ths"
+    assert latest["items"] == [{
+        "code": "600519", "name": "贵州茅台", "main_net": 2e8,
+        "super_net": None, "large_net": None, "medium_net": None, "small_net": None,
+        "source": "akshare_ths",
+    }]
     stale = query.intraday_latest(["600519.SH"], data_dir=tmp_path, today="2026-10-10")
-    assert stale == {"trade_date": None, "captured_at": None, "items": []}
+    assert stale == {"trade_date": None, "captured_at": None, "source": None, "items": []}
 
 
-def test_intraday_retries_then_keeps_previous_snapshot_on_empty(tmp_path) -> None:
+def test_intraday_retries_then_keeps_previous_snapshot_on_empty(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "ths")
     sleeps: list[float] = []
     calls = {"n": 0}
 
@@ -1748,6 +1758,27 @@ def test_live_individual_flow_uses_shared_gate(monkeypatch) -> None:
     assert rows[0]["股票代码"] == "600519"
 
 
+def test_old_intraday_partition_without_order_columns_still_reads(tmp_path) -> None:
+    path = store.partition_file(tmp_path, "stock_intraday", "2026-10-09")
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600519"],
+        "code": ["600519"],
+        "name": ["贵州茅台"],
+        "trade_date": ["2026-10-09"],
+        "captured_at": ["2026-10-09T10:06:00"],
+        "main_net": [2e8],
+        "source": ["akshare_ths"],
+    }).write_parquet(path)
+    frame = store.read_partition(tmp_path, "stock_intraday", "2026-10-09")
+    assert frame["main_net"][0] == 2e8
+    assert frame["super_net"][0] is None
+    latest = query.intraday_latest(["600519.SH"], data_dir=tmp_path, today="2026-10-09")
+    assert latest["source"] == "akshare_ths"
+    assert latest["items"][0]["main_net"] == 2e8
+    assert latest["items"][0]["super_net"] is None
+
+
 def test_intraday_api_filters_symbols(tmp_path, monkeypatch) -> None:
     store.write_rows(tmp_path, "stock_intraday", "2026-10-09", [{
         "symbol": "600519", "code": "600519", "name": "贵州茅台",
@@ -1761,5 +1792,274 @@ def test_intraday_api_filters_symbols(tmp_path, monkeypatch) -> None:
     app.include_router(router)
     client = TestClient(app)
     body = client.get("/api/fund-flow/intraday", params={"symbols": "600519.SH,000001.SZ"}).json()
-    assert body["items"] == [{"code": "600519", "name": "贵州茅台", "main_net": 2e8}]
+    assert body["source"] == "akshare_ths"
+    assert body["items"] == [{
+        "code": "600519", "name": "贵州茅台", "main_net": 2e8,
+        "super_net": None, "large_net": None, "medium_net": None, "small_net": None,
+        "source": "akshare_ths",
+    }]
     assert body["captured_at"] == "2026-10-09T10:06:00"
+
+
+def _eastmoney_rank_rows(count: int = store.FULL_MARKET_MIN) -> list[dict]:
+    """东财当日排名的一行真实口径，其余行只凑满全市场门槛。
+
+    茅台这一行的主力等于超大单加大单，用来证明落盘读的是主力列，不是把两档加总后再改符号。
+    净占比故意放一个很小的数，映射如果读错列会立刻对不上。
+    """
+    rows = [{
+        "代码": "600519",
+        "名称": "贵州茅台",
+        "今日主力净流入-净额": -1234567.5,
+        "今日主力净流入-净占比": 1.25,
+        "今日超大单净流入-净额": -2000000.0,
+        "今日超大单净流入-净占比": -2.0,
+        "今日大单净流入-净额": 765432.5,
+        "今日大单净流入-净占比": 0.8,
+        "今日中单净流入-净额": 100.0,
+        "今日中单净流入-净占比": 0.01,
+        "今日小单净流入-净额": -50.25,
+        "今日小单净流入-净占比": -0.01,
+    }]
+    for index in range(1, count):
+        rows.append({
+            "代码": f"{index:06d}",
+            "名称": "测",
+            "今日主力净流入-净额": float(index),
+            "今日超大单净流入-净额": float(-index),
+            "今日大单净流入-净额": float(index),
+            "今日中单净流入-净额": float(index),
+            "今日小单净流入-净额": float(-index),
+        })
+    return rows
+
+
+def _breaker() -> CircuitBreaker:
+    return CircuitBreaker("akshare", clock=lambda: 0.0)
+
+
+def test_intraday_eastmoney_primary_keeps_yuan_and_sign(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("FUND_FLOW_INTRADAY_PRIMARY", raising=False)
+    calls: list[tuple[str, dict]] = []
+
+    def ak(name, **kwargs):
+        calls.append((name, kwargs))
+        if name == "stock_individual_fund_flow_rank":
+            return _eastmoney_rank_rows()
+        raise AssertionError(name)
+
+    result = jobs.sync_stock_intraday(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_date="2026-10-09",
+        captured_at="2026-10-09T10:06:00",
+        breaker=_breaker(),
+    )
+    assert result.errors == []
+    assert calls == [("stock_individual_fund_flow_rank", {"indicator": "今日"})]
+    frame = store.read_partition(tmp_path, "stock_intraday", "2026-10-09")
+    assert frame.height == store.FULL_MARKET_MIN
+    row = frame.filter(pl.col("code") == "600519").to_dicts()[0]
+    assert row["main_net"] == -1234567.5
+    assert row["super_net"] == -2000000.0
+    assert row["large_net"] == 765432.5
+    assert row["medium_net"] == 100.0
+    assert row["small_net"] == -50.25
+    assert row["source"] == "akshare_em_rank"
+    assert row["main_net"] == row["super_net"] + row["large_net"]
+    other = frame.filter(pl.col("code") == "000001").to_dicts()[0]
+    assert other["main_net"] == 1.0
+    latest = query.intraday_latest(["600519.SH"], data_dir=tmp_path, today="2026-10-09")
+    assert latest["source"] == "akshare_em_rank"
+    assert latest["items"] == [{
+        "code": "600519",
+        "name": "贵州茅台",
+        "main_net": -1234567.5,
+        "super_net": -2000000.0,
+        "large_net": 765432.5,
+        "medium_net": 100.0,
+        "small_net": -50.25,
+        "source": "akshare_em_rank",
+    }]
+
+
+def test_intraday_falls_back_when_eastmoney_fails(tmp_path, monkeypatch, caplog) -> None:
+    monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "eastmoney")
+    calls: list[str] = []
+
+    def ak(name, **kwargs):
+        calls.append(name)
+        if name == "stock_individual_fund_flow_rank":
+            raise TimeoutError("read timed out")
+        return [{"股票代码": "600519", "股票简称": "贵州茅台", "净额": "1.5亿"}]
+
+    sleeps: list[float] = []
+    with caplog.at_level(logging.WARNING):
+        result = jobs.sync_stock_intraday(
+            tmp_path,
+            SourceClients(ak_call=ak),
+            trade_date="2026-10-09",
+            captured_at="2026-10-09T10:06:00",
+            breaker=_breaker(),
+            sleeper=sleeps.append,
+        )
+    assert sleeps == []
+    assert calls == ["stock_individual_fund_flow_rank", "stock_fund_flow_individual"]
+    assert result.errors == []
+    assert any("改走同花顺" in record.message and "read timed out" in record.message for record in caplog.records)
+    frame = store.read_partition(tmp_path, "stock_intraday", "2026-10-09")
+    assert frame.height == 1
+    assert frame["main_net"][0] == 1.5e8
+    assert frame["source"][0] == "akshare_ths"
+    assert frame["super_net"][0] is None
+
+
+def test_intraday_falls_back_when_eastmoney_has_too_few_rows(tmp_path, monkeypatch, caplog) -> None:
+    monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "eastmoney")
+    def ak(name, **kwargs):
+        if name == "stock_individual_fund_flow_rank":
+            return _eastmoney_rank_rows(3)
+        return [
+            {"股票代码": "000001", "股票简称": "平安银行", "净额": "-8000万"},
+        ]
+
+    with caplog.at_level(logging.WARNING):
+        result = jobs.sync_stock_intraday(
+            tmp_path,
+            SourceClients(ak_call=ak),
+            trade_date="2026-10-09",
+            captured_at="2026-10-09T10:12:00",
+            breaker=_breaker(),
+        )
+    assert result.errors == []
+    assert any("只有 3 行" in record.message and "改走同花顺" in record.message for record in caplog.records)
+    frame = store.read_partition(tmp_path, "stock_intraday", "2026-10-09")
+    assert frame.height == 1
+    assert frame["code"][0] == "000001"
+    assert frame["main_net"][0] == -8e7
+    assert frame["source"][0] == "akshare_ths"
+    assert "600519" not in frame["code"].to_list()
+
+
+def test_intraday_primary_switch(tmp_path, monkeypatch, caplog) -> None:
+    calls: list[str] = []
+
+    def ak(name, **kwargs):
+        calls.append(name)
+        if name == "stock_individual_fund_flow_rank":
+            return _eastmoney_rank_rows()
+        return [{"股票代码": "600519", "股票简称": "贵州茅台", "净额": 100.0}]
+
+    def run(captured: str) -> None:
+        result = jobs.sync_stock_intraday(
+            tmp_path,
+            SourceClients(ak_call=ak),
+            trade_date="2026-10-09",
+            captured_at=captured,
+            breaker=_breaker(),
+        )
+        assert result.errors == []
+
+    monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "ths")
+    run("2026-10-09T10:00:00")
+    assert calls == ["stock_fund_flow_individual"]
+    assert store.read_partition(tmp_path, "stock_intraday", "2026-10-09").filter(
+        pl.col("captured_at") == "2026-10-09T10:00:00"
+    )["source"][0] == "akshare_ths"
+
+    calls.clear()
+    monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "EastMoney")
+    run("2026-10-09T10:06:00")
+    assert calls == ["stock_individual_fund_flow_rank"]
+
+    calls.clear()
+    monkeypatch.delenv("FUND_FLOW_INTRADAY_PRIMARY", raising=False)
+    run("2026-10-09T10:12:00")
+    assert calls == ["stock_individual_fund_flow_rank"]
+
+    calls.clear()
+    with caplog.at_level(logging.WARNING):
+        monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "nope")
+        run("2026-10-09T10:18:00")
+    assert calls == ["stock_individual_fund_flow_rank"]
+    assert any("无法识别" in record.message for record in caplog.records)
+
+
+def test_live_rank_uses_shared_gate(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_call(name, **kwargs):
+        seen["name"] = name
+        seen["kwargs"] = kwargs
+        return [{"代码": "600519", "今日主力净流入-净额": -1.5}]
+
+    monkeypatch.setattr("app.eastmoney.akshare_gate.call_akshare", fake_call)
+    from app.fund_flow.sources import live_clients
+
+    rows = live_clients().ak("stock_individual_fund_flow_rank", indicator="今日")
+    assert seen == {"name": "stock_individual_fund_flow_rank", "kwargs": {"indicator": "今日"}}
+    assert rows[0]["今日主力净流入-净额"] == -1.5
+
+
+def test_intraday_fetch_does_not_block_other_jobs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
+    monkeypatch.setenv("FUND_FLOW_SECTOR", "true")
+    monkeypatch.delenv("FUND_FLOW_INTRADAY_PRIMARY", raising=False)
+    for name in (
+        "FUND_FLOW_STOCK", "FUND_FLOW_MARGIN", "FUND_FLOW_ETF_SHARES", "FUND_FLOW_SOUTHBOUND",
+        "FUND_FLOW_NORTHBOUND_TURNOVER", "FUND_FLOW_LHB_BACKUP",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    jobs.reset_sector_cache()
+    rank_entered = threading.Event()
+    release_rank = threading.Event()
+    rank_calls = {"n": 0}
+
+    def ak(name, **kwargs):
+        if name == "stock_individual_fund_flow_rank":
+            rank_calls["n"] += 1
+            rank_entered.set()
+            release_rank.wait(3)
+            return _eastmoney_rank_rows()
+        if name == "stock_fund_flow_industry":
+            assert rank_entered.wait(3), "板块任务没有和东财分页重叠"
+            return [{"行业": "白酒", "净额": "1.2亿"}]
+        if name == "stock_fund_flow_concept":
+            return [{"概念": "白酒", "净额": "1亿"}]
+        raise AssertionError(name)
+
+    worker = scheduler.FundFlowWorker()
+    clients = SourceClients(ak_call=ak)
+    try:
+        ran = worker.run_once(
+            now=_day(10, 0),
+            data_dir=tmp_path,
+            clients=clients,
+            symbols=[],
+            trading=True,
+            busy=False,
+            detach_intraday=True,
+        )
+        assert ran[0] == "stock_intraday"
+        assert "sector_intraday" in ran
+        assert worker._intraday_running()
+        again = worker.run_once(
+            now=_day(10, 6),
+            data_dir=tmp_path,
+            clients=clients,
+            symbols=[],
+            trading=True,
+            busy=False,
+            detach_intraday=True,
+        )
+        assert "stock_intraday" not in again
+        assert rank_calls["n"] == 1
+    finally:
+        release_rank.set()
+        worker.wait_intraday(5)
+        jobs.reset_sector_cache()
+    frame = store.read_partition(tmp_path, "stock_intraday", "2026-10-09")
+    assert frame.height == store.FULL_MARKET_MIN
+    assert frame.filter(pl.col("code") == "600519")["source"][0] == "akshare_em_rank"
+    # 10:00 和 10:06 各一份板块快照。第二轮没有再打东财。
+    assert store.read_partition(tmp_path, "industry", "2026-10-09").height == 2

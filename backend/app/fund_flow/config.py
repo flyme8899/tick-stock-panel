@@ -3,10 +3,14 @@
 代码默认全部关闭：环境变量没设置时不调度、不出网。``.env.example`` 里为本
 HK 部署写了打开值，复制过去才会拉数。例外是盘中个股即时资金流：总开关打开
 且 ``FUND_FLOW_STOCK_INTRADAY`` 未设置时默认拉取，写成 false 才停。
+盘中优先源默认东财，``FUND_FLOW_INTRADAY_PRIMARY=ths`` 才改走同花顺。
 """
 from __future__ import annotations
 
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 _ON = {"1", "true", "yes", "on"}
 
@@ -24,6 +28,20 @@ def enabled() -> bool:
 
 def stock_enabled() -> bool:
     return enabled() and _flag("FUND_FLOW_STOCK")
+
+
+def intraday_primary() -> str:
+    """盘中个股主力净流入先打哪一家。缺省 ``eastmoney``，只有写成 ``ths`` 才改同花顺。
+
+    无法识别的值按东财处理，并记一条日志。大小写不敏感。
+    """
+    raw = (os.environ.get("FUND_FLOW_INTRADAY_PRIMARY") or "").strip().lower()
+    if raw in {"", "eastmoney"}:
+        return "eastmoney"
+    if raw == "ths":
+        return "ths"
+    logger.warning("FUND_FLOW_INTRADAY_PRIMARY=%s 无法识别，改用 eastmoney", raw)
+    return "eastmoney"
 
 
 def stock_intraday_enabled() -> bool:

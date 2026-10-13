@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from typing import TypeVar
@@ -39,30 +40,37 @@ class CircuitBreaker:
         self.cooldown_s = cooldown_s
         self.consecutive_failures = 0
         self.open_until = 0.0
+        # 盘中东财排名在旁路线程里跑，可能和本轮其它 akshare 任务同时记失败。
+        self._lock = threading.RLock()
 
     def allow(self) -> bool:
-        return self._clock() >= self.open_until
+        with self._lock:
+            return self._clock() >= self.open_until
 
     @property
     def state(self) -> str:
         return "closed" if self.allow() else "open"
 
     def success(self) -> None:
-        self.consecutive_failures = 0
-
-    def failure(self) -> None:
-        self.consecutive_failures += 1
-        if self.consecutive_failures >= self.failure_limit:
-            self.open_until = self._clock() + self.cooldown_s
+        with self._lock:
             self.consecutive_failures = 0
 
+    def failure(self) -> None:
+        with self._lock:
+            self.consecutive_failures += 1
+            if self.consecutive_failures >= self.failure_limit:
+                self.open_until = self._clock() + self.cooldown_s
+                self.consecutive_failures = 0
+
     def snapshot(self) -> dict:
-        return {
-            "source": self.source,
-            "state": self.state,
-            "consecutive_failures": self.consecutive_failures,
-            "open_until": self.open_until,
-        }
+        with self._lock:
+            open_now = self._clock() < self.open_until
+            return {
+                "source": self.source,
+                "state": "open" if open_now else "closed",
+                "consecutive_failures": self.consecutive_failures,
+                "open_until": self.open_until,
+            }
 
 
 def call_with_retry(

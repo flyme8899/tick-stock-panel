@@ -107,29 +107,58 @@ def _first_money(row: dict, *names: str) -> float | None:
     return None
 
 
+SOURCE_EM_RANK = "akshare_em_rank"
+SOURCE_THS = "akshare_ths"
+# 东财当日排名的四档净额。裸数字已是元，正数净流入、负数净流出。不读净占比。
+_EM_ORDER_FIELDS = (
+    ("super_net", "今日超大单净流入-净额"),
+    ("large_net", "今日大单净流入-净额"),
+    ("medium_net", "今日中单净流入-净额"),
+    ("small_net", "今日小单净流入-净额"),
+)
+
+
 def normalize_stock_intraday(
     rows: list[dict],
     *,
     trade_date: str,
     captured_at: str,
+    source: str = SOURCE_THS,
 ) -> list[dict]:
-    """同花顺个股即时榜收成一份快照。读「净额」（流入减流出），单位是元。
+    """收成一份盘中快照。没有主力净额的行丢掉，不把缺失写成 0。
 
-    不是东财主力净流入。没有净额的行丢掉。不把缺失写成 0。
+    东财 ``stock_individual_fund_flow_rank(indicator="今日")`` 的净额已经是元，
+    符号保持源数据：正数净流入，负数净流出。只读「今日主力净流入-净额」，
+    不用净占比，也不把同花顺的「净额」当成主力。超大单、大单、中单、小单
+    同样是元、同样的符号，缺了留空。
+
+    同花顺即时榜仍读「净额」（流入减流出）。带「亿」「万」按后缀，没有后缀按元。
+    四档净额留空，因为这份榜不是主力拆分。
     """
-    ranked = normalize_rank_rows(rows, trade_date=trade_date, source="akshare_ths", window="today")
+    eastmoney = source == SOURCE_EM_RANK
     out = []
-    for row in ranked:
-        if row.get("main_net") is None:
+    for row in rows:
+        code = code6(_text(row, "code", "股票代码", "代码"))
+        if not code:
+            continue
+        name = _text(row, "name", "股票简称", "名称") or None
+        if eastmoney:
+            main = _first_money(row, "main_net", "今日主力净流入-净额")
+            orders = {key: _first_money(row, column) for key, column in _EM_ORDER_FIELDS}
+        else:
+            main = _first_money(row, "main_net", "净额")
+            orders = {key: None for key, _column in _EM_ORDER_FIELDS}
+        if main is None:
             continue
         out.append({
-            "symbol": row["code"],
-            "code": row["code"],
-            "name": row.get("name"),
+            "symbol": code,
+            "code": code,
+            "name": name,
             "trade_date": trade_date,
             "captured_at": captured_at,
-            "main_net": row["main_net"],
-            "source": "akshare_ths",
+            "main_net": main,
+            "source": source,
+            **orders,
         })
     return out
 
