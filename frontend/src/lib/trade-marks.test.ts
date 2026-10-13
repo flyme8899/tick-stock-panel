@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  candleMarkStatus,
   dsaLines,
   fillMarkers,
   formatForward,
@@ -27,6 +28,37 @@ const marker = (patch: Partial<TradeSignalMarker> = {}): TradeSignalMarker => ({
 })
 
 describe('买卖点标记映射', () => {
+  it('没有可画的K线标记时，区分未选策略和区间为空', () => {
+    expect(candleMarkStatus({
+      show: true, strategyOn: true, hasStrategy: false, paperOn: true,
+      drawn: 0, pending: false, failed: false,
+    })).toBe('选择策略后显示买卖点')
+    expect(candleMarkStatus({
+      show: true, strategyOn: true, hasStrategy: true, paperOn: true,
+      drawn: 0, pending: false, failed: false,
+    })).toBe('这段区间没有买卖点')
+    expect(candleMarkStatus({
+      show: true, strategyOn: false, hasStrategy: false, paperOn: true,
+      drawn: 0, pending: false, failed: false,
+    })).toBe('这段区间没有买卖点')
+    expect(candleMarkStatus({
+      show: true, strategyOn: true, hasStrategy: true, paperOn: false,
+      drawn: 2, pending: false, failed: false,
+    })).toBeNull()
+    expect(candleMarkStatus({
+      show: true, strategyOn: false, hasStrategy: false, paperOn: false,
+      drawn: 0, pending: false, failed: false,
+    })).toBeNull()
+    expect(candleMarkStatus({
+      show: true, strategyOn: true, hasStrategy: false, paperOn: true,
+      drawn: 0, pending: true, failed: false,
+    })).toBeNull()
+    expect(candleMarkStatus({
+      show: false, strategyOn: true, hasStrategy: false, paperOn: true,
+      drawn: 0, pending: false, failed: false,
+    })).toBeNull()
+  })
+
   it('远期收益不足时显示破折号', () => {
     expect(formatForward(null)).toBe('—')
     expect(formatForward(undefined)).toBe('—')

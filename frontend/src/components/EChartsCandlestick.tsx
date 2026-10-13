@@ -521,9 +521,11 @@ function buildMarkPointData(
   const markPointData: any[] = []
   if (!markers || markers.length === 0) return markPointData
   for (const m of markers) {
-    const idx = dateIndexMap.get(m.date)
+    const idx = dateIndexMap.get(m.date) ?? dateIndexMap.get(m.date.slice(0, 10))
     if (idx == null) continue
     const d = data[idx]
+    // 类目轴用 K 线自己的日期。信号若带时刻（2026-09-24T15:00:00）对不上类目，点会被丢掉。
+    const day = d.date
     const isBuy = m.kind === 'buy'
     const isSell = m.kind === 'sell'
 
@@ -537,7 +539,7 @@ function buildMarkPointData(
           : 'rgba(161,161,170,0.18)'
       markPointData.push({
         name: m.label ?? '',
-        coord: [m.date, placeAbove ? d.high : d.low],
+        coord: [day, placeAbove ? d.high : d.low],
         // symbol 为 none 时 ECharts 不画这个点，文字也会一起丢掉
         symbol: 'circle',
         symbolSize: 1,
@@ -568,9 +570,9 @@ function buildMarkPointData(
         ? (m.style === 'circle' ? 12 : 8)
         : (m.style === 'circle' ? 16 : 12)
       markPointData.push({
-        name: m.date,
+        name: day,
         markerId: m.markerId,
-        coord: [m.date, placeBelow ? d.low : d.high],
+        coord: [day, placeBelow ? d.low : d.high],
         symbol,
         symbolSize,
         symbolRotate: symbol === 'triangle' && !placeBelow ? 180 : 0,
@@ -593,14 +595,14 @@ function buildMarkPointData(
       const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
       if (compact) {
         markPointData.push({
-          name: m.date, coord: [m.date, d.high],
+          name: day, coord: [day, d.high],
           symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
           itemStyle: { color: dotColor, cursor: 'pointer' },
           label: { show: false }, z: 100, zlevel: 10,
         })
       } else {
         markPointData.push({
-          name: m.date, coord: [m.date, d.high],
+          name: day, coord: [day, d.high],
           symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
           itemStyle: { color: 'transparent' },
           label: {
@@ -614,7 +616,7 @@ function buildMarkPointData(
     } else {
       markPointData.push({
         name: m.label ?? '',
-        coord: [m.date, isBuy ? d.low : d.high],
+        coord: [day, isBuy ? d.low : d.high],
         symbol: 'arrow', symbolSize: 12,
         symbolRotate: isBuy ? 0 : 180,
         symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
@@ -631,9 +633,9 @@ function buildMarkPointData(
   return markPointData
 }
 
-function buildChipSeries(chip: ChipOverlay | null | undefined, dateCount: number): any | null {
+function buildChipSeries(chip: ChipOverlay | null | undefined, candles: OHLC[]): any | null {
   const bins = chip?.bins?.filter(bin => bin.ratio > 0) ?? []
-  if (!chip || chip.width <= 0 || bins.length === 0) return null
+  if (!chip || chip.width <= 0 || candles.length === 0 || bins.length === 0) return null
   const strip = Math.max(8, chip.width - 4)
   const maxRatio = bins.reduce((peak, bin) => Math.max(peak, bin.ratio), 0) || 1
   const accuracy = chip.accuracy && chip.accuracy > 0 ? chip.accuracy : 0.01
@@ -646,9 +648,11 @@ function buildChipSeries(chip: ChipOverlay | null | undefined, dateCount: number
     animation: false,
     clip: false,
     z: 2,
-    // 每个日期下标都放一点。dataZoom 默认 filter 掉窗外的点；只放 index 0 时，
-    // 默认末 60 根会把这一点滤掉，renderItem 不再执行，右侧直方图消失。
-    data: Array.from({ length: dateCount }, (_, index) => index),
+    encode: { x: 0, y: 1 },
+    // 每个日期放一点，dataZoom 滤掉窗外的点后窗内仍有 dataIndexInside === 0 可画。
+    // Y 必须是收盘价。日期下标是 0..N，ECharts 会并进价格轴，轴被拉到 0，
+    // 蜡烛挤到上半区（300308.SZ 开着筹码时价格轴出现 0 和负值）。
+    data: candles.map(row => [row.date, row.close]),
     renderItem: (params: any, api: any) => {
       // 窗内第一点画一次。缩放后 dataIndexInside 仍从 0 起，直方图留在图上。
       if (params.dataIndexInside !== 0) return
@@ -759,7 +763,7 @@ function buildOption(
   const priceLineValues = (priceLines ?? [])
     .map(line => line.value)
     .filter(value => Number.isFinite(value) && value > 0)
-  const klineRefPrice = (() => {
+  const candleExtent = (() => {
     let lo = Infinity
     let hi = -Infinity
     for (const row of data ?? []) {
@@ -769,23 +773,36 @@ function buildOption(
       if (typeof high === 'number' && Number.isFinite(high) && high > 0) hi = Math.max(hi, high)
     }
     if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null
-    return (lo + hi) / 2
+    return { lo, hi, ref: (lo + hi) / 2 }
   })()
+  const klineRefPrice = candleExtent?.ref ?? null
   const anchoredLineValues = klineRefPrice == null
     ? priceLineValues
     : priceLineValues.filter(value => Math.abs(value - klineRefPrice) / klineRefPrice <= KLINE_OVERLAY_BAND)
+  // min/max 回调拿到的是主图全部序列的范围。筹码下标、远离现价的目标价都会混进来。
+  // 离蜡烛高低点过远的端点丢掉，布林带这种贴着高低点的扩展仍保留。
+  const axisSpan = (min: number, max: number) => {
+    let baseMin = min
+    let baseMax = max
+    if (candleExtent) {
+      if (!(baseMin >= candleExtent.lo * 0.5)) baseMin = candleExtent.lo
+      if (!(baseMax <= candleExtent.hi * 1.5 && baseMax >= candleExtent.lo)) baseMax = candleExtent.hi
+    }
+    const nextMin = anchoredLineValues.length > 0 ? Math.min(baseMin, ...anchoredLineValues) : baseMin
+    const nextMax = anchoredLineValues.length > 0 ? Math.max(baseMax, ...anchoredLineValues) : baseMax
+    const pad = Math.max((nextMax - nextMin) * pricePad, nextMax * 0.001)
+    return { nextMin, nextMax, pad }
+  }
   const axisMin = anchoredLineValues.length > 0
     ? ({ min, max }: { min: number; max: number }) => {
-        const nextMin = Math.min(min, ...anchoredLineValues)
-        const nextMax = Math.max(max, ...anchoredLineValues)
-        return nextMin - Math.max((nextMax - nextMin) * pricePad, nextMax * 0.001)
+        const span = axisSpan(min, max)
+        return span.nextMin - span.pad
       }
     : undefined
   const axisMax = anchoredLineValues.length > 0
     ? ({ min, max }: { min: number; max: number }) => {
-        const nextMin = Math.min(min, ...anchoredLineValues)
-        const nextMax = Math.max(max, ...anchoredLineValues)
-        return nextMax + Math.max((nextMax - nextMin) * pricePad, nextMax * 0.001)
+        const span = axisSpan(min, max)
+        return span.nextMax + span.pad
       }
     : undefined
 
@@ -917,7 +934,7 @@ function buildOption(
     series.push(maLine('ma60', THEME.ma60, 'MA60'))
   }
 
-  const chipSeries = buildChipSeries(chip, dates.length)
+  const chipSeries = buildChipSeries(chip, data)
   if (chipSeries) series.push(chipSeries)
 
   // 加入自选日标注: 蓝色竖虚线从该根K线的下沿连到主图底端的「自选」标签。

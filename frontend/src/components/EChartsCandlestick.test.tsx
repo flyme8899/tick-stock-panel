@@ -92,7 +92,11 @@ it('筹码柱留在K线右侧，获利为红、套牢为绿，并画出均价和
   const zoom = chart.dispatchAction.mock.calls.map(call => call[0]).find((action: any) => action?.type === 'dataZoom')
   expect(zoom.start).toBeGreaterThan(0)
   expect(zoom.end).toBe(100)
-  expect(series.data).toEqual(DAYS.map((_, index) => index))
+  // Y 是收盘价，不是日期下标。下标 0..N 会被并进价格轴，把蜡烛挤到上半区。
+  expect(series.data).toEqual(DAYS.map(date => [date, 10]))
+  const prices = series.data.map((item: [string, number]) => item[1])
+  expect(Math.min(...prices)).toBeGreaterThan(0)
+  expect(Math.max(...prices)).toBeLessThan(20)
   const coordSys = { x: 0, y: 20, width: 400, height: 200 }
   const api = { coord: (value: number[]) => [0, 220 - value[1] * 10] }
   expect(series.renderItem({ dataIndexInside: 3, coordSys }, api)).toBeUndefined()
@@ -264,11 +268,44 @@ it('a far-away price line does not stretch the candlestick y-axis', async () => 
   ))
   const option = chart.setOption.mock.calls.at(-1)?.[0] as any
   const axis = option.yAxis[0]
-  // 轴的范围函数必须只用 340, 不被 5.00 拉低
-  const resolved = axis.min({ min: 333, max: 341 })
-  const resolvedMax = axis.max({ min: 333, max: 341 })
+  // 轴的范围函数必须只用 340, 不被 5.00 拉低。
+  // 回调收到的 min/max 是主图全部序列的范围：筹码下标会给出 0..N。
+  const resolved = axis.min({ min: 0, max: 1500 })
+  const resolvedMax = axis.max({ min: 0, max: 1500 })
   expect(resolved).toBeGreaterThan(300)
   expect(resolvedMax).toBeLessThan(400)
+})
+
+it('筹码打开时买卖点仍标在对应蜡烛上，带时刻的日期也能对齐', async () => {
+  await act(async () => root.render(
+    <EChartsCandlestick
+      data={rows(337)}
+      height={400}
+      showInfoBar={false}
+      visibleBars="all"
+      activeIndicators={[]}
+      priceLines={[{ value: 340, label: '支撑 340.00', color: '#3B82F6' }]}
+      chip={{
+        width: 72,
+        close: 337,
+        avgCost: 336,
+        bins: [{ price: 330, ratio: 0.4 }, { price: 340, ratio: 0.6 }],
+      }}
+      markers={[
+        { date: `${DAYS[11]}T15:00:00`, kind: 'buy', style: 'triangle', markerId: 'b1', color: '#F04438' },
+        { date: DAYS[12], kind: 'sell', style: 'triangle', markerId: 's1', color: '#12B76A' },
+      ]}
+    />,
+  ))
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  const points = option.series.find((series: any) => series.name === 'K').markPoint.data
+  const buy = points.find((point: any) => point.markerId === 'b1')
+  const sell = points.find((point: any) => point.markerId === 's1')
+  expect(buy.coord).toEqual([DAYS[11], rows(337)[11].low])
+  expect(buy.symbol).toBe('triangle')
+  expect(sell.coord).toEqual([DAYS[12], rows(337)[12].high])
+  const chip = option.series.find((series: any) => series.name === '筹码')
+  expect(chip.data[0][1]).toBe(337)
 })
 
 it('exposes the band constant used for the guard', async () => {

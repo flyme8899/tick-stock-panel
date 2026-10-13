@@ -6,6 +6,7 @@ import { fmtPct } from '@/lib/format'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
+  candleMarkStatus,
   dsaLines,
   fillMarkers,
   formatForward,
@@ -212,6 +213,15 @@ export function TradeMarksOverlay({
 
   const stats = data?.stats
   const card = active ? <SignalCard detail={active} /> : null
+  const markStatus = candleMarkStatus({
+    show: prefs.show,
+    strategyOn: prefs.strategy,
+    hasStrategy: !!prefs.strategyId,
+    paperOn: prefs.paper,
+    drawn: markers.length,
+    pending: query.isFetching,
+    failed: query.isError,
+  })
 
   return (
     <div>
@@ -257,6 +267,7 @@ export function TradeMarksOverlay({
         )}
         {query.isFetching && <span className="shrink-0 text-[10px] text-muted">计算中</span>}
         {query.isError && <span className="shrink-0 text-[10px] text-danger">买卖点暂不可用</span>}
+        {markStatus && <span className="shrink-0 text-[10px] text-muted">{markStatus}</span>}
       </div>
 
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start">
