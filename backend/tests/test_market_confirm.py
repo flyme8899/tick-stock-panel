@@ -214,7 +214,21 @@ def test_loader_reads_minute_bars_and_concept_flow_after_first_seen(tmp_path, mo
     assert scored["label"] == "最近交易日 10月9日"
 
 
-def test_confirmed_move_outranks_an_unconfirmed_major(tmp_path, monkeypatch):
+def test_confirmed_move_outranks_an_unconfirmed_peer(tmp_path, monkeypatch):
+    """同 importance 档内，拿到盘面验证的排在没验证的前面。
+
+    原名是 `..._outranks_an_unconfirmed_major`，断言「已验证的『重要』压过未验证的
+    『重大』」。那条断言在本轮计分改乘性后失效，**但它其实从引入那天起就是错的**
+    （提交 84c8a9db）：当时 drug 136.17 已经低于 fed 138.28，测试能过只是因为
+    `_event_sort_key` 里挂了 `-_IMPORTANCE_POINTS` 当第二键，把倒挂盖住了。
+    本轮把排序键收敛成 `(-score, name)`（展示分已是各子项单调函数，再留子项做平局
+    决胜只会让「名次」和「展示分」两套口径打架），掩盖被移除，倒挂才暴露出来。
+
+    跨档不可达是**结构性**的，不是参数没调好：辅助项合计封顶 `_AUX_SCALE`，最多把
+    分数翻一倍，于是「重要+满」上限 180 恒小于「重大」下限 200。要让验证能跨档，
+    得把档位比从 2.22 压到 1.74 以下，那等于放弃「重要性主导」这条会诊结论。
+    所以这里把需求重述成档内比较：验证的作用是**同一档里往前挪**，不是越级。
+    """
     from app.news import market_confirm as confirm_mod
 
     reset_store_for_tests(tmp_path / "rank.sqlite")
@@ -242,7 +256,10 @@ def test_confirmed_move_outranks_an_unconfirmed_major(tmp_path, monkeypatch):
         )
         assert status == "inserted"
 
-    insert("fed", 15, 0, "美联储宣布降息", [], [])
+    # 同档对照：两条都是「重要」（都靠 _IMPORTANT_ACTS 里的动作词升档），
+    # 只有 drug 有映射且盘面得到验证。对照那条刻意不带降息/制裁一类重大词、
+    # 也不点名 _LEADERS 龙头，否则会落进「重大」档，比的就成了档位而非验证。
+    insert("order", 15, 0, "某公司公告回购", [], [])
     insert("drug", 9, 5, "创新药临床获批", ["创新药"], [("601318.SH", "中国平安")])
 
     def tape(_now, _events):
@@ -258,23 +275,105 @@ def test_confirmed_move_outranks_an_unconfirmed_major(tmp_path, monkeypatch):
         }])
 
     monkeypatch.setattr(confirm_mod, "load_market_tape", tape)
-    names = [event["name"] for event in top_hot_events(NOW)["events"]]
-    assert names[0] == "创新药临床获批"
-    assert names.index("创新药临床获批") < names.index("美联储宣布降息")
-    drug = top_hot_events(NOW)["events"][0]
+    events = top_hot_events(NOW)["events"]
+    names = [event["name"] for event in events]
+    drug = next(event for event in events if event["name"] == "创新药临床获批")
+    peer = next(event for event in events if event["name"] == "某公司公告回购")
+
+    # 「重要」是两条共有的档位，档内比较才有意义。
     assert drug["importance"] == "重要"
+    assert peer["importance"] == "重要"
+
+    # 验证确实算进了 drug 的分：强度「强」，且这一项比热度那项重（封顶 40 vs 10）。
+    # confirmation 原始分是 66，进分前按 _CONFIRMATION_CAP=40 截断 —— 旧口径下这条
+    # 断言写成「breakdown 等于原始分」，只在原始分恰好等于封顶时成立，是靠数值巧合过的。
     assert drug["confirmation"]["strength"] == "强"
     assert drug["confirmation"]["persistence"] == "持续"
-    assert drug["breakdown"]["confirmation"] == drug["confirmation"]["score"]
+    assert drug["confirmation"]["score"] > 40
+    assert drug["breakdown"]["confirmation"] == 40
     assert drug["breakdown"]["confirmation"] > drug["breakdown"]["heat"]
-    fed = next(event for event in top_hot_events(NOW)["events"] if event["name"] == "美联储宣布降息")
-    assert fed["importance"] == "重大"
-    assert fed["confirmation"]["score"] == 0
-    assert drug["score"] > fed["score"]
+
+    # 没映射、没验证的那条，验证项拿 0。
+    assert peer["confirmation"]["score"] == 0
+
+    # 同档内，拿到验证的排前面 —— 这条测试真正要守的东西。
+    assert drug["score"] > peer["score"]
+    assert names.index("创新药临床获批") < names.index("某公司公告回购")
 
     listed = hot_event_listing(NOW, limit=5)
     public = listed["events"][0]
     assert public["name"] == "创新药临床获批"
+
+
+def test_importance_band_dominates_any_amount_of_confirmation():
+    """重要性档位主导：验证再满也跨不过一个档。
+
+    这是乘性结构的**结构性保证**，不是调出来的巧合 —— 辅助项合计封顶 `_AUX_SCALE`，
+    `_combined_score` 最多把 `importance` 翻一倍，而档位比恒 > 2。
+    所以「满验证的低档」永远低于「裸着的高档」，榜单不会被一堆凑满验证的小事冲垮。
+    哪天有人把档位比压到 2 以下，这条会先红。
+    """
+    from app.news.hot_events import _AUX_SCALE, _IMPORTANCE_POINTS, _combined_score
+
+    order = ["琐碎", "一般", "重要", "重大"]
+    for lower, upper in zip(order, order[1:]):
+        base_low = _IMPORTANCE_POINTS[lower]
+        base_up = _IMPORTANCE_POINTS[upper]
+        if base_low == 0:
+            continue
+        # 低档吃满辅助，仍压不过高档的裸分。
+        assert _combined_score(base_low, _AUX_SCALE) < base_up, (
+            f"{lower}+满辅助 不该压过 裸{upper}"
+        )
+        # 档位比恒大于 2，这正是「翻倍也跨不过去」的来源。
+        assert base_up / base_low > 2.0
+
+
+def test_listing_exposes_confirmation_without_internal_ids(tmp_path, monkeypatch):
+    """列表接口把验证结果透出来，但不漏内部 item_ids。"""
+    from app.news import market_confirm as confirm_mod
+
+    reset_store_for_tests(tmp_path / "listing.sqlite")
+    friday = datetime(2026, 10, 9, tzinfo=CN_TZ)
+
+    def insert(source_id, hour, minute, title, sectors, stocks):
+        from app.news.service import get_store
+        published = friday.replace(hour=hour, minute=minute)
+        mentions = [("sector", name, name, "", "structured") for name in sectors]
+        mentions += [("stock", symbol, name, symbol[:6], "structured") for symbol, name in stocks]
+        status = get_store().insert_item(
+            source="cls",
+            source_id=source_id,
+            published_at=published,
+            author="",
+            title=title,
+            clean_text=title + "。正文写长一些以免被当成短讯。",
+            raw=None,
+            content_hash=source_id,
+            url="",
+            level="",
+            media_ids=[],
+            extra=None,
+            mentions=mentions,
+        )
+        assert status == "inserted"
+
+    insert("drug", 9, 5, "创新药临床获批", ["创新药"], [("601318.SH", "中国平安")])
+
+    def tape(_now, _events):
+        return _tape([
+            _bar(10, 0, 10.2),
+            _bar(10, 20, 10.5),
+            _bar(14, 0, 10.8),
+            _bar(14, 40, 11.0, volume=80_000),
+        ], flows=[{
+            "at": datetime(2026, 10, 9, 10, 0, tzinfo=CN_TZ),
+            "value": 8e7,
+            "kind": "snapshot",
+        }])
+
+    monkeypatch.setattr(confirm_mod, "load_market_tape", tape)
+    public = hot_event_listing(NOW, limit=5)["events"][0]
     assert public["confirmation"]["strength"] == "强"
     assert public["confirmation"]["label"] == "最近交易日 10月9日"
     assert "confirmation" in public["breakdown"]
