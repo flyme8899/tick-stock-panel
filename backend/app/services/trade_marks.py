@@ -18,6 +18,8 @@ from typing import Any
 
 import polars as pl
 
+from app.services.price_basis import minute_prev_close, minute_reads_are_adjusted, repo_data_dir
+
 logger = logging.getLogger(__name__)
 
 WARMUP_FLOOR_DAYS = 180
@@ -663,23 +665,46 @@ def _t_trade_block(repo, panel, symbol: str, intraday: date | None) -> dict:
     if minute is None or minute.is_empty():
         return t_trade_from_bars([], symbol=symbol, day=day)
     bars = minute.sort("datetime").to_dicts() if "datetime" in minute.columns else minute.to_dicts()
-    prev = _previous_raw_close(panel, symbol, day) if panel is not None and day else None
+    reads_adjusted = minute_reads_are_adjusted(repo_data_dir(repo))
+    prev = (
+        _previous_raw_close(panel, symbol, day, reads_adjusted=reads_adjusted)
+        if panel is not None and day else None
+    )
     return t_trade_from_bars(bars, symbol=symbol, day=day, prev_close=prev)
 
 
-def _previous_raw_close(panel: pl.DataFrame, symbol: str, day: str) -> float | None:
+def _previous_raw_close(
+    panel: pl.DataFrame,
+    symbol: str,
+    day: str,
+    *,
+    reads_adjusted: bool = False,
+) -> float | None:
+    """做T 昨收。分钟已复权时用前复权昨收；原始分钟用交易所原始昨收。"""
     if panel is None or panel.is_empty() or "date" not in panel.columns:
         return None
     one = panel.filter(pl.col("symbol") == symbol) if "symbol" in panel.columns else panel
-    previous = None
+    previous_adjusted = None
+    previous_raw = None
+    day_close = None
+    day_raw = None
     for row in one.sort("date").iter_rows(named=True):
         current = str(row.get("date"))[:10]
-        if current >= day:
-            break
-        raw = _finite(row.get("raw_close"))
-        close = _finite(row.get("close"))
-        previous = raw if raw is not None else close
-    return previous
+        if current < day:
+            previous_adjusted = _finite(row.get("close"))
+            previous_raw = _finite(row.get("raw_close"))
+            continue
+        if current == day:
+            day_close = _finite(row.get("close"))
+            day_raw = _finite(row.get("raw_close"))
+        break
+    return minute_prev_close(
+        previous_adjusted,
+        day_close=day_close,
+        day_raw=day_raw,
+        prev_raw=previous_raw,
+        reads_adjusted=reads_adjusted,
+    )
 
 
 def _close_series(panel: pl.DataFrame | None, symbol: str) -> list[tuple[str, float | None]]:

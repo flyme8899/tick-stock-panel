@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.market_time import CN_TZ, current_trading_day, in_continuous_session
 from app.news.push import abnormal_signals
+from app.services.price_basis import adjusted_over_raw
 
 logger = logging.getLogger(__name__)
 
@@ -1433,24 +1434,37 @@ def _limit_theme_members(
 def _fill_minutes(data_dir: Path, session: date, stocks: dict[str, dict]) -> None:
     path = data_dir / "kline_minute" / f"date={session.isoformat()}" / "part.parquet"
     frame = _read_frame(path)
-    if frame is None:
-        return
-    grouped: dict[str, list[dict]] = {}
-    for row in frame.iter_rows(named=True):
-        symbol = str(row.get("symbol") or "")
-        if symbol not in stocks:
-            continue
-        bar = _bar_from(row, kind="minute")
-        if bar is not None:
-            grouped.setdefault(symbol, []).append(bar)
-    for symbol, bars in grouped.items():
-        kept = []
-        for old in stocks[symbol]["bars"]:
-            at = _parse_at(old.get("at"))
-            if old.get("kind") == "day" and at is not None and at.date() == session:
+    try:
+        if frame is None:
+            return
+        grouped: dict[str, list[dict]] = {}
+        for row in frame.iter_rows(named=True):
+            symbol = str(row.get("symbol") or "")
+            if symbol not in stocks:
                 continue
-            kept.append(old)
-        stocks[symbol]["bars"] = kept + bars
+            bar = _bar_from(row, kind="minute")
+            if bar is None:
+                continue
+            # 分区是原始价, 日线 prev_close / 日K 是前复权。用当日 close/raw_close
+            # 把分钟 OHLC 折到同一尺度; 没有 raw_close 时因子为 1, 行为不变。
+            factor = float(stocks[symbol].get("_px_factor") or 1.0)
+            if factor != 1.0:
+                for key in ("open", "high", "low", "close"):
+                    value = bar.get(key)
+                    if value is not None:
+                        bar[key] = value * factor
+            grouped.setdefault(symbol, []).append(bar)
+        for symbol, bars in grouped.items():
+            kept = []
+            for old in stocks[symbol]["bars"]:
+                at = _parse_at(old.get("at"))
+                if old.get("kind") == "day" and at is not None and at.date() == session:
+                    continue
+                kept.append(old)
+            stocks[symbol]["bars"] = kept + bars
+    finally:
+        for slot in stocks.values():
+            slot.pop("_px_factor", None)
 
 
 def _fill_daily(data_dir: Path, session: date, stocks: dict[str, dict]) -> None:
@@ -1471,6 +1485,7 @@ def _fill_daily(data_dir: Path, session: date, stocks: dict[str, dict]) -> None:
         if slot is None:
             continue
         before = prior.get(symbol) or {}
+        slot["_px_factor"] = adjusted_over_raw(row.get("close"), row.get("raw_close"))
         if not slot.get("name"):
             slot["name"] = str(row.get("name") or "")
         if slot.get("prev_close") is None:

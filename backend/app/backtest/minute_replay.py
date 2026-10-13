@@ -19,10 +19,12 @@ from datetime import date, timedelta
 import polars as pl
 
 from app.price_limits import is_risk_warning_name, price_limit_pct
+from app.services.price_basis import minute_reads_are_adjusted, repo_data_dir
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
 
 # 日线面板列: 基础行情 + 涨停/炸板信号 (策略日线窗口契约) + 基础过滤/展示列。
-# raw_close 用于涨停价计算 (分钟价是未复权真实价, 涨停规则定义在原始价上)。
+# raw_close 用于涨停价计算 (涨停规则定义在原始价上)。分钟读取在 .raw_basis
+# 标记开启时已经是复权价, 入场价不再乘因子, 涨停比较先除回原始价。
 MINUTE_DAILY_PANEL_COLUMNS = frozenset({
     "open", "high", "low", "close", "volume", "amount",
     "raw_close", "raw_high", "raw_low",
@@ -98,7 +100,8 @@ class MinuteReplayHit:
 
     trade_date: date
     symbol: str
-    # 已按当日 复权close/原始close 比例折算到复权价系的入场价, 与日线出场价同尺度。
+    # 与日线出场价同尺度的入场价。分钟读取仍是原始价时乘当日 close/raw_close;
+    # 读取已经投影到复权尺度时直接用分钟收盘, 避免再乘一次。
     entry_price: float
     trigger_time: str  # "HH:MM" — 触发分钟K的时间戳
     score: float = 0.0
@@ -139,6 +142,7 @@ class MinuteSignalReplayer:
         t0 = time.perf_counter()
         result = MinuteReplayResult()
         repo = self.engine.repo
+        reads_adjusted = minute_reads_are_adjusted(repo_data_dir(repo))
         if panel.is_empty():
             return result
 
@@ -229,7 +233,11 @@ class MinuteSignalReplayer:
                 close = row.get("close")
                 if not symbol or close is None or float(close) <= 0:
                     continue
-                raw_close = float(close)
+                minute_close = float(close)
+                factor = adj_factor.get(str(symbol), 1.0)
+                # 标记开启时 get_minute_by_dates 已把分钟价乘过因子, 再乘就是二次复权。
+                entry_price = minute_close if reads_adjusted else minute_close * factor
+                limit_close = minute_close / factor if reads_adjusted and factor else minute_close
                 name = prev_name.get(str(symbol), "")
                 prev = prev_raw_close.get(str(symbol))
                 # 涨停拒买: 触发分钟收盘已达当日涨停价 (按 T-1 原始收盘 + 板块规则)。
@@ -237,7 +245,7 @@ class MinuteSignalReplayer:
                     limit_up = _scalar_limit_up_price(
                         prev, price_limit_pct(str(symbol), day, is_risk_warning=is_risk_warning_name(name)),
                     )
-                    if raw_close >= limit_up - 1e-9:
+                    if limit_close >= limit_up - 1e-9:
                         result.buy_limit_up += 1
                         continue
                 trigger = row.get("last_datetime")
@@ -245,7 +253,7 @@ class MinuteSignalReplayer:
                 result.hits.append(MinuteReplayHit(
                     trade_date=day,
                     symbol=str(symbol),
-                    entry_price=raw_close * adj_factor.get(str(symbol), 1.0),
+                    entry_price=entry_price,
                     trigger_time=trigger_time,
                     score=float(run_result.scores.get(str(symbol), 0.0) or 0.0),
                 ))

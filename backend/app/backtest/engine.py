@@ -1957,6 +1957,7 @@ class BacktestEngine:
         symbols: list[str],
         dates_needed: set,
         asset_type: str,
+        price_factors: dict | None = None,
     ) -> dict:
         """按触发日加载分钟K, 返回 {(symbol, date_str): float64 2D ndarray}。
 
@@ -1968,9 +1969,19 @@ class BacktestEngine:
 
         cache 值为 float64 紧凑 2D 数组 (列顺序见 _MINUTE_NUMERIC_COLS), 而非
         完整 DataFrame, 避免每条记录携带 polars 元数据开销导致内存膨胀。
+
+        price_factors: {(symbol, YYYY-MM-DD): close/raw_close}。未传时, 仅在分钟
+        读取尚未投影到复权尺度时向日线查询。volume 不缩放, amount 与 OHLC 同乘,
+        使 VWAP 与复权日线同口径。因子为 1 或不存在时数组原样返回。
         """
         if not symbols or not dates_needed:
             return {}
+        if price_factors is None:
+            from app.services.price_basis import lookup_minute_price_factors
+
+            price_factors = lookup_minute_price_factors(
+                repo, symbols, dates_needed, asset_type,
+            )
         from datetime import date as _date
         sorted_date_strs = sorted(dates_needed)
         date_objs = [_date.fromisoformat(s) for s in sorted_date_strs]
@@ -1998,9 +2009,15 @@ class BacktestEngine:
                 sym = sub["symbol"][0]
                 d_str = sub["_d_str"][0]
                 cols = [c for c in numeric_cols if c in sub.columns]
-                cache[(sym, d_str)] = sub.select(
+                arr = sub.select(
                     [pl.col(c).cast(pl.Float64) for c in cols]
                 ).to_numpy()
+                factor = price_factors.get((str(sym), str(d_str)[:10])) if price_factors else None
+                if factor is not None and factor != 1.0:
+                    from app.services.price_basis import scale_minute_prices
+
+                    arr = scale_minute_prices(arr, float(factor))
+                cache[(sym, d_str)] = arr
         return cache
 
     def simulate_portfolio(

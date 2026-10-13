@@ -19,6 +19,7 @@ from app.price_limits import is_no_limit_day, is_risk_warning_name, parse_listin
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync, trading_day
 from app.services import minute_adjust
+from app.services.price_basis import minute_prev_close, minute_reads_are_adjusted, repo_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -350,7 +351,11 @@ def _get_previous_closes(
     trade_dates: list[date],
     asset_type: str,
 ) -> dict[date, float | None]:
-    """Return the previous trading day's adjusted close for each session."""
+    """每个交易日的昨收，与分钟读取口径一致。
+
+    分钟已投影到前复权时用前复权昨收。未投影（原始分钟）时，除权日把前复权昨收
+    折回原始尺度，因子不变的日子用原始昨收。没有 raw_close 时退回前复权昨收。
+    """
     if not trade_dates:
         return {}
     start = min(trade_dates) - timedelta(days=45)
@@ -361,26 +366,49 @@ def _get_previous_closes(
             symbol,
             start,
             end,
-            columns=["date", "close"],
+            columns=["date", "close", "raw_close"],
         ).sort("date")
     except Exception:
         daily = None
-    if daily is None or daily.is_empty():
+    if daily is None or daily.is_empty() or "date" not in daily.columns or "close" not in daily.columns:
         return {trade_date: None for trade_date in trade_dates}
 
-    closes: list[tuple[date, float]] = []
-    for daily_date, close in daily.select(["date", "close"]).iter_rows():
+    reads_adjusted = minute_reads_are_adjusted(repo_data_dir(repo))
+    has_raw = "raw_close" in daily.columns
+    rows: list[tuple[date, float, float | None]] = []
+    selected = ["date", "close", "raw_close"] if has_raw else ["date", "close"]
+    for values in daily.select(selected).iter_rows():
+        daily_date = values[0]
+        close = values[1]
+        raw = values[2] if has_raw else None
         if close is None:
             continue
         numeric = float(close)
-        if math.isfinite(numeric) and numeric > 0:
-            closes.append((daily_date, numeric))
+        if not math.isfinite(numeric) or numeric <= 0:
+            continue
+        raw_numeric = None
+        if raw is not None:
+            try:
+                raw_numeric = float(raw)
+            except (TypeError, ValueError):
+                raw_numeric = None
+            if raw_numeric is not None and (not math.isfinite(raw_numeric) or raw_numeric <= 0):
+                raw_numeric = None
+        rows.append((daily_date, numeric, raw_numeric))
 
     result: dict[date, float | None] = {}
     for trade_date in trade_dates:
-        result[trade_date] = next(
-            (close for daily_date, close in reversed(closes) if daily_date < trade_date),
-            None,
+        previous = next((row for row in reversed(rows) if row[0] < trade_date), None)
+        session = next((row for row in rows if row[0] == trade_date), None)
+        if previous is None:
+            result[trade_date] = None
+            continue
+        result[trade_date] = minute_prev_close(
+            previous[1],
+            day_close=session[1] if session else None,
+            day_raw=session[2] if session else None,
+            prev_raw=previous[2],
+            reads_adjusted=reads_adjusted,
         )
     return result
 
