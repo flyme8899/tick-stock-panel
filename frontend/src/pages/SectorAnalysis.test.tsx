@@ -191,6 +191,15 @@ async function settle() {
   }
 }
 
+/** 按条件等待, 不用固定轮数 —— 负载高时固定轮数会不够。 */
+async function waitFor(predicate: () => boolean, label = 'condition') {
+  for (let i = 0; i < 60; i++) {
+    if (predicate()) return
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  }
+  if (!predicate()) throw new Error(`timed out waiting for ${label}`)
+}
+
 function renderAt(path: string) {
   act(() => {
     root.render(
@@ -294,6 +303,34 @@ it('opens one shared detail for whichever column is clicked', async () => {
   expect(host.querySelector('#sector-detail')?.textContent).toContain('本行业三龙头')
   expect(host.querySelector('#sector-detail')?.textContent).toContain('浦发银行')
   expect(host.querySelector('#sector-detail')?.textContent).toContain('1级行业')
+})
+
+it('selects the board named in the url, on the column the url points at', async () => {
+  // 热门事件点板块直达：?focus=<kind>&sector=<板块名>。
+  renderAt('/sector-analysis?focus=concept&sector=%E9%93%B6%E8%A1%8C%E6%A6%82%E5%BF%B5')
+  await waitFor(() => host.querySelector('#sector-detail')?.getAttribute('data-detail-kind') === 'concept', 'deep-linked board')
+
+  const detail = host.querySelector('#sector-detail')
+  expect(detail?.getAttribute('data-detail-kind')).toBe('concept')
+  expect(detail?.textContent).toContain('银行概念')
+  expect(detail?.textContent).toContain('平安银行')
+  expect(detail?.textContent).not.toContain('点击上方概念或行业')
+})
+
+it('waits for the board list before selecting, and does not claim the board is missing', async () => {
+  // 深链指向一个不存在的板块：要停在「点一个板块看详情」的提示上，
+  // 而不是先选中、渲染出「当前列表里没有这个概念」再跳走。
+  renderAt('/sector-analysis?focus=industry&sector=%E4%B8%8D%E5%AD%98%E5%9C%A8%E7%9A%84%E6%9D%BF%E5%9D%97')
+  // 等板块列表就绪（列里出现板块行）再断言没被选中。
+  // 用裸选择器轮询 —— column() 找不到节点会抛, 不能放进条件里。
+  await waitFor(
+    () => (host.querySelector('[data-kind="industry"]')?.querySelectorAll('[data-sector]').length ?? 0) > 0,
+    'industry rows',
+  )
+
+  const detail = host.querySelector('#sector-detail')
+  expect(detail?.getAttribute('data-detail-kind')).toBeNull()
+  expect(detail?.textContent).toContain('点击上方概念或行业')
 })
 
 it('keeps each column config, and the industry level control, on their own side', async () => {

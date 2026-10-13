@@ -32,7 +32,7 @@ import {
   type DimensionGroup,
   type StockRow,
 } from '@/lib/analysis-adapter'
-import { parseSectorFocus, type SectorKind } from '@/lib/sectorTab'
+import { parseSectorFocus, parseSectorKey, type SectorKind } from '@/lib/sectorTab'
 
 const PAGE_LIMIT = 12000
 const MAX_RENDERED_GROUPS = 120
@@ -441,6 +441,7 @@ type SectorBoard = ReturnType<typeof useSectorBoard>
 export function SectorAnalysis() {
   const [searchParams] = useSearchParams()
   const focus = parseSectorFocus(searchParams.get('focus') ?? searchParams.get('tab'))
+  const deepKey = parseSectorKey(searchParams.get('sector'))
   const narrow = useNarrow()
   const concept = useSectorBoard('concept')
   const industry = useSectorBoard('industry')
@@ -472,6 +473,17 @@ export function SectorAnalysis() {
       window.setTimeout(() => document.getElementById('sector-detail')?.scrollIntoView?.({ block: 'nearest' }), 0)
     }
   }
+
+  // 深链带 sector 进来 (热门事件点板块直达)：等那一列的板块列表就绪后选中它。
+  // 不能在首次渲染就选中 —— 那时 rows 还没回来, 选中一个不存在的 key 会显示
+  // 「当前列表里没有这个概念」, 假装板块不存在。所以先等 stats 里有这个 key。
+  const deepBoard = focus === 'industry' ? industry : concept
+  const deepResolved = !deepKey || deepBoard.stats.some(s => s.key === deepKey)
+  useEffect(() => {
+    if (!deepKey || !deepResolved) return
+    setSelected({ kind: deepBoard.spec.kind, key: deepKey })
+    document.getElementById('sector-detail')?.scrollIntoView?.({ block: 'nearest' })
+  }, [deepKey, deepResolved, deepBoard.spec.kind])
 
   const saveConfig = (kind: SectorKind, config: AnalysisFieldConfig) => {
     const board = kind === 'industry' ? industry : concept
