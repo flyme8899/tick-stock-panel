@@ -1821,6 +1821,34 @@ def test_intraday_freshness_converts_timezone_not_just_drops_it() -> None:
     assert query._intraday_still_fresh("2026-10-13T14:45:00", close) is True
 
 
+def test_naive_inputs_are_read_as_cn_local_regardless_of_system_tz() -> None:
+    """naive 的时间戳一律按东八区解读，不受跑测试的机器时区影响。
+
+    这是个真踩到的坑：``datetime.astimezone(CN_TZ)`` 对 **naive** 值是按**系统
+    本地时区**解释的。CI runner 是 UTC，naive 的 ``14:59`` 会被当成 UTC 14:59，
+    换算成东八区变成 ``22:59`` —— 平白挪 8 小时，把盘中判成收盘后。所以必须先
+    ``replace(tzinfo=CN_TZ)`` 补上时区再换算。
+
+    断言直接钉结论：同一组 naive 输入在东八区机器和 UTC 机器上必须同解。
+    """
+    # 14:59 还是盘中 → 当天任意快照都新鲜。系统时区是 UTC 时，
+    # 「丢时区」的实现在这里会得出 False（14:59 naive 被他当 UTC，换算后 22:59）。
+    assert query._intraday_still_fresh("2026-10-13T13:44:50", datetime(2026, 10, 13, 14, 59)) is True
+    assert query._intraday_still_fresh("2026-10-13T11:25:32", datetime(2026, 10, 13, 14, 0)) is True
+    # 收盘后：14:52 的当天快照仍可用；13:44 的判陈旧。
+    assert query._intraday_still_fresh("2026-10-13T14:52:00", datetime(2026, 10, 13, 15, 30)) is True
+    assert query._intraday_still_fresh("2026-10-13T13:44:50", datetime(2026, 10, 13, 17, 36)) is False
+    # naive 的 ``now`` 与「同一个墙上时间标成东八区」必须同解。
+    for stamp, wall in (
+        ("2026-10-13T13:44:50", datetime(2026, 10, 13, 14, 59)),
+        ("2026-10-13T14:52:00", datetime(2026, 10, 13, 15, 30)),
+        ("2026-10-13T13:44:50", datetime(2026, 10, 13, 17, 36)),
+    ):
+        assert query._intraday_still_fresh(stamp, wall) is query._intraday_still_fresh(
+            stamp, wall.replace(tzinfo=CN)
+        )
+
+
 def test_stocks_today_uses_late_intraday_before_close_partition(tmp_path, monkeypatch) -> None:
     """15:00–16:30 收盘分区未就绪时，用当天 14:5x 的收盘前快照，而不是退回昨天。
 

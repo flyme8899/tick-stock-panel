@@ -559,7 +559,12 @@ def _intraday_still_fresh(captured: str | None, now: datetime | None = None) -> 
         stamp = datetime.fromisoformat(str(captured))
     except ValueError:
         return False
-    current = (now or cn_now()).astimezone(CN_TZ).replace(tzinfo=None)
+    # ``astimezone()`` 对 naive 值是按**系统本地时区**解释的 —— 落在 CI（UTC）上会
+    # 平白挪 8 小时。所以先补时区再换算：naive 的一律当东八区本地时间。
+    current = now or cn_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=CN_TZ)
+    current = current.astimezone(CN_TZ).replace(tzinfo=None)
     # 快照时间戳可能是 aware 也可能是 naive。naive 的按东八区解释（落盘的就是
     # 中国本地时间），aware 的先转东八区再丢时区 —— 直接 ``replace(tzinfo=None)``
     # 只是丢掉时区标记，非东八区的 aware 时间会比出来差好几个小时。
@@ -597,7 +602,10 @@ def _stocks_today(root: Path, *, now: datetime | None = None) -> dict:
         ranked = _stock_sides(root, intra, "main_net")
     if ranked is not None:
         inflow, outflow = ranked
-        current = (now or cn_now()).astimezone(CN_TZ).replace(tzinfo=None)
+        current = now or cn_now()
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=CN_TZ)
+        current = current.astimezone(CN_TZ).replace(tzinfo=None)
         return {
             "trade_date": day,
             "snapshot": "intraday",
