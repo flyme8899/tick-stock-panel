@@ -19,6 +19,7 @@ const harness = vi.hoisted(() => {
     ApiError,
     mode: 'pending' as 'pending' | 'unauthorized' | 'failed' | 'ready',
     hotStatus: '' as '' | 'computing',
+    hotItems: [] as Array<Record<string, unknown>>,
     calls: 0,
   }
 })
@@ -37,7 +38,7 @@ vi.mock('@/lib/api', () => ({
           {
             id: 'hot_events',
             label: '热门事件',
-            items: [],
+            items: harness.hotItems,
             hint: harness.hotStatus === 'computing' ? '正在计算' : null,
             status: harness.hotStatus || undefined,
           },
@@ -70,6 +71,7 @@ beforeEach(() => {
   })
   harness.mode = 'pending'
   harness.hotStatus = ''
+  harness.hotItems = []
   harness.calls = 0
   host = document.createElement('div')
   document.body.append(host)
@@ -185,4 +187,109 @@ it('shows a computing hint while the hot-event snapshot is empty', async () => {
   await openMenu('热门事件')
   expect(host.textContent).toContain('正在计算热门事件，请稍候')
   expect(host.textContent).not.toContain('今日暂无热门事件')
+})
+
+function hotRow(name: string): HTMLButtonElement {
+  const found = [...host.querySelectorAll('button')].find(button => button.textContent?.includes(name))
+  if (!(found instanceof HTMLButtonElement)) throw new Error(`missing hot row ${name}`)
+  return found
+}
+
+async function toggleHot(name: string) {
+  await act(async () => { hotRow(name).click() })
+  await settle()
+}
+
+it('marks an exact selectable count and a capped one differently', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    { id: 'ev-1', name: '液冷服务器需求爆发', mentions: 6, source_count: 3,
+      selectable_count: 12, mapping_breadth: 'usable', selectable_capped: false },
+    // 命中 30 只 = 达到 _CONCEPT_CONSTITUENT_CAP, 是**上限**不是全集, 不能说「约」。
+    { id: 'ev-2', name: '国企改革概念走强', mentions: 30, source_count: 9,
+      selectable_count: 30, mapping_breadth: 'usable', selectable_capped: true },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  expect(host.textContent).toContain('12 只')
+  expect(host.textContent).toContain('至少 30 只')
+  expect(host.textContent).not.toContain('约 12 只')
+  expect(host.textContent).not.toContain('约 30 只')
+})
+
+it('greys out an unmappable hot event and blocks selecting it', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    { id: 'ev-none', name: '美联储哈玛克讲话', mentions: 9, source_count: 5,
+      selectable_count: 0, mapping_breadth: 'none',
+      selectable_note: '「美联储哈玛克讲话」没有匹配到成分股' },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  // 原因来自后端 note, 不是千篇一律的「暂无对应个股」。
+  expect(host.textContent).toContain('没有匹配到成分股')
+  const row = hotRow('美联储哈玛克讲话')
+  // 保留 checkbox 语义 + aria-checked, 且用 aria-disabled 保留可聚焦/可读屏。
+  expect(row.getAttribute('role')).toBe('checkbox')
+  expect(row.getAttribute('aria-checked')).toBe('false')
+  expect(row.getAttribute('aria-disabled')).toBe('true')
+  expect(row.disabled).toBe(false)
+})
+
+it('keeps showing a tick (not a minus) when a ticked item later drops to zero', async () => {
+  // 关键场景: 勾上之后, 重算把这个事件的 selectable_count 归零。
+  // 此时它仍然是「已勾选」状态, UI 必须继续显示已勾选, 而不是变成不可选的减号。
+  // 用两次独立渲染来驱动"重算": 第一次勾选, 第二次数据里 count 已归零。
+  harness.mode = 'ready'
+  harness.hotItems = [
+    { id: 'ev-flip', name: '先有映射的事件', mentions: 5, source_count: 2,
+      selectable_count: 7, mapping_breadth: 'usable', selectable_capped: false },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  await toggleHot('先有映射的事件')
+  expect(hotRow('先有映射的事件').querySelector('.lucide-check')).toBeTruthy()
+  expect(hotRow('先有映射的事件').getAttribute('aria-checked')).toBe('true')
+
+  // 重算: 同一个 id 的 selectable_count 归零, 列表重新取数并重新渲染。
+  harness.hotItems = [
+    { id: 'ev-flip', name: '先有映射的事件', mentions: 5, source_count: 2,
+      selectable_count: 0, mapping_breadth: 'none',
+      selectable_note: '「先有映射的事件」没有匹配到成分股' },
+  ]
+  await act(async () => { await client.invalidateQueries() })
+  await settle()
+
+  // 断言用户**实际看到的控件**: 必须仍是勾(Check), 不能是减号(Minus)。
+  const row = hotRow('先有映射的事件')
+  expect(row.querySelector('.lucide-check')).toBeTruthy()
+  expect(row.querySelector('.lucide-minus')).toBeNull()
+  expect(row.getAttribute('aria-checked')).toBe('true')
+  // 且仍可取消。
+  await toggleHot('先有映射的事件')
+  expect(hotRow('先有映射的事件').getAttribute('aria-checked')).toBe('false')
+})
+
+it('marks a broad mapping as a wide range instead of a precise count', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    { id: 'ev-broad', name: 'AI概念全面开花', mentions: 20, source_count: 9,
+      selectable_count: 30, mapping_breadth: 'broad', selectable_capped: true },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  expect(host.textContent).toContain('范围较大')
+  expect(host.textContent).not.toContain('至少 30 只')
+})
+
+it('does not grey out a hot event when the backend omits the new fields', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    { id: 'ev-old', name: '旧快照事件', mentions: 4, source_count: 2 },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  const row = hotRow('旧快照事件')
+  expect(row.getAttribute('aria-disabled')).toBeNull()
+  expect(host.textContent).not.toContain('没有匹配到成分股')
 })

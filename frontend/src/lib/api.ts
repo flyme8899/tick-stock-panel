@@ -2679,6 +2679,16 @@ export interface PickerSourceItem {
     horizon?: string
   } | null
   mapped_stocks?: string[]
+  /** 真实可选股数(与实跑同一把尺: 已截断、已过滤基金)。0 表示选不出任何个股。 */
+  selectable_count?: number
+  /** 该事件的概念总数。 */
+  concept_total?: number
+  /** 映射广度：usable=有区分度 / broad=命中过宽板块 / none=选不出股。 */
+  mapping_breadth?: 'usable' | 'broad' | 'none' | string
+  /** 选不出股时的原因(区分维表未同步/事件无映射/代码对不上)。 */
+  selectable_note?: string | null
+  /** selectable_count 是否被 30 只上限截断(截断时 N 是「至少」不是「约」)。 */
+  selectable_capped?: boolean
 }
 
 export interface PickerSourceGroup {

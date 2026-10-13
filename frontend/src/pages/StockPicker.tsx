@@ -279,6 +279,12 @@ export function StockPicker() {
               importance: item.importance,
               confirmationLabel: confirmSourceLabel(item.confirmation),
               mappedStocks: item.mapped_stocks,
+              // 后端透出的「真·可选股数」与映射广度, 供下拉框做「约 N 只」徽章
+              // 与「暂无对应个股」置灰。旧快照没有这两个字段时不要误判成可点。
+              selectableCount: item.selectable_count,
+              mappingBreadth: item.mapping_breadth,
+              selectableNote: item.selectable_note,
+              selectableCapped: item.selectable_capped,
             }))}
             selectedIds={idsOf(picks, 'hot_events')}
             onToggle={id => setPicks(current => togglePick(current, 'hot_events', id))}
