@@ -519,6 +519,10 @@ export interface ScreenerRunAllSummary {
   errors?: Record<string, string>
   /** 本次执行起点 (Unix ms, 后端时钟), 用于判断缓存结果是否属于本轮 */
   started_at?: number | null
+  /** 已跳过的失效策略 ID (策略池残留, 前端应从池中移除) */
+  skipped_unknown?: string[]
+  /** 已跳过的当前不可运行策略 ID (如草稿态 research_only; 前端仅提示, 不移出池) */
+  skipped_unavailable?: string[]
 }
 
 export interface ScreenerCachedResult {
@@ -902,6 +906,8 @@ export interface StrategyDetail {
   scoring_directions: Record<string, ScoringDirection>
   entry_signals: string[]
   exit_signals: string[]
+  // 叠加条件 (每策略 overlay 硬过滤); 无覆盖时空数组
+  overlay_filter?: CustomSignalCondition[]
   minute_exit_trigger_supported_signals: string[]
   stop_loss: number | null
   take_profit: number | null

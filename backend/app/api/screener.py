@@ -788,15 +788,33 @@ def run_all(request: Request, body: Optional[dict] = None):
     data_dir = request.app.state.repo.store.data_dir
 
     requested_ids = body.get("strategy_ids")
+    skipped_unknown: list[str] = []
+    skipped_unavailable: list[str] = []
     if requested_ids and isinstance(requested_ids, list):
         all_ids = [str(sid) for sid in requested_ids]
-        unknown = [
+        # 宽容降级: 策略池可能残留已不存在的策略 ID (如内置策略移除后的
+        # 旧数据目录) —— 跳过未知项继续跑, 响应带回 skipped_unknown 供前端
+        # 从池中清掉; 全部未知才整体 404 (避免空跑被当成成功)。
+        # 注意区分「不存在」与「存在但当前不可用」:
+        #   - 不存在 (engine 无此 ID)          -> skipped_unknown, 前端可安全移出池
+        #   - research_only (AI 草稿态/未发布) -> skipped_unavailable, 只是暂不可跑,
+        #     用户可能刻意保留在池中, 前端仅提示不自动移出 (避免静默删掉草稿)。
+        skipped_unknown = [sid for sid in all_ids if not engine.has(sid)]
+        skipped_unavailable = [
             sid
             for sid in all_ids
-            if not engine.has(sid) or engine.get(sid).meta.get("research_only")
+            if engine.has(sid) and engine.get(sid).meta.get("research_only")
         ]
-        if unknown:
-            raise HTTPException(status_code=404, detail=f"unknown strategies: {unknown}")
+        skipped_all = skipped_unknown + skipped_unavailable
+        if skipped_all:
+            if len(skipped_all) == len(all_ids):
+                raise HTTPException(status_code=404, detail=f"unknown strategies: {skipped_all}")
+            known = [sid for sid in all_ids if sid not in set(skipped_all)]
+            logger.warning(
+                "run_all: 跳过 %d 个不存在 / %d 个当前不可用 的策略 ID: %s / %s",
+                len(skipped_unknown), len(skipped_unavailable), skipped_unknown, skipped_unavailable,
+            )
+            all_ids = known
     else:
         all_ids = [
             meta["id"]
@@ -825,7 +843,7 @@ def run_all(request: Request, body: Optional[dict] = None):
     # 仅日线 + summary_only (策略页卡片) 启用; 分钟/明细请求保持整段阻塞。
     first_return_s = settings.strategy_run_all_first_return_s
     if body.get("summary_only") and timeframe == "1d" and first_return_s > 0:
-        return _run_all_progressive(
+        progressive = _run_all_progressive(
             repo=repo,
             engine=engine,
             svc=svc,
@@ -838,6 +856,11 @@ def run_all(request: Request, body: Optional[dict] = None):
             first_return_s=first_return_s,
             t_total=t_total,
         )
+        if skipped_unknown:
+            progressive["skipped_unknown"] = skipped_unknown
+        if skipped_unavailable:
+            progressive["skipped_unavailable"] = skipped_unavailable
+        return progressive
 
     try:
         context = svc.build_strategy_context(
@@ -890,10 +913,17 @@ def run_all(request: Request, body: Optional[dict] = None):
                 sid: {"total": result["total"], "as_of": result["as_of"]}
                 for sid, result in results.items()
             },
+            "skipped_unknown": skipped_unknown,
+            "skipped_unavailable": skipped_unavailable,
         }
 
     ext_values = _load_ext_value_maps(repo, body.get("ext_columns"))
-    return {"as_of": str(as_of), "results": _results_with_ext(results, ext_values)}
+    return {
+        "as_of": str(as_of),
+        "results": _results_with_ext(results, ext_values),
+        "skipped_unknown": skipped_unknown,
+        "skipped_unavailable": skipped_unavailable,
+    }
 
 
 @router.get("/limit-ladder")
