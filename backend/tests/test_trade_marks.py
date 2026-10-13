@@ -94,6 +94,39 @@ def _filter_defn():
     )
 
 
+def test_active_limit_gene_matrix_masks_with_consecutive_limit_ups():
+    """涨停基因用 limit_up_count_60d, 帧里有连板数时买卖点矩阵不得缺字段。"""
+    from app.services.trade_marks import _matrix_masks
+    from app.strategy.builtin.active_limit_gene import MATRIX_STRATEGY, META
+    from app.strategy.engine import StrategyEngine
+
+    start = date(2024, 1, 2)
+    n = 8
+    frame = pl.DataFrame({
+        "symbol": ["600519.SH"] * n,
+        "name": ["贵州茅台"] * n,
+        "date": [start + timedelta(days=offset) for offset in range(n)],
+        "open": [10.0] * n,
+        "high": [10.2] * n,
+        "low": [9.8] * n,
+        "close": [10.0 + offset * 0.1 for offset in range(n)],
+        "volume": [1_000_000.0] * n,
+        "amount": [1e9] * n,
+        "turnover_rate": [3.0] * n,
+        "consecutive_limit_ups": [1, 0, 2, 0, 1, 0, 3, 0],
+    })
+    defn = SimpleNamespace(
+        matrix_strategy=MATRIX_STRATEGY,
+        basic_filter={"enabled": False},
+        meta=META,
+    )
+    dates, entry, exit_mask, entry_ids, _exit_ids = _matrix_masks(defn, frame, {})
+    assert len(dates) == n
+    assert len(entry) == n and len(exit_mask) == n
+    assert "signal_active_limit_gene" in entry_ids
+    assert "consecutive_limit_ups" in StrategyEngine._matrix_field_columns(defn, None, {})
+
+
 def test_forward_return_uses_later_closes_and_stops_at_the_end():
     closes = [10.0, 11.0, 12.0, 9.0, 8.0, 13.0]
     assert forward_return(closes, 0, 5) == pytest.approx(0.3)

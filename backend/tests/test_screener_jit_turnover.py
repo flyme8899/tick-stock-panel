@@ -37,8 +37,12 @@ def _write_enriched(tmp_path, days: int, turnover_by_day: dict[str, float]) -> N
                 "raw_high": [11.0, 21.0],
                 "raw_low": [9.0, 19.0],
                 "turnover_rate": [turnover_by_day.get(d.isoformat(), 1.0), 2.0],
-                "consecutive_limit_ups": [0, 0],
-                "consecutive_limit_downs": [0, 0],
+                # 与 ENRICHED_STORAGE_SCHEMA 一致, 否则 scan 因 Int64≠UInt32 失败并退回单日帧
+                "consecutive_limit_ups": pl.Series(
+                    [4 if d.isoformat() in turnover_by_day else 0, 0],
+                    dtype=pl.UInt32,
+                ),
+                "consecutive_limit_downs": pl.Series([0, 0], dtype=pl.UInt32),
             }
         ).write_parquet(part / "part.parquet")
 
@@ -63,9 +67,11 @@ def test_historical_jit_frame_keeps_turnover_rate(tmp_path) -> None:
     df = svc._load_enriched_for_date(target)
     assert not df.is_empty()
     assert "turnover_rate" in df.columns, "JIT 即时计算后 turnover_rate 列不应丢失"
-    # 目标日的值来自存储列透传, 不是置 null
+    assert "consecutive_limit_ups" in df.columns, "连板数存储列同样必须透传"
+    # 目标日的值来自存储列透传, 不是置 null / 重算成 0
     row = df.filter(pl.col("symbol") == "600000.SH").row(0, named=True)
     assert row["turnover_rate"] == 5.5
+    assert row["consecutive_limit_ups"] == 4
 
 
 def test_custom_sql_can_filter_on_turnover_rate(tmp_path) -> None:

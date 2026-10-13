@@ -29,6 +29,7 @@ function render(props: {
   conditions: { left: string; op: string; right: string; leftDays?: number; rightDays?: number }[]
   onChange: (next: any[]) => void
   hideDays?: boolean
+  decimalFields?: string[]
 }) {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   if (root) { act(() => { root!.unmount() }); root = null }
@@ -39,7 +40,7 @@ function render(props: {
       <ConditionEditor
         conditions={props.conditions}
         onChange={props.onChange}
-        options={{ ...baseOptions, hideDays: props.hideDays }}
+        options={{ ...baseOptions, hideDays: props.hideDays, decimalFields: props.decimalFields }}
       />,
     )
   })
@@ -125,6 +126,31 @@ it('switching to a string field resets op to contains and right value', () => {
   expect(onChange.mock.calls[0][0][0]).toMatchObject({
     left: 'ext_x_name', op: 'contains', right: '',
   })
+})
+
+it('shows a decimal hint beside percent-style fields', () => {
+  const decimalFields = ['change_pct', 'amplitude']
+  render({
+    conditions: [{ left: 'change_pct', op: '>', right: '0.03' }],
+    onChange: () => {},
+    decimalFields,
+  })
+  expect(container.textContent).toContain('小数，3% 填 0.03')
+
+  render({
+    conditions: [{ left: 'close', op: '>', right: '10' }],
+    onChange: () => {},
+    decimalFields,
+  })
+  expect(container.textContent).not.toContain('小数，3% 填 0.03')
+
+  // 右值改成字段比较时不再提示填写口径
+  render({
+    conditions: [{ left: 'amplitude', op: '>', right: 'field:close' }],
+    onChange: () => {},
+    decimalFields,
+  })
+  expect(container.textContent).not.toContain('小数，3% 填 0.03')
 })
 
 it('switching within numeric fields keeps op/right intact', () => {

@@ -445,3 +445,73 @@ def test_matrix_run_overlay_masks_entry_only(tmp_path) -> None:
     assert "HIGH.SH" in {h["symbol"] for h in result.exit_signal_hits}
 
 
+def test_matrix_field_columns_include_overlay_fields() -> None:
+    """叠加条件的左值与 field: 右值都要进矩阵列, 不能只靠 required_fields。"""
+    strategy = SimpleNamespace(
+        matrix_strategy=SimpleNamespace(required_fields=lambda: frozenset({"close"})),
+        basic_filter={},
+        meta={"scoring": {}, "order_by": "score"},
+    )
+    fields = StrategyEngine._matrix_field_columns(
+        strategy,
+        {"overlay_filter": [
+            {"left": "turnover_rate", "op": ">", "right": "field:consecutive_limit_ups"},
+        ]},
+        {},
+    )
+    assert "turnover_rate" in fields
+    assert "consecutive_limit_ups" in fields
+    # 未配置叠加条件时不额外装列
+    bare = StrategyEngine._matrix_field_columns(strategy, None, {})
+    assert "turnover_rate" not in bare
+
+
+def test_matrix_run_overlay_filters_turnover_rate(tmp_path) -> None:
+    """fixture 带 turnover_rate 时, 叠加 turnover_rate > 5 能过滤且不报缺列。"""
+    sid = "ovm_turn"
+    engine = _engine(tmp_path, _matrix_strategy_code(sid), sid)
+    day = date(2026, 1, 5)
+    rows = []
+    for symbol, turnover, close in (
+        ("HOT.SZ", 8.0, 10.0),
+        ("COLD.SH", 2.0, 11.0),
+        ("NONE.SZ", None, 12.0),
+    ):
+        rows.append({
+            "symbol": symbol, "date": date(2026, 1, 2), "name": symbol,
+            "open": close, "high": close, "low": close, "close": close,
+            "turnover_rate": turnover,
+        })
+        rows.append({
+            "symbol": symbol, "date": day, "name": symbol,
+            "open": close, "high": close, "low": close, "close": close,
+            "turnover_rate": turnover,
+        })
+    panel = pl.DataFrame(rows)
+    ctx = StrategyDataContext(
+        asset_type="stock", timeframe="1d", as_of=day,
+        current=panel.filter(pl.col("date") == day),
+        history=panel,
+    )
+    result = engine.run(
+        sid, ctx,
+        overrides={
+            "basic_filter": {"enabled": False},
+            "overlay_filter": [{"left": "turnover_rate", "op": ">", "right": 5}],
+        },
+    )
+    assert {r["symbol"] for r in result.rows} == {"HOT.SZ"}
+
+
+def test_decimal_ratio_fields_are_percent_style_not_turnover() -> None:
+    from app.api.signals import get_options
+
+    assert "change_pct" in custom_signals.DECIMAL_RATIO_FIELDS
+    assert "amplitude" in custom_signals.DECIMAL_RATIO_FIELDS
+    # enriched 换手率是百分数值 (5 = 5%), 提示「3% 填 0.03」会填错
+    assert "turnover_rate" not in custom_signals.DECIMAL_RATIO_FIELDS
+    listed = set(get_options()["decimalFields"])
+    assert "change_pct" in listed and "amplitude" in listed
+    assert "turnover_rate" not in listed
+
+

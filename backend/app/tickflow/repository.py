@@ -602,15 +602,18 @@ class KlineRepository:
                 logger.info("enriched refresh skipped: latest parquet empty (%.2fs)", time.perf_counter() - started)
                 return
 
-            # Step 2: 读近 300 天 14 列数据 → compute → filter(latest) → 缓存
+            # Step 2: 读近 300 天存储列 (含换手率/连板数) → compute → filter(latest) → 缓存
             # 300 日历天 ≈ 210 交易日, 覆盖 filter_history 最大 lookback(90) + warmup(60)
             try:
                 from datetime import timedelta
-                from app.indicators.pipeline import compute_enriched_history_window
+                from app.indicators.pipeline import (
+                    compute_enriched_history_window,
+                    enriched_recompute_columns,
+                )
                 start_full = latest - timedelta(days=300)
-                read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                         "volume", "amount", "raw_close", "raw_high", "raw_low"]
-                             if c in df_latest.columns]
+                # 存储列随行带走 (换手率/连板数)。只读 OHLCV 时内存历史缓存丢掉这些列,
+                # 叠加条件和涨停基因矩阵会报列不存在。
+                read_cols = enriched_recompute_columns(df_latest.columns)
                 lf = (
                     scan_enriched_parquet(self._enriched_glob)
                     .filter(pl.col("date") >= start_full)
@@ -1051,11 +1054,13 @@ class KlineRepository:
                 return
 
             from datetime import timedelta
-            from app.indicators.pipeline import compute_indicators, compute_signals
+            from app.indicators.pipeline import (
+                compute_indicators,
+                compute_signals,
+                enriched_recompute_columns,
+            )
             start_full = latest - timedelta(days=300)
-            read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                     "volume", "amount", "raw_close", "raw_high", "raw_low"]
-                         if c in df_latest.columns]
+            read_cols = enriched_recompute_columns(df_latest.columns)
             df_hist = guarded_collect(
                 scan_enriched_parquet(self._etf_enriched_glob,
                                 cast_options=pl.ScanCastOptions(integer_cast="allow-float"))

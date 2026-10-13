@@ -712,10 +712,11 @@ def _matrix_masks(defn, frame: pl.DataFrame, params: dict):
 
     if frame.is_empty():
         return [], [], [], (), ()
-    fields = set(defn.matrix_strategy.required_fields())
-    for column in ("amount", "total_shares", "float_shares", "turnover_rate"):
-        if column in frame.columns:
-            fields.add(column)
+    # 与选股 StrategyEngine._matrix_field_columns 同一口径: required_fields
+    # 之外还要展开评分依赖和 required_fields_for_params, 否则
+    # limit_up_count_60d 这类虚拟因子在矩阵里缺 consecutive_limit_ups。
+    from app.strategy.engine import StrategyEngine
+    fields = StrategyEngine._matrix_field_columns(defn, None, params)
     market = build_market_data_matrix(frame, field_columns=fields)
     basic = dict(defn.basic_filter or {})
     signals = MatrixStrategyPipeline().run(

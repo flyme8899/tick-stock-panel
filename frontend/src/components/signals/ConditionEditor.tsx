@@ -21,6 +21,8 @@ export interface ConditionEditorOptions {
   maxDays?: number
   /** 隐藏「前N日」偏移控件 (叠加条件不支持偏移, 始终当日值) */
   hideDays?: boolean
+  /** 右值按小数存储的收益率/振幅字段 (0.03 = 3%); 自定义信号与叠加条件共用 */
+  decimalFields?: string[]
 }
 
 interface Props {
@@ -41,6 +43,7 @@ export function ConditionEditor({ conditions, onChange, options, max = 8, title,
     operators = ['>', '>=', '<', '<=', '==', '!='],
     stringOperators = ['contains', '==', '!='],
     maxDays = 60, hideDays = false,
+    decimalFields = [],
   } = options
 
   const updateCond = (idx: number, patch: Partial<CustomSignalCondition>) =>
@@ -104,6 +107,7 @@ export function ConditionEditor({ conditions, onChange, options, max = 8, title,
                   className="flex-1 min-w-0 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50" />
               ) : (
                 <RightValueInput cond={c} fields={fields} groups={groups} maxDays={maxDays} hideDays={hideDays}
+                  decimalHint={decimalFields.includes(c.left)}
                   onChangeRight={v => updateCond(i, { right: v })}
                   onChangeDays={v => updateCond(i, { rightDays: v })} />
               )}
@@ -286,12 +290,14 @@ function DaysInput({ value, max, onChange }: { value: number; max: number; onCha
 
 // ── 右操作数: 字段(弹出) / 常量 切换 ─────────────────────
 
-function RightValueInput({ cond, fields, groups, maxDays, hideDays, onChangeRight, onChangeDays }: {
+function RightValueInput({ cond, fields, groups, maxDays, hideDays, decimalHint, onChangeRight, onChangeDays }: {
   cond: CustomSignalCondition
   fields: { key: string; label: string }[]
   groups?: CustomSignalFieldGroup[]
   maxDays: number
   hideDays?: boolean
+  /** 左字段是小数制收益率/振幅时, 在数字右值旁提示填写口径 */
+  decimalHint?: boolean
   onChangeRight: (v: string) => void
   onChangeDays: (v: number) => void
 }) {
@@ -314,7 +320,11 @@ function RightValueInput({ cond, fields, groups, maxDays, hideDays, onChangeRigh
           {/* 常量无前N日概念, 占位保持与字段模式对齐 */}
           {!hideDays && <div className="shrink-0" style={{ width: 44 }} />}
           <input type="number" value={numValue} onChange={e => onChangeRight(e.target.value)} step="any"
+            title={decimalHint ? '小数，3% 填 0.03' : undefined}
             className="flex-1 min-w-0 h-7 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
+          {decimalHint && (
+            <span className="text-[10px] text-muted whitespace-nowrap shrink-0">小数，3% 填 0.03</span>
+          )}
           <button onClick={() => onChangeRight('field:close')} title="切换为字段" className="p-0.5 rounded text-muted hover:text-accent cursor-pointer shrink-0">
             <ArrowRight className="h-3 w-3 -rotate-90" />
           </button>

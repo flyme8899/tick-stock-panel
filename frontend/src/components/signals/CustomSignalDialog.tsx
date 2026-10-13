@@ -42,6 +42,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
   const operators = options.data?.operators ?? ['>', '>=', '<', '<=', '==', '!=']
   const stringFields = options.data?.stringFields ?? []
   const stringOperators = options.data?.stringOperators ?? ['contains', '==', '!=']
+  const decimalFields = options.data?.decimalFields ?? []
   const editing = !!signal
 
   useEffect(() => {
@@ -162,7 +163,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                 <ConditionEditor
                   conditions={draft.conditions}
                   onChange={updateConditions}
-                  options={{ fields, groups, stringFields, operators, stringOperators, maxDays }}
+                  options={{ fields, groups, stringFields, operators, stringOperators, maxDays, decimalFields }}
                   headerExtra={
                     <button
                       onClick={() => setAiOpen(o => !o)}
