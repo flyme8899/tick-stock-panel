@@ -8,6 +8,9 @@ from datetime import date, datetime, timedelta
 
 from app.market_time import CN_TZ
 from app.news.hot_events import (
+    _ANCHOR_HEAD_OK,
+    _ANCHOR_TAIL_OK,
+    _CONCEPT_SHELL,
     _category_for,
     _cleaned_headline,
     _concept_relevant,
@@ -18,6 +21,7 @@ from app.news.hot_events import (
     _explicit_target_direction,
     _fallback_title_ok,
     _fine_concept,
+    _headline_maps_concept,
     _is_section_label,
     _keep_shown_event,
     _keyword_title,
@@ -28,6 +32,60 @@ from app.news.hot_events import (
     _strip_report_label,
     _title_ok,
 )
+
+# 概念子串锚定的正反例。左列是反例：概念名的一个 2 字片撞上了正文里的通用词，
+# 语义完全无关，改前全部误挂（`for size in range(...)` 的 2 字暴力命中）。
+# 右列是必须保留的真命中，其中「低空飞行」「算力需求」只有 2 字锚，
+# 所以修法不能用简单的「子串长度 ≥ 3」（会误杀它们）。
+_CONCEPT_ANCHOR_CASES = (
+    # (概念, 事件文本, 期望命中)
+    ("低空经济", "经济回暖带动消费", False),
+    ("低空经济", "经济数据回暖", False),
+    ("低空经济", "一季度经济增速", False),
+    ("工业母机", "工业增加值超预期", False),
+    ("固态电池", "电池级碳酸锂价格", False),
+    ("固态电池", "电池厂商扩产", False),
+    ("可控核聚变", "可控硅需求回暖", False),
+    ("可控核聚变", "可控硅涨价", False),
+    ("数据要素", "数据交易规模扩大", False),
+    ("新能源行业", "行业景气度回升", False),
+    ("低空经济", "低空飞行试点扩容", True),
+    ("算力租赁", "算力需求爆发", True),
+    ("固态电池", "固态电池量产线投产", True),
+    ("储能电池", "储能招标规模扩大", True),
+    ("机器人", "人形机器人发布", True),
+    ("白酒", "白酒动销回暖", True),
+    ("光伏组件", "组件出货量增长", True),
+    ("半导体设备", "设备国产化率提升", True),
+    ("银行板块", "银行板块午后走强", True),
+)
+
+
+def test_headline_maps_concept_rejects_shell_substring_hits():
+    """2 字子串撞通用产业壳不算命中，撞在锚位上的才算。
+
+    线上实测反例：「低空经济」←「经济回暖」、「工业母机」←「工业增加值」、
+    「固态电池」←「电池级碳酸锂」、「可控核聚变」←「可控硅」。这些概念都被
+    挂到了语义无关的事件上，直接影响展示层的题材归属。
+    """
+    for name, blob, expected in _CONCEPT_ANCHOR_CASES:
+        hit = name in blob or _headline_maps_concept(name, blob)
+        assert hit is expected, f"{name} ← {blob} 期望 {expected}，实得 {hit}"
+
+
+def test_concept_anchor_tables_stay_disjoint_from_shell():
+    """壳词表与锚表的重叠必须限于显式白名单 `_ANCHOR_SHELL_EXEMPT`。
+
+    两张表的分工是：壳词表拦「单独撞上一个通用词」，锚表放「这个字在概念名里
+    占的是首/尾锚位」。同一个字同时进两张表时，锚表必须赢 —— 这条测试防的是
+    以后有人往 `_ANCHOR_TAIL_OK` 里补「电池」「材料」这类壳词，把
+    「固态电池」重新变成「电池XX」都能挂上的概念。
+    """
+    from app.news.hot_events import _ANCHOR_SHELL_EXEMPT
+
+    assert not (_ANCHOR_HEAD_OK & _CONCEPT_SHELL)
+    assert (_ANCHOR_TAIL_OK & _CONCEPT_SHELL) <= _ANCHOR_SHELL_EXEMPT
+    assert _ANCHOR_SHELL_EXEMPT <= _CONCEPT_SHELL
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
 
 NOW = datetime(2026, 10, 10, 8, 30, tzinfo=CN_TZ)
@@ -1089,7 +1147,9 @@ def test_concept_tags_follow_entities_not_column_names(tmp_path):
     assert _concept_relevant("俄乌冲突快报", "俄罗斯与乌克兰冲突升级", set()) is False
     assert _concept_relevant("俄乌冲突", title, set()) is False
     assert _concept_relevant("俄乌冲突快报", title, set()) is False
-    assert _dictionary_concepts(title) == ["中东"]
+    # 词典返回 (概念, 极性) 三元组：加息利空黄金/利好银行这类方向只有词典知道。
+    # 中东（地缘）方向随语境翻转，登记为 0，由事件整体方向定。
+    assert _dictionary_concepts(title) == [("中东", 0)]
     kept = _relevant_concepts(
         Counter({"俄乌冲突": 1, "俄乌冲突快报": 2}),
         [title],
@@ -1880,12 +1940,12 @@ def test_negation_and_entity_tags_keep_live_titles(tmp_path, monkeypatch):
     assert _direction_for("地区冲突升级", "冲突") == "利空"
 
     assert _category_for(_PENTAGON, "") == "地缘政治"
-    assert _dictionary_concepts(_PENTAGON) == ["中东"]
+    assert _dictionary_concepts(_PENTAGON) == [("中东", 0)]
     assert _category_for(_NY_FED, "") == "海外市场/央行"
     assert _category_for(_JINDAN_HIKE, "提价") == "公司重大事项"
-    assert _dictionary_concepts(_JINDAN_HIKE) == ["聚乳酸"]
+    assert _dictionary_concepts(_JINDAN_HIKE) == [("聚乳酸", 1)]
     assert _category_for(_JINDAN_RAISE, "上调") == "公司重大事项"
-    assert "聚乳酸" in _dictionary_concepts(_JINDAN_RAISE)
+    assert "聚乳酸" in {name for name, _polarity in _dictionary_concepts(_JINDAN_RAISE)}
     assert _category_for("华为发布盘古新模型", "发布") == "科技与产业"
     assert _category_for("杰富瑞将特斯拉目标价从350美元上调至400美元", "上调") != "海外市场/央行"
 
@@ -1962,3 +2022,58 @@ def test_negation_and_entity_tags_keep_live_titles(tmp_path, monkeypatch):
         assert event["category"] == "公司重大事项"
         assert "聚乳酸" in event["concepts"]
         assert "石油" not in event["concepts"]
+
+
+def test_dictionary_carries_polarity_per_concept():
+    """同一个词典键下的概念方向可以相反，极性必须逐条还原。
+
+    `(("美联储","加息"), ("黄金","银行"))`：加息压黄金、抬银行息差。原实现
+    返回裸概念名，把方向丢了，展示层只能按事件整体方向给两个概念贴同一个标签
+    —— 其中必有一个是反的（线上实测：加息事件里黄金被标成利好）。
+    """
+    from app.news.hot_events import _concept_polarity_map, _polarity_direction
+
+    hike = _concept_polarity_map("美联储宣布加息25基点")
+    assert hike == {"黄金": -1, "银行": 1}
+    assert _polarity_direction(hike["黄金"], "利好") == "利空"
+    assert _polarity_direction(hike["银行"], "利好") == "利好"
+    # 没登记的条目退回事件方向，不猜。
+    assert _polarity_direction(0, "利空") == "利空"
+    assert _polarity_direction(None, "利好") == "利好"
+    assert _polarity_direction(None, "") == ""
+
+
+def test_semantic_exclusion_blocks_opposite_narratives():
+    """题材不能挂在语义相反的事件上。
+
+    线上实测：「上交所向东百集团下发监管工作函」被挂上东百集团的收购题材
+    （光芯片收购/光探测芯片）。收购是利好叙事，监管函是利空动作，挂在一起
+    等于用利好题材解释利空事件。
+    """
+    from app.news.hot_events import _semantically_excluded
+
+    # 监管动作否决收购类题材。
+    assert _semantically_excluded("光芯片收购", "上交所向某公司下发监管工作函")
+    assert _semantically_excluded("资产重组", "公司收到证监会立案告知书")
+    assert _semantically_excluded("借壳上市", "交易所下发问询函")
+    # 题材与事件同向时不拦。
+    assert not _semantically_excluded("光芯片收购", "公司宣布溢价收购标的资产")
+    # 降价否决涨价题材；中标不被订单题材拦住。
+    assert _semantically_excluded("产品涨价", "公司宣布主力产品降价")
+    assert not _semantically_excluded("轨道交通订单", "公司中标地铁项目")
+    # 关键词不在概念名里就不参与判定。
+    assert not _semantically_excluded("商业零售", "上交所下发监管工作函")
+
+
+def test_semantic_exclusion_applies_on_both_concept_paths():
+    """互斥判定必须同时挂在 `_concept_relevant` 和 `_merge_mapped_concepts`。
+
+    只挂一边会漏：`_concept_relevant` 管「细概念延伸标题」那条路径，
+    `_merge_mapped_concepts` 管词典路径 —— 监管函挂收购题材正是经词典路径
+    进来的，词典不受前者约束。
+    """
+    from app.news.hot_events import _merge_mapped_concepts
+
+    blob = "上交所向东百集团下发监管工作函"
+    assert _concept_relevant("光芯片收购", blob, set()) is False
+    assert _merge_mapped_concepts(["光芯片收购", "商业零售"], blob) == ["商业零售"]

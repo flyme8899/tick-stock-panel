@@ -418,6 +418,40 @@ _CONCEPT_LINK_SKIP = _GENERIC_TOKENS | _STOP | _CONCEPT_GLUE | frozenset({
     "美元", "目标", "价格", "预期", "上调", "下调", "美股", "发布", "订单",
     "全球", "同比", "环比",
 })
+# 通用产业壳。它们能出现在任何稿子里，单独一个壳词素撞上不该算概念命中。
+# 线上实测反例：「低空经济」被「经济回暖」误挂、「工业母机」被「工业增加值」
+# 误挂、「固态电池」被「电池级碳酸锂」误挂、「可控核聚变」被「可控硅」误挂。
+# 只用于**子串锚过滤**，绝不用来否决整个概念名 —— 「固态电池」本身是合法概念。
+_CONCEPT_SHELL = frozenset({
+    "经济", "工业", "电池", "数据", "智能", "产业", "制造", "科技", "市场",
+    "板块", "概念", "行业", "企业", "公司", "产品", "技术", "设备", "材料",
+    "能源", "金融", "消费", "医药", "化工", "汽车", "电力", "地产", "农业",
+})
+# 能当概念名**开头**的 2 字锚。允许「低空经济」被「低空飞行」「低空」命中，
+# 但不允许「一般话题」里的「低空」以外的任意 2 字切口触发。
+# 判据：这个词素是产业的限定语（低空/算力/固态/可控…），不是通用壳。
+# 与 _CONCEPT_SHELL 刻意保持不相交 —— 同一个词同时进两张表时「哪张赢」会变成
+# 隐式规则，靠 test_concept_anchor_tables_stay_disjoint_from_shell 钉死。
+_ANCHOR_HEAD_OK = frozenset({
+    "低空", "算力", "固态", "光伏", "储能", "氢能", "钠电", "锂电",
+    "芯片", "军工", "稀土", "券商", "白酒", "煤炭", "钢铁",
+    "有色", "黄金", "原油", "天然", "机器", "无人", "数字", "卫星", "商业",
+    "免税", "水泥", "航空", "船运", "游戏", "传媒", "教育", "养殖", "种业",
+    "培育", "可再", "核聚", "新型", "高端", "精细", "创新", "绿色",
+})
+# 词尾 2 字锚。概念名的**收尾成分是产品/环节**时，正文提到这个环节就算命中
+# （「半导体设备」← 「设备国产化率提升」）。收尾是通用主语（公司/行业/价格）
+# 的一律不算，否则「新能源行业」会被任何带「行业」的稿子挂上。
+# 允许少量壳词留在表里（见下面的白名单），但那意味着它们**只在尾锚位**放行：
+# 「半导体设备」能被「设备扩产」挂上，「固态电池」不会被「电池XX」挂上
+# （`电池` 不在这张表里）。
+_ANCHOR_TAIL_OK = frozenset({
+    "设备", "零部件", "组件", "芯片", "模块", "整机",
+    "产能", "工程", "物流", "零售", "银行", "保险", "养殖", "种业",
+})
+# 壳词表里允许同时出现在锚表里的那几个。它们在概念名里占锚位时指的是具体
+# 产业环节，不再算通用壳。除此之外两张表不相交。
+_ANCHOR_SHELL_EXEMPT = frozenset({"设备", "地产"})
 _CLAUSE = re.compile(r"[，。！？、；：:\n]")
 # 半句话常见的起笔。完整标题不会从这些词开始。
 _FRAGMENT_LEADS = (
@@ -2227,6 +2261,8 @@ def _concept_entity_miss(name: str, blob: str) -> bool:
 def _concept_relevant(name: str, blob: str, subjects: set[str]) -> bool:
     if _is_column_concept(name) or _concept_entity_miss(name, blob):
         return False
+    if _semantically_excluded(name, blob):
+        return False
     if name and name in blob:
         return True
     # 细概念延伸标题里已经出现的词，例如标题写「机器人」、提及是「工业机器人」。
@@ -2249,15 +2285,60 @@ def _concept_relevant(name: str, blob: str, subjects: set[str]) -> bool:
 
 
 def _headline_maps_concept(name: str, blob: str) -> bool:
+    """概念名的一部分出现在事件文本里，算这条概念指向的是同一件事。
+
+    **这里必须三重约束，光靠「2 字子串命中」会大面积错挂。** 线上实测的四类
+    反例（都是 2 字子串命中、语义完全无关）：
+
+      「低空经济」← 「经济回暖」      撞「经济」
+      「工业母机」← 「工业增加值」    撞「工业」
+      「固态电池」← 「电池级碳酸锂」  撞「电池」
+      「可控核聚变」← 「可控硅」      撞「可控」
+
+    最简单的修法是「子串长度 ≥ 3」，但实测会误杀真实映射：「低空 → 低空飞行」、
+    「算力 → 算力租赁」都只有 2 字。所以改成三条并列约束，任一满足即可：
+
+      1. 子串长度 ≥ 3：右边界对齐时取足够长的词素，或
+      2. 子串长度 == 2 且落在词首（`_anchor_head_ok` 白名单）：能当概念名开头的
+         2 字锚，「低空」「算力」「固态」在这类；「经济」「工业」「电池」不在，或
+      3. 子串长度 == 2 且落在词尾，且这个词尾在该概念对应词典的触发词里
+         （词典兜底，见 `_dictionary_names`）。
+
+    另外，只有**非壳词素**才能触发命中：`_CONCEPT_SHELL` 里的通用产业壳
+    （经济/工业/电池/数据/智能/产业/制造…）单独出现时一律不算 —— 它们能出现在
+    任何稿子里，是最主要的误挂来源。壳词素若和更长词素连在一起（「低空经济」
+    里的「经济」），由更长的那段负责命中，依旧有效。
+    """
     if len(name) < 3 or not blob or name in blob:
         return False
+    dictionary = _dictionary_names()
     for size in range(min(len(name) - 1, 6), 1, -1):
         for start in range(0, len(name) - size + 1):
             token = name[start:start + size]
             if token in _CONCEPT_LINK_SKIP:
                 continue
-            if token in blob:
+            if token not in blob:
+                continue
+            head = start == 0
+            tail = start + size == len(name)
+            # 白名单锚**先于**壳词判：壳词表是拦「单独撞上一个通用词」的，
+            # 不拦「这个词素在概念名里占的是首尾锚位」。`设备` 既在壳表里也
+            # 在词尾锚表里 —— 「半导体设备」←「设备国产化率提升」要靠后者放行。
+            if size == 2 and head and token in _ANCHOR_HEAD_OK:
                 return True
+            if size == 2 and tail and token in _ANCHOR_TAIL_OK:
+                return True
+            if token in _CONCEPT_SHELL:
+                continue
+            if size >= 3:
+                return True
+            if tail and any(
+                name in concepts and token in "".join(keys)
+                for keys, concepts in _SUBJECT_CONCEPTS
+            ):
+                return True
+            # 2 字词素两头都不占（概念中间的连接词），或者不在锚表里 —— 不算命中。
+            continue
     return False
 
 
@@ -2283,24 +2364,120 @@ def _dictionary_names() -> tuple[str, ...]:
     return tuple(names)
 
 
-def _dictionary_concepts(blob: str) -> list[str]:
-    """主体在标题里、提及却是空的时候，补上对应的 A 股概念。"""
-    found: list[str] = []
+def _dictionary_concepts(blob: str) -> list[tuple[str, int]]:
+    """主体在标题里、提及却是空的时候，补上对应的 A 股概念**和它的极性**。
 
-    def add(names: tuple[str, ...]) -> None:
+    返回 (概念名, 极性) 三元组。极性 +1 利好 / -1 利空 / 0 中性，用来还原词典
+    条目里被抹掉的因果方向。原实现返回裸概念名，把
+    `(("美联储", "加息"), ("黄金", "银行"))` 当成「美联储 且 加息 → 挂黄金和银行」
+    —— 可加息对黄金是**利空**、对银行是**利好**，同一个键下的两个概念方向相反。
+    返回裸名字就把这条信息丢了，展示层只能按事件整体方向给两边都贴同一个标签。
+
+    词典按 (触发键组, 概念, 极性) 展开，「美联储+加息」这一条因此裂成
+    `("黄金", -1)` 和 `("银行", +1)` 两项。极性表见 `_CONCEPT_POLARITY`，
+    没登记的条目一律 0（不表态），不猜。
+    """
+    found: list[tuple[str, int]] = []
+
+    def add(names: tuple[str, ...], polarity: int = 0) -> None:
         for name in names:
-            if name not in found:
-                found.append(name)
+            if name not in {item[0] for item in found}:
+                found.append((name, polarity))
 
     for keys, concepts in _SUBJECT_CONCEPTS:
         if all(key in blob for key in keys):
-            add(concepts)
+            for name in concepts:
+                add((name,), _concept_polarity(name, keys))
     fiscal = "财政部" in blob or (
         "财政" in blob and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策"))
     )
     if fiscal and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策")):
-        add(("基建", "地方债"))
+        add(("基建", "地方债"), 1)
     return found
+
+
+def _concept_polarity(name: str, keys: tuple[str, ...]) -> int:
+    """词典条目的方向。键型决定谁受益、谁受损，不按「利好/利空」两个字猜。"""
+    rule = _CONCEPT_POLARITY.get((keys, name))
+    if rule is not None:
+        return rule
+    rule = _CONCEPT_POLARITY.get((None, name))
+    return 0 if rule is None else rule
+
+
+# (触发键组, 概念) → 极性。键组用 None 表示「不限键组，只看概念名」。
+# 只登记方向明确、且方向**不随语境翻转**的条目。没登记的一律 0 —— 中性比
+# 猜错方向安全，猜错方向会让展示层把利空事件标成利好。
+_CONCEPT_POLARITY: dict[tuple[tuple[str, ...] | None, str], int] = {
+    # 加息收紧流动性：压黄金、抬银行息差。
+    (("美联储", "加息"), "黄金"): -1,
+    (("美联储", "加息"), "银行"): 1,
+    # 涨价直接抬上游和替代品的盈利预期。
+    (("橡胶",), "橡胶"): 1,
+    (("橡胶",), "天然橡胶"): 1,
+    (("原油",), "石油"): 1,
+    (("原油",), "油服"): 1,
+    (("IEA",), "石油"): 0,
+    (("IEA",), "油服"): 0,
+    # 地缘冲突抬油价和避险，但事件本身是「冲突」不是「利好」，交给事件方向定。
+    (None, "中东"): 0,
+    (None, "聚乳酸"): 1,
+    (None, "基建"): 1,
+    (None, "地方债"): 1,
+}
+
+
+def _concept_polarity_map(blob: str) -> dict[str, int]:
+    """词典给出的「概念 → 极性」映射，供挂概念时按名取方向。"""
+    return {name: polarity for name, polarity in _dictionary_concepts(blob)}
+
+
+def _polarity_direction(polarity: int | None, fallback: object) -> str:
+    """极性转展示方向。极性为 0/None 时退回事件整体方向。"""
+    if polarity == 1:
+        return "利好"
+    if polarity == -1:
+        return "利空"
+    return str(fallback or "")
+
+
+def _semantically_excluded(name: str, blob: str) -> bool:
+    """概念与事件语义互斥：题材不能挂在语义相反的事件上。
+
+    线上实测案例：「上交所向东百集团下发监管工作函」被挂上东百集团的**收购
+    题材**（光芯片收购/光探测芯片）。收购是利好叙事，监管函是利空动作，挂在
+    一起等于用利好题材解释利空事件 —— 展示层照着念就是反的。
+
+    规则是 (概念关键词, 禁止同现的事件关键词) 对。概念名里含左侧任一关键词，
+    且事件文本含右侧任一关键词，就否决这条概念。**两个挂点都要挂**：
+    `_concept_relevant` 管「细概念延伸标题」那条路径，`_merge_mapped_concepts`
+    管词典路径 —— 词典路径绕过前者，只堵一个会漏。
+    """
+    if not name or not blob:
+        return False
+    for concept_keys, event_keys in _SEMANTIC_EXCLUSION:
+        if not any(key in name for key in concept_keys):
+            continue
+        if any(key in blob for key in event_keys):
+            return True
+    return False
+
+
+# (概念名里的关键词, 禁止同现的事件关键词)。
+# 右侧一律用**动作/性质词**，不用主体词 —— 主体和题材本来就该同现。
+_SEMANTIC_EXCLUSION: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    # 收购、重组是主动的利好叙事，不跟监管动作同现。
+    (
+        ("收购", "并购", "重组", "借壳", "资产注入"),
+        ("监管工作函", "关注函", "问询函", "监管函", "立案", "警示函", "处罚", "退市"),
+    ),
+    # 涨价、提价是景气叙事，不跟降价、跌价同现。
+    (("涨价", "提价", "价格上调"), ("降价", "跌价", "价格下调", "下调价格", "暴跌")),
+    # 中标、签约是订单叙事，不跟流标、解约同现。
+    (("中标", "签约", "订单"), ("流标", "废标", "终止合作", "解约", "取消订单")),
+    # 获批、上市是进展叙事，不跟撤回、终止同现。
+    (("获批", "上市", "注册生效"), ("撤回", "终止审核", "被否", "暂缓表决")),
+)
 
 
 def _concept_grounded(name: str, text: str) -> bool:
@@ -2322,9 +2499,18 @@ def _concept_grounded(name: str, text: str) -> bool:
 
 
 def _merge_mapped_concepts(concepts: list[str], blob: str) -> list[str]:
+    """词典概念排在前面，去重后取前 _CONCEPT_LIMIT 个。
+
+    词典条目带极性，这里按 `_dictionary_concepts` 的顺序取名字，极性由调用方
+    经 `_concept_polarity_map` 查（`_event_from` 的 mapping 挂点用）。
+    语义互斥在这里也要滤一遍：词典路径**绕过** `_concept_relevant`，只在那
+    一边堵会漏（监管函挂收购题材就是经词典路径进来的）。
+    """
     merged: list[str] = []
-    for name in [*_dictionary_concepts(blob), *concepts]:
-        if name and not _is_column_concept(name) and name not in merged:
+    for name in [name for name, _polarity in _dictionary_concepts(blob)] + list(concepts):
+        if not name or _is_column_concept(name) or _semantically_excluded(name, blob):
+            continue
+        if name not in merged:
             merged.append(name)
         if len(merged) >= _CONCEPT_LIMIT:
             break
@@ -5854,8 +6040,16 @@ def _apply_llm(event: dict, parsed: dict) -> None:
             if len(picked) >= _CONCEPT_LIMIT:
                 break
         event["concepts"] = picked
+    # 概念方向：词典条目自带的极性优先于事件整体方向。加息利空黄金、利好银行
+    # 这种「同一事件里两个概念方向相反」的情形，只有词典知道；按事件方向一刀切
+    # 会把其中一个标反。词典没登记的走事件方向（原来是唯一来源）。
+    polarity = _concept_polarity_map(story_blob)
     event["mapping"] = [
-        {"name": name, "kind": "concept", "direction": event.get("direction") or ""}
+        {
+            "name": name,
+            "kind": "concept",
+            "direction": _polarity_direction(polarity.get(name), event.get("direction")),
+        }
         for name in event["concepts"]
     ]
     known = {item["key"] for item in event.get("mentioned_stocks") or []}
