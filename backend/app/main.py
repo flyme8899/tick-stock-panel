@@ -16,6 +16,7 @@ from app.api import (
     abnormal,
     alerts,
     analysis,
+    auction_scan,
     backtest,
     chip,
     data,
@@ -639,6 +640,7 @@ app.include_router(overview.router)
 app.include_router(paper.router)
 app.include_router(picker.router)
 app.include_router(abnormal.router)
+app.include_router(auction_scan.router)
 app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)

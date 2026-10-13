@@ -840,6 +840,31 @@ export interface AuctionBenchmarkPayload {
   items?: AuctionBenchmarkItem[]
 }
 
+// ===== 全市场竞价扫描 (交易日 09:25 落盘) =====
+export interface AuctionScanItem {
+  symbol: string
+  ticker?: string | null
+  name?: string | null
+  gap?: number | null            // 高开幅度, 小数制 (0.05 = 5%)
+  vol_ratio?: number | null
+  auction_volume?: number | null // 竞价量, 手
+  auction_amount?: number | null // 竞价额, 元
+}
+
+export interface AuctionScanPayload {
+  state: 'ok' | 'no_data'
+  trade_date?: string | null
+  scanned_at?: string | null
+  server_ts?: number | null
+  scanned_count?: number | null
+  volume_basis?: string | null
+  min_gap?: number | null
+  min_vol_ratio?: number | null
+  dates?: string[]
+  items?: AuctionScanItem[]
+  message?: string
+}
+
 // ===== Strategy Engine =====
 export interface StrategyParamDef {
   id: string
@@ -4253,6 +4278,12 @@ export const api = {
   auctionBenchmark: (date?: string) =>
     request<AuctionBenchmarkPayload>(
       `/api/market-recap/auction-benchmark${date ? `?date=${encodeURIComponent(date)}` : ''}`,
+    ),
+
+  /** 全市场竞价扫描 (只读已落盘 JSON; 当日没有文件时 state=no_data) */
+  auctionScan: (date?: string) =>
+    request<AuctionScanPayload>(
+      `/api/auction-scan${date ? `?date=${encodeURIComponent(date)}` : ''}`,
     ),
 
   reviewReportSave: (r: {
