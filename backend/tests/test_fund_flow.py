@@ -1268,6 +1268,190 @@ def test_board_side_keeps_ranking_when_upstream_misses_a_board(tmp_path) -> None
     assert any("主力净流入居前" in item["summary"] for item in context["items"])
 
 
+def _two_name_universe(root) -> None:
+    inst = root / "instruments"
+    inst.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600519.SH", "000001.SZ"],
+        "code": ["600519", "000001"],
+        "name": ["贵州茅台", "平安银行"],
+    }).write_parquet(inst / "instruments.parquet")
+
+
+def _close_pair(root, trade_date: str, *, maotai: float, pingan: float, five: float = 3e8) -> None:
+    store.write_rows(root, "stock", trade_date, [
+        {
+            "symbol": "600519.SH", "code": "600519", "name": "贵州茅台",
+            "trade_date": trade_date, "main_net": maotai, "main_net_5d": five, "source": "efinance",
+        },
+        {
+            "symbol": "000001.SZ", "code": "000001", "name": "平安银行",
+            "trade_date": trade_date, "main_net": pingan, "main_net_5d": -five, "source": "efinance",
+        },
+    ])
+
+
+def test_stocks_today_prefers_today_intraday_snapshot(tmp_path, monkeypatch) -> None:
+    """当天 stock_intraday 有完整快照时，今日榜用最近一次盘中，不读昨收。"""
+    monkeypatch.setattr(query, "cn_today", lambda: date(2026, 10, 13))
+    _two_name_universe(tmp_path)
+    _close_pair(tmp_path, "2026-10-12", maotai=9e8, pingan=-9e8)
+    # 后写的是更早的切片。不先按 captured_at 过滤时，unique(keep=last) 会排到这一份。
+    store.write_rows(tmp_path, "stock_intraday", "2026-10-13", [
+        {
+            "symbol": "000001.SZ", "code": "000001", "name": "平安银行",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T10:30:00",
+            "main_net": 8e8, "source": "akshare_em_rank",
+        },
+        {
+            "symbol": "600519.SH", "code": "600519", "name": "贵州茅台",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T10:30:00",
+            "main_net": -1e8, "source": "akshare_em_rank",
+        },
+    ])
+    store.write_rows(tmp_path, "stock_intraday", "2026-10-13", [
+        {
+            "symbol": "600519.SH", "code": "600519", "name": "贵州茅台",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T10:00:00",
+            "main_net": 5e8, "source": "akshare_em_rank",
+        },
+        {
+            "symbol": "000001.SZ", "code": "000001", "name": "平安银行",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T10:00:00",
+            "main_net": -3e8, "source": "akshare_ths",
+        },
+    ])
+    stock_before = store.read_partition(tmp_path, "stock", "2026-10-12").height
+    payload = query.board(tmp_path)
+    today = payload["stocks_today"]
+    assert store.list_dates(tmp_path, "stock") == ["2026-10-12"]
+    assert store.read_partition(tmp_path, "stock", "2026-10-12").height == stock_before
+    assert today["trade_date"] == "2026-10-13"
+    assert today["snapshot"] == "intraday"
+    assert today["captured_at"] == "2026-10-13T10:30:00"
+    assert today["source"] == "akshare_em_rank"
+    assert today["partial"] is False
+    assert [row["code"] for row in today["inflow"]] == ["000001"]
+    assert today["inflow"][0]["main_net"] == 8e8
+    assert [row["code"] for row in today["outflow"]] == ["600519"]
+    assert today["outflow"][0]["main_net"] == -1e8
+    assert today["items"] == today["inflow"]
+    five = payload["stocks_5d"]
+    assert five["trade_date"] == "2026-10-12"
+    assert "snapshot" not in five
+    assert [row["code"] for row in five["inflow"]] == ["600519"]
+    assert five["inflow"][0]["ff_main_net_5d"] == 3e8
+
+
+def test_stocks_today_falls_back_to_stock_close(tmp_path, monkeypatch) -> None:
+    """没有可用的今日盘中时，今日榜回到 stock 收盘。昨日盘中和残缺快照都不能顶上。"""
+    monkeypatch.setattr(query, "cn_today", lambda: date(2026, 10, 13))
+    _two_name_universe(tmp_path)
+    _close_pair(tmp_path, "2026-10-12", maotai=-2e8, pingan=4e8)
+    store.write_rows(tmp_path, "stock_intraday", "2026-10-12", [
+        {
+            "symbol": "600519.SH", "code": "600519", "name": "贵州茅台",
+            "trade_date": "2026-10-12", "captured_at": "2026-10-12T14:30:00",
+            "main_net": 7e8, "source": "akshare_em_rank",
+        },
+        {
+            "symbol": "000001.SZ", "code": "000001", "name": "平安银行",
+            "trade_date": "2026-10-12", "captured_at": "2026-10-12T14:30:00",
+            "main_net": -7e8, "source": "akshare_em_rank",
+        },
+    ])
+    closed = query.board(tmp_path)["stocks_today"]
+    assert closed["snapshot"] == "close"
+    assert closed["trade_date"] == "2026-10-12"
+    assert closed["captured_at"] is None
+    assert closed["source"] is None
+    assert closed["partial"] is False
+    assert [row["code"] for row in closed["inflow"]] == ["000001"]
+    assert closed["inflow"][0]["main_net"] == 4e8
+
+    partial = tmp_path / "partial"
+    _two_name_universe(partial)
+    _close_pair(partial, "2026-10-12", maotai=-2e8, pingan=4e8)
+    store.write_rows(partial, "stock_intraday", "2026-10-13", [{
+        "symbol": "600519.SH", "code": "600519", "name": "贵州茅台",
+        "trade_date": "2026-10-13", "captured_at": "2026-10-13T10:30:00",
+        "main_net": 8e8, "source": "akshare_em_rank",
+    }])
+    again = query.board(partial)["stocks_today"]
+    assert again["snapshot"] == "close"
+    assert again["trade_date"] == "2026-10-12"
+    assert again["partial"] is False
+    assert [row["code"] for row in again["inflow"]] == ["000001"]
+
+    missing = query.board(tmp_path / "none")
+    assert missing["stocks_today"] == {
+        "trade_date": None,
+        "snapshot": None,
+        "captured_at": None,
+        "source": None,
+        "partial": False,
+        "note": None,
+        "items": [],
+        "inflow": [],
+        "outflow": [],
+    }
+    assert missing["stocks_5d"]["snapshot"] is None
+    assert missing["stocks_5d"]["captured_at"] is None
+    assert missing["stocks_5d"]["source"] is None
+
+
+def test_sector_board_splits_inflow_and_outflow(tmp_path) -> None:
+    """板块榜从全量排名里各取流入、流出，items 保持等于流入。"""
+    rows = []
+    for index in range(13):
+        rows.append({
+            "name": f"流入{index:02d}",
+            "trade_date": "2026-10-13",
+            "captured_at": "2026-10-13T10:30:00",
+            "snapshot": "intraday",
+            "net_inflow": float(13 - index) * 1e8,
+            "rank": index + 1,
+            "source": "akshare_em",
+        })
+    for index in range(13):
+        rows.append({
+            "name": f"流出{index:02d}",
+            "trade_date": "2026-10-13",
+            "captured_at": "2026-10-13T10:30:00",
+            "snapshot": "intraday",
+            "net_inflow": -float(index + 1) * 1e8,
+            "rank": 20 + index,
+            "source": "akshare_em",
+        })
+    rows.append({
+        "name": "持平",
+        "trade_date": "2026-10-13",
+        "captured_at": "2026-10-13T10:30:00",
+        "snapshot": "intraday",
+        "net_inflow": 0.0,
+        "rank": 40,
+        "source": "akshare_em",
+    })
+    store.write_rows(tmp_path, "industry", "2026-10-13", rows)
+    full = query.sectors("industry", data_dir=tmp_path)
+    assert len(full["items"]) == 27
+    assert "inflow" not in full
+    board = query.board(tmp_path)
+    industry = board["industry"]
+    assert [row["name"] for row in industry["inflow"]] == [f"流入{index:02d}" for index in range(12)]
+    assert [row["name"] for row in industry["outflow"]] == [f"流出{index:02d}" for index in range(12, 0, -1)]
+    assert industry["items"] == industry["inflow"]
+    assert all(row["net_inflow"] > 0 for row in industry["inflow"])
+    assert all(row["net_inflow"] < 0 for row in industry["outflow"])
+    names = {row["name"] for row in industry["inflow"] + industry["outflow"]}
+    assert "持平" not in names
+    assert "流入12" not in names
+    assert "流出00" not in names
+    assert board["concept"]["items"] == []
+    assert board["concept"]["inflow"] == []
+    assert board["concept"]["outflow"] == []
+
+
 def test_refresh_scoped_to_missing_board_only() -> None:
     """缺口重拉只碰缺失板块的代码，已拉到的照常 skip。"""
     existing = ["300001", "600519", "688981"]     # 已有：创业板/沪主板/科创板

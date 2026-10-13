@@ -461,6 +461,9 @@ def board_gap_note(gaps: list[str]) -> str | None:
 def _empty_stock(day: str | None, *, partial: bool = False, note: str | None = None) -> dict:
     return {
         "trade_date": day,
+        "snapshot": None,
+        "captured_at": None,
+        "source": None,
         "partial": partial,
         "note": note,
         "items": [],
@@ -508,12 +511,51 @@ def board(data_dir: Path | None = None) -> dict:
 
 
 def _sector_board(root: Path, kind: str) -> dict:
+    """流入、流出各取限额。``items`` 仍等于流入，旧前端只读这一列。"""
     payload = sectors(kind, data_dir=root)
-    payload["items"] = payload["items"][:_BOARD_SECTOR_LIMIT]
+    rows = payload["items"]
+    inflow = sorted(
+        (row for row in rows if (_amount(row.get("net_inflow")) or 0) > 0),
+        key=lambda row: row["net_inflow"],
+        reverse=True,
+    )[:_BOARD_SECTOR_LIMIT]
+    outflow = sorted(
+        (row for row in rows if (_amount(row.get("net_inflow")) or 0) < 0),
+        key=lambda row: row["net_inflow"],
+    )[:_BOARD_SECTOR_LIMIT]
+    payload["inflow"] = inflow
+    payload["outflow"] = outflow
+    payload["items"] = inflow
     return payload
 
 
 def _stocks_today(root: Path) -> dict:
+    """今日优先用当天最近一份盘中快照。样本不够或没有快照时，仍读 ``stock`` 收盘。"""
+    day = cn_today().isoformat()
+    intra = _partition(root, "stock_intraday", day)
+    captured = None
+    if not intra.is_empty() and "captured_at" in intra.columns:
+        captured = intra.select(pl.col("captured_at").max()).item()
+        if captured:
+            intra = intra.filter(pl.col("captured_at") == captured)
+        else:
+            intra = store.empty_frame("stock_intraday")
+    else:
+        intra = store.empty_frame("stock_intraday")
+    ranked = _stock_sides(root, intra, "main_net") if captured else None
+    if ranked is not None:
+        inflow, outflow = ranked
+        return {
+            "trade_date": day,
+            "snapshot": "intraday",
+            "captured_at": captured,
+            "source": _snapshot_source(intra),
+            "partial": False,
+            "note": board_gap_note(board_gaps(root, intra)),
+            "items": inflow,
+            "inflow": inflow,
+            "outflow": outflow,
+        }
     day = store.latest_date(root, "stock")
     if day is None:
         return _empty_stock(None)
@@ -525,6 +567,9 @@ def _stocks_today(root: Path) -> dict:
     inflow, outflow = ranked
     return {
         "trade_date": day,
+        "snapshot": "close",
+        "captured_at": None,
+        "source": None,
         "partial": False,
         "note": board_gap_note(board_gaps(root, frame)),
         "items": inflow,
