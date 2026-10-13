@@ -85,6 +85,82 @@ FUNDAMENTAL_PRESETS: tuple[dict[str, str], ...] = (
 _TOP_HOT_EVENTS = 8
 _CONCEPT_CONSTITUENT_CAP = 30
 
+# 宽泛板块: 命中它们等于把半个市场搬进来, 对选股没有区分度, 归为 broad 降权。
+_BROAD_MAPPING_CEILING = 800
+# usable 内部的「太窄」下限: 只选出 1~2 只的事件覆盖不足, 排在舒适区之后(但仍可用)。
+_MAPPING_MIN_COMFORTABLE = 5
+# 「重大」档在选股列表里的保底席位: 允许无映射的重大事件占位, 但不超过这个数。
+# 目的: 既不把「美联储讲话」这类高关注度新闻全埋掉, 也不让一堆选不出股的空炮
+# 霸占整个列表(线上实测: 档位优先时前 8 条仅 1 条能选出股)。
+_MAJOR_RESERVED_SLOTS = 2
+
+# 资讯栏/专栏名常被当成概念带进来(如「美联储动态」「汽车大新闻」「期货市场情报」),
+# 这类名字在板块维表里查不到, 去掉栏目后缀后往往能还原出真正的板块词。
+_COLUMN_SUFFIXES = (
+    "行业新闻", "市场情报", "大新闻", "情报站", "专栏", "快报", "动态", "新闻", "播报", "报道",
+)
+# 出现在概念名里但纯属资讯语境的虚词, 归一化时先剥掉。
+_COLUMN_INFIX = ("最新", "今日", "盘中", "早间", "午后", "隔夜", "海外", "国内")
+# 词素匹配里必须直接跳过的通用词: 它们命中一片板块却毫无指向性。
+# 只按 2 字以上统计, 所以「股」「涨」这类单字不会进来, 但「个股」「板块」会。
+_TOKEN_STOPWORDS = frozenset({
+    "个股", "板块", "行业", "概念", "指数", "基金", "龙头", "市场", "全线", "集体",
+    "大涨", "大跌", "上涨", "下跌", "走强", "走低", "涨停", "跌停", "异动", "拉升",
+    "公司", "集团", "股份", "相关", "新闻", "消息", "数据", "报告", "分析", "观点",
+    "美股", "港股", "中概", "海外", "全球", "国内", "本周", "今日", "昨日", "盘中",
+})
+
+
+def _strip_column_suffix(value: str) -> str:
+    """去掉资讯栏目后缀, 得到疑似板块词。改不出更短的名字就原样返回。"""
+    text = str(value or "").strip()
+    for suffix in _COLUMN_SUFFIXES:
+        if text.endswith(suffix) and len(text) - len(suffix) >= 2:
+            return text[: -len(suffix)]
+    return text
+
+
+def _concept_tokens(value: str) -> list[str]:
+    """把概念名切成 2 字以上的中文片段, 供「任一片段命中」的宽松匹配用。
+
+    只在精确匹配、去后缀匹配都失败时才启用 —— 「数据中心液冷」对「液冷服务器」
+    这种没有包含关系、但共享「液冷」词素的组合, 靠它才能接上。
+
+    切出来的词素要能**唯一定位**才有意义, 所以通用词(见 `_TOKEN_STOPWORDS`)
+    和单字先剔除, 避免「个股」「美股」这类噪音把宽泛板块拉进来。
+    """
+    text = _strip_column_suffix(str(value or "").strip())
+    for infix in _COLUMN_INFIX:
+        text = text.replace(infix, "")
+    parts: list[str] = []
+
+    def _keep(part: str) -> bool:
+        return len(part) >= 2 and part not in _TOKEN_STOPWORDS
+
+    # 按非中文/字母数字切开, 再对纯中文串做 2-4 字滑窗
+    for chunk in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", text):
+        if not chunk:
+            continue
+        if chunk.isascii():
+            # 短英文缩略词(ai/5g/pcb)大多本身就是一个板块名, 长串才值得切
+            if len(chunk) >= 2 and _keep(chunk):
+                parts.append(chunk)
+            continue
+        if len(chunk) <= 4:
+            if _keep(chunk):
+                parts.append(chunk)
+            continue
+        for size in (4, 3, 2):
+            for start in range(len(chunk) - size + 1):
+                part = chunk[start : start + size]
+                if _keep(part):
+                    parts.append(part)
+    seen: list[str] = []
+    for part in parts:
+        if part not in seen:
+            seen.append(part)
+    return seen
+
 
 def safe_source_id(value: str) -> bool:
     return bool(_SAFE_ID.match(value)) and ".." not in value
@@ -231,13 +307,17 @@ def build_label_index(dimensions: Dimensions) -> dict[str, set[str]]:
     return index
 
 
-def match_sector_symbols(name: str, key: str, index: dict[str, set[str]]) -> set[str]:
-    """先精确匹配板块名，没有命中时才做有限的包含匹配。"""
-    for raw in (name, key):
+def _match_exact(candidates: list[str], index: dict[str, set[str]]) -> set[str]:
+    for raw in candidates:
         exact = index.get(_norm_label(raw))
         if exact:
             return set(exact)
-    for raw in (name, key):
+    return set()
+
+
+def _match_contained(candidates: list[str], index: dict[str, set[str]]) -> set[str]:
+    """有限包含匹配: 拒绝过短词素与超过 30 个标签的过宽命中。"""
+    for raw in candidates:
         needle = _norm_label(raw)
         if len(needle) < 2:
             continue
@@ -257,6 +337,65 @@ def match_sector_symbols(name: str, key: str, index: dict[str, set[str]]) -> set
                 break
             hits |= symbols
         if hits and not too_broad:
+            return hits
+    return set()
+
+
+def _match_tokens(candidates: list[str], index: dict[str, set[str]]) -> set[str]:
+    """任一词素命中即算: 兜住「数据中心液冷 → 液冷服务器」这类无包含关系的同义说法。
+
+    词素比整名短得多, 更容易撞上一堆板块, 所以这里必须比包含匹配更严。精度护栏
+    (按专家意见收紧, 防止「科技」「美股」这类泛词把无关板块拉进甜区被优先展示):
+      ① 命中 **不同标签数** 超过 30 个视为泛词, 直接丢弃(与包含匹配同一条线);
+      ② 2 字词素**必须唯一定位**(只命中一个标签)才收 —— 2 字太短, 命中两个以上
+         标签时几乎一定是巧合; 3 字以上放宽到「命中标签数 ≤ 3」;
+      ③ 命中的股票总数超过上限的也丢弃(命中少数几个宽板块的情形)。
+    """
+    best: set[str] = set()
+    for raw in candidates:
+        for token in _concept_tokens(str(raw)):
+            key = _norm_label(token)
+            if len(key) < 2:
+                continue
+            hits: set[str] = set()
+            labels = 0
+            for label, symbols in index.items():
+                if key in label or label in key:
+                    labels += 1
+                    if labels > 30:
+                        break
+                    hits |= symbols
+            if labels > 30 or not hits:
+                continue
+            # 词素越短越容易撞车: 2 字要求唯一命中, 3 字以上最多 3 个标签。
+            max_labels = 1 if len(key) <= 2 else 3
+            if labels > max_labels:
+                continue
+            if len(hits) > _BROAD_MAPPING_CEILING:
+                continue
+            # 词素越具体(命中越少)越可信, 取最具体的那次结果
+            if not best or len(hits) < len(best):
+                best = hits
+        if best:
+            return best
+    return best
+
+
+def match_sector_symbols(name: str, key: str, index: dict[str, set[str]]) -> set[str]:
+    """把事件里的概念/标题名落到板块成分股上。
+
+    依次尝试: 精确 → 去栏目后缀 → 包含 → 词素。越靠前越可信, 命中即返回。
+    """
+    raw = [name, key]
+    stripped = [_strip_column_suffix(name), _strip_column_suffix(key)]
+    candidates: list[str] = []
+    for value in raw + stripped:
+        text = str(value or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+    for matcher in (_match_exact, _match_contained, _match_tokens):
+        hits = matcher(candidates, index)
+        if hits:
             return hits
     return set()
 
@@ -322,6 +461,68 @@ def resolve_mentioned_stock(key: str, known_symbols: set[str]) -> str | None:
     return None
 
 
+def resolve_event_symbols(
+    event: dict,
+    dimensions: Dimensions,
+    label_index: dict[str, set[str]],
+    *,
+    known_symbols: set[str] | None = None,
+    market_caps: dict[str, float] | None = None,
+    constituent_cap: int = _CONCEPT_CONSTITUENT_CAP,
+) -> set[str]:
+    """事件 → 候选个股集合。**唯一一把尺**, 选项预览与真正跑选股都用它。
+
+    与旧实现的差别(修掉专家指出的「预览数系统性高估」):
+      - 概念成分股按 `constituent_cap` 截断, 不是全量并集;
+      - 提及个股要过 `_mentioned_is_fund` 与 `resolve_mentioned_stock`;
+      - 结果再整体过滤一次基金。
+    `known_symbols` 为空时(选项预览阶段没有行情表)跳过代码校验, 但仍然过滤基金。
+    """
+    concepts = _event_concept_names(event)
+    has_dimensions = bool(dimensions.concepts or dimensions.industry_path)
+    constituents: set[str] = set()
+    if has_dimensions:
+        for concept in concepts:
+            constituents |= match_sector_symbols(concept, concept, label_index)
+
+    resolved: set[str] = set()
+    mention_rank: dict[str, int] = {}
+    mentioned = event.get("mentioned_stocks")
+    if not isinstance(mentioned, list):
+        mentioned = event.get("frequent_stocks") or []
+    for stock in mentioned:
+        if not isinstance(stock, dict):
+            continue
+        raw_key = str(stock.get("key") or "")
+        stock_name = str(stock.get("name") or "")
+        if _mentioned_is_fund(raw_key, stock_name):
+            continue
+        try:
+            mention_rank[raw_key] = int(stock.get("mentions") or 0)
+        except (TypeError, ValueError):
+            mention_rank[raw_key] = 0
+        if known_symbols:
+            symbol = resolve_mentioned_stock(raw_key, known_symbols)
+            if symbol is None:
+                continue
+        else:
+            # 预览阶段拿不到行情表, 退化为「代码看起来像 A 股个股」才收。
+            symbol = resolve_mentioned_stock(raw_key, set())
+            if symbol is None:
+                continue
+        resolved.add(symbol)
+
+    caps = market_caps or {}
+    extra = sorted(
+        constituents - resolved,
+        key=lambda symbol: (-mention_rank.get(symbol, 0), -(caps.get(symbol) or 0.0), symbol),
+    )
+    return {
+        symbol for symbol in (resolved | set(extra[:constituent_cap]))
+        if not _mentioned_is_fund(symbol)
+    }
+
+
 def map_selected_hot_event(
     event: dict,
     dimensions: Dimensions,
@@ -342,44 +543,31 @@ def map_selected_hot_event(
         source_count = 0
     label = hot_event_label(name or key, source_count)
     score = hot_display_score(source_count, mentions)
-    concepts = [str(item).strip() for item in (event.get("concepts") or []) if str(item).strip()]
+    concepts = _event_concept_names(event)
     has_dimensions = bool(dimensions.concepts or dimensions.industry_path)
     label_index = index if index is not None else build_label_index(dimensions)
-    constituents: set[str] = set()
-    if has_dimensions:
-        for concept in concepts:
-            constituents |= match_sector_symbols(concept, concept, label_index)
-    resolved: set[str] = set()
-    unresolved = 0
-    mention_rank: dict[str, int] = {}
+    symbols = resolve_event_symbols(
+        event,
+        dimensions,
+        label_index,
+        known_symbols=known_symbols,
+        market_caps=market_caps,
+    )
+    # 提及个股里有没有「连本地代码都找不到」的, 用于给用户提示。
     mentioned = event.get("mentioned_stocks")
     if not isinstance(mentioned, list):
         mentioned = event.get("frequent_stocks") or []
+    unresolved = 0
     for stock in mentioned:
         if not isinstance(stock, dict):
             continue
-        key = str(stock.get("key") or "")
-        name = str(stock.get("name") or "")
-        if _mentioned_is_fund(key, name):
+        raw_key = str(stock.get("key") or "")
+        stock_name = str(stock.get("name") or "")
+        if _mentioned_is_fund(raw_key, stock_name):
             continue
-        try:
-            mention_rank[key] = int(stock.get("mentions") or 0)
-        except (TypeError, ValueError):
-            mention_rank[key] = 0
-        symbol = resolve_mentioned_stock(key, known_symbols)
-        if symbol is None:
+        if resolve_mentioned_stock(raw_key, known_symbols) is None:
             unresolved += 1
-            continue
-        resolved.add(symbol)
-    caps = market_caps or {}
-    extra = sorted(
-        constituents - resolved,
-        key=lambda symbol: (-mention_rank.get(symbol, 0), -(caps.get(symbol) or 0.0), symbol),
-    )
-    symbols = {
-        symbol for symbol in (resolved | set(extra[:_CONCEPT_CONSTITUENT_CAP]))
-        if not _mentioned_is_fund(symbol)
-    }
+    resolved = bool(symbols - set())
     note = None
     if concepts and not has_dimensions and resolved:
         note = "尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股"
@@ -777,16 +965,156 @@ def _load_hot_snapshot(deps: PickerDeps, now: datetime) -> tuple[dict, str | Non
     return raw, None
 
 
-def _hot_group(snapshot: dict, error: str | None) -> dict:
+def _event_concept_names(event: dict) -> list[str]:
+    """事件里可以拿去查板块的名字, 按可信度排序。
+
+    先取 concepts(上游已做过相关性筛选的概念), 再补 mapping 里的概念条目。
+    上游 concepts 混进了栏目名, 所以调用方匹配时还要过一遍归一化。
+    """
+    names: list[str] = []
+    for value in event.get("concepts") or []:
+        text = str(value).strip()
+        if text and text not in names:
+            names.append(text)
+    for entry in event.get("mapping") or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("kind") or "") != "concept":
+            continue
+        text = str(entry.get("name") or "").strip()
+        if text and text not in names:
+            names.append(text)
+    return names
+
+
+def _mapping_breadth(selectable: int) -> str:
+    """把可选股数折成三档语义, 供排序与前端展示共用。"""
+    if selectable <= 0:
+        return "none"
+    if selectable > _BROAD_MAPPING_CEILING:
+        return "broad"
+    return "usable"
+
+
+def _selectable_symbols(
+    event: dict,
+    dimensions: Dimensions,
+    label_index: dict[str, set[str]],
+) -> set[str]:
+    """这个热门事件选中后会落到哪些个股上 —— 与 map_selected_hot_event 同一把尺。
+
+    用途: ① 给选项暴露真实可选股数(而不是被截断的 mapped[:3]);
+          ② 作为排序依据(可映射性 = 这条事件对选股到底有没有用)。
+
+    直接复用 `resolve_event_symbols`, 不另写一套 —— 早前预览数与真实跑出来的
+    股数对不上(预览没做 30 只截断、没过滤基金), 会系统性高估, 前端因此误导用户。
+    """
+    return resolve_event_symbols(event, dimensions, label_index, known_symbols=None)
+
+
+def _event_pick_rank(event: dict, selectable: int, *, index_ready: bool) -> tuple:
+    """热门事件在「**选股**列表」里的排序键 —— 与新闻榜单的排序口径不同。
+
+    新闻榜单要的是「按重要性看世界」, 所以档位主导。选股列表要的是「点得动」,
+    所以要的是**这条事件能不能选出股**。线上实测: 如果档位主导, 前 8 条里有
+    7 条是「美联储讲话」「欧盟制裁」这类 A 股根本没有对应板块的新闻, 点进去
+    一股都选不出来 —— 这是最伤体验的地方。
+
+    因此这里改成**可映射性主导**:
+      - usable(1.._BROAD_MAPPING_CEILING): 能选出有区分度的一篮子股, 最优先。
+      - broad(> 上限): 命中的是「国企改革」这类半个市场的板块, 点进去等于没筛,
+        排在 none 之前(好歹有股), 但不如 usable。
+      - none(0): 选不出任何股, 排最后。
+    usable 内部按 `_MAPPING_MIN_COMFORTABLE` 排 —— 只选出 1~2 只的事件覆盖不足,
+    排在舒适区之后(但仍优于 broad/none)。上限不另设阈值: 800 以上已经归 broad,
+    再划一个 400 只会制造「既非 broad 也不舒适」的模糊地带。
+    broad 内部按可选数**升序**排列: 同样是宽泛, 1000 只比 1500 只稍好一点,
+    不然整个 broad 段会退化成同分、只能靠名称兜底。
+
+    档位降为「同组内」的次级键; 无映射的「重大」由 `_hot_group` 的保底席位兜住
+    (见 _MAJOR_RESERVED_SLOTS), 不在这里硬顶。
+
+    索引不可用时(离线/维表缺失)可映射性这维退化为常数, 排序回到纯档位+热度 ——
+    不能因为算不出映射就退化成随机顺序。
+    """
+    order = {"重大": 0, "重要": 1, "一般": 2, "琐碎": 3}
+    importance = str(event.get("importance") or "一般")
+    if index_ready:
+        if selectable <= 0:
+            usefulness = (2, 0)
+        elif selectable > _BROAD_MAPPING_CEILING:
+            usefulness = (1, selectable)
+        else:
+            # 舒适区并列 0, 太窄的按「差多少只到下限」排, 越近越靠前。
+            distance = max(0, _MAPPING_MIN_COMFORTABLE - selectable)
+            usefulness = (0, distance)
+        return (
+            *usefulness,
+            order.get(importance, 2),
+            -int(event.get("mentions") or 0),
+            -int(event.get("source_count") or 0),
+            str(event.get("name") or ""),
+        )
+    return (
+        0,
+        0,
+        order.get(importance, 2),
+        -int(event.get("mentions") or 0),
+        -int(event.get("source_count") or 0),
+        str(event.get("name") or ""),
+    )
+
+
+def _hot_group(
+    snapshot: dict,
+    error: str | None,
+    dimensions: Dimensions | None = None,
+) -> dict:
+    # 选股列表的排序 ≠ 新闻榜单的排序: 这里以「能不能选出股」为主, 档位为辅。
+    # 但完全不看档位也不行 —— 全榜最重的新闻一条都不露脸会很怪。
+    # 所以: 先按可映射性排序取满, 若其中「重大」档不足 _MAJOR_RESERVED_SLOTS 条,
+    # 就用排名最高的无映射「重大」把它们换进来(而不是让空炮无限霸榜)。
+    raw_events = [e for e in (snapshot.get("events") or []) if isinstance(e, dict) and str(e.get("key") or "").strip()]
+    label_index = build_label_index(dimensions) if dimensions is not None else {}
+    index_ready = bool(label_index)
+    ranked: list[tuple[tuple, dict, int]] = []
+    for event in raw_events:
+        selectable = len(_selectable_symbols(event, dimensions, label_index)) if index_ready else 0
+        ranked.append((_event_pick_rank(event, selectable, index_ready=index_ready), event, selectable))
+    ranked.sort(key=lambda row: row[0])
+
+    # 保底席位: 若按可映射性取出的前 N 里「重大」档少于 _MAJOR_RESERVED_SLOTS 条,
+    # 就从榜外把排名最前的「重大」补进来 —— 但补进来的位置固定在**末尾**, 让它们
+    # 不挤占可映射事件的位置。实现上先砍掉末位若干条, 再一次性拼接, 避免「取末位
+    # 替换后重排、下一轮又覆盖刚插入的那条」的错乱(专家指出的替换 bug)。
+    if index_ready:
+        picked = ranked[:_TOP_HOT_EVENTS]
+
+        def _is_major(row: tuple) -> bool:
+            return str(row[1].get("importance") or "") == "重大"
+
+        majors_in = sum(1 for row in picked if _is_major(row))
+        shortfall = _MAJOR_RESERVED_SLOTS - majors_in
+        if shortfall > 0:
+            picked_ids = {id(row) for row in picked}
+            waiting = [
+                row for row in ranked[_TOP_HOT_EVENTS:]
+                if _is_major(row) and id(row) not in picked_ids
+            ][:shortfall]
+            if waiting:
+                # 从榜尾让位, 但保护榜内唯一的「重大」不被换掉。
+                keep = picked[: _TOP_HOT_EVENTS - len(waiting)]
+                # 保底条目按原排名插回, 保证整体仍是有序的(它们本来排在最后)。
+                picked = sorted(keep + waiting, key=lambda row: row[0])[:_TOP_HOT_EVENTS]
+    else:
+        picked = ranked[:_TOP_HOT_EVENTS]
+    selected = picked
+
     items = []
-    for event in snapshot.get("events") or []:
+    for _rank, event, selectable in selected:
         if len(items) >= _TOP_HOT_EVENTS:
             break
-        if not isinstance(event, dict):
-            continue
         key = str(event.get("key") or "").strip()
-        if not key:
-            continue
         try:
             mentions = int(event.get("mentions") or 0)
             source_count = int(event.get("source_count") or 0)
@@ -828,6 +1156,13 @@ def _hot_group(snapshot: dict, error: str | None) -> dict:
             "importance": str(event.get("importance") or ""),
             "confirmation": _confirmation_brief(event.get("confirmation")),
             "mapped_stocks": mapped,
+            # 真实可选股数(过滤前算出的全集), 供选股选项直接展示「会选出 N 只」。
+            # mapped_stocks 只有前 3 个, 前端无法据此还原总数。
+            "selectable_count": selectable,
+            "concept_total": len(event.get("concepts") or []),
+            # 映射广度: usable=有区分度(1..上限) / broad=命中过宽板块 / none=选不出股。
+            # 前端据此决定这条能不能点、要不要提示「范围较大」。
+            "mapping_breadth": _mapping_breadth(selectable),
         })
     return {
         "id": "hot_events",
@@ -917,7 +1252,7 @@ def build_catalog(deps: PickerDeps, snapshot: dict | None = None, hot_error: str
                     for item in FUNDAMENTAL_PRESETS
                 ],
             },
-            _hot_group(snapshot, hot_error),
+            _hot_group(snapshot, hot_error, dimensions),
             {"id": "technical", "label": "技术面/短线", "items": technical},
             {
                 "id": "factor",
