@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 RETRY_GAP_S = 30 * 60
 SECTOR_GAP_S = 180
 # 个股即时资金流落在 5–10 分钟这一档。6 分钟是固定间隔，文档和页面按这个数写。
+# 东财当日排名要翻页，再加 1 秒限流，一次大约一分多钟，不能占住这条线程。
 STOCK_INTRADAY_GAP_S = 6 * 60
 
 _worker: FundFlowWorker | None = None
@@ -394,6 +395,7 @@ class FundFlowWorker:
             "akshare": CircuitBreaker("akshare", clock=time_time),
         }
         self.deferred_reason: str | None = None
+        self._intraday_thread: threading.Thread | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -419,7 +421,8 @@ class FundFlowWorker:
             if self._stop.is_set():
                 return
             try:
-                self.run_once()
+                # 盘中个股要翻页，放到旁路线程，避免这一轮的板块和收盘任务干等。
+                self.run_once(detach_intraday=True)
             except Exception:
                 logger.exception("资金进出本轮失败")
 
@@ -432,19 +435,27 @@ class FundFlowWorker:
         symbols: list[str] | None = None,
         trading: bool | None = None,
         busy: bool | None = None,
+        detach_intraday: bool = False,
     ) -> list[str]:
-        """跑当前到点的任务。返回实际启动的名字。忙或未开时返回空。"""
+        """跑当前到点的任务。返回实际启动的名字。忙或未开时返回空。
+
+        ``detach_intraday`` 为真时，盘中个股在旁路线程里拉，本轮不等它结束。
+        测试默认仍在当前线程跑完，方便直接读落盘。
+        """
         if not self._run_lock.acquire(blocking=False):
             return []
         try:
             return self._run_once(
                 now=now, data_dir=data_dir, clients=clients,
                 symbols=symbols, trading=trading, busy=busy,
+                detach_intraday=detach_intraday,
             )
         finally:
             self._run_lock.release()
 
-    def _run_once(self, *, now, data_dir, clients, symbols, trading, busy) -> list[str]:
+    def _run_once(
+        self, *, now, data_dir, clients, symbols, trading, busy, detach_intraday: bool = False,
+    ) -> list[str]:
         from app.config import settings
 
         now = now or cn_now()
@@ -490,9 +501,23 @@ class FundFlowWorker:
 
             clients = live_clients(data_dir)
         ran: list[str] = []
-        for name in planned:
+        ordered = list(planned)
+        if detach_intraday and "stock_intraday" in ordered:
+            # 先把慢任务丢出去，后面的板块快照不用等分页结束。
+            ordered = ["stock_intraday", *[name for name in ordered if name != "stock_intraday"]]
+        for name in ordered:
             if self._stop.is_set():
                 break
+            if name == "stock_intraday" and detach_intraday:
+                if self._intraday_running():
+                    logger.info("盘中个股主力净流入仍在拉取，本轮不重复启动")
+                    continue
+                self._mark_attempt(data_dir, name, now)
+                self._spawn_stock_intraday(
+                    data_dir, now, clients, trading=trading, known_days=known,
+                )
+                ran.append(name)
+                continue
             self._mark_attempt(data_dir, name, now)
             self._execute(
                 data_dir, name, now, clients, symbols,
@@ -504,6 +529,49 @@ class FundFlowWorker:
                 break
         self._persist_breakers(data_dir)
         return ran
+
+    def _intraday_running(self) -> bool:
+        thread = self._intraday_thread
+        return thread is not None and thread.is_alive()
+
+    def wait_intraday(self, timeout: float = 5) -> None:
+        """测试里等旁路拉取结束。生产循环不调用。"""
+        thread = self._intraday_thread
+        if thread is not None:
+            thread.join(timeout)
+
+    def _spawn_stock_intraday(
+        self,
+        data_dir: Path,
+        now: datetime,
+        clients,
+        *,
+        trading: bool,
+        known_days: list[date],
+    ) -> None:
+        day = now.date().isoformat()
+        trade_day = task_day("stock_intraday", now, trading=trading, known_days=known_days)
+        captured = f"{trade_day}T{now.strftime('%H:%M:%S')}"
+        breaker = self.breakers["akshare"]
+
+        def target() -> None:
+            try:
+                result = jobs.sync_stock_intraday(
+                    data_dir, clients, trade_date=trade_day, captured_at=captured, breaker=breaker,
+                )
+                if not result.errors:
+                    _mark_success(data_dir, "stock_intraday", day)
+            except Exception:
+                logger.exception("盘中个股主力净流入拉取失败")
+            finally:
+                try:
+                    self._persist_breakers(data_dir)
+                except Exception:
+                    logger.exception("盘中个股主力净流入写回熔断状态失败")
+
+        thread = threading.Thread(target=target, name="fund-flow-intraday", daemon=True)
+        self._intraday_thread = thread
+        thread.start()
 
     def _execute(
         self,
@@ -610,7 +678,11 @@ class FundFlowWorker:
 
     def _restore_breakers(self, data_dir: Path) -> None:
         saved = (store.load_state(data_dir).get("sources") or {})
+        # 旁路线程正在打东财时，磁盘上的熔断计数可能还是上一轮的。不要把它盖回去。
+        intraday_busy = self._intraday_running()
         for name, breaker in self.breakers.items():
+            if name == "akshare" and intraday_busy:
+                continue
             row = saved.get(name) or {}
             try:
                 breaker.open_until = float(row.get("open_until") or 0)
@@ -619,9 +691,12 @@ class FundFlowWorker:
                 continue
 
     def _persist_breakers(self, data_dir: Path) -> None:
-        payload = store.load_state(data_dir)
-        payload["sources"] = {name: breaker.snapshot() for name, breaker in self.breakers.items()}
-        store.save_state(data_dir, payload)
+        def mutate(payload: dict) -> None:
+            payload["sources"] = {
+                name: breaker.snapshot() for name, breaker in self.breakers.items()
+            }
+
+        store.mutate_state(data_dir, mutate)
 
 
 def time_time() -> float:

@@ -2371,13 +2371,29 @@ export interface SectorRotationUniverseItem {
 export interface FundFlowIntradayItem {
   code: string
   name?: string | null
-  /** 同花顺即时净额（流入减流出），单位元。缺失的代码不会出现在 items 里。 */
+  /**
+   * 单位元。`source=akshare_em_rank` 时是东财今日主力净流入；
+   * `source=akshare_ths` 时是同花顺即时净额（流入减流出）。
+   * 缺失的代码不会出现在 items 里。
+   */
   main_net: number | null
+  /** 东财超大单净流入，元。同花顺备用快照为空。 */
+  super_net?: number | null
+  /** 东财大单净流入，元。同花顺备用快照为空。 */
+  large_net?: number | null
+  /** 东财中单净流入，元。同花顺备用快照为空。 */
+  medium_net?: number | null
+  /** 东财小单净流入，元。同花顺备用快照为空。 */
+  small_net?: number | null
+  /** `akshare_em_rank` 或 `akshare_ths`。 */
+  source?: string | null
 }
 
 export interface FundFlowIntraday {
   trade_date: string | null
   captured_at: string | null
+  /** 这一份快照的来源。和 items 里的 source 相同。没有快照时为空。 */
+  source: string | null
   items: FundFlowIntradayItem[]
 }
 

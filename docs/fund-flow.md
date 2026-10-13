@@ -12,7 +12,7 @@ HK 服务器上这些入口不可用，调用表里没有它们：
 - `ak.stock_main_fund_flow`
 - 东财 push2 板块资金流（含 `ak.stock_sector_fund_flow_rank`）
 
-个股日频账单用显式 secid 直接请求东财 push2his，不再经 efinance 搜索代码。全市场当日 / 5 日排名才用 akshare：同花顺 `stock_fund_flow_individual` 优先，东财 `stock_individual_fund_flow_rank` 作备选。同花顺个股榜缺深市主板和北交所时，用东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 分页补一次当日主力、大单和超大单，走统一限速和超时。深市主板按交易日拉全市场后只留 000/001/002/003。北交所同花顺榜没有，按 430、8 字头和 920 三段代码过滤后再翻页，不把沪深再拉一遍。这套接口和龙虎榜、两融、PE 相同。行情列表 ``push2`` 在部分云服务器上返回 502，这里不再用它补板块，也不再对这两个板块逐只打历史账单。数据中心这三个净额字段的单位是万元，落盘前换成元。日志里的「整段缺板块」按缺失只数占该板块应有只数达到 80% 才写；只缺几只科创板不会报整段缺失。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。东财 push2 的板块资金流接口仍然不调用。
+个股日频账单用显式 secid 直接请求东财 push2his，不再经 efinance 搜索代码。全市场当日 / 5 日排名才用 akshare：同花顺 `stock_fund_flow_individual` 优先，东财 `stock_individual_fund_flow_rank` 作备选。盘中个股主力净流入相反，默认先打东财当日排名，不够再退回同花顺，见下表。同花顺个股榜缺深市主板和北交所时，用东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 分页补一次当日主力、大单和超大单，走统一限速和超时。深市主板按交易日拉全市场后只留 000/001/002/003。北交所同花顺榜没有，按 430、8 字头和 920 三段代码过滤后再翻页，不把沪深再拉一遍。这套接口和龙虎榜、两融、PE 相同。行情列表 ``push2`` 在部分云服务器上返回 502，这里不再用它补板块，也不再对这两个板块逐只打历史账单。数据中心这三个净额字段的单位是万元，落盘前换成元。日志里的「整段缺板块」按缺失只数占该板块应有只数达到 80% 才写；只缺几只科创板不会报整段缺失。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。东财 push2 的板块资金流接口仍然不调用。
 
 ## 来源和时刻
 
@@ -21,7 +21,7 @@ HK 服务器上这些入口不可用，调用表里没有它们：
 | 数据 | 源 | 时刻 |
 | --- | --- | --- |
 | 个股主力 / 大单 / 超大单 | 东财 push2his 日 K，secid 由代码推导（沪市 `1.`，深市和北交所 `0.`）。已经请求过但没拿到的代码用妙想 `MX_APIKEY`。熔断后还没轮到的代码不进妙想，改走全市场排名 | 交易日 16:30 之后。单线程，约 2.5 次/秒，带浏览器请求头。本轮失败率超过 5%（至少 20 次）后降到 1 次/秒。第一次每个代码留最近 120 个日期。当天分区不足全市场时会整表重拉。排名兜底只写当日主力，以及单独一列的 5 日合计 |
-| 个股盘中资金净额（同花顺即时「净额」，流入减流出，不是东财主力净流入） | akshare 同花顺 `stock_fund_flow_individual(symbol="即时")`。金额按「亿」「万」后缀换成元，没有后缀按元 | 交易日连续竞价 9:30–11:30、13:00–15:00 每 6 分钟一份快照。午休、收盘后、周末不拉，也不补历史。走东财共用限流（同花顺分页占用同一间隔），单次连接 10 秒、读取 30 秒。失败后 2 秒、4 秒、8 秒退避，最多 3 次重试。空表不覆盖已有快照 |
+| 个股盘中主力净流入 | 默认东财 akshare `stock_individual_fund_flow_rank(indicator="今日")`。`今日主力净流入-净额` 以及超大单、大单、中单、小单净额都已是元，正数净流入、负数净流出，不乘万、不改符号。失败、空表或有效行不足 1000 时记日志，改走同花顺 `stock_fund_flow_individual(symbol="即时")` 的「净额」（流入减流出，带「亿」「万」按后缀，否则按元）。`FUND_FLOW_INTRADAY_PRIMARY=ths` 时只走同花顺 | 交易日连续竞价 9:30–11:30、13:00–15:00 每 6 分钟一份快照。午休、收盘后、周末不拉，也不补历史。东财只试一次（分页加 1 秒限流大约要一分多钟，不再做 2/4/8 秒重试）。同花顺仍按 2 秒、4 秒、8 秒退避，最多 3 次重试。两边都走东财共用限流，单次连接 10 秒、读取 30 秒。这次拉取在旁路线程，不挡住同一轮的板块和其它资金任务。空表不覆盖已有快照 |
 | 行业 / 概念资金 | akshare 同花顺，`symbol="即时"` | 交易日 9:30–15:00 每 3 分钟一份盘中快照，60 秒内不重复请求。15:05 之后再写一份收盘快照 |
 | 融资融券 | `stock_margin_sse`、`stock_margin_detail_sse`、深交所对应接口。深市空表（pandas `Length mismatch`）不当成源故障，保留已拿到的沪市，并再试上一交易日的深市 | 次日约 08:30 拉上一交易日。20:00 若那天还没落盘再试一次。融资余额按 akshare 的元入库，页面除以 1 亿显示为亿元。2026-10-09 沪市融资余额 12914.37 亿元，约 1.29 万亿元 |
 | ETF 份额 | 上交所 `fund_etf_scale_sse`；深交所 `fund_scale_daily_szse`（[ETF规模](https://www.szse.cn/market/fund/volume/etf/index.html)，`symbol="ETF"`） | 交易日 16:40。两边的裸数字都是份：上交所接口在 akshare 1.19.1 里已经把万份乘了 10000；深交所列名是「基金规模(份)」，入库不再乘。带「万」「亿」的文本仍按后缀换。`fund_etf_scale_szse` 只有当前快照、没有交易日，不用它回补。深市不走东财，所以不进东财限流器。一边失败时另一边仍落盘，当天记错误并稍后重试。`data/etf_flow` 里已有的 ETF领航者净流入按代码和日期接上，对不上就空着 |
@@ -45,7 +45,7 @@ data/fund_flow/<kind>/date=YYYY-MM-DD/part.parquet
 
 `kind` 是 `stock`、`stock_intraday`、`industry`、`concept`、`margin`、`etf_shares`、`southbound`、`northbound_turnover`、`lhb`。
 
-`stock_intraday` 按 `code` + `captured_at` 留多份快照。页面只读当天最近一份的同花顺净额，标签是「盘中资金净额(同花顺)」。昨天的快照不会显示成今天的即时数。没有该代码时留空，不写成 0。自选表和个股详情红为正、绿为负。悬停说明这不是东财主力净流入。
+`stock_intraday` 按 `code` + `captured_at` 留多份快照。每行有 `source`：东财是 `akshare_em_rank`，同花顺备用是 `akshare_ths`。东财行另外有 `super_net`、`large_net`、`medium_net`、`small_net`，单位和符号与 `main_net` 相同；同花顺行这四列为空。页面只读当天最近一份。东财快照的标签是「盘中主力净流入」，同花顺快照的标签是「盘中资金净额(同花顺)」。昨天的快照不会显示成今天的即时数。没有该代码时留空，不写成 0。自选表和个股详情红为正、绿为负。
 
 写入先写临时文件再替换。同一主键后写覆盖先写。金额进库后是元，份额是份。板块排名 1 表示净流入最大。
 
@@ -74,7 +74,7 @@ backfill_etf_share_history(Path("data"), live_clients(), breaker=CircuitBreaker(
 | GET | `/api/fund-flow/health` | 开关、各分区最新日期、最近错误、熔断状态 |
 | GET | `/api/fund-flow/board` | 资金流向页用的排行和短趋势。没有的块是空列表。个股带 `inflow` / `outflow`，样本不够时 `partial` 为真且名单为空。两融 `days` 带合计和「沪深合计 / 仅沪市 / 仅深市」 |
 | GET | `/api/fund-flow/stock/{symbol}` | 该股账单，以及主力净流入 5 日 |
-| GET | `/api/fund-flow/intraday?symbols=` | 当天最近一份同花顺即时净额（流入减流出，不是东财主力净流入）。`symbols` 为逗号分隔代码，最多 2000 只。开放令牌的 `read:analysis` 可以读 |
+| GET | `/api/fund-flow/intraday?symbols=` | 当天最近一份盘中快照。响应和每一行都有 `source`（`akshare_em_rank` 或 `akshare_ths`）。东财行带主力、超大单、大单、中单、小单净额，单位元。`symbols` 为逗号分隔代码，最多 2000 只。开放令牌的 `read:analysis` 可以读 |
 | GET | `/api/fund-flow/sectors?kind=industry\|concept` | 行业或概念排名。有收盘快照用收盘，否则用当天最后一次盘中 |
 | GET | `/api/fund-flow/margin` | 两融汇总，明细默认最多 100 行 |
 | GET | `/api/fund-flow/etf-shares` | ETF 份额，能接上领航者时带 `flow_net` |
@@ -100,6 +100,7 @@ backfill_etf_share_history(Path("data"), live_clients(), breaker=CircuitBreaker(
 | `FUND_FLOW_ENABLED` | 关 | 本部署打开 |
 | `FUND_FLOW_STOCK` | 关 | 打开 |
 | `FUND_FLOW_STOCK_INTRADAY` | 总开关打开时默认开 | 打开。写成 false 才关 |
+| `FUND_FLOW_INTRADAY_PRIMARY` | `eastmoney` | `eastmoney` 或 `ths`。无法识别时按东财并记日志 |
 | `FUND_FLOW_SECTOR` | 关 | 打开 |
 | `FUND_FLOW_MARGIN` | 关 | 打开 |
 | `FUND_FLOW_ETF_SHARES` | 关 | 打开 |

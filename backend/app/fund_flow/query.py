@@ -54,16 +54,42 @@ def health(data_dir: Path | None = None) -> dict:
     }
 
 
+def _amount(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and value != value:
+            return None
+        return float(value)
+    return None
+
+
+def _snapshot_source(frame: pl.DataFrame) -> str | None:
+    """一份快照只有一个源。混进来源时不猜，交给每行自己的 source。"""
+    if frame.is_empty() or "source" not in frame.columns:
+        return None
+    found: list[str] = []
+    for value in frame.get_column("source").drop_nulls().unique().to_list():
+        text = str(value or "").strip()
+        if text and text not in found:
+            found.append(text)
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
 def intraday_latest(
     symbols: list[str] | None = None,
     *,
     data_dir: Path | None = None,
     today: str | None = None,
 ) -> dict:
-    """今天最近一份同花顺即时净额（流入减流出）。没有快照时 items 为空，不把缺失写成 0。
+    """今天最近一份盘中个股资金快照。没有快照时 items 为空，不把缺失写成 0。
 
+    东财行的 ``main_net`` 是今日主力净流入（元，正数净流入）。同花顺备用行仍是
+    即时「净额」（流入减流出）。``source`` 写在响应上，也写在每一行。
     只读当天分区。昨天的快照不带到今天，避免开盘前把昨日盘中数当成即时。
-    ``symbols`` 为空列表时不返回行，仍带上快照时间。``None`` 表示不按代码过滤。
+    ``symbols`` 为空列表时不返回行，仍带上快照时间和来源。``None`` 表示不按代码过滤。
     """
     root = _dir(data_dir)
     day = today or cn_today().isoformat()
@@ -77,28 +103,36 @@ def intraday_latest(
             frame = store.empty_frame("stock_intraday")
     else:
         frame = store.empty_frame("stock_intraday")
+    snapshot_source = _snapshot_source(frame)
     if symbols is not None:
         codes = [code for symbol in symbols if (code := normalize.code6(symbol))]
         if codes and not frame.is_empty():
             frame = frame.filter(pl.col("code").is_in(codes))
         else:
             frame = store.empty_frame("stock_intraday")
+    columns = [
+        "code", "name", "main_net", "super_net", "large_net", "medium_net", "small_net", "source",
+    ]
     items = []
     if not frame.is_empty():
-        for row in frame.select(["code", "name", "main_net"]).iter_rows(named=True):
-            amount = row.get("main_net")
+        for row in frame.select(columns).iter_rows(named=True):
+            amount = _amount(row.get("main_net"))
             if amount is None:
-                continue
-            if isinstance(amount, float) and amount != amount:
                 continue
             items.append({
                 "code": row.get("code"),
                 "name": row.get("name"),
                 "main_net": amount,
+                "super_net": _amount(row.get("super_net")),
+                "large_net": _amount(row.get("large_net")),
+                "medium_net": _amount(row.get("medium_net")),
+                "small_net": _amount(row.get("small_net")),
+                "source": row.get("source") or None,
             })
     return {
         "trade_date": day if captured else None,
         "captured_at": captured,
+        "source": snapshot_source,
         "items": items,
     }
 

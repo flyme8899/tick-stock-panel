@@ -9,7 +9,7 @@ import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { extendMinuteTail } from '@/lib/minuteTailExtend'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
-import { fmtPrice, fmtPct, fmtBigNum, fmtSignedFlow, flowClock, intradayNetTitle, INTRADAY_NET_HINT, INTRADAY_NET_LABEL, priceColorClass, formatExtNumber } from '@/lib/format'
+import { fmtPrice, fmtPct, fmtBigNum, fmtSignedFlow, flowClock, intradayNetTitle, intradayNetHint, intradayNetLabel, priceColorClass, formatExtNumber } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
@@ -480,6 +480,7 @@ const StockCard = React.memo(function StockCard({
   groupChangePending,
   mainNet,
   flowClockLabel,
+  flowSource,
 }: {
   r: any
   candleRows: KlineRow[]
@@ -499,9 +500,11 @@ const StockCard = React.memo(function StockCard({
   groups: WatchlistGroup[]
   onToggleMember: (symbol: string, groupId: string, member: boolean) => void
   groupChangePending: boolean
-  /** 同花顺即时净额，单位元。没有快照时为 null，卡片显示 —。 */
+  /** 盘中主力净流入或同花顺备用净额，单位元。没有快照时为 null，卡片显示 —。 */
   mainNet: number | null
   flowClockLabel: string
+  /** 快照来源。`akshare_ths` 时标签改成同花顺净额。 */
+  flowSource: string | null
 }) {
   const board = boardTag(r.symbol)
   const price = r.rt_price ?? r.close
@@ -601,8 +604,8 @@ const StockCard = React.memo(function StockCard({
 
         {/* 第三行: 指标 */}
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-muted leading-relaxed">
-          <span title={intradayNetTitle(flowClockLabel, mainNet != null)}>
-            {INTRADAY_NET_LABEL}
+          <span title={intradayNetTitle(flowClockLabel, mainNet != null, flowSource)}>
+            {intradayNetLabel(flowSource)}
             <span className={`font-mono ml-0.5 ${priceColorClass(mainNet)}`}>{fmtSignedFlow(mainNet)}</span>
           </span>
           <span title="换手率">换手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span></span>
@@ -1064,6 +1067,7 @@ export function Watchlist() {
     return map
   }, [intradayFlow.data])
   const flowCaptured = flowClock(intradayFlow.data?.captured_at)
+  const flowSource = intradayFlow.data?.source ?? null
   const mainNetOf = useCallback((symbol: string): number | null => {
     const code = symbol.split('.')[0] ?? ''
     const amount = flowByCode.get(code)
@@ -1355,6 +1359,7 @@ export function Watchlist() {
       groupChangePending={addGroupMember.isPending || removeGroupMember.isPending}
       mainNet={mainNetOf(r.symbol)}
       flowClockLabel={flowCaptured}
+      flowSource={flowSource}
     />
   )
 
@@ -1678,8 +1683,8 @@ export function Watchlist() {
               renderHeaderContent={(col) => {
                 if (col.source.type === 'builtin' && col.source.key === 'main_net_intraday') {
                   return (
-                    <span className="shrink-0 whitespace-nowrap" title={INTRADAY_NET_HINT}>
-                      {col.label}
+                    <span className="shrink-0 whitespace-nowrap" title={intradayNetHint(flowSource)}>
+                      {intradayNetLabel(flowSource)}
                     </span>
                   )
                 }
@@ -1849,7 +1854,7 @@ export function Watchlist() {
                 }
                 if (key === 'main_net_intraday') {
                   const net = mainNetOf(r.symbol)
-                  const title = intradayNetTitle(flowCaptured, net != null)
+                  const title = intradayNetTitle(flowCaptured, net != null, flowSource)
                   return (
                     <td className={`${numCls} ${priceColorClass(net)}`} title={title}>
                       {fmtSignedFlow(net)}

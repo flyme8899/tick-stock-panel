@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -64,6 +65,11 @@ _SCHEMAS: dict[str, dict[str, pl.DataType]] = {
         "trade_date": pl.Utf8,
         "captured_at": pl.Utf8,
         "main_net": pl.Float64,
+        # 东财当日排名才有这四列，单位元，符号与主力相同。同花顺即时净额留空。
+        "super_net": pl.Float64,
+        "large_net": pl.Float64,
+        "medium_net": pl.Float64,
+        "small_net": pl.Float64,
         "source": pl.Utf8,
     },
     "industry": {
@@ -468,11 +474,25 @@ def save_state(data_dir: Path, payload: dict) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+# 盘中拉取在旁路线程里写状态，调度线程同一轮也会写。读改写必须包在同一把锁里。
+_state_lock = threading.Lock()
+
+
+def mutate_state(data_dir: Path, mutator) -> dict:
+    """在锁里读出状态、改完再写回。``mutator`` 就地修改 payload。"""
+    with _state_lock:
+        payload = load_state(data_dir)
+        mutator(payload)
+        save_state(data_dir, payload)
+        return payload
+
+
 def update_kind_state(data_dir: Path, kind: str, **fields: object) -> dict:
-    payload = load_state(data_dir)
-    current = dict(payload["kinds"].get(kind) or {})
-    current.update(fields)
-    current["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    payload["kinds"][kind] = current
-    save_state(data_dir, payload)
-    return current
+    def mutate(payload: dict) -> None:
+        current = dict(payload["kinds"].get(kind) or {})
+        current.update(fields)
+        current["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        payload["kinds"][kind] = current
+
+    saved = mutate_state(data_dir, mutate)
+    return dict(saved["kinds"][kind])

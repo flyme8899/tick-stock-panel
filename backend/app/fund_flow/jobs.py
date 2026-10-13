@@ -508,6 +508,28 @@ def reset_sector_cache() -> None:
     _sector_cache.clear()
 
 
+def _call_ths_intraday(clients: SourceClients) -> list[dict]:
+    return clients.ak("stock_fund_flow_individual", symbol="即时")
+
+
+def _write_intraday(
+    data_dir: Path,
+    rows: list[dict],
+    *,
+    trade_date: str,
+    captured_at: str,
+    result: RunResult,
+) -> RunResult:
+    if not rows:
+        message = "同花顺即时个股资金流为空"
+        result.errors.append(message)
+        store.update_kind_state(data_dir, "stock_intraday", last_error=message)
+        return result
+    result.wrote = store.write_rows(data_dir, "stock_intraday", trade_date, rows)
+    store.update_kind_state(data_dir, "stock_intraday", last_error=None, last_snapshot=captured_at)
+    return result
+
+
 def sync_stock_intraday(
     data_dir: Path,
     clients: SourceClients,
@@ -517,31 +539,62 @@ def sync_stock_intraday(
     breaker: CircuitBreaker,
     sleeper: Sleeper | None = None,
 ) -> RunResult:
-    """同花顺 ``stock_fund_flow_individual(symbol="即时")`` 的一份全市场快照。
+    """一份全市场盘中快照。
 
-    失败走资金流熔断的 2s/4s/8s 退避。空表不当成成功，避免把上一份快照标成刚更新过。
-    真正出网的客户端把这次调用送进东财共用限流和缺省超时；测试注入的客户端不出网。
+    默认先打东财 ``stock_individual_fund_flow_rank(indicator="今日")``。
+    这次要翻页，再加上共用限流的 1 秒间隔，大约要一分多钟，所以只试一次：
+    不走 2/4/8 秒重试，也不记入 akshare 熔断。失败、空表或有效行少于
+    ``store.FULL_MARKET_MIN`` 时记日志，改走同花顺即时榜。同花顺仍按熔断的
+    2s/4s/8s 退避。``FUND_FLOW_INTRADAY_PRIMARY=ths`` 时跳过东财。
+
+    空表不当成成功，避免把上一份快照标成刚更新过。真正出网的客户端把东财排名
+    和同花顺即时榜送进共用限流和缺省超时；测试注入的客户端不出网。
     """
     result = RunResult(kind="stock_intraday")
-
-    def _call() -> list[dict]:
-        return clients.ak("stock_fund_flow_individual", symbol="即时")
+    primary = config.intraday_primary()
+    if primary == "eastmoney" and breaker.allow():
+        try:
+            raw = clients.ak("stock_individual_fund_flow_rank", indicator="今日")
+            rows = normalize.normalize_stock_intraday(
+                raw,
+                trade_date=trade_date,
+                captured_at=captured_at,
+                source=normalize.SOURCE_EM_RANK,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("盘中个股主力净流入东财失败，改走同花顺: %s", str(exc)[:300])
+        else:
+            if len(rows) >= store.FULL_MARKET_MIN:
+                result.wrote = store.write_rows(data_dir, "stock_intraday", trade_date, rows)
+                store.update_kind_state(
+                    data_dir, "stock_intraday", last_error=None, last_snapshot=captured_at,
+                )
+                return result
+            logger.warning(
+                "盘中个股主力净流入东财只有 %d 行，不足 %d，改走同花顺",
+                len(rows),
+                store.FULL_MARKET_MIN,
+            )
+    elif primary == "eastmoney":
+        logger.warning("盘中个股主力净流入跳过东财：akshare 熔断冷却中，改走同花顺")
 
     try:
-        raw = call_with_retry("akshare", _call, breaker, sleeper=sleeper)
+        raw = call_with_retry(
+            "akshare", lambda: _call_ths_intraday(clients), breaker, sleeper=sleeper,
+        )
     except Exception as exc:  # noqa: BLE001
         result.errors.append(str(exc))
         store.update_kind_state(data_dir, "stock_intraday", last_error=str(exc))
         return result
-    rows = normalize.normalize_stock_intraday(raw, trade_date=trade_date, captured_at=captured_at)
-    if not rows:
-        message = "同花顺即时个股资金流为空"
-        result.errors.append(message)
-        store.update_kind_state(data_dir, "stock_intraday", last_error=message)
-        return result
-    result.wrote = store.write_rows(data_dir, "stock_intraday", trade_date, rows)
-    store.update_kind_state(data_dir, "stock_intraday", last_error=None, last_snapshot=captured_at)
-    return result
+    rows = normalize.normalize_stock_intraday(
+        raw,
+        trade_date=trade_date,
+        captured_at=captured_at,
+        source=normalize.SOURCE_THS,
+    )
+    return _write_intraday(
+        data_dir, rows, trade_date=trade_date, captured_at=captured_at, result=result,
+    )
 
 
 def fetch_sector_rows(

@@ -6,6 +6,7 @@
 
 个股历史失败后，妙想只补已经请求过、但没有拿到的代码。全市场今日 / 5 日排名用
 同花顺 ``stock_fund_flow_individual``，不行再用东财 ``stock_individual_fund_flow_rank``。
+盘中个股主力净流入反过来：默认先打东财当日排名，失败或行数不足再退回同花顺即时榜。
 深市主板和北交所的整段缺口改为东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 分页补一次，走统一限速，不再逐只打历史账单。北交所按代码段过滤。
 逐只的 ``stock_individual_fund_flow`` 和 push2 板块资金流接口仍然不调用。
 """
@@ -230,9 +231,9 @@ def live_clients(data_dir: Path | None = None) -> SourceClients:
         return payload
 
     def ak_call(name: str, **kwargs: Any):
-        # 同花顺个股资金流（含「即时」）走共用限流：东财间隔、缺省超时、失败退避在调用方。
-        # 其它 akshare 函数保持原请求，避免把两融、ETF 也改到这把锁上。
-        if name == "stock_fund_flow_individual":
+        # 个股资金流分页走共用限流：东财间隔、缺省超时。同花顺即时榜和东财当日排名
+        # 都会连续翻页，一次要几十秒。其它 akshare 函数保持原请求，避免把两融、ETF 也改到这把锁上。
+        if name in {"stock_fund_flow_individual", "stock_individual_fund_flow_rank"}:
             from app.eastmoney.akshare_gate import call_akshare
 
             return call_akshare(name, **kwargs)

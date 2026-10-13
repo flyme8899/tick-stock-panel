@@ -25,7 +25,11 @@ def stock(symbol: str, limit: int = Query(120, ge=1, le=500)) -> dict:
 
 @router.get("/intraday")
 def intraday(symbols: str = Query("", max_length=20000)) -> dict:
-    """自选和个股详情读的同花顺即时净额。只读本地快照，不触发出网。"""
+    """自选和个股详情读的盘中个股资金快照。只读本地，不触发出网。
+
+    ``source`` 为 ``akshare_em_rank``（东财今日主力净流入）或 ``akshare_ths``
+    （同花顺即时净额）。金额单位是元。
+    """
     requested = [part.strip() for part in symbols.split(",") if part.strip()]
     return query.intraday_latest(requested[:2000])
 
