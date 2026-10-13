@@ -65,6 +65,15 @@ export interface ChartPriceLine {
   end?: string
 }
 
+/**
+ * 价位线参与 Y 轴扩张的允许偏离(相对可见 K 线的价格中枢)。
+ *
+ * 取错字段、旧报告残留的远期目标价会离现价很远 (300502.SZ: 现价 337 却有
+ * 一条「目标 5.00」), 一旦参与 min/max 计算就把坐标轴撑开, 蜡烛挤成一条线。
+ * 超出这条线的价位线不主导坐标轴。
+ */
+export const KLINE_OVERLAY_BAND = 0.2
+
 export interface StockInfo {
   name?: string
   total_shares?: number
@@ -740,20 +749,38 @@ function buildOption(
   const hasPatternTag = (markers ?? []).some(marker => marker.patternTag)
   // 形态短标签贴在影线外，轴边距加大一点，避免顶底那根的字被裁掉
   const pricePad = hasPatternTag ? 0.1 : 0.03
+  // 只有离当前价格带 ±KLINE_OVERLAY_BAND 以内的价位线才参与 Y 轴扩张。
+  // 取错字段或旧报告残留的远期目标价(如现价 337 却有「目标 5.00」)会把轴撑开,
+  // 蜡烛挤成一条线 —— 这几条线本身仍照画, 只是不该主导坐标轴。
   const priceLineValues = (priceLines ?? [])
     .map(line => line.value)
     .filter(value => Number.isFinite(value) && value > 0)
-  const axisMin = priceLineValues.length > 0
+  const klineRefPrice = (() => {
+    let lo = Infinity
+    let hi = -Infinity
+    for (const row of data ?? []) {
+      const low = (row as any)?.low
+      const high = (row as any)?.high
+      if (typeof low === 'number' && Number.isFinite(low) && low > 0) lo = Math.min(lo, low)
+      if (typeof high === 'number' && Number.isFinite(high) && high > 0) hi = Math.max(hi, high)
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null
+    return (lo + hi) / 2
+  })()
+  const anchoredLineValues = klineRefPrice == null
+    ? priceLineValues
+    : priceLineValues.filter(value => Math.abs(value - klineRefPrice) / klineRefPrice <= KLINE_OVERLAY_BAND)
+  const axisMin = anchoredLineValues.length > 0
     ? ({ min, max }: { min: number; max: number }) => {
-        const nextMin = Math.min(min, ...priceLineValues)
-        const nextMax = Math.max(max, ...priceLineValues)
+        const nextMin = Math.min(min, ...anchoredLineValues)
+        const nextMax = Math.max(max, ...anchoredLineValues)
         return nextMin - Math.max((nextMax - nextMin) * pricePad, nextMax * 0.001)
       }
     : undefined
-  const axisMax = priceLineValues.length > 0
+  const axisMax = anchoredLineValues.length > 0
     ? ({ min, max }: { min: number; max: number }) => {
-        const nextMin = Math.min(min, ...priceLineValues)
-        const nextMax = Math.max(max, ...priceLineValues)
+        const nextMin = Math.min(min, ...anchoredLineValues)
+        const nextMax = Math.max(max, ...anchoredLineValues)
         return nextMax + Math.max((nextMax - nextMin) * pricePad, nextMax * 0.001)
       }
     : undefined

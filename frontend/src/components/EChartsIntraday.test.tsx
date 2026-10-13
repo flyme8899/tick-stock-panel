@@ -167,3 +167,58 @@ it('listing day without prevClose anchors y-axis with scale, not zero', async ()
   expect(axis.max).toBeUndefined()
   expect(axis.scale).toBe(true)
 })
+
+// ================================================================
+// 叠加线异常价位: 离现价太远的目标/压力线不能撑开 Y 轴 (300502.SZ 场景)
+//   现价 337, 却有一条「目标 5.00」紫线 —— 旧行为把轴撑成 -11~685, 走势看不清
+// ================================================================
+const normalRows = (day: string) => [
+  { datetime: `${day} 09:30:00`, open: 336, high: 338, low: 335, close: 337, volume: 100, amount: 3370000 },
+  { datetime: `${day} 11:20:00`, open: 338, high: 340, low: 337.5, close: 339, volume: 55, amount: 1864500 },
+  { datetime: `${day} 15:00:00`, open: 339, high: 341, low: 338, close: 340, volume: 60, amount: 2040000 },
+]
+
+it('a far-away overlay line does not stretch the intraday y-axis', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const host = document.createElement('div')
+  const root = createRoot(host)
+  cleanup = async () => { await act(async () => root.unmount()) }
+  await act(async () => root.render(
+    <EChartsIntraday
+      data={normalRows('2026-10-13')}
+      date="2026-10-13"
+      prevClose={336}
+      priceLines={[
+        { value: 5.0, label: '目标 5.00', color: '#8B5CF6' },       // 坏数据
+        { value: 375.64, label: '压力 375.64', color: '#F97316' },  // ±20% 内, 保留
+        { value: 340.0, label: '支撑 340.00', color: '#3B82F6' },   // 保留
+      ]}
+    />,
+  ))
+  const axis = lastYAxis()
+  // y 轴必须贴合当天价格, 不被 5.00 拉到 0 附近。
+  // 旧行为: maxDiff = |5.00 - 336| ≈ 331 → 轴被撑成约 -11~685。
+  // 现在只有 ±20% 内的 375.64 参与放宽, 轴落在当天价与 375.64 之间。
+  expect(axis.min).toBeGreaterThan(290)
+  expect(axis.max).toBeGreaterThanOrEqual(341)
+  expect(axis.max).toBeLessThanOrEqual(400)
+  // 关键不变量: 轴宽 ≈ 2×41.6 (来自 375.64), 而不是被 5.00 撑到 2×331
+  expect(axis.max - axis.min).toBeLessThan(110)
+
+  // 超范围的那条线连 markLine 都不该画
+  const option = chart.setOption.mock.calls.at(-1)?.[0]
+  const markLines = option.series[0].markLine.data
+  const yValues = markLines.map((item: { yAxis: number }) => item.yAxis)
+  expect(yValues).not.toContain(5.0)
+  expect(yValues).toContain(340.0)
+})
+
+it('marks the same behaviour via the exported band helper', async () => {
+  const { withinOverlayBand, OVERLAY_BAND } = await import('./EChartsIntraday')
+  expect(OVERLAY_BAND).toBe(0.2)
+  expect(withinOverlayBand(5.0, 336)).toBe(false)
+  expect(withinOverlayBand(375.64, 336)).toBe(true)
+  expect(withinOverlayBand(340.0, 336)).toBe(true)
+  expect(withinOverlayBand(5.0, null)).toBe(false)
+})
