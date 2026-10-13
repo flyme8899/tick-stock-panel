@@ -19,6 +19,7 @@ const harness = vi.hoisted(() => {
     ApiError,
     mode: 'pending' as 'pending' | 'unauthorized' | 'failed' | 'ready',
     hotStatus: '' as '' | 'computing',
+    hotItems: [] as Array<Record<string, unknown>>,
     calls: 0,
   }
 })
@@ -37,7 +38,7 @@ vi.mock('@/lib/api', () => ({
           {
             id: 'hot_events',
             label: '热门事件',
-            items: [],
+            items: harness.hotItems,
             hint: harness.hotStatus === 'computing' ? '正在计算' : null,
             status: harness.hotStatus || undefined,
           },
@@ -70,6 +71,7 @@ beforeEach(() => {
   })
   harness.mode = 'pending'
   harness.hotStatus = ''
+  harness.hotItems = []
   harness.calls = 0
   host = document.createElement('div')
   document.body.append(host)
@@ -185,4 +187,80 @@ it('shows a computing hint while the hot-event snapshot is empty', async () => {
   await openMenu('热门事件')
   expect(host.textContent).toContain('正在计算热门事件，请稍候')
   expect(host.textContent).not.toContain('今日暂无热门事件')
+})
+
+it('shows an approximate-holdings badge for mappable hot events', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    {
+      id: 'ev-1', name: '液冷服务器需求爆发', description: '提及 6 · 来源 3',
+      mentions: 6, source_count: 3, selectable_count: 12, mapping_breadth: 'usable',
+    },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  expect(host.textContent).toContain('约 12 只')
+})
+
+it('greys out an unmappable hot event and blocks selecting it', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    {
+      id: 'ev-none', name: '美联储哈玛克讲话', description: '提及 9 · 来源 5',
+      mentions: 9, source_count: 5, selectable_count: 0, mapping_breadth: 'none',
+    },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  expect(host.textContent).toContain('暂无对应个股')
+  const row = [...host.querySelectorAll('button')].find(button => button.textContent?.includes('美联储哈玛克讲话'))
+  expect(row).toBeTruthy()
+  // 选不出股的事件禁用整行, 避免「点了没反应」; 用减号而非勾选框表达"不可选"。
+  expect((row as HTMLButtonElement).disabled).toBe(true)
+  expect(row!.querySelector('[role="checkbox"]')).toBeNull()
+})
+
+it('still lets an unmappable event be unticked once it is selected', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    {
+      id: 'ev-none', name: '美联储哈玛克讲话', description: '提及 9 · 来源 5',
+      mentions: 9, source_count: 5, selectable_count: 0, mapping_breadth: 'none',
+    },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  const find = () => [...host.querySelectorAll('button')]
+    .find(button => button.textContent?.includes('美联储哈玛克讲话')) as HTMLButtonElement
+  // 先经由 URL/其它途径勾选不到, 这里直接点选: 未勾选时被禁用, 点了不生效。
+  await act(async () => { find().click() })
+  await settle()
+  expect(find().disabled).toBe(true)
+})
+
+it('marks a broad mapping as a wide range instead of a precise count', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    {
+      id: 'ev-broad', name: 'AI概念全面开花', description: '提及 20 · 来源 9',
+      mentions: 20, source_count: 9, selectable_count: 30, mapping_breadth: 'broad',
+    },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  expect(host.textContent).toContain('范围较大')
+  expect(host.textContent).not.toContain('约 30 只')
+})
+
+it('does not grey out a hot event when the backend omits the new fields', async () => {
+  harness.mode = 'ready'
+  harness.hotItems = [
+    { id: 'ev-old', name: '旧快照事件', description: '提及 4 · 来源 2', mentions: 4, source_count: 2 },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  const row = [...host.querySelectorAll('button')].find(button => button.textContent?.includes('旧快照事件'))
+  expect(row).toBeTruthy()
+  expect((row as HTMLButtonElement).disabled).toBe(false)
+  expect(host.textContent).not.toContain('暂无对应个股')
 })
