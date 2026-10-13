@@ -9,12 +9,12 @@ import {
 import {
   api, type AbnormalIntradayRow, type AbnormalOverview, type AbnormalRow,
   type AbnormalStatus, type AuctionBenchmarkItem, type AuctionBenchmarkPayload,
-  type IntradaySignalKey,
+  type AuctionScanItem, type AuctionScanPayload, type IntradaySignalKey,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { toNavItems, type NavItem } from '@/lib/listNav'
-import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
+import { fmtBigNum, fmtPrice, fmtPct, fmtVolume, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
@@ -24,7 +24,7 @@ import { useQuoteStatus } from '@/lib/useSharedQueries'
 /**
  * 异动监控 — 全时段异动中心, 按交易时间线分三个 tab:
  *
- * - 竞价异动 (盘前 9:15-9:25): 同花顺短线风向标名单 + 全市场竞价扫描 (待采集任务)
+ * - 竞价异动 (盘前 9:15-9:25): 同花顺短线风向标名单 + 全市场竞价扫描
  * - 盘中异动 (盘中实时): enriched 当日信号聚合 — 涨停/炸板/翘板/跌停/新高/新低/放量
  * - 偏移异动 (多日累计): 交易所异动规则口径 (3日±20%/30%/40%, 10日+100%, 30日+200%)
  *   实时计算个股「偏离值/阈值」接近度, 找出处于异动边缘的标的。
@@ -230,10 +230,19 @@ function AuctionView({ onOpenStock }: {
     staleTime: 5 * 60_000,
     retry: 1,
   })
+  const fuyaoMissing = q.data?.state === 'source_unavailable'
+  const scan = useQuery({
+    queryKey: QK.auctionScan(),
+    queryFn: () => api.auctionScan(),
+    enabled: !fuyaoMissing,
+    staleTime: 60_000,
+    refetchInterval: fuyaoMissing ? false : 60_000,
+    retry: 1,
+  })
 
   // fuyao 未配置: 整个 tab 的统一引导态 (风向标与全市场扫描都依赖 fuyao),
   // 不再展示零散的降级卡/占位卡 — 与偏移 tab「监控未开启」空态同款式
-  if (q.data?.state === 'source_unavailable') {
+  if (fuyaoMissing) {
     return (
       <PanelEmpty
         icon={Compass}
@@ -255,29 +264,12 @@ function AuctionView({ onOpenStock }: {
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 overflow-y-auto">
       <BenchmarkCard q={q} onOpenStock={onOpenStock} />
-
-      {/* 全市场竞价扫描: 采集任务启用后填充 (接口与批量能力已验证) */}
-      <div className="rounded-card border border-dashed border-border bg-surface/50 px-4 py-4">
-        <div className="flex items-start gap-3">
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded bg-elevated/60">
-            <Radar className="h-4 w-4 text-muted/50" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm font-medium text-foreground">全市场竞价扫描</span>
-              <Badge>待采集任务启用</Badge>
-            </div>
-            <p className="mt-1.5 text-xs leading-relaxed text-muted">
-              9:25 竞价终态后扫描全市场 (实测 5547 只约 2 秒), 自动筛出高开 ≥5% 且竞价量比 ≥10
-              的标的并按日落盘积累历史。竞价明细无历史接口, 数据从采集启用之日起积累。
-            </p>
-          </div>
-        </div>
-      </div>
+      <AuctionScanCard q={scan} onOpenStock={onOpenStock} />
 
       <p className="px-1 text-xs leading-relaxed text-muted">
         风向标为同花顺盘前竞价筛选名单 (每日约 5~6 只)。60 日回测: 名单当日开盘买入均值 +0.54%
         (超额 +0.44%), 但高开 ≥5% 子集当日 -1.97% — 追高是陷阱, 次日无显著优势, 仅作当日观察。
+        全市场扫描在交易日 9:25 竞价终态后落盘，历史从启用当天开始积累。
       </p>
     </div>
   )
@@ -410,6 +402,162 @@ function BenchmarkCard({ q, onOpenStock }: {
                     <span className={cn('font-mono tabular-nums', i.d1_pct == null ? 'text-muted' : priceColorClass(i.d1_pct))}>
                       {fmtReturn(i.d1_pct)}
                     </span>
+                  </span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function fmtRatio(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return '—'
+  if (Math.abs(v) >= 100) return v.toFixed(0)
+  return v.toFixed(1)
+}
+
+function fmtGapThreshold(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return '5%'
+  const pct = Math.round(v * 1000) / 10
+  return `${Number.isInteger(pct) ? String(pct) : pct.toFixed(1)}%`
+}
+
+function fmtRatioThreshold(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return '10'
+  return Number.isInteger(v) ? String(v) : v.toFixed(1)
+}
+
+function scanClock(iso: string | null | undefined): string {
+  const match = /T(\d{2}:\d{2}:\d{2})/.exec(String(iso ?? ''))
+  return match?.[1] ?? ''
+}
+
+function volumeBasisHint(basis: string | null | undefined): string {
+  if (basis === 'avg5_div_240') return '量比 = 竞价量 ÷ (近5日均量/240)'
+  if (basis === 'snapshot_volume_ratio') return '量比取自行情快照'
+  if (basis === 'snapshot_auction_volume') return '竞价量取自行情快照，基准为近5日均量/240'
+  return ''
+}
+
+function AuctionScanCard({ q, onOpenStock }: {
+  q: UseQueryResult<AuctionScanPayload, Error>
+  onOpenStock: (symbol: string, name?: string, navList?: NavItem[]) => void
+}) {
+  const d = q.data
+  const items = d?.items ?? []
+  const navItems = useMemo(
+    () => toNavItems(items.map(i => ({ symbol: i.symbol, name: i.name }))),
+    [items],
+  )
+
+  if (q.isLoading) {
+    return (
+      <div className="flex items-center gap-3 rounded-card border border-border bg-surface/80 px-4 py-3">
+        <span className="grid h-8 w-8 shrink-0 animate-pulse place-items-center rounded bg-elevated">
+          <Radar className="h-4 w-4 text-muted/50" />
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="h-3 w-24 animate-pulse rounded-full bg-elevated/80" />
+          <span className="h-3 w-32 animate-pulse rounded-full bg-elevated/60" />
+        </div>
+      </div>
+    )
+  }
+
+  if (q.isError) {
+    return (
+      <div className="flex items-center gap-3 rounded-card border border-border bg-surface/50 px-4 py-3">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded bg-elevated/60">
+          <Radar className="h-4 w-4 text-muted/50" />
+        </span>
+        <span className="min-w-0 flex-1 text-xs text-secondary">全市场竞价扫描暂时无法读取</span>
+        <button onClick={() => q.refetch()} className="ml-auto shrink-0 text-xs text-accent hover:underline">重试</button>
+      </div>
+    )
+  }
+
+  const dates = d?.dates ?? []
+  const emptyText = d?.state === 'no_data' && dates.length === 0
+    ? '待采集（首次 9:25 后）'
+    : '当日无数据'
+  const clock = scanClock(d?.scanned_at)
+  const basis = volumeBasisHint(d?.volume_basis)
+  const rule = `高开 ≥${fmtGapThreshold(d?.min_gap)} 且量比 ≥${fmtRatioThreshold(d?.min_vol_ratio)}`
+
+  return (
+    <div className="rounded-card border border-border bg-surface/80">
+      <div className="flex items-start gap-3 px-4 py-3">
+        <span className="grid h-8 w-8 shrink-0 place-items-center rounded bg-bull/15 text-bull ring-1 ring-bull/20">
+          <Radar className="h-4 w-4" />
+        </span>
+        <span className="min-w-0 flex-1 leading-tight">
+          <span className="block text-sm font-semibold text-foreground">全市场竞价扫描</span>
+          <span className="mt-0.5 block text-xs leading-relaxed text-muted">
+            {d?.state === 'ok' ? (
+              <>
+                {d.trade_date}
+                {clock ? ` · ${clock} 扫描` : ''}
+                {d.scanned_count != null ? ` · 全市场 ${d.scanned_count} 只` : ''}
+                {` · 命中 ${items.length} 只 · ${rule}`}
+                {basis ? ` · ${basis}` : ''}
+              </>
+            ) : (
+              <>{d?.trade_date ? `${d.trade_date} · ` : ''}{rule}</>
+            )}
+          </span>
+        </span>
+      </div>
+
+      {d?.state !== 'ok' || items.length === 0 ? (
+        <p className="border-t border-border/60 px-4 py-8 text-center text-sm text-secondary">{emptyText}</p>
+      ) : (
+        <div>
+          {items.map((i: AuctionScanItem) => {
+            const gap = i.gap ?? null
+            const board = boardTag(i.symbol)
+            const code = i.ticker ?? i.symbol
+            const name = i.name ?? i.symbol
+            return (
+              <button
+                key={i.symbol}
+                type="button"
+                onClick={() => onOpenStock(i.symbol, i.name ?? undefined, navItems)}
+                className="flex w-full flex-col gap-1.5 border-t border-border/30 px-4 py-2.5 text-left transition-colors hover:bg-accent/[0.05]"
+                title={`查看 ${name} 详情 · 高开 ${gap == null ? '—' : fmtPct(gap)}`}
+              >
+                <span className="flex items-start justify-between gap-3">
+                  <span className="min-w-0">
+                    <span data-stock-name className="block break-words text-sm font-medium leading-snug text-foreground">{name}</span>
+                    <span className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-xs text-muted">{code}</span>
+                      {board && (
+                        <span className={cn('inline-flex items-center rounded border px-1.5 py-px text-[10px] font-bold leading-4', board.color)}>
+                          {board.label}
+                        </span>
+                      )}
+                    </span>
+                  </span>
+                  <span className={cn('shrink-0 font-mono text-sm font-medium tabular-nums', priceColorClass(gap))}>
+                    {gap == null ? '—' : fmtPct(gap)}
+                  </span>
+                </span>
+                <span className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+                  <span>
+                    量比{' '}
+                    <span className="font-mono tabular-nums text-foreground">{fmtRatio(i.vol_ratio)}</span>
+                  </span>
+                  <span>
+                    竞价量{' '}
+                    <span className="font-mono tabular-nums text-foreground">
+                      {i.auction_volume == null ? '—' : `${fmtVolume(i.auction_volume)}手`}
+                    </span>
+                  </span>
+                  <span>
+                    竞价额{' '}
+                    <span className="font-mono tabular-nums text-foreground">{fmtBigNum(i.auction_amount)}</span>
                   </span>
                 </span>
               </button>

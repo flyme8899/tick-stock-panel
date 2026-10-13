@@ -669,8 +669,9 @@ def _etf_changes(root: Path) -> dict:
             broad.append(item)
         elif change is not None:
             others.append(item)
-    broad.sort(key=lambda item: (item["broad"] or "", item["name"] or ""))
-    others.sort(key=lambda item: abs(item["share_change"] or 0), reverse=True)
+    # 落盘只有份额、没有市值/净值；同系列 ETF 份额与规模同序，整表按份额降序作规模代理。
+    broad.sort(key=lambda item: item.get("shares") or 0, reverse=True)
+    others.sort(key=lambda item: item.get("shares") or 0, reverse=True)
     return {
         "trade_date": day,
         "prev_trade_date": prev_day,

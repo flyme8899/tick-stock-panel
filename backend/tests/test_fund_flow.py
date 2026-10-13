@@ -731,6 +731,55 @@ def test_board_pins_szse_broad_etfs(tmp_path) -> None:
     assert "159996" not in items
 
 
+def test_board_etf_shares_sorted_by_shares_desc(tmp_path) -> None:
+    """宽基和其他组都按份额降序。落盘没有市值，份额是规模代理。"""
+    day = "2026-10-09"
+    prev = "2026-10-08"
+    broad_rows = [
+        ("159901", "创业板50ETF-A", 0.65e8),
+        ("159902", "创业板50ETF-B", 165.48e8),
+        ("159903", "创业板50ETF-C", 2.20e8),
+        ("510300", "沪深300ETF", 200e8),
+        ("588000", "科创50ETF", None),
+    ]
+    # 份额最大的非宽基变化为 0；其余 12 只份额小但变化额大。按变化额排序会把它截掉。
+    other_rows = [("510880", "红利ETF", 90e8, 90e8)]
+    for index in range(12):
+        shares = (index + 1) * 1e6
+        other_rows.append((f"512{index:03d}", f"主题ETF{index}", shares, shares - 50e8))
+
+    def row(code: str, name: str, trade_date: str, shares: float | None) -> dict:
+        return {
+            "symbol": code, "code": code, "name": name,
+            "trade_date": trade_date, "shares": shares, "source": "akshare",
+        }
+
+    store.write_rows(tmp_path, "etf_shares", prev, [
+        row(code, name, prev, shares if shares is not None else 1.0)
+        for code, name, shares in broad_rows
+    ] + [
+        row(code, name, prev, previous)
+        for code, name, _shares, previous in other_rows
+    ])
+    store.write_rows(tmp_path, "etf_shares", day, [
+        row(code, name, day, shares) for code, name, shares in broad_rows
+    ] + [
+        row(code, name, day, shares) for code, name, shares, _previous in other_rows
+    ])
+
+    items = query.board(tmp_path)["etf_shares"]["items"]
+    broad = [item for item in items if item["broad"]]
+    others = [item for item in items if not item["broad"]]
+    assert [item["code"] for item in broad] == ["510300", "159902", "159903", "159901", "588000"]
+    assert [item["shares"] for item in broad[:4]] == pytest.approx([200e8, 165.48e8, 2.20e8, 0.65e8])
+    assert broad[-1]["shares"] is None
+    assert [item["code"] for item in others] == ["510880"] + [f"512{index:03d}" for index in range(11, 0, -1)]
+    assert others[0]["share_change"] == 0
+    assert all(item["share_change"] == pytest.approx(50e8) for item in others[1:])
+    assert "512000" not in {item["code"] for item in others}
+    assert items.index(others[0]) > items.index(broad[-1])
+
+
 def test_eastmoney_secid_and_bill_request(monkeypatch: pytest.MonkeyPatch) -> None:
     assert eastmoney_secid("600519.SH") == "1.600519"
     assert eastmoney_secid("000001.SZ") == "0.000001"
