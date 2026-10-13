@@ -4198,10 +4198,14 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     if name == "vwap_bias":
         amount = market.field("amount")
         shares = market.volume * np.float32(100.0)
-        valid = close_valid & np.isfinite(amount) & (market.volume > 0) & (amount > 0)
+        # amount/(volume×100) 是不复权均价。除权日用 raw_close, 缺列时回退 close
+        # (与 strategy/scoring.py 同口径; raw_close == close 时结果不变)。
+        price = market.fields.get("raw_close", market.close)
+        price_valid = np.isfinite(price) & (price > 0)
+        valid = price_valid & np.isfinite(amount) & (market.volume > 0) & (amount > 0)
         vwap = np.full(market.shape, np.nan, dtype=np.float32)
         np.divide(amount, shares, out=vwap, where=valid)
-        return _matrix_relative(market.close, vwap)
+        return _matrix_relative(price, vwap)
     if name == "vol_trend_5_60":
         volume_valid = close_valid & np.isfinite(market.volume)
         fast = valid_rolling_mean(market.volume, volume_valid, 5)

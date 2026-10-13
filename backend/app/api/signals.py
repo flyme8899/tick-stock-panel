@@ -288,13 +288,21 @@ def intraday_replay(req: IntradayReplayRequest, request: Request):
         raise HTTPException(status_code=400, detail="信号编译失败, 请检查条件字段")
     min_bars = int(sig.get("min_bars", 0) or 0)
 
+    from app.services.price_basis import minute_prev_close, minute_reads_are_adjusted, repo_data_dir
+
     repo = request.app.state.repo
-    # 昨收映射: 一次性取区间(含前置 15 天)日K, 按「严格早于当日」取最近收盘
-    daily = repo.get_daily_batch(symbols, start - timedelta(days=15), end, columns=["symbol", "date", "close"])
-    close_by_sym_date: dict[str, dict[date, float]] = {}
-    if not daily.is_empty():
+    reads_adjusted = minute_reads_are_adjusted(repo_data_dir(repo))
+    # 昨收映射: 一次性取区间(含前置 15 天)日K。分钟未投影时按当日因子折回原始尺度。
+    daily = repo.get_daily_batch(
+        symbols, start - timedelta(days=15), end,
+        columns=["symbol", "date", "close", "raw_close"],
+    )
+    history: dict[str, list[tuple]] = {}
+    if not daily.is_empty() and "close" in daily.columns:
+        has_raw = "raw_close" in daily.columns
         for row in daily.sort(["symbol", "date"]).iter_rows(named=True):
-            close_by_sym_date.setdefault(str(row["symbol"]), {})[row["date"]] = float(row["close"])
+            raw = row.get("raw_close") if has_raw else None
+            history.setdefault(str(row["symbol"]), []).append((row["date"], float(row["close"]), raw))
 
     triggers: list[dict] = []
     days_scanned = 0
@@ -305,11 +313,21 @@ def intraday_replay(req: IntradayReplayRequest, request: Request):
         if minute_df is not None and not minute_df.is_empty():
             days_scanned += 1
             bars_scanned += minute_df.height
-            prev_close = {
-                sym: closes_map[max(d for d in closes_map if d < day)]
-                for sym, closes_map in close_by_sym_date.items()
-                if any(d < day for d in closes_map)
-            }
+            prev_close = {}
+            for sym, rows in history.items():
+                previous = next((item for item in reversed(rows) if item[0] < day), None)
+                if previous is None:
+                    continue
+                session = next((item for item in rows if item[0] == day), None)
+                aligned = minute_prev_close(
+                    previous[1],
+                    day_close=session[1] if session else None,
+                    day_raw=session[2] if session else None,
+                    prev_raw=previous[2],
+                    reads_adjusted=reads_adjusted,
+                )
+                if aligned is not None:
+                    prev_close[sym] = aligned
             frame = build_feature_frame(minute_df, prev_close=prev_close)
             if not frame.is_empty():
                 evaluated = custom_signals.apply_intraday_edges(frame, {col: exprs[col]}).with_columns(

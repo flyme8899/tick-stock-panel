@@ -101,6 +101,14 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
     available = set(columns)
     if name in available:
         return pl.col(name)
+    # raw_close 是可选依赖: 除权日 VWAP(原始均价) 必须对不复权收盘, 缺列时回退 close,
+    # 这样没有 raw_close 的面板仍可计算, 且 raw_close == close 时结果不变。
+    if name == "vwap_bias":
+        if not {"close", "volume", "amount"}.issubset(available):
+            return None
+        vwap = _ratio(pl.col("amount"), pl.col("volume") * 100.0)
+        price = pl.col("raw_close") if "raw_close" in available else pl.col("close")
+        return _relative(price, vwap)
     # composite 在 VIRTUAL 字典门控之前分派 (依赖经注册表递归展开) —— P3
     spec = _registry_get_factor(name)
     if spec is not None and spec.kind == "composite":
@@ -186,9 +194,6 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
             .otherwise(None)
             .over("symbol")
         )
-    if name == "vwap_bias":
-        vwap = _ratio(pl.col("amount"), pl.col("volume") * 100.0)
-        return _relative(pl.col("close"), vwap)
     if name == "vol_trend_5_60":
         fast = pl.col("volume").rolling_mean(5)
         slow = pl.col("volume").rolling_mean(60)

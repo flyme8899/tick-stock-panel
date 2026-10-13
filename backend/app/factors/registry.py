@@ -166,8 +166,9 @@ _CATALOG: tuple[FactorSpec, ...] = (
         deps=frozenset({"close", "low_60d"}),
     ),
     _virtual(
-        "vwap_bias", "VWAP乖离", "价格位置", "收盘价 / 当日成交均价 - 1, 成交均价 = 成交额 / (成交量x100)",
-        deps=frozenset({"close", "volume", "amount"}),
+        "vwap_bias", "VWAP乖离", "价格位置",
+        "不复权收盘 / 当日成交均价 - 1, 成交均价 = 成交额 / (成交量x100); 无 raw_close 时回退前复权收盘",
+        deps=frozenset({"close", "volume", "amount", "raw_close"}),
     ),
     # --- 收益形态 (虚拟, 滚动窗口) ---
     _virtual(

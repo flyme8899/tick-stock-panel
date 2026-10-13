@@ -228,8 +228,9 @@ class StrategyDependencyResolver:
         matrix_columns = set(_EXECUTION_COLUMNS) | required_signals
         if minute_fill:
             indicator_columns = frozenset(set(indicator_columns) | {"ma5", "ma10", "ma20"})
-            matrix_columns.update({"ma5", "ma10", "ma20"})
-            base_columns = frozenset(set(base_columns) | {"close"})
+            matrix_columns.update({"ma5", "ma10", "ma20", "raw_close"})
+            # 分钟成交价要乘 close/raw_close 才能和复权日线同尺度; 缺 raw_close 时因子为 1。
+            base_columns = frozenset(set(base_columns) | {"close", "raw_close"})
 
         plan = FeaturePlan(
             required_features=frozenset(required_features),

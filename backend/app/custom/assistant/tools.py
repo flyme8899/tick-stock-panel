@@ -329,7 +329,9 @@ def _get_stock_quote(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
         if prev_close is None and row.get("close") is not None and row.get("change_pct") is not None:
             # 行情快照无昨收列时按 close/(1+pct) 反推, 供分时图画昨收基准线
             prev_close = round(float(row["close"]) / (1.0 + float(row["change_pct"])), 3)
-        chart = _intraday_chart_payload(ctx, symbols[0], str(row.get("name") or ""), prev_close)
+        chart = _intraday_chart_payload(
+            ctx, symbols[0], str(row.get("name") or ""), _align_chart_prev(ctx, row, prev_close),
+        )
         if chart is not None:
             result["charts"] = [chart]
     return result
@@ -351,6 +353,23 @@ def _finite_float(value: Any) -> float | None:
 def _num(v: Any) -> float | None:
     number = _finite_float(v)
     return None if number is None else round(number, 3)
+
+
+def _align_chart_prev(ctx: ToolContext, row: dict[str, Any], prev_close: float | None) -> float | None:
+    """分时昨收与 get_minute 同口径。已投影时保持前复权昨收；原始分钟按当日因子折回。"""
+    if prev_close is None:
+        return None
+    from app.services.price_basis import minute_prev_close, minute_reads_are_adjusted, repo_data_dir
+
+    if minute_reads_are_adjusted(repo_data_dir(ctx.repo)):
+        return prev_close
+    aligned = minute_prev_close(
+        prev_close,
+        day_close=row.get("close"),
+        day_raw=row.get("raw_close"),
+        reads_adjusted=False,
+    )
+    return prev_close if aligned is None else aligned
 
 
 def _intraday_chart_payload(

@@ -1494,6 +1494,7 @@ class QuoteService:
             fetch_intraday_monitor_batch,
             intraday_monitor_support,
         )
+        from app.services.price_basis import minute_prev_close, minute_reads_are_adjusted, repo_data_dir
 
         capset = getattr(self._app_state, "capabilities", None)
 
@@ -1516,6 +1517,7 @@ class QuoteService:
             minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
         prev_close: dict[str, float] = {}
         available_cols = set(enriched.columns)
+        reads_adjusted = minute_reads_are_adjusted(repo_data_dir(self._repo))
         for row in enriched.filter(pl.col("symbol").is_in(sorted(symbols))).iter_rows(named=True):
             symbol = str(row.get("symbol") or "")
             reference = row.get("prev_close") if "prev_close" in available_cols else None
@@ -1524,6 +1526,16 @@ class QuoteService:
                 change_pct = row.get("change_pct")
                 if close is not None and change_pct is not None and float(change_pct) > -1:
                     reference = float(close) / (1.0 + float(change_pct))
+            if symbol and reference is not None and not reads_adjusted:
+                aligned = minute_prev_close(
+                    reference,
+                    day_close=row.get("close"),
+                    day_raw=row.get("raw_close"),
+                    prev_raw=row.get("_prev_close_raw"),
+                    reads_adjusted=False,
+                )
+                if aligned is not None:
+                    reference = aligned
             if symbol and reference is not None:
                 prev_close[symbol] = float(reference)
 
