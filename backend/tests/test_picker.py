@@ -258,6 +258,47 @@ def test_hot_group_reserves_slots_for_unmappable_major():
     assert sum(1 for item in group["items"] if item["selectable_count"] > 0) == 6
 
 
+def test_hot_group_keeps_existing_major_that_sits_at_tail():
+    """榜内「重大」排在末位时，补位只能砍非重大，不能把它换掉。
+
+    评审给的反例：top8 = 7 条 usable「重要」+ 1 条「重大」但无映射 M1（正好在末位），
+    此时 majors_in=1、shortfall=1，会从榜外补 M2。若按位置砍末尾（旧实现），砍掉的
+    就是 M1 —— 重大席位数没变，还换成了排名更差的 M2。
+    """
+    from app.services.picker import _hot_group
+
+    def ev(key, name, importance, concepts):
+        return {
+            "key": key,
+            "name": name,
+            "importance": importance,
+            "concepts": concepts,
+            "mentions": 1,
+            "source_count": 1,
+        }
+
+    pool = ["机器人", "白酒", "光伏", "储能", "芯片", "军工", "医药", "券商"]
+    dims = Dimensions(concepts={f"{i:06d}.SZ": [c] for i, c in enumerate(pool)})
+    events = []
+    # 7 条可映射「重要」—— 它们按可映射性排在 M1 之前，占满前 7 位。
+    for i in range(7):
+        events.append(ev(f"i{i}", f"重要-可映射{i}", "重要", [pool[i]]))
+    # 1 条「重大」但无映射 —— 排在 usable 之后，正好落在第 8 位（末位）。
+    events.append(ev("M1", "榜内重大-末位", "重大", ["中东"]))
+    # 榜外还有 1 条无映射「重大」，会被保底拉进来补第 2 个席位。
+    events.append(ev("M2", "榜外重大-无映射", "重大", ["美联储动态"]))
+
+    group = _hot_group({"events": events}, None, dims)
+    names = [item["name"] for item in group["items"]]
+    assert len(names) == 8
+    # 榜内那条末位「重大」必须保住，不能被榜外的 M2 顶掉。
+    assert "榜内重大-末位" in names
+    majors = [item["name"] for item in group["items"] if item["importance"] == "重大"]
+    assert set(majors) == {"榜内重大-末位", "榜外重大-无映射"}
+    # 让位的是「重要」而非「重大」：可映射条数从 7 降到 6。
+    assert sum(1 for item in group["items"] if item["selectable_count"] > 0) == 6
+
+
 def test_event_pick_rank_is_mappability_first_tier_second():
     """选股列表里可映射性主导, 档位降为次级键（与新闻榜单口径刻意不同）。"""
     from app.services.picker import _event_pick_rank, _mapping_breadth

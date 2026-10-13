@@ -1084,9 +1084,12 @@ def _hot_group(
     ranked.sort(key=lambda row: row[0])
 
     # 保底席位: 若按可映射性取出的前 N 里「重大」档少于 _MAJOR_RESERVED_SLOTS 条,
-    # 就从榜外把排名最前的「重大」补进来 —— 但补进来的位置固定在**末尾**, 让它们
-    # 不挤占可映射事件的位置。实现上先砍掉末位若干条, 再一次性拼接, 避免「取末位
-    # 替换后重排、下一轮又覆盖刚插入的那条」的错乱(专家指出的替换 bug)。
+    # 就从榜外把排名最前的「重大」补进来。
+    #
+    # 让位规则: **只砍榜内的「非重大」**, 且从排名末位的开始砍 —— 榜内已有的「重大」
+    # 一律保留。早前的实现只按位置砍末尾(keep = picked[:-len(waiting)]), 不看末尾
+    # 是不是重大, 于是会出现「榜内唯一的重大的排在末位 → 被砍掉换成榜外更差的重大」
+    # 的反例: 保底席位数没变, 反而把条目换差了(评审指出)。
     if index_ready:
         picked = ranked[:_TOP_HOT_EVENTS]
 
@@ -1102,10 +1105,17 @@ def _hot_group(
                 if _is_major(row) and id(row) not in picked_ids
             ][:shortfall]
             if waiting:
-                # 从榜尾让位, 但保护榜内唯一的「重大」不被换掉。
-                keep = picked[: _TOP_HOT_EVENTS - len(waiting)]
-                # 保底条目按原排名插回, 保证整体仍是有序的(它们本来排在最后)。
-                picked = sorted(keep + waiting, key=lambda row: row[0])[:_TOP_HOT_EVENTS]
+                # 从「非重大」里挑排名最末的让位, 榜内重大全部保住。
+                demotable = [row for row in picked if not _is_major(row)]
+                if len(demotable) >= len(waiting):
+                    drop_ids = {id(row) for row in demotable[-len(waiting):]}
+                    picked = [row for row in picked if id(row) not in drop_ids]
+                else:
+                    # 榜内几乎全是重大(罕见), 只能砍末尾的非重大部分, 不足则放弃补位。
+                    waiting = waiting[: len(demotable)]
+                    drop_ids = {id(row) for row in demotable}
+                    picked = [row for row in picked if id(row) not in drop_ids]
+                picked = sorted(picked + waiting, key=lambda row: row[0])[:_TOP_HOT_EVENTS]
     else:
         picked = ranked[:_TOP_HOT_EVENTS]
     selected = picked
@@ -1156,8 +1166,9 @@ def _hot_group(
             "importance": str(event.get("importance") or ""),
             "confirmation": _confirmation_brief(event.get("confirmation")),
             "mapped_stocks": mapped,
-            # 真实可选股数(过滤前算出的全集), 供选股选项直接展示「会选出 N 只」。
-            # mapped_stocks 只有前 3 个, 前端无法据此还原总数。
+            # 真实可选股数, 与实跑同一把尺(走 resolve_event_symbols: 已按
+            # _CONCEPT_CONSTITUENT_CAP 截断、已过滤基金)。mapped_stocks 只有前 3 个,
+            # 前端无法据此还原总数, 所以单独透出这个数。
             "selectable_count": selectable,
             "concept_total": len(event.get("concepts") or []),
             # 映射广度: usable=有区分度(1..上限) / broad=命中过宽板块 / none=选不出股。
