@@ -758,3 +758,103 @@ def test_no_stock_observation_does_not_borrow_index_move_auction():
     assert result["strength"] == "无", f"无标的观测却拿到强度：strength={result['strength']}"
     assert result["abnormal"] is False, "无标的观测不该判异动"
     assert result["state"] != "scored", f"无标的观测却标 scored：state={result['state']}"
+    # 评审 C：**完全没有任何观测**（无价格 bar、无资金流、无盘口窗口）→ 按 docstring
+    # 定义应为 `unverifiable`（无标可验），而不是 `unconfirmed`（那是「有观测未兑现」）。
+    assert result["state"] == "unverifiable"
+
+
+def test_flows_only_does_not_borrow_index_move_and_stays_unconfirmed():
+    """评审 B（回归）：只有资金流、没有价格 bar 时，不得借指数涨跌给分。
+
+    `opens`/`returns` 为空 → `basket = 0` → `excess = -index_ret`。若只靠 `flows` 存在
+    就放行继续计分，`_move_points`/`_strength_points` 仍会读这个被指数污染的值。
+    现清零 `excess` 后再计分：资金流事件只能由资金面（`_flow_confirms`）得分。
+
+    同时确认 state 口径：有资金流观测但未兑现 → `unconfirmed`（与「完全没观测」区分）。
+    """
+    from app.market_time import CN_TZ as _CN_TZ
+
+    def _qbar(day, hour, minute, price, volume=20_000):
+        return {
+            "at": datetime(2026, 10, day, hour, minute, tzinfo=_CN_TZ),
+            "open": price, "high": price, "low": price, "close": price,
+            "volume": volume, "kind": "minute",
+        }
+
+    event = _event("平安银行回购", "利好", 15, 30)
+    # 指数竞价跌 1.5%；标的有竞价 bar 但缺 prev_close（算不出 opens），另有概念资金流。
+    concept_flows = [
+        {"at": datetime(2026, 10, 12, 9, 20, tzinfo=_CN_TZ), "value": 1e8, "kind": "snapshot"},
+    ]
+    tape = {
+        "session": "2026-10-12",
+        "live": False,
+        "members": {},
+        "index_bars": [
+            {"at": datetime(2026, 10, 12, 9, 15, tzinfo=_CN_TZ), "open": 4000.0, "close": 4000.0, "kind": "minute"},
+            {"at": datetime(2026, 10, 12, 9, 25, tzinfo=_CN_TZ), "open": 4000.0, "close": 3940.0, "kind": "minute"},
+        ],
+        "stocks": {
+            "601318.SH": {
+                "name": "中国平安",
+                "prev_close": None,
+                "baseline_volume": 1_000_000,
+                "bars": [_qbar(12, 9, 20, 10.0), _qbar(12, 9, 25, 10.1)],
+                "flows": [],
+            },
+        },
+        "concepts": {"保险": concept_flows},
+    }
+    now = datetime(2026, 10, 12, 10, 0, tzinfo=_CN_TZ)
+    result = score_confirmation(event, tape, now)
+
+    detail = result.get("detail") or {}
+    # 核心：excess 不得等于「指数跌幅」（-index_ret = +1.5%）。
+    assert (detail.get("excess_pct") or 0) == 0.0, (
+        f"无价格观测却借了指数的涨跌：excess_pct={detail.get('excess_pct')}"
+    )
+    # 有资金流观测 → unconfirmed（而非 unverifiable）。
+    assert result["state"] == "unconfirmed", f"state={result['state']}"
+
+
+def test_verified_flag_still_feeds_horizon_after_scored_decoupling():
+    """评审 A（回归）：`state` 用 `scored`(=strength!="无") 后，`verified` 必须保持原口径。
+
+    `verified` 不只喂 state，还喂 `_horizon()` 与「一日游」封顶。若把它也改成
+    `strength != "无"`，只有异动（涨停/放量/资金流，但 `strength_points == 0`）的事件会：
+      - 丢掉「主线 / 一日游」标签；
+      - 不再触发 `persist_points = min(persist_points, 6)`，**total 被抬高、排序改变** —— 这是
+        本次 PR 最不该引入的那种「顺带改分」的行为回归。
+
+    守护方式：三条计分路径传给 `_horizon` 的第 4 个实参**必须**含 `abnormal`。
+    主路径经 `verified` 间接传（该路径端到端难以构造：正常盘中/盘后消息会被路由到
+    intraday/auction），故此处直接做源码级断言，锁定 wiring 不被再次改窄。
+    """
+    import inspect
+
+    from app.news import market_confirm as mc
+
+    src = inspect.getsource(mc)
+    # 主路径：verified 必须保留 `or abnormal`。
+    assert 'verified = strength != "无" or abnormal' in src, (
+        "主路径 `verified` 被改窄，会导致 _horizon 丢标签并抬高 total"
+    )
+    # 竞价 / 盘中路径：内联实参也必须含 abnormal。
+    assert src.count('_horizon(stock_rows, first, bull, strength != "无" or abnormal)') == 2, (
+        "竞价/盘中路径的 _horizon 实参被改窄"
+    )
+    # 同时确认 state 用的是 scored 而非 verified（两者已解耦）。
+    assert 'scored = strength != "无"' in src
+
+    # 行为侧：verified=True 时 _horizon 能给出标签；False 时按设计返回空。
+    def _bar(hour, minute, price):
+        return {
+            "at": datetime(2026, 10, 9, hour, minute, tzinfo=CN_TZ),
+            "open": price, "high": price, "low": price, "close": price,
+            "volume": 20_000, "kind": "minute",
+        }
+
+    first = datetime(2026, 10, 9, 13, 0, tzinfo=CN_TZ)
+    rows = [("601318.SH", {"bars": [_bar(13, 0, 10.0), _bar(14, 0, 10.05)]})]
+    assert mc._horizon(rows, first, True, True) != ""
+    assert mc._horizon(rows, first, True, False) == ""
