@@ -2521,6 +2521,15 @@ export interface NewsHotConfirmation {
   lagged?: boolean
   /** 收盘后或隔夜消息还没有盘面。为真时不扣分，开盘后再验证。 */
   pending?: boolean
+  /**
+   * 可验证性状态（单一来源）。与 `score`/`strength` 并存，后者值域未变。
+   *   unverifiable 无标可验 —— 事件没有 A 股标的，盘面无从验证（不是「盘面不认」）
+   *   unconfirmed  验证未兑现 —— 有观测但没兑现（真负样本）
+   *   pending      待开盘验证
+   *   scored       已计分
+   * 用它分流，不要再用 `score === 0` 猜：0 分里既有「无标」也有「未兑现」，是异质簇。
+   */
+  state?: 'unverifiable' | 'unconfirmed' | 'pending' | 'scored' | string
   horizon?: '主线' | '一日游' | '' | string
   detail?: {
     excess_pct?: number | null

@@ -92,7 +92,8 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
     session = _session_date(tape)
     live = bool(tape.get("live")) and in_continuous_session(now)
     if first is None:
-        return _result(0, False, "无", "无", _session_text(session, live, waited=False), session, live, {})
+        return _result(0, False, "无", "无", _session_text(session, live, waited=False), session, live, {},
+                       state="unverifiable")
     # 竞价时点还没到时，周末稿的日期会晚于最近一个交易日。先标待开盘验证，
     # 不要被「首见晚于最近交易日」这条短路走掉。已知休市日把确认时点推到下一开市。
     gate = _validation_deadline(first)
@@ -108,6 +109,7 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
     ):
         return _result(
             0, False, "无", "无", "尚无首见之后的盘面", session, False, {},
+            state="unverifiable",
         )
     symbols = _event_symbols(event, tape)
     # 方向留空（中性）时不改 bull 口径：这里只做事前行情检测，不生产用户可见
@@ -125,7 +127,7 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
         return _result(
             0, False, "无", "无", "待开盘验证", gate.date(), False,
             {"pre_return": round(pre_excess, 4)},
-            phase="auction", lagged=lagged, horizon="", pending=True,
+            phase="auction", lagged=lagged, horizon="", pending=True, state="pending",
         )
     if gate is not None and _has_auction_bars(stock_rows, gate.date()):
         return _score_auction(
@@ -146,7 +148,7 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
         waited = _after_session(first, session)
         return _result(
             0, False, "无", "无", _session_text(session, live, waited=waited), session, live and not waited, {},
-            phase="session", lagged=lagged,
+            phase="session", lagged=lagged, state="unverifiable",
         )
     returns = []
     limit_count = 0
@@ -196,21 +198,57 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
             vol_ratio = sum(volumes) / expected
     sector_net = _scale_flow(sum(flows) if flows else None, shares)
     main_net = _scale_flow(sum(nets) if nets else None, shares)
+    # **没有标的收益观测时 `basket = 0`**，于是 `excess = (0 - index_ret)`（利好时）——
+    # 指数跌幅被整体当成了标的**超额收益**。指数跌 ≥0.3% 就能给一个没有 A 股价格观测的
+    # 事件打出分、标 `scored`、甚至拿到 `strength`；指数一下跌就给利好事件"发验证"。
+    # 判据用 `not returns`：**这是"有没有价格观测"的唯一硬证据**，`pre_excess` 非零只说明
+    # 消息**之前**有行情，不能为消息**之后**的计分背书。三个计分路径统一按此拦截。
+    #
+    # **必须在算 move/strength_points 之前清零 `excess`** —— 否则那两个函数仍会读到
+    # 被指数污染的值、凭空给分（这是评审 B 指出的口径问题）。清零后 flows-only 的
+    # 事件仍可按资金面（`_flow_confirms(sector_net/main_net)`）正常计分。
+    if not returns:
+        excess = 0.0
+        # 连资金流、盘口窗口都没有 → 什么都没观测到 → `unverifiable`（无标可验）。
+        # 有资金流但无价格 bar → 观测到了资金面但未兑现 → 继续走计分，末尾按 strength 判。
+        if not (flows or nets or abs(pre_excess) > 0):
+            return _result(
+                0, False, "无", "无", "尚无首见之后的盘面", session, False,
+                {"excess_pct": 0.0, "pre_return": round(pre_excess, 4)},
+                phase="session", lagged=lagged, state="unverifiable",
+            )
     move = _move_points(excess, vol_ratio, limit_count, sector_net, bull)
     strength_points = _strength_points(excess, breadth, main_net, bull)
     hits, observed = _persistence(stock_rows, first, bull)
     persist_points = 20 if hits >= 3 else 14 if hits >= 2 else 6 if hits == 1 else 0
     if move > 0 or limit_count or (vol_ratio or 0) >= 2 or _flow_confirms(sector_net, bull):
         abnormal = True
-    if _after_session(first, session) and not returns and not flows and not nets:
+    if _after_session(first, session) and not returns and not flows and not nets and abs(pre_excess) == 0:
+        # 消息在收盘后、且盘口什么都没读到 → 无从验证。
+        # 注意 `abs(pre_excess) == 0` 这个条件：若消息前本就有行情（pre_excess 非零），
+        # 说明我们读过盘口，只是这条消息没推动它 —— 那是「验证未兑现」，不是「无标可验」，
+        # 该继续往下走主计分路径，由末尾按 total 判 state。
         return _result(
             0, False, "无", "无", "尚无首见之后的盘面", session, False, {},
-            phase="session", lagged=lagged,
+            phase="session", lagged=lagged, state="unverifiable",
         )
     total = min(_CONFIRM_MAX, move + strength_points + persist_points)
     strength = "强" if strength_points >= 20 else "中" if strength_points >= 10 else "弱" if strength_points > 0 else "无"
     persistence = "持续" if hits >= 2 else "短暂" if hits == 1 else "无"
+    # **`verified`（喂 _horizon / 一日游封顶）与 `scored`（喂 state）是两个不同的判据，
+    # 不可合并。**
+    #   - `verified` 沿用原口径 `strength != "无" or abnormal`：它回答「盘面**动没动**」。
+    #     涨停/放量/资金流确认（abnormal）也算动过，据此才有「主线/一日游」标签。
+    #   - `scored` 用 `strength != "无"`：它回答「**强度**验证没有」。`move`/`persist`
+    #     打出的分只是异动，不构成强度已验证 —— 否则 push.py 用 state 说「已验证」、
+    #     前端按 strength 说「无验证」，两边矛盾。
+    # 反例（评审第 1 条）：`excess ∈ [0.3%, 0.5%)` → `move=3, strength_points=0`
+    # → `total=3` 却 `strength="无"`；若按 total>0 标 scored 会被误放进推送。
+    # 注意**不可**把 verified 改成 `strength != "无"` —— 那会连带 `_horizon` 返回空
+    # （丢掉「一日游」标签），进而使 `persist_points` 不再被压到 6，**意外抬高 total
+    # 并改变排序**（这是评审 A 指出的副作用，属行为回归）。
     verified = strength != "无" or abnormal
+    scored = strength != "无"
     horizon = _horizon(stock_rows, first, bull, verified)
     if horizon == "一日游":
         persist_points = min(persist_points, 6)
@@ -232,6 +270,15 @@ def _score_confirmation(event: dict, tape: dict, now: datetime, *, peers: list[d
         total, abnormal, strength, persistence,
         _session_text(session, live, waited=False), session, live, detail,
         phase="session", lagged=lagged, horizon=horizon,
+        # 用 `scored`（= strength != "无"）而非 `verified`，与 push/前端同口径。
+        # 「有观测但没兑现」→ 「验证未兑现」；连观测都没有 → 「无标可验」。
+        # 「观测过」的证据：看过盘口窗口（observed>0）、拿到超额收益/资金流，或
+        # 消息前本就有行情（pre_excess 非零 —— 说明确实读了盘口，只是消息没推动它）。
+        state="scored" if scored else (
+            "unconfirmed"
+            if (observed > 0 or returns or flows or nets or abs(pre_excess) > 0)
+            else "unverifiable"
+        ),
     )
 
 
@@ -363,12 +410,38 @@ def _result(
     lagged: bool = False,
     horizon: str = "",
     pending: bool = False,
+    state: str = "",
 ) -> dict:
+    """盘面验证结果。
+
+    `state` 把「可验证性」这一维度收敛成单一枚举，供下游显式分流：
+
+      - `unverifiable` 无标可验：事件没有可用的 A 股标的/资金流，盘面无从验证。
+      - `unconfirmed`  验证未兑现：**有**观测（有标的、看过盘面），但没兑现。
+      - `pending`      待开盘验证：确认时点还没到。
+      - `scored`       已计分：正常打出了分。
+
+    在此之前，「无标可验」与「验证未兑现」都表现为 `score=0` + `strength="无"`，
+    下游无法区分。线上实测（16:09 快照，`score=0` 共 381 条）两者同时存在：
+    `unverifiable` 185 条（48.6%）、`unconfirmed` 40 条（10.5%）
+    （如「奥克股份终止重组复牌」excess=-4.96%、观测 4 个窗口）
+    —— 异质簇，任何基于 `score == 0` 的判断都不可靠。
+
+    注意 **`score`/`strength` 的值域一律不变**：`unverifiable` 时 `score` 仍是 0、
+    `strength` 仍是 "无"，以保持 `_confirmation_points`、`service._public_confirmation`
+    的值域白名单、前端既有的 `strength === '无'` 分支全部向后兼容。
+    """
+    if state not in {"unverifiable", "unconfirmed", "pending", "scored"}:
+        # 兜底（正常情况下调用点都显式传 state）：
+        # 待开盘 → pending；**`strength != "无"` → scored**（与三个计分路径同口径：
+        # move/persist 打出的分只是异动，不等于强度已验证）；否则按「无标可验」。
+        state = "pending" if pending else ("scored" if strength not in {"", "无"} else "unverifiable")
     return {
         "label": label,
         "session": session.isoformat() if session else None,
         "live": live,
         "pending": bool(pending),
+        "state": state,
         "score": round(min(_CONFIRM_MAX, max(0.0, score)), 4),
         "abnormal": abnormal,
         "strength": strength,
@@ -802,6 +875,25 @@ def _score_auction(
             if number is not None:
                 flows.append(number)
     sector_net = _scale_flow(sum(flows) if flows else None, shares)
+    # **没有任何标的竞价价格观测**（`opens` 空）时 `basket = 0`，
+    # 于是 `excess = (0 - index_ret)`（利好时）—— 指数**竞价跌幅**被整体当成标的超额收益。
+    # 实测：指数竞价跌 1.5% 就能让一个 `windows=0, auction_open_pct=0` 的事件拿到
+    # `score=16, strength="中", state="scored", abnormal=True`，并进钉钉推送。
+    # 没有价格观测，`excess` 就**必须清零**（不能留 `-index_ret`），否则：
+    #   ① `_move_points`/`_strength_points` 会凭空给分；
+    #   ② 即使只靠 flows 也继续计分，中间仍会读这个被污染的 `excess`。
+    # 清零后 flows-only 的事件仍可按资金面计分（`sector_net` 走 `_flow_confirms`）。
+    if not opens:
+        excess = 0.0
+    # flows-only（无价格观测但有资金流）→ 计分依赖资金面，属「观测到但未兑现」的口径。
+    # 完全没有任何观测 → 直接返回 `unverifiable`，不进计分。
+    if not opens and not flows:
+        return _result(
+            0, False, "无", "无", "尚无首见之后的盘面", session, False,
+            {"excess_pct": 0.0, "pre_return": round(pre_excess, 4),
+             "auction_open_pct": 0.0, "windows": 0},
+            phase="auction", lagged=lagged, state="unverifiable",
+        )
     move = _move_points(excess, vol_ratio, limit_count, sector_net, bull)
     strength_points = _strength_points(excess, high_open, None, bull)
     hits, observed = _persistence(stock_rows, datetime.combine(day, dt_time(9, 25), CN_TZ), bull)
@@ -834,6 +926,10 @@ def _score_auction(
         total, abnormal, strength, persistence,
         _session_text(session, live, waited=False), session, live, detail,
         phase="auction", lagged=lagged, horizon=horizon,
+        # 与主路径同口径：只有 `strength != "无"` 才算「已计分」。
+        state="scored" if strength != "无" else (
+            "unconfirmed" if (observed > 0 or opens or flows) else "unverifiable"
+        ),
     )
 
 
@@ -995,6 +1091,12 @@ def _score_intraday(
         total, abnormal, strength, persistence,
         _session_text(session, live, waited=False), session, live, detail,
         phase="intraday", lagged=lagged, horizon=horizon,
+        # 与主路径同口径：只有 `strength != "无"` 才算「已计分」。
+        state="scored" if strength != "无" else (
+            "unconfirmed"
+            if (observed > 0 or post_returns or nets or abs(pre_excess) > 0)
+            else "unverifiable"
+        ),
     )
 
 

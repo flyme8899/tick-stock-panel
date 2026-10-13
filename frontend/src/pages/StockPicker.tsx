@@ -21,8 +21,15 @@ function confirmSourceLabel(confirm?: {
   lagged?: boolean
   pending?: boolean
   label?: string
+  state?: string
 } | null): string | undefined {
   if (!confirm) return undefined
+  // 选股下拉不显示「无标可验」徽章 —— 这类事件本就没有 A 股标的（下拉里也已按
+  // selectableCount<=0 置灰并说明），再挂一个徽章是重复信息，且占比近半（实测
+  // 48.6%，即 score=0 里 185/381），会把徽章从信号降级成噪声，
+  // 让用户忽略掉真正有价值的「盘面验证 强」。
+  // 语义并没有丢：详情面板仍会给出「暂无可映射标的」的说明。
+  if (confirm.state === 'unverifiable') return undefined
   if (confirm.pending || confirm.label === '待开盘验证') return '待开盘验证'
   if (confirm.lagged && (!confirm.strength || confirm.strength === '无')) return '消息滞后确认'
   if (!confirm.strength || confirm.strength === '无') return undefined

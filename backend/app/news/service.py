@@ -561,10 +561,24 @@ def _public_confirmation(raw) -> dict:
     horizon = str(payload.get("horizon") or "")
     if horizon not in {"主线", "一日游"}:
         horizon = ""
+    # 可验证性状态（单一来源），供下游显式分流：
+    #   unverifiable 无标可验 / unconfirmed 验证未兑现 / pending 待开盘 / scored 已计分。
+    # 与 `score`/`strength` 并存但**不改它们的值域** —— 老消费点（如 strength=="无"）
+    # 行为不变；新消费点（如「只看可验证事件」筛选）应以 state 为准。
+    # 兼容旧快照：缺 state 时按 strength/pending 反推，不返回空串。
+    state = str(payload.get("state") or "")
+    if state not in {"unverifiable", "unconfirmed", "pending", "scored"}:
+        if bool(payload.get("pending")) or str(payload.get("label") or "") == "待开盘验证":
+            state = "pending"
+        elif strength != "无":
+            state = "scored"
+        else:
+            state = "unverifiable"
     return {
         "label": str(payload.get("label") or "暂无行情"),
         "session": payload.get("session") or None,
         "live": bool(payload.get("live")),
+        "state": state,
         "score": _public_score_part(payload.get("score")),
         "abnormal": bool(payload.get("abnormal")),
         "strength": strength,

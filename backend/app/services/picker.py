@@ -1193,11 +1193,24 @@ def _hot_group(
     # 一律保留。早前的实现只按位置砍末尾(keep = picked[:-len(waiting)]), 不看末尾
     # 是不是重大, 于是会出现「榜内唯一的重大的排在末位 → 被砍掉换成榜外更差的重大」
     # 的反例: 保底席位数没变, 反而把条目换差了(评审指出)。
+    #
+    # **保底只收「有映射」的重大**(selectable > 0)。线上实测: 全量 6 条「重大」里 5 条
+    # 零可选股(全是欧盟制裁/泽连斯基/美联储这类 A 股无标的的地缘新闻), 榜外可补的
+    # 「重大」候选更是 100% 零可选股 —— 保底必然把一个点不动的条目塞进前 8。
+    # 这与本函数前半段自相矛盾: _event_pick_rank 刚把 selectable<=0 排到最后, 保底
+    # 又把它抬回来。**同一函数对「能不能点」只能有一套标准**, 故此处按 selectable 过滤。
+    # 代价是某些日子前 8 可能一条「重大」都没有 —— 这是数据的真实结论, 不是缺陷:
+    # 重大新闻的「露脸」由新闻页榜单承接(那里按重要度排), 选股列表的职责是「点得动」。
     if index_ready:
         picked = ranked[:_TOP_HOT_EVENTS]
 
         def _is_major(row: tuple) -> bool:
             return str(row[1].get("importance") or "") == "重大"
+
+        def _mappable(row: tuple) -> bool:
+            # 元组结构: (排序键, event, selectable, note, capped)。index_ready 为真时
+            # selectable 是 int(维表已就绪), None 只会出现在未就绪的支路, 这里防御性取 0。
+            return int(row[2] or 0) > 0
 
         majors_in = sum(1 for row in picked if _is_major(row))
         shortfall = _MAJOR_RESERVED_SLOTS - majors_in
@@ -1205,7 +1218,7 @@ def _hot_group(
             picked_ids = {id(row) for row in picked}
             waiting = [
                 row for row in ranked[_TOP_HOT_EVENTS:]
-                if _is_major(row) and id(row) not in picked_ids
+                if _is_major(row) and _mappable(row) and id(row) not in picked_ids
             ][:shortfall]
             if waiting:
                 # 从「非重大」里挑排名最末的让位, 榜内重大全部保住。
