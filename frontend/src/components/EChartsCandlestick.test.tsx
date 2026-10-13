@@ -68,7 +68,7 @@ it('筹码柱留在K线右侧，获利为红、套牢为绿，并画出均价和
       symbol="300829.SZ"
       height={400}
       showInfoBar={false}
-      visibleBars="all"
+      visibleBars={60}
       onHoverDate={onHoverDate}
       chip={{
         width: 72,
@@ -88,10 +88,15 @@ it('筹码柱留在K线右侧，获利为红、套牢为绿，并画出均价和
   expect(option.grid[0].right).toBe(80)
   const series = option.series.find((item: any) => item.name === '筹码')
   expect(series.clip).toBe(false)
-  const drawn = series.renderItem(
-    { coordSys: { x: 0, y: 20, width: 400, height: 200 } },
-    { coord: (value: number[]) => [0, 220 - value[1] * 10] },
-  )
+  // 默认只看末 60 根。index 0 落在窗外；序列必须盖住全部日期，滤完仍有点可画。
+  const zoom = chart.dispatchAction.mock.calls.map(call => call[0]).find((action: any) => action?.type === 'dataZoom')
+  expect(zoom.start).toBeGreaterThan(0)
+  expect(zoom.end).toBe(100)
+  expect(series.data).toEqual(DAYS.map((_, index) => index))
+  const coordSys = { x: 0, y: 20, width: 400, height: 200 }
+  const api = { coord: (value: number[]) => [0, 220 - value[1] * 10] }
+  expect(series.renderItem({ dataIndexInside: 3, coordSys }, api)).toBeUndefined()
+  const drawn = series.renderItem({ dataIndexInside: 0, coordSys }, api)
   const fills = drawn.children.filter((child: any) => child.type === 'rect').map((child: any) => child.style.fill)
   expect(fills).toContain('#C74040')
   expect(fills).toContain('#2D9B65')

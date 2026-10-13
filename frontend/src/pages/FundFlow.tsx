@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api, type FundFlowAmountRow, type FundFlowBoard, type FundFlowMarginDay, type FundFlowStockBlock } from '@/lib/api'
+import { api, type FundFlowAmountRow, type FundFlowBoard, type FundFlowMarginDay, type FundFlowSectorBlock, type FundFlowStockBlock } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
@@ -120,6 +120,35 @@ function StockLabel({ row }: { row: FundFlowAmountRow }) {
   )
 }
 
+function FlowSides({
+  inflow,
+  outflow,
+  label,
+  amount,
+  emptyInflow,
+  renderLabel,
+}: {
+  inflow: FundFlowAmountRow[]
+  outflow: FundFlowAmountRow[]
+  label: (row: FundFlowAmountRow) => string
+  amount: (row: FundFlowAmountRow) => number | null | undefined
+  emptyInflow: string
+  renderLabel?: (row: FundFlowAmountRow) => ReactNode
+}) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="mb-1 text-[11px] text-muted">净流入</p>
+        <AmountList rows={inflow} label={label} amount={amount} emptyText={emptyInflow} renderLabel={renderLabel} />
+      </div>
+      <div>
+        <p className="mb-1 text-[11px] text-muted">净流出</p>
+        <AmountList rows={outflow} label={label} amount={amount} emptyText="没有净流出。" renderLabel={renderLabel} />
+      </div>
+    </div>
+  )
+}
+
 function StockSides({
   block,
   amount,
@@ -132,20 +161,47 @@ function StockSides({
   if (block?.partial) {
     return <Empty text={block.note || '个股样本不完整，不作为全市场排名。'} />
   }
-  const inflow = block?.inflow ?? block?.items ?? []
-  const outflow = block?.outflow ?? []
   return (
-    <div className="space-y-3">
-      <div>
-        <p className="mb-1 text-[11px] text-muted">净流入</p>
-        <AmountList rows={inflow} label={stockName} amount={amount} emptyText={emptyInflow} renderLabel={row => <StockLabel row={row} />} />
-      </div>
-      <div>
-        <p className="mb-1 text-[11px] text-muted">净流出</p>
-        <AmountList rows={outflow} label={stockName} amount={amount} emptyText="没有净流出。" renderLabel={row => <StockLabel row={row} />} />
-      </div>
-    </div>
+    <FlowSides
+      inflow={block?.inflow ?? block?.items ?? []}
+      outflow={block?.outflow ?? []}
+      label={stockName}
+      amount={amount}
+      emptyInflow={emptyInflow}
+      renderLabel={row => <StockLabel row={row} />}
+    />
   )
+}
+
+function sectorName(row: FundFlowAmountRow): string {
+  return row.name || '—'
+}
+
+function SectorSides({ block }: { block: FundFlowSectorBlock | undefined }) {
+  return (
+    <FlowSides
+      inflow={block?.inflow ?? block?.items ?? []}
+      outflow={block?.outflow ?? []}
+      label={sectorName}
+      amount={row => row.net_inflow}
+      emptyInflow="还没有这一块的落盘。"
+    />
+  )
+}
+
+function capturedClock(captured: string | null | undefined): string | null {
+  if (!captured) return null
+  const matched = captured.match(/T(\d{2}:\d{2})/)
+  return matched?.[1] ?? null
+}
+
+function stockCardMeta(block: FundFlowStockBlock | undefined, window: 'today' | '5d'): string | undefined {
+  const day = block?.trade_date
+  if (!day) return undefined
+  if (window !== 'today' || !block?.snapshot) return day
+  const phase = block.snapshot === 'close' ? '收盘' : '盘中'
+  const clock = capturedClock(block.captured_at)
+  return clock ? `${day} · ${phase} · ${clock}` : `${day} · ${phase}`
 }
 
 function fallbackMarginDays(items: FundFlowAmountRow[]): FundFlowMarginDay[] {
@@ -227,14 +283,10 @@ export function FundFlow() {
                 options={[{ key: 'industry', label: '行业' }, { key: 'concept', label: '概念' }]}
                 onChange={setSector}
               />
-              <AmountList
-                rows={sectorBlock?.items ?? []}
-                label={row => row.name || '—'}
-                amount={row => row.net_inflow}
-              />
+              <SectorSides block={sectorBlock} />
             </Card>
 
-            <Card title="个股主力净流入" meta={stockBlock?.trade_date ?? undefined}>
+            <Card title="个股主力净流入" meta={stockCardMeta(stockBlock, stockWindow)}>
               <Tabs
                 value={stockWindow}
                 options={[{ key: 'today', label: '今日' }, { key: '5d', label: '5日' }]}

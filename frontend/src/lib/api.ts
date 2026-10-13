@@ -2446,8 +2446,19 @@ export interface FundFlowAmountRow {
 
 export interface FundFlowStockBlock {
   trade_date: string | null
+  snapshot?: string | null
+  captured_at?: string | null
+  source?: string | null
   partial?: boolean
   note?: string | null
+  items: FundFlowAmountRow[]
+  inflow?: FundFlowAmountRow[]
+  outflow?: FundFlowAmountRow[]
+}
+
+export interface FundFlowSectorBlock {
+  trade_date: string | null
+  snapshot: string | null
   items: FundFlowAmountRow[]
   inflow?: FundFlowAmountRow[]
   outflow?: FundFlowAmountRow[]
@@ -2464,8 +2475,8 @@ export interface FundFlowMarginDay {
 }
 
 export interface FundFlowBoard {
-  industry: { trade_date: string | null; snapshot: string | null; items: FundFlowAmountRow[] }
-  concept: { trade_date: string | null; snapshot: string | null; items: FundFlowAmountRow[] }
+  industry: FundFlowSectorBlock
+  concept: FundFlowSectorBlock
   stocks_today: FundFlowStockBlock
   stocks_5d: FundFlowStockBlock
   margin: { items: FundFlowAmountRow[]; days?: FundFlowMarginDay[] }

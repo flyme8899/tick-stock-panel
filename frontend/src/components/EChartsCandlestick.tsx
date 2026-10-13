@@ -631,7 +631,7 @@ function buildMarkPointData(
   return markPointData
 }
 
-function buildChipSeries(chip: ChipOverlay | null | undefined): any | null {
+function buildChipSeries(chip: ChipOverlay | null | undefined, dateCount: number): any | null {
   const bins = chip?.bins?.filter(bin => bin.ratio > 0) ?? []
   if (!chip || chip.width <= 0 || bins.length === 0) return null
   const strip = Math.max(8, chip.width - 4)
@@ -646,8 +646,12 @@ function buildChipSeries(chip: ChipOverlay | null | undefined): any | null {
     animation: false,
     clip: false,
     z: 2,
-    data: [0],
+    // 每个日期下标都放一点。dataZoom 默认 filter 掉窗外的点；只放 index 0 时，
+    // 默认末 60 根会把这一点滤掉，renderItem 不再执行，右侧直方图消失。
+    data: Array.from({ length: dateCount }, (_, index) => index),
     renderItem: (params: any, api: any) => {
+      // 窗内第一点画一次。缩放后 dataIndexInside 仍从 0 起，直方图留在图上。
+      if (params.dataIndexInside !== 0) return
       const coord = params.coordSys
       if (!coord) return
       const x0 = coord.x + coord.width + 4
@@ -913,7 +917,7 @@ function buildOption(
     series.push(maLine('ma60', THEME.ma60, 'MA60'))
   }
 
-  const chipSeries = buildChipSeries(chip)
+  const chipSeries = buildChipSeries(chip, dates.length)
   if (chipSeries) series.push(chipSeries)
 
   // 加入自选日标注: 蓝色竖虚线从该根K线的下沿连到主图底端的「自选」标签。
