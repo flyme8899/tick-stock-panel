@@ -494,20 +494,28 @@ export function SectorAnalysis() {
     if (!deepKey || !deepResolved) return
     if (appliedDeepKey.current === deepKey) return
     appliedDeepKey.current = deepKey
-    // 优先 focus 指定的那一列; 那一列没有就退到实际含这个板块的另一列。
+    // **优先 focus 指定的那一列** —— 深链来自热门事件, focus 就是上游的判列意见,
+    // 只有当那一列确实没有这个板块时才纠偏到另一列。
+    // 同名板块两列都有不罕见(概念/行业重名), 若无条件优先概念列, focus=industry
+    // 的深链会被错误地落到概念列。
     const inConcept = concept.stats.some(s => s.key === deepKey)
     const inIndustry = industry.stats.some(s => s.key === deepKey)
-    const kind: SectorKind = inConcept ? 'concept' : inIndustry ? 'industry' : focus === 'industry' ? 'industry' : 'concept'
+    const inFocus = focus === 'industry' ? inIndustry : inConcept
+    let kind: SectorKind
+    if (inFocus) {
+      kind = focus === 'industry' ? 'industry' : 'concept'
+    } else {
+      kind = inConcept ? 'concept' : inIndustry ? 'industry' : (focus === 'industry' ? 'industry' : 'concept')
+    }
     setSelected({ kind, key: deepKey })
     document.getElementById('sector-detail')?.scrollIntoView?.({ block: 'nearest' })
   }, [deepKey, deepResolved, concept.stats, industry.stats, focus])
 
-  // 深链板块两列都没有: 等两列都加载完再确认, 免得把「还在加载」误报成「不存在」。
-  // 用于给详情区一句明确提示, 而不是干停在默认文案上让人以为点了没反应。
-  const deepMissing = !!deepKey && !deepResolved
-    && concept.stats.length > 0 && industry.stats.length > 0
-    ? deepKey
-    : null
+  // 深链板块两列都没有: 等两列**加载完成**再确认, 免得把「还在加载」误报成「不存在」。
+  // 用「加载完成」而不是「有数据」判定 —— 某一列数据源本身为空(未接入/加载失败)时,
+  // 它永远不会有数据, 拿「有数据」当条件就永远不提示, 又回到静默。
+  const deepBoardsLoaded = !concept.rowsLoading && !industry.rowsLoading
+  const deepMissing = !!deepKey && !deepResolved && deepBoardsLoaded ? deepKey : null
 
   const saveConfig = (kind: SectorKind, config: AnalysisFieldConfig) => {
     const board = kind === 'industry' ? industry : concept
