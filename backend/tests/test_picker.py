@@ -333,6 +333,87 @@ def test_event_pick_rank_is_mappability_first_tier_second():
     assert _event_pick_rank(major_none, 999, index_ready=False) < _event_pick_rank(
         minor_usable, 999, index_ready=False
     )
+    # 未知(维表未同步)的广度是 None, 不是 none —— 前者「还不知道」后者「确知选不出」。
+    assert _mapping_breadth(None) is None
+
+
+def test_hot_group_only_marks_capped_when_constituents_actually_exceed_the_cap():
+    """恰好等于上限不是「截断」, 多于上限才是。
+
+    前端据此决定说「30 只」还是「至少 30 只」。旧实现拿 `count >= 上限` 猜,
+    恰好在 30 只时也会说「至少 30 只」——把「正好」说成了「不止」。
+    """
+    from app.services.picker import _CONCEPT_CONSTITUENT_CAP, _hot_group
+
+    cap = _CONCEPT_CONSTITUENT_CAP
+
+    def dims_with(concept: str, count: int) -> Dimensions:
+        # 造 count 只成分股, 全部属于同一个概念。
+        return Dimensions(concepts={
+            f"{i:06d}.SZ": [concept] for i in range(1, count + 1)
+        })
+
+    def ev(key: str, concept: str) -> dict:
+        return {
+            "key": key, "name": key, "importance": "重要", "concepts": [concept],
+            "mentions": 3, "source_count": 2,
+        }
+
+    # 概念「正好」有上限只成分股 → 不该算截断。
+    exact = _hot_group({"events": [ev("exact", "正好")]}, None, dims_with("正好", cap))
+    exact_item = next(i for i in exact["items"] if i["id"] == hot_event_id("exact"))
+    assert exact_item["selectable_count"] == cap
+    assert exact_item["selectable_capped"] is False, "恰好等于上限不是截断"
+
+    # 概念有上限多只 → 真被截断, count 停在上限, capped=True。
+    over = _hot_group({"events": [ev("over", "超了")]}, None, dims_with("超了", cap + 1))
+    over_item = next(i for i in over["items"] if i["id"] == hot_event_id("over"))
+    assert over_item["selectable_count"] == cap
+    assert over_item["selectable_capped"] is True, "多于上限才算截断"
+
+
+def test_hot_group_dim_index_missing_does_not_block_selection():
+    """维表未同步时 selectable_count 必须是 None(未知), 不能是 0。
+
+    回归守卫: 早前这里给 0, 前端把 `<=0` 当成「空炮」置灰, 于是维表没同步时
+    用户连本来能跑出「资讯提及个股」的事件都勾不上。而实跑路径
+    (`map_selected_hot_event`) 此时**仍会纳入资讯提到的个股**, 并不空。
+    """
+    from app.services.picker import _hot_group
+
+    events = [
+        {
+            "key": "k1",
+            "name": "机器人订单",
+            "importance": "重要",
+            "concepts": ["机器人"],
+            "mentions": 5,
+            "source_count": 3,
+            "mentioned_stocks": [{"key": "000001.SZ", "name": "平安银行"}],
+        },
+        {
+            "key": "k2",
+            "name": "美联储讲话",
+            "importance": "重大",
+            "concepts": [],
+            "mentions": 9,
+            "source_count": 4,
+        },
+    ]
+    # dimensions=None → 维表未就绪。
+    group = _hot_group({"events": events}, None, None)
+
+    assert len(group["items"]) == 2
+    for item in group["items"]:
+        # 未知 ≠ 空炮: 两个字段都要表达「不知道」。
+        assert item["selectable_count"] is None, item
+        assert item["mapping_breadth"] is None, item
+        # 仍要给出原因, 且说明是「只纳入资讯提及个股」而不是「无法映射」。
+        assert "尚未同步同花顺行业/概念" in item["selectable_note"]
+        assert "只纳入资讯里提到的个股" in item["selectable_note"]
+        # 未知时不能说被截断(那会渲染成「至少 N 只」)。
+        assert item["selectable_capped"] is False
+
 
 
 def test_filters_drop_st_financial_and_cap_outside_range():

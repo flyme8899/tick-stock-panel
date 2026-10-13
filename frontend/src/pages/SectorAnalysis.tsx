@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
@@ -32,7 +32,7 @@ import {
   type DimensionGroup,
   type StockRow,
 } from '@/lib/analysis-adapter'
-import { parseSectorFocus, type SectorKind } from '@/lib/sectorTab'
+import { parseSectorFocus, parseSectorKey, type SectorKind } from '@/lib/sectorTab'
 
 const PAGE_LIMIT = 12000
 const MAX_RENDERED_GROUPS = 120
@@ -441,6 +441,7 @@ type SectorBoard = ReturnType<typeof useSectorBoard>
 export function SectorAnalysis() {
   const [searchParams] = useSearchParams()
   const focus = parseSectorFocus(searchParams.get('focus') ?? searchParams.get('tab'))
+  const deepKey = parseSectorKey(searchParams.get('sector'))
   const narrow = useNarrow()
   const concept = useSectorBoard('concept')
   const industry = useSectorBoard('industry')
@@ -472,6 +473,49 @@ export function SectorAnalysis() {
       window.setTimeout(() => document.getElementById('sector-detail')?.scrollIntoView?.({ block: 'nearest' }), 0)
     }
   }
+
+  // 深链带 sector 进来 (热门事件点板块直达)：等那一列的板块列表就绪后选中它。
+  // 不能在首次渲染就选中 —— 那时 rows 还没回来, 选中一个不存在的 key 会显示
+  // 「当前列表里没有这个概念」, 假装板块不存在。所以先等 stats 里有这个 key。
+  //
+  // **判列纠偏**: 上游（热门事件）判 concept/industry 只能看到涨跌榜头尾各 5 条,
+  // 排在中间的板块会兜底到概念列。这里两列的完整 stats 都在手边, 所以若 focus
+  // 那一列没有这个板块、另一列却有, 就改到另一列选 —— 这才是权威判定。
+  //
+  // **只消费一次**: URL 里的 sector 会一直留着, 而 stats 可能在轮询/切参后
+  // 短暂不含这个 key 再回来 —— 那样 `deepResolved` 会 false→true 再次触发,
+  // 把用户手动点的另一个板块抢回去。所以用 ref 记住已经应用过的那个 key:
+  // 同一个 key 不再应用, 换成**新**的深链 (从热门事件再点一次) 仍会生效。
+  const deepResolved = !deepKey
+    || concept.stats.some(s => s.key === deepKey)
+    || industry.stats.some(s => s.key === deepKey)
+  const appliedDeepKey = useRef<string | null>(null)
+  useEffect(() => {
+    if (!deepKey || !deepResolved) return
+    if (appliedDeepKey.current === deepKey) return
+    appliedDeepKey.current = deepKey
+    // **优先 focus 指定的那一列** —— 深链来自热门事件, focus 就是上游的判列意见,
+    // 只有当那一列确实没有这个板块时才纠偏到另一列。
+    // 同名板块两列都有不罕见(概念/行业重名), 若无条件优先概念列, focus=industry
+    // 的深链会被错误地落到概念列。
+    const inConcept = concept.stats.some(s => s.key === deepKey)
+    const inIndustry = industry.stats.some(s => s.key === deepKey)
+    const inFocus = focus === 'industry' ? inIndustry : inConcept
+    let kind: SectorKind
+    if (inFocus) {
+      kind = focus === 'industry' ? 'industry' : 'concept'
+    } else {
+      kind = inConcept ? 'concept' : inIndustry ? 'industry' : (focus === 'industry' ? 'industry' : 'concept')
+    }
+    setSelected({ kind, key: deepKey })
+    document.getElementById('sector-detail')?.scrollIntoView?.({ block: 'nearest' })
+  }, [deepKey, deepResolved, concept.stats, industry.stats, focus])
+
+  // 深链板块两列都没有: 等两列**加载完成**再确认, 免得把「还在加载」误报成「不存在」。
+  // 用「加载完成」而不是「有数据」判定 —— 某一列数据源本身为空(未接入/加载失败)时,
+  // 它永远不会有数据, 拿「有数据」当条件就永远不提示, 又回到静默。
+  const deepBoardsLoaded = !concept.rowsLoading && !industry.rowsLoading
+  const deepMissing = !!deepKey && !deepResolved && deepBoardsLoaded ? deepKey : null
 
   const saveConfig = (kind: SectorKind, config: AnalysisFieldConfig) => {
     const board = kind === 'industry' ? industry : concept
@@ -548,6 +592,7 @@ export function SectorAnalysis() {
             stat={selectedStat}
             level={industry.industryLevel}
             activeSymbol={previewSymbol}
+            missingKey={deepMissing}
             onStockClick={handleStockClick}
             onOpenMatrix={() => {
               if (!selected) return
@@ -948,6 +993,7 @@ function SectorDetail({
   stat,
   level,
   activeSymbol,
+  missingKey,
   onStockClick,
   onOpenMatrix,
 }: {
@@ -955,13 +1001,17 @@ function SectorDetail({
   stat: SectorStat | null
   level: 1 | 2 | 3
   activeSymbol: string | null
+  /** 深链指定但两列都找不到的板块名。有值时给明确提示, 而不是默认占位文案。 */
+  missingKey?: string | null
   onStockClick: (symbol: string, name?: string, navList?: NavItem[]) => void
   onOpenMatrix: () => void
 }) {
   if (!selection) {
     return (
       <section id="sector-detail" className="rounded-2xl border border-dashed border-border px-4 py-8 text-center text-sm text-muted">
-        点击上方概念或行业，在这里查看成分股、龙头和 RPS
+        {missingKey
+          ? `未找到板块「${missingKey}」，可能不在当前数据源范围内`
+          : '点击上方概念或行业，在这里查看成分股、龙头和 RPS'}
       </section>
     )
   }

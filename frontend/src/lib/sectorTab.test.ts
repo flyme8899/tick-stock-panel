@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { parseSectorFocus, sectorFocusSearch, sectorPageLabel } from './sectorTab'
+import {
+  parseSectorFocus,
+  parseSectorKey,
+  sectorFocusSearch,
+  sectorPageLabel,
+  sectorTargetSearch,
+} from './sectorTab'
 
 describe('parseSectorFocus', () => {
   it('ignores empty and unknown values', () => {
@@ -20,6 +26,39 @@ describe('sectorFocusSearch', () => {
     expect(sectorFocusSearch('concept')).toBe('focus=concept')
     expect(sectorFocusSearch('industry', 'foo=1')).toBe('foo=1&focus=industry')
     expect(sectorFocusSearch('concept', new URLSearchParams('tab=industry&x=2'))).toBe('x=2&focus=concept')
+  })
+
+  it('drops a stale sector param so switching focus does not keep a foreign board selected', () => {
+    // 从「概念-某题材」切到行业列时, 旧的 sector 属于概念列, 留着会让行业列找不到板块。
+    expect(sectorFocusSearch('industry', 'focus=concept&sector=银行概念')).toBe('focus=industry')
+  })
+})
+
+describe('parseSectorKey', () => {
+  it('treats blank values as no selection', () => {
+    expect(parseSectorKey(null)).toBeNull()
+    expect(parseSectorKey(undefined)).toBeNull()
+    expect(parseSectorKey('')).toBeNull()
+    expect(parseSectorKey('   ')).toBeNull()
+  })
+
+  it('keeps the board name, trimmed', () => {
+    expect(parseSectorKey(' 银行 ')).toBe('银行')
+    expect(parseSectorKey('银行-国有大行-大型')).toBe('银行-国有大行-大型')
+  })
+})
+
+describe('sectorTargetSearch', () => {
+  it('carries both the focused column and the board', () => {
+    expect(sectorTargetSearch('concept', '机器人')).toBe('focus=concept&sector=%E6%9C%BA%E5%99%A8%E4%BA%BA')
+    expect(sectorTargetSearch('industry', '银行', 'foo=1')).toBe('foo=1&focus=industry&sector=%E9%93%B6%E8%A1%8C')
+  })
+
+  it('replaces an older target instead of appending a second one', () => {
+    const once = sectorTargetSearch('concept', '机器人')
+    const twice = sectorTargetSearch('concept', '低空经济', once)
+    expect(new URLSearchParams(twice).getAll('sector')).toEqual(['低空经济'])
+    expect(new URLSearchParams(twice).get('focus')).toBe('concept')
   })
 })
 

@@ -12,7 +12,30 @@ export function parseSectorFocus(value: string | null | undefined): SectorKind |
 export function sectorFocusSearch(focus: SectorKind, current?: URLSearchParams | string): string {
   const next = new URLSearchParams(current ?? '')
   next.delete('tab')
+  next.delete('sector')
   next.set('focus', focus)
+  return next.toString()
+}
+
+/** 深链要选中的具体板块。空值/纯空白都当作没指定。 */
+export function parseSectorKey(value: string | null | undefined): string | null {
+  const key = (value ?? '').trim()
+  return key || null
+}
+
+/**
+ * 深链到某个具体板块：`?focus=<kind>&sector=<key>`。
+ * focus 仍然要带上 —— 窄屏靠它决定展开哪一列。
+ */
+export function sectorTargetSearch(
+  focus: SectorKind,
+  key: string,
+  current?: URLSearchParams | string,
+): string {
+  const next = new URLSearchParams(current ?? '')
+  next.delete('tab')
+  next.set('focus', focus)
+  next.set('sector', key)
   return next.toString()
 }
 

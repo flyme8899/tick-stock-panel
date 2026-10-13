@@ -1,9 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type NewsCandidate, type NewsHotEvent, type NewsMxHotStatus, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
+import { api, type NewsCandidate, type NewsHotEvent, type NewsHotStock, type NewsMxHotStatus, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { PageHelpButton } from '@/components/PageHelpButton'
+import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { sectorTargetSearch, type SectorKind } from '@/lib/sectorTab'
 import { cn } from '@/lib/cn'
 
 const POLL_MS = 60_000
@@ -25,6 +28,64 @@ const CATEGORIES = [
 ] as const
 
 type HotTab = (typeof TABS)[number]['key']
+
+/** 点开的个股/ETF 预览。symbol 为空表示没开。 */
+interface StockPreviewTarget {
+  symbol: string
+  name: string
+}
+
+/**
+ * 个股名做成可点。「热门个股」和事件详情里的相关个股都用它，
+ * 免得两处各写一遍样式和交互。
+ */
+function StockLink({
+  stock,
+  onOpen,
+  className,
+}: {
+  stock: Pick<NewsHotStock, 'key' | 'name'>
+  onOpen: (target: StockPreviewTarget) => void
+  className?: string
+}) {
+  const label = stock.name || stock.key
+  return (
+    <button
+      type="button"
+      title={`查看 ${label} 详情`}
+      onClick={() => onOpen({ symbol: stock.key, name: label })}
+      className={cn('rounded px-0.5 text-accent hover:underline', className)}
+    >
+      {label}
+    </button>
+  )
+}
+
+/** 用顿号隔开的可点个股列表。空列表返回 null，交给调用方决定要不要渲染外层。 */
+function StockLinkList({
+  stocks,
+  onOpen,
+  limit,
+}: {
+  stocks: Pick<NewsHotStock, 'key' | 'name'>[]
+  onOpen: (target: StockPreviewTarget) => void
+  limit?: number
+}) {
+  const shown = limit == null ? stocks : stocks.slice(0, limit)
+  if (shown.length === 0) return null
+  return (
+    <>
+      {shown.map((stock, idx) => (
+        // 合并个股与 ETF 后同一 key 可能出现两次(列表各自去重、合起来不一定),
+        // 单用 key 会撞; 带上下标保证唯一。
+        <span key={`${stock.key}-${idx}`}>
+          {idx > 0 && <span className="text-muted">、</span>}
+          <StockLink stock={stock} onOpen={onOpen} />
+        </span>
+      ))}
+    </>
+  )
+}
 
 function confirmBadge(confirm: NonNullable<NewsHotEvent['confirmation']>): string {
   if (confirm.pending || confirm.label === '待开盘验证') return '待开盘验证'
@@ -75,6 +136,9 @@ export function HotEvents() {
   const [pickedEvent, setPickedEvent] = useState<NewsHotEvent | null>(null)
   const [openTitles, setOpenTitles] = useState<Record<string, boolean>>({})
   const [pushNote, setPushNote] = useState('')
+  const [preview, setPreview] = useState<StockPreviewTarget | null>(null)
+  const [sectorToOpen, setSectorToOpen] = useState<string | null>(null)
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
 
   const hot = useQuery({
@@ -96,6 +160,14 @@ export function HotEvents() {
     queryKey: QK.newsMessages('event', pickedEvent?.key ?? ''),
     queryFn: () => api.newsEventMessages(pickedEvent!.key),
     enabled: pickedEvent != null && tab === 'event',
+  })
+  // 点板块时要知道它是概念还是行业 —— 板块分析页两列各有自己的成分表，
+  // 送错列会查不到。只在真的点了板块之后才去拉，不给热门事件首屏加请求。
+  const sectorRank = useQuery({
+    queryKey: QK.overviewMarket(),
+    queryFn: () => api.overviewMarket(),
+    enabled: sectorToOpen != null,
+    staleTime: 5 * 60 * 1000,
   })
   const toggle = useMutation({
     mutationFn: (source: NewsSourceHealth) =>
@@ -137,6 +209,65 @@ export function HotEvents() {
     .filter(item => !redOnly || (item.red_count ?? 0) > 0)
   const eventItems = (eventDetail.data?.items ?? []).filter(item => !redOnly || item.red)
   const messageItems = (messages.data?.items ?? []).filter(item => !redOnly || item.red)
+
+  // 概念/行业两个榜里的板块名集合。总览把两张榜分开展示, 同名板块也能据此定列。
+  //
+  // 注意这只是**初判**: 榜单每列只给涨跌头尾各 5 条, 排在中间的板块两个集合里都
+  // 没有, 会兜底成概念列 (见 openSector)。真正的纠偏在板块分析页 —— 它两列完整
+  // stats 都在手边, 深链落错列时会自动改到含该板块的那一列 (见 SectorAnalysis)。
+  // 所以这里的初判只要「大致对」即可, 判错无害。
+  const sectorKinds = useMemo(() => {
+    const concept = new Set<string>()
+    const industry = new Set<string>()
+    for (const item of sectorRank.data?.concept_rank?.leading ?? []) concept.add(item.name)
+    for (const item of sectorRank.data?.concept_rank?.lagging ?? []) concept.add(item.name)
+    for (const item of sectorRank.data?.industry_rank?.leading ?? []) industry.add(item.name)
+    for (const item of sectorRank.data?.industry_rank?.lagging ?? []) industry.add(item.name)
+    return { concept, industry }
+  }, [sectorRank.data])
+
+  const openStock = (target: StockPreviewTarget) => setPreview(target)
+
+  /**
+   * 跳板块分析并定位到具体板块。
+   * 榜里查不到就先按概念走 —— 热点里提到的大多是概念/题材。判错也不怕:
+   * 板块分析页发现该列没有这个板块、另一列有, 会自动改到另一列选。
+   */
+  const openSector = (key: string, kind?: SectorKind) => {
+    const resolved: SectorKind = kind
+      ?? (sectorKinds.industry.has(key) && !sectorKinds.concept.has(key) ? 'industry' : 'concept')
+    navigate(`/sector-analysis?${sectorTargetSearch(resolved, key)}`)
+  }
+
+  // 板块热度榜里没有概念/行业这一列, 得先查总览才知道该送哪个列。
+  // 总览没缓存时先记下要开的板块, 等它回来 (见下面的 effect) 再跳。
+  const openSectorFromCandidate = (key: string) => {
+    if (sectorRank.isSuccess) {
+      openSector(key)
+      return
+    }
+    setSectorToOpen(key)
+  }
+
+  useEffect(() => {
+    if (sectorToOpen == null) return
+    // 还没结束就继续等。请求失败也算结束 —— 兜底跳概念列, 不能点了没反应。
+    if (!sectorRank.isSuccess && !sectorRank.isError) return
+    setSectorToOpen(null)
+    openSector(sectorToOpen)
+    // openSector 读的 sectorKinds 由 sectorRank.data 派生, 正是这个 effect 等的对象;
+    // 列进依赖会让结算后再触发一次。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectorToOpen, sectorRank.isSuccess, sectorRank.isError])
+
+  const previewStock = preview && (
+    <StockPreviewDialog
+      symbol={preview.symbol}
+      name={preview.name}
+      onClose={() => setPreview(null)}
+      onNavigate={(symbol, name) => setPreview({ symbol, name: name ?? '' })}
+    />
+  )
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -232,14 +363,20 @@ export function HotEvents() {
           {tab === 'event' && (
             <ul className="space-y-2">
               {events.map(item => (
-                <li key={item.key}>
+                <li
+                  key={item.key}
+                  className={cn(
+                    'rounded-md border px-3 py-2',
+                    pickedEvent?.key === item.key ? 'border-accent' : 'border-border',
+                  )}
+                >
+                  {/* 卡片不再是整块按钮：里面要塞映射个股的可点链接，按钮套按钮是非法嵌套。
+                      折叠/展开仍然保留在原处，只是改成独立的按钮。 */}
                   <button
                     type="button"
                     title={item.headline || item.name}
-                    className={cn(
-                      'w-full rounded-md border px-3 py-2 text-left',
-                      pickedEvent?.key === item.key ? 'border-accent' : 'border-border',
-                    )}
+                    className="w-full text-left"
+                    aria-expanded={!!openTitles[item.key]}
                     onClick={() => {
                       setPickedEvent(item)
                       setOpenTitles(current => ({
@@ -300,17 +437,21 @@ export function HotEvents() {
                         <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
                       ))}
                     </div>
-                    {([...item.stocks, ...(item.etfs ?? [])]).length > 0 && (
-                      <div className="mt-1 text-xs text-secondary">
-                        {item.direction || '映射'}{' '}
-                        {([...item.stocks, ...(item.etfs ?? [])]).slice(0, 4).map(stock => stock.name || stock.key).join('、')}
-                      </div>
-                    )}
-                    <div className="mt-1 text-xs text-muted">
-                      提及 {item.mentions} · 来源 {item.source_count}
-                      {item.first_seen ? ` · 首见 ${item.first_seen}` : ''}
-                    </div>
                   </button>
+                  {([...item.stocks, ...(item.etfs ?? [])]).length > 0 && (
+                    <div className="mt-1 text-xs text-secondary">
+                      {item.direction || '映射'}{' '}
+                      <StockLinkList
+                        stocks={[...item.stocks, ...(item.etfs ?? [])]}
+                        onOpen={openStock}
+                        limit={4}
+                      />
+                    </div>
+                  )}
+                  <div className="mt-1 text-xs text-muted">
+                    提及 {item.mentions} · 来源 {item.source_count}
+                    {item.first_seen ? ` · 首见 ${item.first_seen}` : ''}
+                  </div>
                 </li>
               ))}
             </ul>
@@ -319,28 +460,49 @@ export function HotEvents() {
           {tab !== 'event' && (
           <ul className="space-y-2">
             {candidates.map(item => (
-              <li key={item.key}>
-                <button
-                  type="button"
-                  className={cn(
-                    'w-full rounded-md border px-3 py-2 text-left',
-                    picked?.key === item.key ? 'border-accent' : 'border-border',
-                  )}
-                  onClick={() => setPicked(item)}
-                >
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className="font-medium">{item.name}</span>
-                    <span className="text-xs text-muted">分数 {item.score}</span>
-                  </div>
-                  <div className="mt-1 text-xs text-muted">
-                    {item.story_count} 条故事 · {item.sources.length} 个来源 · 相对基线 {item.growth} 倍
-                    {item.kind === 'stock' && item.fund_flow?.main_net_5d != null ? (
-                      <span className={stockFlowClass(item.fund_flow.main_net_5d)}>
-                        {` · 主力净流入5日 ${(item.fund_flow.main_net_5d / 1e8).toFixed(2)} 亿`}
-                      </span>
-                    ) : fundFlowText(item) ? ` · ${fundFlowText(item)}` : null}
-                  </div>
-                </button>
+              <li
+                key={item.key}
+                data-kind={item.kind}
+                className={cn(
+                  'rounded-md border px-3 py-2',
+                  picked?.key === item.key ? 'border-accent' : 'border-border',
+                )}
+              >
+                {/* 名字是可点的直达入口；摘录是另一件事，单独一个按钮。
+                    整块做成按钮的话里面就塞不下第二个可点区域了。 */}
+                <div className="flex items-baseline justify-between gap-3">
+                  <button
+                    type="button"
+                    title={item.kind === 'sector' ? `在板块分析里打开 ${item.name}` : `查看 ${item.name} 详情`}
+                    className="min-w-0 truncate text-left font-medium text-accent hover:underline"
+                    onClick={() => {
+                      if (item.kind === 'sector') {
+                        openSectorFromCandidate(item.key)
+                        return
+                      }
+                      openStock({ symbol: item.key, name: item.name })
+                    }}
+                  >
+                    {item.name}
+                  </button>
+                  <span className="shrink-0 text-xs text-muted">分数 {item.score}</span>
+                </div>
+                <div className="mt-1 text-xs text-muted">
+                  {item.story_count} 条故事 · {item.sources.length} 个来源 · 相对基线 {item.growth} 倍
+                  {item.kind === 'stock' && item.fund_flow?.main_net_5d != null ? (
+                    <span className={stockFlowClass(item.fund_flow.main_net_5d)}>
+                      {` · 主力净流入5日 ${(item.fund_flow.main_net_5d / 1e8).toFixed(2)} 亿`}
+                    </span>
+                  ) : fundFlowText(item) ? ` · ${fundFlowText(item)}` : null}
+                  <button
+                    type="button"
+                    title={`查看 ${item.name} 的相关摘录`}
+                    className="ml-1 text-accent hover:underline"
+                    onClick={() => setPicked(item)}
+                  >
+                    {picked?.key === item.key ? '收起摘录' : '看摘录'}
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -373,12 +535,14 @@ export function HotEvents() {
               )}
               {(eventDetail.data?.stocks ?? pickedEvent.stocks).length > 0 && (
                 <p className="mb-2 text-xs text-muted">
-                  相关个股：{(eventDetail.data?.stocks ?? pickedEvent.stocks).map(stock => stock.name || stock.key).join('、')}
+                  相关个股：
+                  <StockLinkList stocks={eventDetail.data?.stocks ?? pickedEvent.stocks} onOpen={openStock} />
                 </p>
               )}
               {(eventDetail.data?.etfs ?? pickedEvent.etfs ?? []).length > 0 && (
                 <p className="mb-2 text-xs text-muted">
-                  相关ETF：{(eventDetail.data?.etfs ?? pickedEvent.etfs ?? []).map(stock => stock.name || stock.key).join('、')}
+                  相关ETF：
+                  <StockLinkList stocks={eventDetail.data?.etfs ?? pickedEvent.etfs ?? []} onOpen={openStock} />
                 </p>
               )}
               {eventDetail.isLoading && <p className="text-sm text-muted">加载摘录…</p>}
@@ -568,6 +732,7 @@ export function HotEvents() {
           </section>
         </aside>
       </div>
+      {previewStock}
     </div>
   )
 }

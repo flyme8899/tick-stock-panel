@@ -19,10 +19,11 @@ export interface SourceOption {
   importance?: string
   confirmationLabel?: string
   mappedStocks?: string[]
-  /** 真实可选股数(与实跑同一把尺)。0 表示这条事件当前选不出任何个股。这是**上限**。 */
-  selectableCount?: number
-  /** 映射广度：usable=有区分度 / broad=命中过宽 / none=选不出股 / undefined=后端未透出。 */
-  mappingBreadth?: 'usable' | 'broad' | 'none' | string
+  /** 真实可选股数(与实跑同一把尺)。0 表示这条事件当前选不出任何个股。这是**上限**。
+   *  null/undefined 表示**未知**(维表未同步)——不拦截勾选, 只旁注原因。 */
+  selectableCount?: number | null
+  /** 映射广度：usable=有区分度 / broad=命中过宽 / none=选不出股 / null=未知。 */
+  mappingBreadth?: 'usable' | 'broad' | 'none' | string | null
   /** 选不出股的原因(后端 note)。用来区分「维表没同步」和「事件真没股」。 */
   selectableNote?: string | null
   /** 可选数是否被 30 只上限截断。截断了要说「至少 N 只」而不是「约 N 只」。 */
@@ -30,8 +31,13 @@ export interface SourceOption {
 }
 
 function selectableBadge(item: SourceOption): { text: string; className: string } | null {
+  // 未知(维表未同步): 展示原因, 用中性色 —— 它既不是「能选 N 只」也不是「空炮」。
+  if (item.selectableCount == null) {
+    return item.selectableNote
+      ? { text: item.selectableNote, className: 'bg-muted/15 text-muted' }
+      : null
+  }
   const count = item.selectableCount
-  if (count == null) return null
   if (count <= 0) {
     // 原因由后端 note 给出: 维表未同步 / 事件无映射 / 代码对不上, 三种不该长一个样。
     return { text: item.selectableNote || '暂无对应个股', className: 'bg-muted/15 text-muted' }
@@ -130,6 +136,8 @@ export function SourceDropdown({
         {visible.map(item => {
           const on = selected.has(item.id)
           // 选不出股的事件不提供**新增**勾选 (勾了也是空炮)。
+          // 注意 count 为 null(维表未同步)时**不**置灰 —— 那时仍会纳入资讯提及个股,
+          // 拦下来会让用户连本来能跑的事件都勾不上。只有确知 0 才拦。
           const lacksMapping = item.selectableCount != null && item.selectableCount <= 0
           // 关键: 只要**已勾选**, 就必须保留勾选框形态与可点性 —— 否则用户取消不掉,
           // 而且「选中态」会在 count 归零后凭空消失(渲染与交互用了同一个条件时会这样)。

@@ -10,6 +10,10 @@ import { SectorAnalysis } from './SectorAnalysis'
 const calls = vi.hoisted(() => ({
   rows: [] as string[],
   rotation: [] as { kind: string; level?: number }[],
+  // 置 true 时 ext_gn_ths 不再返回「银行概念」，用来模拟深链板块在刷新后短暂消失。
+  dropBankConcept: false,
+  // 置 true 时 ext_gn_ths 整列为空，模拟某一列数据源未接入/为空。
+  emptyConcept: false,
 }))
 
 vi.mock('@/lib/api', () => ({
@@ -56,10 +60,10 @@ vi.mock('@/lib/api', () => ({
             { name: 'symbol', dtype: 'str', label: '代码' },
             { name: '所属概念', dtype: 'str', label: '所属概念' },
           ],
-          rows: [
-            { symbol: '000001.SZ', name: '平安银行', 所属概念: '银行概念;融资融券' },
+          rows: (calls.emptyConcept ? [] : [
+            { symbol: '000001.SZ', name: '平安银行', 所属概念: '银行概念;融资融券;银行' },
             { symbol: '000002.SZ', name: '万科A', 所属概念: '地产概念' },
-          ],
+          ]).filter(row => !(calls.dropBankConcept && row.所属概念.includes('银行概念'))),
         }
       }
       if (id === 'board_mix') {
@@ -168,6 +172,8 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   calls.rows.length = 0
   calls.rotation.length = 0
+  calls.dropBankConcept = false
+  calls.emptyConcept = false
   localStorage.clear()
   localStorage.setItem('industry-analysis-config', JSON.stringify({ hierarchyLevel: 1 }))
   localStorage.setItem('concept-analysis-config', JSON.stringify({ dimensionField: '所属概念' }))
@@ -189,6 +195,15 @@ async function settle() {
   for (let i = 0; i < 10; i++) {
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
   }
+}
+
+/** 按条件等待, 不用固定轮数 —— 负载高时固定轮数会不够。 */
+async function waitFor(predicate: () => boolean, label = 'condition') {
+  for (let i = 0; i < 60; i++) {
+    if (predicate()) return
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  }
+  if (!predicate()) throw new Error(`timed out waiting for ${label}`)
 }
 
 function renderAt(path: string) {
@@ -251,9 +266,11 @@ it('shows concept and industry side by side, with industry-only level and heatma
   expect(column('industry').textContent).not.toContain('国有大行')
   expect(column('industry').textContent).not.toContain('银行概念')
   expect(column('industry').getAttribute('data-source')).toBe('ext_hy_ths')
-  expect(new Set(sectorKeys('concept'))).toEqual(new Set(['银行概念', '地产概念']))
+  expect(new Set(sectorKeys('concept'))).toEqual(new Set(['银行概念', '地产概念', '银行']))
   expect(new Set(sectorKeys('industry'))).toEqual(new Set(['银行', '房地产']))
-  expect(sectorKeys('concept').some(key => sectorKeys('industry').includes(key))).toBe(false)
+  // 「银行」两列都有 —— 概念/行业重名是真实存在的, 深链判列必须据此优先 focus
+  // 而不是无条件概念列（见下面的同名深链用例）。除它之外两列不重叠。
+  expect(sectorKeys('concept').filter(key => key !== '银行').some(key => sectorKeys('industry').includes(key))).toBe(false)
   expect(sectorKeys('industry')).not.toContain('融资融券')
   expect(sectorKeys('concept')).not.toContain('融资融券')
   expect(calls.rows).toContain('ext_gn_ths')
@@ -294,6 +311,113 @@ it('opens one shared detail for whichever column is clicked', async () => {
   expect(host.querySelector('#sector-detail')?.textContent).toContain('本行业三龙头')
   expect(host.querySelector('#sector-detail')?.textContent).toContain('浦发银行')
   expect(host.querySelector('#sector-detail')?.textContent).toContain('1级行业')
+})
+
+it('selects the board named in the url, on the column the url points at', async () => {
+  // 热门事件点板块直达：?focus=<kind>&sector=<板块名>。
+  renderAt('/sector-analysis?focus=concept&sector=%E9%93%B6%E8%A1%8C%E6%A6%82%E5%BF%B5')
+  await waitFor(() => host.querySelector('#sector-detail')?.getAttribute('data-detail-kind') === 'concept', 'deep-linked board')
+
+  const detail = host.querySelector('#sector-detail')
+  expect(detail?.getAttribute('data-detail-kind')).toBe('concept')
+  expect(detail?.textContent).toContain('银行概念')
+  expect(detail?.textContent).toContain('平安银行')
+  expect(detail?.textContent).not.toContain('点击上方概念或行业')
+})
+
+it('honours the focused column when the board name exists in both', async () => {
+  // 概念与行业重名（「银行」两列都有）。focus=industry 的深链必须落行业列,
+  // 不能因为「概念列也有这个名字」就被抢到概念列。
+  renderAt('/sector-analysis?focus=industry&sector=%E9%93%B6%E8%A1%8C')
+  await waitFor(
+    () => (host.querySelector('[data-kind="industry"]')?.querySelectorAll('[data-sector]').length ?? 0) > 0,
+    'industry rows',
+  )
+  await waitFor(
+    () => host.querySelector('#sector-detail')?.getAttribute('data-detail-kind') === 'industry',
+    'focused column wins',
+  )
+  expect(host.querySelector('#sector-detail')?.getAttribute('data-detail-kind')).toBe('industry')
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('本行业三龙头')
+})
+
+it('corrects the column when the deep-linked board lives in the other one', async () => {
+  // 上游判列只能看涨跌榜头尾, 排在中间的行业板块会被兜底成概念列。
+  // 板块分析页两列完整 stats 都在手边, 要据此纠偏到真正含该板块的那一列。
+  // 「房地产」只存在于行业列（概念列是「地产概念」）, 但 URL 说 focus=concept。
+  renderAt('/sector-analysis?focus=concept&sector=%E6%88%BF%E5%9C%B0%E4%BA%A7')
+  // 等两列 stats 都就绪（行业列出现板块行）—— 纠偏要等到那时候才知道房地产在行业列。
+  await waitFor(
+    () => (host.querySelector('[data-kind="industry"]')?.querySelectorAll('[data-sector]').length ?? 0) > 0,
+    'industry rows',
+  )
+  await waitFor(
+    () => host.querySelector('#sector-detail')?.getAttribute('data-detail-kind') === 'industry',
+    'industry correction',
+  )
+
+  const detail = host.querySelector('#sector-detail')
+  // 必须落到行业列, 而不是停在概念列显示「当前列表里没有这个概念」。
+  expect(detail?.getAttribute('data-detail-kind')).toBe('industry')
+  expect(detail?.textContent).toContain('房地产')
+  expect(detail?.textContent).not.toContain('当前列表里没有这个概念')
+})
+
+it('waits for the board list before selecting, and does not claim the board is missing', async () => {
+  // 深链指向一个不存在的板块：要停在提示上, 而不是先选中、渲染出
+  // 「当前列表里没有这个概念」再跳走。等两列都就绪后给一句明确的「未找到」。
+  renderAt('/sector-analysis?focus=industry&sector=%E4%B8%8D%E5%AD%98%E5%9C%A8%E7%9A%84%E6%9D%BF%E5%9D%97')
+  // 等板块列表就绪（列里出现板块行）再断言没被选中。
+  // 用裸选择器轮询 —— column() 找不到节点会抛, 不能放进条件里。
+  await waitFor(
+    () => (host.querySelector('[data-kind="industry"]')?.querySelectorAll('[data-sector]').length ?? 0) > 0,
+    'industry rows',
+  )
+
+  const detail = host.querySelector('#sector-detail')
+  expect(detail?.getAttribute('data-detail-kind')).toBeNull()
+  expect(detail?.textContent).toContain('未找到板块「不存在的板块」')
+  expect(detail?.textContent).not.toContain('当前列表里没有这个概念')
+})
+
+it('still reports a missing deep-linked board when one column has no data at all', async () => {
+  // 概念列数据源为空(未接入/加载失败)时, 它永远不会有数据。
+  // 「未找到」的判定要以两列**加载完成**为准, 不能要求两列都有数据 ——
+  // 否则这种情况下提示永远不出现, 又回到点了没反应的静默。
+  calls.emptyConcept = true
+  renderAt('/sector-analysis?focus=concept&sector=%E4%B8%8D%E5%AD%98%E5%9C%A8%E7%9A%84%E6%9D%BF%E5%9D%97')
+  await waitFor(
+    () => (host.querySelector('#sector-detail')?.textContent ?? '').includes('未找到板块'),
+    'missing hint despite empty column',
+  )
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('未找到板块「不存在的板块」')
+})
+
+it('applies a deep link only once, so a refetch cannot steal a manual pick', async () => {
+  // URL 里的 sector 会一直留着。如果深链 effect 每次 stats 变化都重新应用,
+  // 那么「深链板块在刷新后短暂消失再回来」就会把用户手动点的另一个板块抢回去。
+  renderAt('/sector-analysis?focus=concept&sector=%E9%93%B6%E8%A1%8C%E6%A6%82%E5%BF%B5')
+  await waitFor(() => host.querySelector('#sector-detail')?.getAttribute('data-detail-kind') === 'concept', 'deep-linked board')
+
+  // 用户手动改选另一个概念板块。
+  await act(async () => {
+    column('concept').querySelector<HTMLButtonElement>('[data-sector="地产概念"]')?.click()
+  })
+  await settle()
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('地产概念')
+
+  // 模拟刷新：深链板块「银行概念」先消失, 再出现 —— deepResolved 走了 false→true。
+  calls.dropBankConcept = true
+  await act(async () => { await client.invalidateQueries() })
+  await settle()
+  calls.dropBankConcept = false
+  await act(async () => { await client.invalidateQueries() })
+  await settle()
+
+  // 用户的手动选择必须还在, 不能被深链抢回「银行概念」。
+  const detail = host.querySelector('#sector-detail')
+  expect(detail?.textContent).toContain('地产概念')
+  expect(detail?.textContent).not.toContain('银行概念')
 })
 
 it('keeps each column config, and the industry level control, on their own side', async () => {
@@ -371,7 +495,7 @@ it('keeps industry rows when the saved industry source points at the concept pre
 
   expect(column('industry').getAttribute('data-source')).toBe('ext_hy_ths')
   expect(new Set(sectorKeys('industry'))).toEqual(new Set(['银行', '房地产']))
-  expect(new Set(sectorKeys('concept'))).toEqual(new Set(['银行概念', '地产概念']))
+  expect(new Set(sectorKeys('concept'))).toEqual(new Set(['银行概念', '地产概念', '银行']))
   expect(calls.rows).not.toContain('board_mix')
 })
 

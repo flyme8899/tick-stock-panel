@@ -293,3 +293,29 @@ it('does not grey out a hot event when the backend omits the new fields', async 
   expect(row.getAttribute('aria-disabled')).toBeNull()
   expect(host.textContent).not.toContain('没有匹配到成分股')
 })
+
+it('keeps an unknown count selectable while dim index is not synced', async () => {
+  // 维表未同步时后端给 selectable_count=null(未知), 不是 0(空炮)。
+  // 此时实跑仍会纳入资讯提及个股, 所以**不能**置灰拦下勾选 —— 否则用户
+  // 连本来能跑的事件都勾不上。原因要照常展示。
+  harness.mode = 'ready'
+  harness.hotItems = [
+    { id: 'ev-pending', name: '机器人订单落地', mentions: 6, source_count: 3,
+      selectable_count: null, mapping_breadth: null,
+      selectable_note: '尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股' },
+  ]
+  await renderPicker()
+  await openMenu('热门事件')
+  // 原因可见。
+  expect(host.textContent).toContain('尚未同步同花顺行业/概念')
+  const row = hotRow('机器人订单落地')
+  // 未置灰, 可勾选。
+  expect(row.getAttribute('aria-disabled')).toBeNull()
+  await toggleHot('机器人订单落地')
+  expect(hotRow('机器人订单落地').getAttribute('aria-checked')).toBe('true')
+  // 未知数不能被渲染成「至少 N 只」这类量词 —— 那一行里不该出现「只」计数。
+  // 注意别全局断言「只」: note 里「只纳入资讯里提到的个股」也含「只」。
+  const text = hotRow('机器人订单落地').textContent ?? ''
+  expect(text).not.toContain('至少')
+  expect(text).not.toMatch(/\d+\s*只/)
+})

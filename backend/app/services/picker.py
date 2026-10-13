@@ -478,6 +478,33 @@ def resolve_event_symbols(
       - 结果再整体过滤一次基金。
     `known_symbols` 为空时(选项预览阶段没有行情表)跳过代码校验, 但仍然过滤基金。
     """
+    symbols, _capped = _event_symbols_and_capped(
+        event,
+        dimensions,
+        label_index,
+        known_symbols=known_symbols,
+        market_caps=market_caps,
+        constituent_cap=constituent_cap,
+    )
+    return symbols
+
+
+def _event_symbols_and_capped(
+    event: dict,
+    dimensions: Dimensions,
+    label_index: dict[str, set[str]],
+    *,
+    known_symbols: set[str] | None = None,
+    market_caps: dict[str, float] | None = None,
+    constituent_cap: int = _CONCEPT_CONSTITUENT_CAP,
+) -> tuple[set[str], bool]:
+    """`resolve_event_symbols` 的实现, 额外返回「成分股是否真被上限截断」。
+
+    `selectable_count` 恰好等于上限时无法区分「正好 30 只」和「30 只是砍出来的」——
+    这决定前端该说「30 只」还是「至少 30 只」。所以把「是否真截断」显式透出,
+    而不是让调用方拿 `count >= cap` 去猜(恰好 30 时会误报)。
+    截断 = 资讯提及之外的成分股比上限还多。
+    """
     concepts = _event_concept_names(event)
     has_dimensions = bool(dimensions.concepts or dimensions.industry_path)
     constituents: set[str] = set()
@@ -517,10 +544,12 @@ def resolve_event_symbols(
         constituents - resolved,
         key=lambda symbol: (-mention_rank.get(symbol, 0), -(caps.get(symbol) or 0.0), symbol),
     )
-    return {
+    picked = {
         symbol for symbol in (resolved | set(extra[:constituent_cap]))
         if not _mentioned_is_fund(symbol)
     }
+    # 恰好等于上限时 extra 可能正好是 cap 只 —— 那只算「正好」不算「被砍」。
+    return picked, len(extra) > constituent_cap
 
 
 def _mapping_note(
@@ -1010,8 +1039,14 @@ def _event_concept_names(event: dict) -> list[str]:
     return names
 
 
-def _mapping_breadth(selectable: int) -> str:
-    """把可选股数折成三档语义, 供排序与前端展示共用。"""
+def _mapping_breadth(selectable: int | None) -> str | None:
+    """把可选股数折成三档语义, 供排序与前端展示共用。
+
+    `selectable is None` 表示**还不知道** (维表没同步), 与 none(确实选不出)
+    是两回事 —— 这时返回 None, 前端按「未知」处理, 不能当成「空炮」置灰。
+    """
+    if selectable is None:
+        return None
     if selectable <= 0:
         return "none"
     if selectable > _BROAD_MAPPING_CEILING:
@@ -1042,14 +1077,16 @@ def _selectable_detail(
     event: dict,
     dimensions: Dimensions,
     label_index: dict[str, set[str]],
-) -> tuple[int, str | None]:
-    """可选股数 + 选不出的原因。
+) -> tuple[int, str | None, bool]:
+    """可选股数 + 选不出的原因 + 是否真被上限截断。
 
     `resolve_event_symbols` 第三返回值是 note —— 它区分了「数据没就绪」「事件无映射」
     「代码对不上」三种本质不同的 0。前端要按原因给出不同文案, 不能一律「暂无对应个股」
     (那会把「重大政策新闻暂时映射不上」和「冷门事件真没股」画等号)。
+
+    `capped` 单独返回而不是让调用方拿 `len >= 上限` 猜: 恰好 30 只时不该说「至少 30 只」。
     """
-    symbols = resolve_event_symbols(
+    symbols, capped = _event_symbols_and_capped(
         event, dimensions, label_index, known_symbols=None,
     )
     note = _mapping_note(
@@ -1059,10 +1096,10 @@ def _selectable_detail(
         has_dimensions=bool(dimensions.concepts or dimensions.industry_path),
         known_symbols=None,
     )
-    return len(symbols), note
+    return len(symbols), note, capped
 
 
-def _event_pick_rank(event: dict, selectable: int, *, index_ready: bool) -> tuple:
+def _event_pick_rank(event: dict, selectable: int | None, *, index_ready: bool) -> tuple:
     """热门事件在「**选股**列表」里的排序键 —— 与新闻榜单的排序口径不同。
 
     新闻榜单要的是「按重要性看世界」, 所以档位主导。选股列表要的是「点得动」,
@@ -1127,16 +1164,25 @@ def _hot_group(
     raw_events = [e for e in (snapshot.get("events") or []) if isinstance(e, dict) and str(e.get("key") or "").strip()]
     label_index = build_label_index(dimensions) if dimensions is not None else {}
     index_ready = bool(label_index)
-    ranked: list[tuple[tuple, dict, int, str | None]] = []
+    ranked: list[tuple[tuple, dict, int | None, str | None, bool]] = []
     for event in raw_events:
         if index_ready:
-            selectable, note = _selectable_detail(event, dimensions, label_index)
+            selectable, note, capped = _selectable_detail(event, dimensions, label_index)
         else:
-            # 行业/概念维表还没就绪: 此时全 0 是「未同步」导致的, 不是事件本身没映射,
-            # 前端要据此说「数据同步中」而不是「暂无对应个股」。
-            selectable, note = 0, "尚未同步同花顺行业/概念，无法映射成分股"
+            # 行业/概念维表还没就绪: 可映射性**未知**, 不是 0。
+            # 这里传 None 而不是 0 —— 用 0 会让前端把这条事件当成「空炮」拦掉勾选,
+            # 但实跑 `resolve_event_symbols` 在没维表时仍会纳入资讯里提到的个股
+            # (note 本身就写着「本次只纳入资讯里提到的个股」)。维表没同步 ≠ 选不出股,
+            # 前者该让用户照常勾选、只在旁边说明, 后者才该拦。
+            selectable, note, capped = None, "尚未同步同花顺行业/概念，本次只纳入资讯里提到的个股", False
         ranked.append(
-            (_event_pick_rank(event, selectable, index_ready=index_ready), event, selectable, note)
+            (
+                _event_pick_rank(event, selectable, index_ready=index_ready),
+                event,
+                selectable,
+                note,
+                capped,
+            )
         )
     ranked.sort(key=lambda row: row[0])
 
@@ -1178,7 +1224,7 @@ def _hot_group(
     selected = picked
 
     items = []
-    for _rank, event, selectable, note in selected:
+    for _rank, event, selectable, note, capped in selected:
         if len(items) >= _TOP_HOT_EVENTS:
             break
         key = str(event.get("key") or "").strip()
@@ -1226,18 +1272,21 @@ def _hot_group(
             # 真实可选股数, 与实跑同一把尺(走 resolve_event_symbols: 已按
             # _CONCEPT_CONSTITUENT_CAP 截断、已过滤基金)。mapped_stocks 只有前 3 个,
             # 前端无法据此还原总数, 所以单独透出这个数。
+            # **None 表示未知**(维表未同步), 与 0(确实选不出股)语义不同:
+            # 前端据此决定是「照常勾选 + 说明」还是「置灰拦下」。
             "selectable_count": selectable,
             "concept_total": len(event.get("concepts") or []),
-            # 映射广度: usable=有区分度(1..上限) / broad=命中过宽板块 / none=选不出股。
-            # 前端据此决定这条能不能点、要不要提示「范围较大」。
+            # 映射广度: usable=有区分度(1..上限) / broad=命中过宽板块 / none=选不出股 /
+            # None=未知(维表未同步)。前端据此决定这条能不能点、要不要提示「范围较大」。
             "mapping_breadth": _mapping_breadth(selectable),
             # 选不出股时的**原因**(区分「维表没同步」「事件无映射」「个股代码对不上」)。
             # 前端按原因给不同文案, 不能一律「暂无对应个股」——那会把「重大政策新闻
             # 暂时映射不上」和「冷门事件真没股」混为一谈, 藏掉重要信息。
             "selectable_note": note,
             # 是否被 `_CONCEPT_CONSTITUENT_CAP` 截断。截断了就不能说「约 N 只」,
-            # 要说「至少 N 只」——N 是上限不是全集。
-            "selectable_capped": bool(selectable >= _CONCEPT_CONSTITUENT_CAP),
+            # 要说「至少 N 只」——N 是上限不是全集。**由计算直接给出**, 不拿
+            # `count >= cap` 猜: 恰好 30 只时不是截断, 不该说「至少」。
+            "selectable_capped": capped,
         })
     return {
         "id": "hot_events",
