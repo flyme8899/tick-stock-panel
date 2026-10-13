@@ -134,7 +134,9 @@ function etfBaselineTitle(
   days: number,
 ): string {
   const base = baselines?.[String(days)]
-  return base ? `较 ${base}（前 ${days} 个交易日）` : `不足 ${days} 个交易日的份额，无法计算`
+  // 说「份」而不是「交易日」：etf_shares 中间可能缺天，那时「前 N 个交易日」
+  // 会不准；落盘记录本身才是可靠锚点。
+  return base ? `较 ${base}（前 ${days} 份落盘）` : `不足 ${days} 份落盘，无法计算`
 }
 
 function StockLabel({ row }: { row: FundFlowAmountRow }) {
@@ -227,9 +229,13 @@ function stockCardMeta(block: FundFlowStockBlock | undefined, window: 'today' | 
   const day = block?.trade_date
   if (!day) return undefined
   if (window !== 'today' || !block?.snapshot) return day
-  const phase = block.snapshot === 'close' ? '收盘' : '盘中'
   const clock = capturedClock(block.captured_at)
-  return clock ? `${day} · ${phase} · ${clock}` : `${day} · ${phase}`
+  if (block.snapshot === 'close') return clock ? `${day} · 收盘 · ${clock}` : `${day} · 收盘`
+  // 收盘后采用的盘中快照是「收盘前」的定格，标出来免得被当成实时。
+  if (block.stale_after_close) {
+    return clock ? `${day} · 收盘前快照 · ${clock}` : `${day} · 收盘前快照`
+  }
+  return clock ? `${day} · 盘中 · ${clock}` : `${day} · 盘中`
 }
 
 function fallbackMarginDays(items: FundFlowAmountRow[]): FundFlowMarginDay[] {
@@ -367,9 +373,9 @@ export function FundFlow() {
                 <div className="min-w-0">
                   <div className="mb-1 flex items-baseline justify-between gap-3 text-[11px] text-muted">
                     <span>名称</span>
-                    <span className="flex shrink-0 gap-3">
+                    <span className="flex shrink-0 gap-2 sm:gap-3">
                       {ETF_WINDOWS.map(window => (
-                        <span key={window.label} className="w-[68px] text-right">
+                        <span key={window.label} className="w-[56px] text-right sm:w-[68px]">
                           {window.label}
                         </span>
                       ))}
@@ -388,11 +394,11 @@ export function FundFlow() {
                               </span>
                             ) : null}
                           </span>
-                          <span className="flex shrink-0 gap-3">
+                          <span className="flex shrink-0 gap-2 sm:gap-3">
                             {ETF_WINDOWS.map(window => (
                               <span
                                 key={window.label}
-                                className={cn('w-[68px] text-right font-mono text-xs', signedClass(window.value(row)))}
+                                className={cn('w-[56px] text-right font-mono text-xs sm:w-[68px]', signedClass(window.value(row)))}
                                 title={etfBaselineTitle(etf?.baselines, window.days)}
                               >
                                 {formatShares(window.value(row))}

@@ -333,6 +333,70 @@ def test_worker_defers_when_tickflow_is_busy(tmp_path, monkeypatch) -> None:
     assert called["n"] == 0
     assert worker.deferred_reason == "tickflow_sync"
     assert not (tmp_path / "fund_flow" / "stock").exists() or called["n"] == 0
+    # 让路也要刷心跳 —— 否则运维看到的心跳会停住，误判成调度器挂了。
+    hb = store.load_state(tmp_path)["kinds"]["_scheduler"]
+    assert hb["deferred"] == "tickflow_sync"
+    assert hb["updated_at"]
+
+
+def test_defer_cap_forces_a_round(tmp_path, monkeypatch) -> None:
+    """让路有上限：连续让路到阈值就强行放行，不能让循环无限空转。
+
+    ``tickflow_sync_busy`` 一旦恒真，没有上限的实现会一轮轮静默空转、整天不落盘。
+    """
+    monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
+    monkeypatch.setenv("FUND_FLOW_STOCK", "true")
+    worker = scheduler.FundFlowWorker()
+
+    def run_once(busy: bool):
+        return worker.run_once(
+            now=_day(17, 0),
+            data_dir=tmp_path,
+            clients=SourceClients(history_bill=lambda _s: []),
+            symbols=["600519.SH"],
+            trading=True,
+            busy=busy,
+        )
+
+    # 阈值内一直让路。
+    for _ in range(scheduler.DEFER_MAX_STREAK):
+        assert run_once(True) == []
+    assert worker._defer_streak == scheduler.DEFER_MAX_STREAK
+    # 再一轮越过阈值 → 即使上游仍忙也放行。
+    worker.run_once(
+        now=_day(17, 0),
+        data_dir=tmp_path,
+        clients=SourceClients(history_bill=lambda _s: []),
+        symbols=["600519.SH"],
+        trading=True,
+        busy=True,
+    )
+    assert worker._defer_streak == 0, "放行后计数要归零，避免下一轮又立刻放行"
+    # 上游恢复后计数器同样复位。
+    run_once(False)
+    assert worker._defer_streak == 0
+    assert worker.deferred_reason is None
+
+
+def test_heartbeat_never_goes_backwards(tmp_path) -> None:
+    """心跳只前进不后退 —— 陈旧快照写回不能把它拽回去。
+
+    线上现象：文件 mtime 是 17:36（确实在写），``_scheduler.updated_at`` 却停在
+    15:42。并发的读改写把旧值复活了，停摆信号失真。``touch_heartbeat`` 拒绝更旧的值。
+    """
+    later = datetime(2026, 10, 13, 17, 36, 0)
+    earlier = datetime(2026, 10, 13, 15, 42, 46)
+    store.set_heartbeat_clock(lambda: later)
+    try:
+        store.touch_heartbeat(tmp_path, deferred=None)
+        assert store.load_state(tmp_path)["kinds"]["_scheduler"]["updated_at"] == "2026-10-13T17:36:00"
+        # 换成一个更旧的时钟（模拟陈旧快照写回），不该倒退。
+        store.set_heartbeat_clock(lambda: earlier)
+        store.touch_heartbeat(tmp_path, deferred=None)
+        assert store.load_state(tmp_path)["kinds"]["_scheduler"]["updated_at"] == "2026-10-13T17:36:00"
+        assert store.load_state(tmp_path)["kinds"]["_scheduler"]["updated_at"] != earlier.isoformat()
+    finally:
+        store.set_heartbeat_clock(None)
 
 
 def test_stale_intraday_thread_is_restarted(tmp_path, monkeypatch) -> None:
@@ -342,7 +406,6 @@ def test_stale_intraday_thread_is_restarted(tmp_path, monkeypatch) -> None:
     时恒为真，后续每轮都只打「仍在拉取」就 continue。
     """
     worker = scheduler.FundFlowWorker()
-    started = {"n": 0}
 
     class FakeThread:
         def __init__(self, alive: bool) -> None:
@@ -364,6 +427,69 @@ def test_stale_intraday_thread_is_restarted(tmp_path, monkeypatch) -> None:
     worker._intraday_thread = FakeThread(False)
     worker._intraday_started_at = scheduler.time_time()
     assert worker._intraday_running() is False
+
+
+def test_stale_intraday_result_is_discarded(tmp_path, monkeypatch) -> None:
+    """卡死重启后，旧代线程迟到的结果必须丢弃，不能盖过新代。
+
+    评审指出：Python 线程杀不掉，超时重启只是叠加一个新线程。旧线程若之后解卡，
+    会和新线程同时写盘、同时标成功，可能用一份过时快照掩盖新代的失败。
+    """
+    monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
+    worker = scheduler.FundFlowWorker()
+    runs: list[str] = []
+
+    class Result:
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+            self.wrote = 1
+
+    def fake_sync(data_dir, clients, *, trade_date, captured_at, breaker):
+        runs.append(captured_at)
+        return Result()
+
+    monkeypatch.setattr(scheduler.jobs, "sync_stock_intraday", fake_sync)
+
+    # 旧代（gen=1）被判卡死后，当前代已推进到 2。
+    worker._intraday_generation = 2
+    day = date(2026, 10, 13)
+    # 直接驱动 _spawn 生成的 target：旧代线程在启动时拿的是它那一刻的 generation。
+    worker._spawn_stock_intraday(
+        tmp_path,
+        datetime(2026, 10, 13, 13, 44, 50),
+        SourceClients(),
+        trading=True,
+        known_days=[],
+    )
+    # _spawn 会把当前代自增到 3 并起一个真线程；等它跑完。
+    worker.wait_intraday(timeout=5)
+    assert runs, "新代应该真的跑了一次"
+    # 上一次尝试里 gen=2 的那次已过期，不会标成功（最新 gen=3 才是当前代）。
+    state = store.load_state(tmp_path)["kinds"].get("stock_intraday") or {}
+    assert state.get("last_success_date") == day.isoformat()
+
+
+def test_etf_baseline_uses_record_count_not_trading_days(tmp_path) -> None:
+    """ETF 基准按「前 N 份落盘」算；中间缺天时不会假装是 N 个交易日。
+
+    评审 4：``etf_shares`` 中间缺天（线上 10-13 就没落），按落盘日推的「前 1 份」
+    实际是 2 个交易日之前。文案与语义统一按「份」表述。
+    """
+    # 10-09 后直接跳到 10-13（缺 10-10、10-12 两个交易日）。
+    for day, shares in (
+        ("2026-10-09", 100.0),
+        ("2026-10-13", 130.0),
+    ):
+        store.write_rows(tmp_path, "etf_shares", day, [
+            {"symbol": "510300", "code": "510300", "name": "沪深300ETF",
+             "trade_date": day, "shares": shares},
+        ])
+    payload = query._etf_changes(tmp_path)
+    assert payload["trade_date"] == "2026-10-13"
+    # 前 1 份落盘是 10-09（不是「前 1 个交易日」的 10-10）。
+    assert payload["baselines"]["1"] == "2026-10-09"
+    assert payload["baselines"]["5"] is None
+    assert payload["items"][0]["change_1d"] == pytest.approx(30.0)
 
 
 def test_stock_marked_success_when_fallback_fills_partition(tmp_path, monkeypatch) -> None:
@@ -417,15 +543,15 @@ def test_etf_changes_expose_1_5_15_day_windows(tmp_path) -> None:
     }
     assert payload["prev_trade_date"] == days[-2]
     by_code = {row["code"]: row for row in payload["items"]}
-    maotai = by_code["510300"]
-    assert maotai["change_1d"] == pytest.approx(1e8)
-    assert maotai["change_5d"] == pytest.approx(5e8)
-    assert maotai["change_15d"] == pytest.approx(15e8)
+    hs300 = by_code["510300"]
+    assert hs300["change_1d"] == pytest.approx(1e8)
+    assert hs300["change_5d"] == pytest.approx(5e8)
+    assert hs300["change_15d"] == pytest.approx(15e8)
     # 老字段与新字段同源，保持向后兼容。
-    assert maotai["share_change"] == maotai["change_1d"]
-    pingan = by_code["510050"]
-    assert pingan["change_1d"] == pytest.approx(-2e8)
-    assert pingan["change_15d"] == pytest.approx(-30e8)
+    assert hs300["share_change"] == hs300["change_1d"]
+    sz50 = by_code["510050"]
+    assert sz50["change_1d"] == pytest.approx(-2e8)
+    assert sz50["change_15d"] == pytest.approx(-30e8)
 
 
 def test_etf_changes_window_baseline_is_none_when_history_short(tmp_path) -> None:
@@ -1568,11 +1694,65 @@ def test_stocks_today_falls_back_to_stock_close(tmp_path, monkeypatch) -> None:
     assert missing["stocks_5d"]["source"] is None
 
 
+def test_intraday_fresh_line_is_close_clock() -> None:
+    """新鲜度只看快照自身的 captured_at，不看墙上时钟。
+
+    评审指出的回归：只看时钟时，15:00 一过就不认当天盘中，而收盘分区要到
+    16:30 才就绪，中间会退回上一交易日的旧榜单。改成按取样时刻判：
+    14:45 及以后的当天快照收盘后仍可用（视作收盘前快照），更早的判陈旧。
+    """
+    # 盘中：当天任意快照都新鲜。
+    assert query._intraday_still_fresh("2026-10-13T13:44:50", datetime(2026, 10, 13, 14, 59)) is True
+    assert query._intraday_still_fresh("2026-10-13T11:25:32", datetime(2026, 10, 13, 14, 0)) is True
+    # 收盘后：14:45 及以后仍可用（收盘前快照），更早的判陈旧。
+    assert query._intraday_still_fresh("2026-10-13T14:52:00", datetime(2026, 10, 13, 17, 36)) is True
+    assert query._intraday_still_fresh("2026-10-13T14:45:00", datetime(2026, 10, 13, 15, 30)) is True
+    assert query._intraday_still_fresh("2026-10-13T13:44:50", datetime(2026, 10, 13, 17, 36)) is False
+    assert query._intraday_still_fresh("2026-10-13T13:44:50", datetime(2026, 10, 13, 15, 0)) is False
+    # 没有快照 / 快照日期不是今天 → 一律不新鲜。
+    assert query._intraday_still_fresh(None, datetime(2026, 10, 13, 10, 0)) is False
+    assert query._intraday_still_fresh("2026-10-12T14:55:00", datetime(2026, 10, 13, 10, 0)) is False
+    assert query._intraday_still_fresh("坏时间", datetime(2026, 10, 13, 10, 0)) is False
+
+
+def test_stocks_today_uses_late_intraday_before_close_partition(tmp_path, monkeypatch) -> None:
+    """15:00–16:30 收盘分区未就绪时，用当天 14:5x 的收盘前快照，而不是退回昨天。
+
+    评审给的场景：15:30。此前只看时钟的实现会退回上一交易日收盘，比 14:5x 的
+    快照还旧 —— 属于修出来的回归。现在按 captured_at 判，仍采用当天晚些的快照。
+    """
+    monkeypatch.setattr(query, "cn_today", lambda: date(2026, 10, 13))
+    monkeypatch.setattr(query, "cn_now", lambda: datetime(2026, 10, 13, 15, 30))
+    _two_name_universe(tmp_path)
+    store.write_rows(tmp_path, "stock_intraday", "2026-10-13", [
+        {
+            "symbol": "000001.SZ", "code": "000001", "name": "平安银行",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T14:52:00",
+            "main_net": 8e8, "source": "akshare_em_rank",
+        },
+        {
+            "symbol": "600519.SH", "code": "600519", "name": "贵州茅台",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T14:52:00",
+            "main_net": -1e8, "source": "akshare_em_rank",
+        },
+    ])
+    # 只有上一交易日的收盘分区，今天收盘分区尚未就绪。
+    _close_pair(tmp_path, "2026-10-12", maotai=-5e8, pingan=3e8)
+    today = query.board(tmp_path)["stocks_today"]
+    assert today["snapshot"] == "intraday", "收盘分区未就绪时该用当天收盘前快照"
+    assert today["trade_date"] == "2026-10-13"
+    assert today["captured_at"] == "2026-10-13T14:52:00"
+    assert today["stale_after_close"] is True
+    assert [row["code"] for row in today["inflow"]] == ["000001"]
+    assert today["inflow"][0]["main_net"] == 8e8
+
+
 def test_stocks_today_after_close_ignores_stale_intraday(tmp_path, monkeypatch) -> None:
-    """收盘后当天盘中快照不再代表「今日」：改读当天收盘。
+    """收盘后定格在午盘的快照不再代表「今日」：改读当天收盘。
 
     线上曾出现 17:36 仍显示「盘中 13:44」—— 当天盘中快照停在午盘，收盘分区
-    又没落下来，页面就把定格在 13:44 的旧快照当成实时。收盘后当天盘中一律不采用。
+    又没落下来，页面就把定格在 13:44 的旧快照当成实时。13:44 早于 14:45，
+    收盘后判为陈旧。
     """
     monkeypatch.setattr(query, "cn_today", lambda: date(2026, 10, 13))
     monkeypatch.setattr(query, "cn_now", lambda: datetime(2026, 10, 13, 17, 36))
@@ -1592,18 +1772,11 @@ def test_stocks_today_after_close_ignores_stale_intraday(tmp_path, monkeypatch) 
     ])
     _close_pair(tmp_path, "2026-10-13", maotai=-5e8, pingan=3e8)
     today = query.board(tmp_path)["stocks_today"]
-    assert today["snapshot"] == "close", "收盘后不该再把盘中快照当今日"
+    assert today["snapshot"] == "close", "收盘后不该再把午盘快照当今日"
     assert today["trade_date"] == "2026-10-13"
     assert today["captured_at"] is None
     assert [row["code"] for row in today["inflow"]] == ["000001"]
     assert today["inflow"][0]["main_net"] == 3e8
-
-
-def test_intraday_fresh_line_is_close_clock() -> None:
-    """15:00 是盘中快照的新鲜分界：之前采用，之后不采用。"""
-    assert query._intraday_still_fresh(datetime(2026, 10, 13, 14, 59)) is True
-    assert query._intraday_still_fresh(datetime(2026, 10, 13, 15, 0)) is False
-    assert query._intraday_still_fresh(datetime(2026, 10, 13, 17, 36)) is False
 
 
 def test_sector_board_splits_inflow_and_outflow(tmp_path) -> None:

@@ -487,12 +487,61 @@ def mutate_state(data_dir: Path, mutator) -> dict:
         return payload
 
 
+# 心跳采样点。``None`` 表示同步取当前时钟；测试可注入以避开真实时间。
+_heartbeat_clock = None
+
+
+def set_heartbeat_clock(clock) -> None:
+    """测试用：注入心跳时钟。``None`` 恢复默认。"""
+    global _heartbeat_clock
+    _heartbeat_clock = clock
+
+
+def _now_stamp() -> str:
+    clock = _heartbeat_clock
+    return (clock() if clock is not None else datetime.now()).isoformat(timespec="seconds")
+
+
 def update_kind_state(data_dir: Path, kind: str, **fields: object) -> dict:
+    """写 ``kind`` 的字段，并刷新它的 ``updated_at``。
+
+    心跳字段 ``_scheduler`` 走 ``touch_heartbeat``，不用这个 —— 见那里的说明。
+    """
+
     def mutate(payload: dict) -> None:
         current = dict(payload["kinds"].get(kind) or {})
         current.update(fields)
-        current["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        current["updated_at"] = _now_stamp()
         payload["kinds"][kind] = current
 
     saved = mutate_state(data_dir, mutate)
     return dict(saved["kinds"][kind])
+
+
+def touch_heartbeat(data_dir: Path, **fields: object) -> dict:
+    """只刷新 ``_scheduler`` 心跳，不碰其它 ``kind``。
+
+    独立成一条路径的原因：``_scheduler.updated_at`` 是「资金流循环还活着」的
+    唯一信号，运维靠它判断调度器是否停摆。而 ``update_kind_state`` 是读改写整份
+    payload —— 调用方若拿着一份陈旧快照（例如本轮开头 ``load_state`` 的结果），
+    就会把早已过期的 ``_scheduler`` 原样写回，让心跳倒退。
+
+    线上曾出现：文件 mtime 是 17:36（说明确实在写），而 ``_scheduler.updated_at``
+    却停在 15:42 —— 心跳被并发的读改写复活成了旧值，停摆信号彻底失效。
+    这里只改一个字段，且**不允许把更旧的时间写回**，从根上堵死这种倒退。
+    """
+
+    def mutate(payload: dict) -> None:
+        current = dict(payload["kinds"].get("_scheduler") or {})
+        current.update(fields)
+        stamp = _now_stamp()
+        previous = current.get("updated_at")
+        # 心跳只前进不后退。同一秒内的并发写会得到相同的秒级时间戳，不算倒退。
+        if isinstance(previous, str) and previous > stamp:
+            current["updated_at"] = previous
+        else:
+            current["updated_at"] = stamp
+        payload["kinds"]["_scheduler"] = current
+
+    saved = mutate_state(data_dir, mutate)
+    return dict(saved["kinds"]["_scheduler"])

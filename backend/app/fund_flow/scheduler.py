@@ -31,6 +31,9 @@ INTRADAY_THREAD_TIMEOUT_S = 12 * 60
 # 主循环看门狗：单轮 run_once 超过这个时长就记 WARNING。
 # 主循环是单线程，卡住一次会让之后所有任务（含收盘分区）全部停摆。
 LOOP_STALL_WARN_S = 5 * 60
+# 让路的轮数上限。30 秒一轮，120 轮约一小时 —— 重任务再慢也该出结果了。
+# 到点就强行放行一次，避免 ``tickflow_sync_busy`` 恒真导致全天不落盘。
+DEFER_MAX_STREAK = 120
 
 _worker: FundFlowWorker | None = None
 _worker_lock = threading.Lock()
@@ -413,6 +416,37 @@ class FundFlowWorker:
         self.deferred_reason: str | None = None
         self._intraday_thread: threading.Thread | None = None
         self._intraday_started_at: float | None = None
+        # 连续让路计数与首次让路时刻。让路是一次性的礼让，不该变成永久停摆：
+        # ``tickflow_sync`` 的判据一旦恒真，主循环会一轮轮空转、什么都不落盘。
+        # 超过 ``DEFER_MAX_STREAK`` 轮就强行放行一次，宁可和重任务抢一下，
+        # 也不能整天不出数据。
+        self._defer_streak = 0
+        self._defer_since: float | None = None
+        # 每次启动盘中拉取自增。线程杀不掉，只能靠世代号让旧结果自我作废。
+        self._intraday_generation = 0
+
+    def _defer_allowed(self, now: datetime) -> tuple[bool, str | None]:
+        """这一轮是否还让路。返回 ``(是否让路, 原因说明)``。
+
+        连续让路到 ``DEFER_MAX_STREAK`` 轮就放行，并把原因记进日志 ——
+        让路必须可见、有上限，否则就是静默停摆。
+        """
+        self._defer_streak += 1
+        if self._defer_since is None:
+            self._defer_since = time_time()
+        waited = time_time() - self._defer_since
+        if self._defer_streak > DEFER_MAX_STREAK:
+            logger.warning(
+                "资金流已连续让路 %d 轮 / %.0f 秒（tickflow_sync 一直忙），本轮强制放行",
+                self._defer_streak,
+                waited,
+            )
+            return False, "tickflow_sync_busy_forced"
+        return True, None
+
+    def _defer_reset(self) -> None:
+        self._defer_streak = 0
+        self._defer_since = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -438,9 +472,10 @@ class FundFlowWorker:
             if self._stop.is_set():
                 return
             started = time_time()
+            ran: list[str] = []
             try:
                 # 盘中个股要翻页，放到旁路线程，避免这一轮的板块和收盘任务干等。
-                self.run_once(detach_intraday=True)
+                ran = self.run_once(detach_intraday=True) or []
             except Exception:
                 logger.exception("资金进出本轮失败")
             finally:
@@ -448,6 +483,14 @@ class FundFlowWorker:
                 # （stock / etf_shares / southbound 等）都会一起停摆。这里只做
                 # 事后告警 —— 真正的超时交给各客户端自身的超时设置。
                 elapsed = time_time() - started
+                # 每轮都留痕：启动了什么、耗时多久、是否让路。13:44 那类「快照
+                # 突然不再更新」的事后排查，全靠这一行日志自证卡在哪一步。
+                logger.info(
+                    "资金流一轮完成 耗时=%.0fs 启动=%s 让路=%s",
+                    elapsed,
+                    ",".join(ran) if ran else "-",
+                    self.deferred_reason or "-",
+                )
                 if elapsed > LOOP_STALL_WARN_S:
                     logger.warning("资金进出一轮耗时 %.0f 秒，已超过看门狗阈值", elapsed)
 
@@ -493,11 +536,13 @@ class FundFlowWorker:
             trading = _default_trading(now)
         if busy is None:
             busy = tickflow_sync_busy()
-        if busy:
+        if busy and self._defer_allowed(now)[0]:
             self.deferred_reason = "tickflow_sync"
-            store.update_kind_state(data_dir, "_scheduler", deferred="tickflow_sync")
+            # 心跳独立写：绝不因为让路而让「循环还活着」的信号倒退。
+            store.touch_heartbeat(data_dir, deferred="tickflow_sync")
             return []
         self.deferred_reason = None
+        self._defer_reset()
         state = store.load_state(data_dir)
         open_sources = {name for name, breaker in self.breakers.items() if not breaker.allow()}
         known = known_trading_days(data_dir)
@@ -519,8 +564,10 @@ class FundFlowWorker:
             if name not in planned:
                 planned.append(name)
         if not planned:
+            store.touch_heartbeat(data_dir, deferred=None)
             self._persist_breakers(data_dir)
             return []
+        store.touch_heartbeat(data_dir, deferred=None)
         if clients is None:
             from app.fund_flow.sources import live_clients
 
@@ -561,6 +608,10 @@ class FundFlowWorker:
         只看 ``is_alive()`` 不够：线程卡在网络读上时永远为真，当天剩余时段
         再也不会启动新快照（线上曾停在 13:44）。超过 ``INTRADAY_THREAD_TIMEOUT_S``
         的一律按卡死处理，让下一轮重新拉。
+
+        注意：Python 线程杀不掉，超时只是「不再等它」，旧线程仍在跑。所以每次
+        启动都带一个 ``generation`` 序号，旧代线程结束时发现自己不是当前代就
+        丢弃结果 —— 否则新旧两个线程会同时写分区、同时回写熔断状态。
         """
         thread = self._intraday_thread
         if thread is None or not thread.is_alive():
@@ -570,8 +621,10 @@ class FundFlowWorker:
             return True
         if (time_time() - started) > INTRADAY_THREAD_TIMEOUT_S:
             logger.warning(
-                "盘中个股主力净流入线程已运行 %.0f 秒，判定卡死，本轮重新启动",
+                "盘中个股主力净流入线程已运行 %.0f 秒，判定卡死，本轮重新启动"
+                "（旧线程 gen=%d 仍在跑，其结果将被丢弃）",
                 time_time() - started,
+                self._intraday_generation,
             )
             return False
         return True
@@ -595,14 +648,33 @@ class FundFlowWorker:
         trade_day = task_day("stock_intraday", now, trading=trading, known_days=known_days)
         captured = f"{trade_day}T{now.strftime('%H:%M:%S')}"
         breaker = self.breakers["akshare"]
+        self._intraday_generation += 1
+        generation = self._intraday_generation
 
         def target() -> None:
             try:
                 result = jobs.sync_stock_intraday(
                     data_dir, clients, trade_date=trade_day, captured_at=captured, breaker=breaker,
                 )
+                # 卡死重启后新旧两代会同时在跑。只有当前代才允许落盘标成功；
+                # 旧代（通常是解卡后迟到的请求）结果一律丢弃，否则会用一份过时
+                # 的快照把新代的失败盖成成功。
+                if generation != self._intraday_generation:
+                    logger.warning(
+                        "盘中快照 gen=%d 已过期（当前 gen=%d），丢弃本次结果 %s",
+                        generation,
+                        self._intraday_generation,
+                        captured,
+                    )
+                    return
                 if not result.errors:
                     _mark_success(data_dir, "stock_intraday", day)
+                    logger.info(
+                        "盘中快照已落盘 gen=%d captured=%s 写入=%s",
+                        generation,
+                        captured,
+                        result.wrote,
+                    )
             except Exception:
                 logger.exception("盘中个股主力净流入拉取失败")
             finally:

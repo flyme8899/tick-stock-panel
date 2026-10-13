@@ -17,6 +17,9 @@ from app.market_time import cn_now, cn_today
 # 用 15:00 而不是收盘数据就绪的 16:30：15:00 一过，盘中快照的技术含义就变了
 # （定格的最后一笔竞价），继续拿它当「今日」会把旧快照当成实时。
 _INTRADAY_FRESH_UNTIL = dt_time(15, 0)
+# 收盘后仍可采用的当天盘中快照的最早取样时刻。14:45 之后基本接近收盘，
+# 拿它当「收盘前快照」尚可接受；更早的（如 13:44）定格在午盘，会误导。
+_STALE_INTRADAY_BEFORE = dt_time(14, 45)
 
 _FLOW_COLUMNS = ("net_flow", "flow_net", "net_inflow", "净流入")
 _CODE_COLUMNS = ("code", "symbol", "基金代码")
@@ -536,23 +539,45 @@ def _sector_board(root: Path, kind: str) -> dict:
     return payload
 
 
-def _intraday_still_fresh(now: datetime | None = None) -> bool:
-    """当天盘中快照是否仍代表「今日」。
+def _intraday_still_fresh(captured: str | None, now: datetime | None = None) -> bool:
+    """当天盘中快照是否仍能代表「今日」。
 
-    收盘（15:00）之后不再新鲜 —— 最后一笔盘中快照定格在收盘前某个时点，
-    继续拿它当「今日」会把旧快照当实时展示（线上曾出现 17:36 仍显示 13:44）。
-    非交易日同样视为不新鲜，交给收盘分区或上一交易日兜底。
+    判据看**快照自身的取样时刻**（``captured_at``），不看墙上时钟 —— 这是评审
+    指出的关键差异。只看时钟会有个回归：15:00 一过就不认当天盘中，而收盘分区
+    要到 16:30 左右才就绪，这段时间会退回**上一交易日**，比原来显示的 14:5x
+    快照还旧。
+
+    真正要拦的是「快照定格在午盘」：那种快照拿来说「今日」会误导。所以：
+
+    * 交易日盘中（``now`` 早于收盘）→ 当天任意快照都新鲜；
+    * 收盘后 → 只认 ``captured_at`` 不早于 ``_STALE_INTRADAY_BEFORE``（14:45）
+      的当天快照，视作「收盘前快照」；更早的（如 13:44）判为陈旧，交给收盘分区。
     """
+    if not captured:
+        return False
+    try:
+        stamp = datetime.fromisoformat(str(captured))
+    except ValueError:
+        return False
     current = now or cn_now()
-    return current.timetz().replace(tzinfo=None) < _INTRADAY_FRESH_UNTIL
+    if current.tzinfo is not None:
+        current = current.replace(tzinfo=None)
+    if stamp.tzinfo is not None:
+        stamp = stamp.replace(tzinfo=None)
+    # 快照日期不是今天 → 不新鲜（非交易日、跨日残留都走这条）。
+    if stamp.date() != current.date():
+        return False
+    if current.timetz() < _INTRADAY_FRESH_UNTIL:
+        return True
+    return stamp.timetz() >= _STALE_INTRADAY_BEFORE
 
 
 def _stocks_today(root: Path, *, now: datetime | None = None) -> dict:
     """今日优先用当天最近一份盘中快照。样本不够或没有快照时，仍读 ``stock`` 收盘。
 
-    收盘后（见 ``_intraday_still_fresh``）不再采用当天盘中：此时应改读当天
-    收盘分区；收盘分区尚未落盘时退回上一交易日收盘，而不是把定格在
-    午盘的旧快照冒充「今日实时」。
+    收盘后（见 ``_intraday_still_fresh``）只采用「收盘前快照」（14:45 及以后）；
+    更早的快照判为陈旧，改读当天收盘分区；收盘分区尚未落盘时退回上一交易日，
+    而不是把定格在午盘的旧快照冒充「今日实时」。
     """
     day = cn_today().isoformat()
     intra = _partition(root, "stock_intraday", day)
@@ -566,14 +591,19 @@ def _stocks_today(root: Path, *, now: datetime | None = None) -> dict:
     else:
         intra = store.empty_frame("stock_intraday")
     ranked = None
-    if captured and _intraday_still_fresh(now):
+    if _intraday_still_fresh(captured, now):
         ranked = _stock_sides(root, intra, "main_net")
     if ranked is not None:
         inflow, outflow = ranked
+        current = now or cn_now()
+        if current.tzinfo is not None:
+            current = current.replace(tzinfo=None)
         return {
             "trade_date": day,
             "snapshot": "intraday",
             "captured_at": captured,
+            # 收盘后采用的盘中快照是「收盘前」的定格，标出来免得被当成实时。
+            "stale_after_close": current.timetz() >= _INTRADAY_FRESH_UNTIL,
             "source": _snapshot_source(intra),
             "partial": False,
             "note": board_gap_note(board_gaps(root, intra)),
@@ -701,16 +731,22 @@ def _southbound_trend(root: Path) -> dict:
     return {"items": ranked.select("trade_date", "net_flow").to_dicts()}
 
 
-# ETF 份额变化的窗口（交易日数）。1 日为「比上一交易日」，5/15 日为「比 N 个
-# 交易日之前」。基准按落盘日期往前推，不按自然日 —— 跨周末和长假时自然日会
-# 取到更早的日期，与「5 日变化」的直觉不符。
+# ETF 份额变化的窗口，单位是**落盘份数**而非交易日数。1 指「比上一份落盘」,
+# 5/15 指「比往前第 N 份落盘」。基准按落盘日期往前推，不按自然日 —— 跨周末和
+# 长假时自然日会取到更早的日期，与「5 日变化」的直觉不符。
+#
+# 用「份数」而不是「交易日数」是刻意的：``etf_shares`` 中间可能缺天（线上就出过
+# 10-13 没落盘），这时「前 1 个交易日」实际会变成 2 个交易日之前。而落盘记录本身
+# 是唯一可靠的锚点 —— 说「较前 N 份落盘」永远准确，前端 tooltip 也照这个措辞。
 _ETF_WINDOWS = (1, 5, 15)
 
 
 def _window_baseline_dates(dates: list[str], day: str) -> dict[int, str | None]:
-    """每个窗口对应的基准交易日。不足 N 个交易日时为 None（不编造变化）。"""
+    """每个窗口对应的基准落盘日。不足 N 份落盘时为 None（不编造变化）。"""
     index = len(dates) - 1
-    assert dates[index] == day
+    if dates[index] != day:
+        # 调用方传错了基准日；不抛异常打断整个看板，退回「拿不到基准」。
+        return {window: None for window in _ETF_WINDOWS}
     return {
         window: (dates[index - window] if index - window >= 0 else None)
         for window in _ETF_WINDOWS

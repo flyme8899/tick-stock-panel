@@ -2452,6 +2452,8 @@ export interface FundFlowStockBlock {
   trade_date: string | null
   snapshot?: string | null
   captured_at?: string | null
+  /** 收盘后采用的当天盘中快照是「收盘前」定格，不是实时。 */
+  stale_after_close?: boolean
   source?: string | null
   partial?: boolean
   note?: string | null
