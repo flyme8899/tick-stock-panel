@@ -76,7 +76,9 @@ function StockLinkList({
   return (
     <>
       {shown.map((stock, idx) => (
-        <span key={stock.key}>
+        // 合并个股与 ETF 后同一 key 可能出现两次(列表各自去重、合起来不一定),
+        // 单用 key 会撞; 带上下标保证唯一。
+        <span key={`${stock.key}-${idx}`}>
           {idx > 0 && <span className="text-muted">、</span>}
           <StockLink stock={stock} onOpen={onOpen} />
         </span>
@@ -209,6 +211,11 @@ export function HotEvents() {
   const messageItems = (messages.data?.items ?? []).filter(item => !redOnly || item.red)
 
   // 概念/行业两个榜里的板块名集合。总览把两张榜分开展示, 同名板块也能据此定列。
+  //
+  // 注意这只是**初判**: 榜单每列只给涨跌头尾各 5 条, 排在中间的板块两个集合里都
+  // 没有, 会兜底成概念列 (见 openSector)。真正的纠偏在板块分析页 —— 它两列完整
+  // stats 都在手边, 深链落错列时会自动改到含该板块的那一列 (见 SectorAnalysis)。
+  // 所以这里的初判只要「大致对」即可, 判错无害。
   const sectorKinds = useMemo(() => {
     const concept = new Set<string>()
     const industry = new Set<string>()
@@ -223,8 +230,8 @@ export function HotEvents() {
 
   /**
    * 跳板块分析并定位到具体板块。
-   * 榜里查不到就先按概念走 —— 热点里提到的大多是概念/题材, 而且板块分析页
-   * 两列并排展示, 落错列也还能一眼看到旁边那列。
+   * 榜里查不到就先按概念走 —— 热点里提到的大多是概念/题材。判错也不怕:
+   * 板块分析页发现该列没有这个板块、另一列有, 会自动改到另一列选。
    */
   const openSector = (key: string, kind?: SectorKind) => {
     const resolved: SectorKind = kind

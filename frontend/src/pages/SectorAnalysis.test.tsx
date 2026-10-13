@@ -10,6 +10,8 @@ import { SectorAnalysis } from './SectorAnalysis'
 const calls = vi.hoisted(() => ({
   rows: [] as string[],
   rotation: [] as { kind: string; level?: number }[],
+  // 置 true 时 ext_gn_ths 不再返回「银行概念」，用来模拟深链板块在刷新后短暂消失。
+  dropBankConcept: false,
 }))
 
 vi.mock('@/lib/api', () => ({
@@ -59,7 +61,7 @@ vi.mock('@/lib/api', () => ({
           rows: [
             { symbol: '000001.SZ', name: '平安银行', 所属概念: '银行概念;融资融券' },
             { symbol: '000002.SZ', name: '万科A', 所属概念: '地产概念' },
-          ],
+          ].filter(row => !(calls.dropBankConcept && row.所属概念.includes('银行概念'))),
         }
       }
       if (id === 'board_mix') {
@@ -317,9 +319,31 @@ it('selects the board named in the url, on the column the url points at', async 
   expect(detail?.textContent).not.toContain('点击上方概念或行业')
 })
 
+it('corrects the column when the deep-linked board lives in the other one', async () => {
+  // 上游判列只能看涨跌榜头尾, 排在中间的行业板块会被兜底成概念列。
+  // 板块分析页两列完整 stats 都在手边, 要据此纠偏到真正含该板块的那一列。
+  // 「银行」只存在于行业列, 但 URL 说 focus=concept。
+  renderAt('/sector-analysis?focus=concept&sector=%E9%93%B6%E8%A1%8C')
+  // 等两列 stats 都就绪（行业列出现板块行）—— 纠偏要等到时候才知道银行在行业列。
+  await waitFor(
+    () => (host.querySelector('[data-kind="industry"]')?.querySelectorAll('[data-sector]').length ?? 0) > 0,
+    'industry rows',
+  )
+  await waitFor(
+    () => host.querySelector('#sector-detail')?.getAttribute('data-detail-kind') === 'industry',
+    'industry correction',
+  )
+
+  const detail = host.querySelector('#sector-detail')
+  // 必须落到行业列, 而不是停在概念列显示「当前列表里没有这个概念」。
+  expect(detail?.getAttribute('data-detail-kind')).toBe('industry')
+  expect(detail?.textContent).toContain('银行')
+  expect(detail?.textContent).not.toContain('当前列表里没有这个概念')
+})
+
 it('waits for the board list before selecting, and does not claim the board is missing', async () => {
-  // 深链指向一个不存在的板块：要停在「点一个板块看详情」的提示上，
-  // 而不是先选中、渲染出「当前列表里没有这个概念」再跳走。
+  // 深链指向一个不存在的板块：要停在提示上, 而不是先选中、渲染出
+  // 「当前列表里没有这个概念」再跳走。等两列都就绪后给一句明确的「未找到」。
   renderAt('/sector-analysis?focus=industry&sector=%E4%B8%8D%E5%AD%98%E5%9C%A8%E7%9A%84%E6%9D%BF%E5%9D%97')
   // 等板块列表就绪（列里出现板块行）再断言没被选中。
   // 用裸选择器轮询 —— column() 找不到节点会抛, 不能放进条件里。
@@ -330,7 +354,35 @@ it('waits for the board list before selecting, and does not claim the board is m
 
   const detail = host.querySelector('#sector-detail')
   expect(detail?.getAttribute('data-detail-kind')).toBeNull()
-  expect(detail?.textContent).toContain('点击上方概念或行业')
+  expect(detail?.textContent).toContain('未找到板块「不存在的板块」')
+  expect(detail?.textContent).not.toContain('当前列表里没有这个概念')
+})
+
+it('applies a deep link only once, so a refetch cannot steal a manual pick', async () => {
+  // URL 里的 sector 会一直留着。如果深链 effect 每次 stats 变化都重新应用,
+  // 那么「深链板块在刷新后短暂消失再回来」就会把用户手动点的另一个板块抢回去。
+  renderAt('/sector-analysis?focus=concept&sector=%E9%93%B6%E8%A1%8C%E6%A6%82%E5%BF%B5')
+  await waitFor(() => host.querySelector('#sector-detail')?.getAttribute('data-detail-kind') === 'concept', 'deep-linked board')
+
+  // 用户手动改选另一个概念板块。
+  await act(async () => {
+    column('concept').querySelector<HTMLButtonElement>('[data-sector="地产概念"]')?.click()
+  })
+  await settle()
+  expect(host.querySelector('#sector-detail')?.textContent).toContain('地产概念')
+
+  // 模拟刷新：深链板块「银行概念」先消失, 再出现 —— deepResolved 走了 false→true。
+  calls.dropBankConcept = true
+  await act(async () => { await client.invalidateQueries() })
+  await settle()
+  calls.dropBankConcept = false
+  await act(async () => { await client.invalidateQueries() })
+  await settle()
+
+  // 用户的手动选择必须还在, 不能被深链抢回「银行概念」。
+  const detail = host.querySelector('#sector-detail')
+  expect(detail?.textContent).toContain('地产概念')
+  expect(detail?.textContent).not.toContain('银行概念')
 })
 
 it('keeps each column config, and the industry level control, on their own side', async () => {
