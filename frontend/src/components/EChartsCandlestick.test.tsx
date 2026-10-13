@@ -239,3 +239,34 @@ it('形态标签是短字小字号半透明底，不画箭头', async () => {
   expect(bear.coord[1]).toBe(rows(10)[16].high)
   expect(option.yAxis[0].boundaryGap[0]).toBeGreaterThan(0.03)
 })
+
+// ================================================================
+// 异常叠加线不撑开 Y 轴 (300502.SZ: 现价 337 却有一条「目标 5.00」)
+// ================================================================
+it('a far-away price line does not stretch the candlestick y-axis', async () => {
+  const daily = (base: number): OHLC[] => DAYS.map(date => (
+    { date, open: base, high: base + 4, low: base - 4, close: base, volume: 1 }
+  ))
+  await act(async () => root.render(
+    <EChartsCandlestick
+      data={daily(337)}
+      symbol="300502.SZ"
+      priceLines={[
+        { value: 5.0, label: '目标 5.00', color: '#8B5CF6' },
+        { value: 340.0, label: '支撑 340.00', color: '#3B82F6' },
+      ]}
+    />,
+  ))
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  const axis = option.yAxis[0]
+  // 轴的范围函数必须只用 340, 不被 5.00 拉低
+  const resolved = axis.min({ min: 333, max: 341 })
+  const resolvedMax = axis.max({ min: 333, max: 341 })
+  expect(resolved).toBeGreaterThan(300)
+  expect(resolvedMax).toBeLessThan(400)
+})
+
+it('exposes the band constant used for the guard', async () => {
+  const { KLINE_OVERLAY_BAND } = await import('./EChartsCandlestick')
+  expect(KLINE_OVERLAY_BAND).toBe(0.2)
+})

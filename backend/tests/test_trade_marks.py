@@ -227,9 +227,57 @@ def test_parse_dsa_levels_and_hide_when_absent():
     assert levels["resistance"]["label"] == "压力"
     assert levels["stop"]["price"] == pytest.approx(1700)
     assert parse_dsa_levels({"summary": "没有价位"}) == []
-    text_only = {"body": "支撑位：12.5，压力位：14，止损价：11.2"}
-    parsed = {row["kind"]: row["price"] for row in parse_dsa_levels(text_only)}
-    assert parsed == {"support": 12.5, "resistance": 14.0, "stop": 11.2}
+
+
+def test_parse_dsa_levels_ignores_prices_buried_in_free_text():
+    """自由文本里的数字不再是价位线。
+
+    背景: 300502.SZ 分时图被一条「目标 5.00」撑爆 Y 轴。根因是旧实现会全文
+    正则抠「目标价: 数字」, 把机构研报正文(「最新目标价:701元」「上次旧目标价:
+    353.57元」)以及 strategy.take_profit 这种「反弹目标位：MA5 375.64元」的
+    自由文本当成当前可用价位。
+    """
+    body_only = {"body": "支撑位：12.5，压力位：14，止损价：11.2"}
+    assert parse_dsa_levels(body_only) == []
+
+    take_profit_text = {
+        "strategy": {"take_profit": "反弹目标位：MA5 375.64元 / MA10 407.58元"},
+        "strategy2": {"take_profit": "目标位：5.00元"},
+    }
+    kinds = [row["kind"] for row in parse_dsa_levels(take_profit_text)]
+    assert "target" not in kinds
+
+    news_blob = {
+        "details": {
+            "机构分析": "花旗对新易盛目标价 701 元，上次旧目标价: 353.57 元",
+        },
+    }
+    assert parse_dsa_levels(news_blob) == []
+
+
+def test_parse_dsa_levels_drops_prices_far_from_reference():
+    """离现价太远的价位线丢掉 —— 这是撑开 Y 轴那条线的直接护栏。"""
+    report = {
+        "strategy": {"stop_loss": "336.00"},
+        "details": {
+            "raw_result": {
+                "dashboard": {
+                    "price": {"support_level": 340.0, "resistance_level": 375.64},
+                    "take_profit": 5.0,
+                },
+            },
+        },
+    }
+    # 现价 337: 支撑/压力都在 ±25% 内留下, 5.00 丢掉
+    levels = {row["kind"]: row["price"] for row in parse_dsa_levels(report, reference=337.0)}
+    assert levels["support"] == pytest.approx(340.0)
+    assert levels["resistance"] == pytest.approx(375.64)
+    assert levels["stop"] == pytest.approx(336.0)
+    assert "target" not in levels
+
+    # 参考价缺失(旧调用路径)时不过滤, 保持可测性
+    unfiltered = {row["kind"]: row["price"] for row in parse_dsa_levels(report)}
+    assert unfiltered["support"] == pytest.approx(340.0)
 
 
 def test_t_replay_skips_first_bar_and_respects_60_minute_cooldown():
