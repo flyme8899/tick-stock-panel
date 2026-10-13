@@ -111,6 +111,22 @@ export function formatForward(value: number | null | undefined): string {
   return fmtPct(value)
 }
 
+/** 日K上画不出买卖标记时，工具栏要能区分「还没选策略」和「这段确实没有」。 */
+export function candleMarkStatus(input: {
+  show: boolean
+  strategyOn: boolean
+  hasStrategy: boolean
+  paperOn: boolean
+  drawn: number
+  pending: boolean
+  failed: boolean
+}): string | null {
+  if (!input.show || input.pending || input.failed || input.drawn > 0) return null
+  if (input.strategyOn && !input.hasStrategy) return '选择策略后显示买卖点'
+  if ((input.strategyOn && input.hasStrategy) || input.paperOn) return '这段区间没有买卖点'
+  return null
+}
+
 export function strategyMarkers(markers: TradeSignalMarker[], enabled: boolean): ChartMarker[] {
   if (!enabled) return []
   return markers.map(marker => ({
