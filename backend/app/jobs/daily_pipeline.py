@@ -1425,6 +1425,13 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
     except Exception as e:  # noqa: BLE001
         logger.warning("fund-flow scheduler job not registered: %s", e)
 
+    try:
+        from app.services.auction_scan import register_jobs as register_auction_scan
+
+        register_auction_scan(scheduler, repo)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("auction-scan scheduler job not registered: %s", e)
+
     scheduler.start()
     logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",
                 inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],
