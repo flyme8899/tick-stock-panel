@@ -96,7 +96,7 @@ def test_annotate_directions_keeps_explicit_direction() -> None:
 
 
 def test_score_event_gives_no_direction_points_without_signal() -> None:
-    """空方向不得 mapping 的 direction 分（概念+个股各 15，无方向 5）。"""
+    """空方向不得 mapping 的方向分（概念 10 + 个股 8 = 18）。"""
     event = {
         "importance": "重要",
         "concepts": ["某概念"],
@@ -105,11 +105,11 @@ def test_score_event_gives_no_direction_points_without_signal() -> None:
         "heat": 10,
     }
     _score_event(event, NOW)
-    assert event["breakdown"]["mapping"] == 30
+    assert event["breakdown"]["mapping"] == 18.0
 
 
 def test_score_event_gives_direction_points_with_signal() -> None:
-    """有方向才给满 35 分，防止上一条测试因别的原因恒过。"""
+    """有方向才给满 23 分，防止上一条测试因别的原因恒过。"""
     event = {
         "importance": "重要",
         "concepts": ["某概念"],
@@ -118,7 +118,74 @@ def test_score_event_gives_direction_points_with_signal() -> None:
         "heat": 10,
     }
     _score_event(event, NOW)
-    assert event["breakdown"]["mapping"] == 35
+    assert event["breakdown"]["mapping"] == 23.0
+
+
+def test_mapping_points_grow_with_hit_count() -> None:
+    """映射分按命中**个数**递增，不再是「有就满分」的布尔式。
+
+    旧口径 `if concepts: mapping += 15` 让挂 1 个概念和挂 4 个概念同分，
+    等于鼓励多挂概念凑分。现在基数 + 增量，到第 4 个封顶。
+    """
+    one = {
+        "importance": "重要",
+        "concepts": ["甲"],
+        "mentioned_stocks": [],
+        "direction": "",
+    }
+    four = {
+        "importance": "重要",
+        "concepts": ["甲", "乙", "丙", "丁"],
+        "mentioned_stocks": [],
+        "direction": "",
+    }
+    eight = {
+        "importance": "重要",
+        "concepts": ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛"],
+        "mentioned_stocks": [],
+        "direction": "",
+    }
+    for event in (one, four, eight):
+        _score_event(event, NOW)
+    assert one["breakdown"]["mapping"] == 10.0
+    assert four["breakdown"]["mapping"] == 16.0  # 10 + 2×3，第 4 个封顶
+    assert eight["breakdown"]["mapping"] == 16.0  # 超出仍封顶，不再递增
+
+    stocks_one = {
+        "importance": "重要",
+        "concepts": [],
+        "mentioned_stocks": [{"key": str(index)} for index in range(1)],
+        "direction": "",
+    }
+    stocks_four = {
+        "importance": "重要",
+        "concepts": [],
+        "mentioned_stocks": [{"key": str(index)} for index in range(4)],
+        "direction": "",
+    }
+    for event in (stocks_one, stocks_four):
+        _score_event(event, NOW)
+    assert stocks_one["breakdown"]["mapping"] == 8.0
+    assert stocks_four["breakdown"]["mapping"] == 12.5  # 8 + 1.5×3，第 4 个封顶
+
+
+def test_aux_points_scale_matches_component_caps() -> None:
+    """_AUX_SCALE 必须等于各辅助项封顶之和。
+
+    这是「辅助项最多把分数翻倍」这条不变量的唯一来源。任何一项封顶改了而
+    _AUX_SCALE 忘了同步，乘性系数就会越过 2，低档满辅助重新追上高档 ——
+    那正是加性结构里「一般+满压过裸重要」的老病。
+    """
+    from app.news import hot_events as hot_mod
+
+    assert hot_mod._AUX_SCALE == (
+        hot_mod._MAPPING_CONCEPT_CAP
+        + hot_mod._MAPPING_ASSET_CAP
+        + hot_mod._MAPPING_DIRECTION
+        + hot_mod._CONFIRMATION_CAP
+        + hot_mod._FRESH_MAX
+        + hot_mod._HEAT_BONUS_CAP
+    )
 
 
 def test_log_suspect_event_pairs_warns_on_disjoint_same_concepts(caplog) -> None:

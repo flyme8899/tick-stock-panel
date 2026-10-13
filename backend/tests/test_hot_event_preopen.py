@@ -325,7 +325,8 @@ def test_weekend_freshness_starts_at_the_session_open():
     open_clock = _at(MONDAY, 9, 25)
     assert _freshness_age_hours(event, open_clock) < 1
     _score_event(event, open_clock)
-    assert event["breakdown"]["freshness"] > 15
+    # 新鲜度封顶从 20 降到 15（乘性计分：封顶之和必须等于 _AUX_SCALE）。
+    assert event["breakdown"]["freshness"] > 11
     event["_latest"] = _at(MONDAY, 9, 20)
     assert _freshness_age_hours(event, open_clock) < 0.2
 
@@ -433,5 +434,5 @@ def test_oct12_replay_shows_cyber_after_the_brief_and_jindan_by_the_open(tmp_pat
         assert rank < before_rank
         assert priced["confirmation"]["score"] > 0
         assert priced["confirmation"]["phase"] == "auction"
-        assert priced["breakdown"]["freshness"] > 15
+        assert priced["breakdown"]["freshness"] > 11
         assert priced["confirmation"]["detail"]["auction_open_pct"] >= 0.07

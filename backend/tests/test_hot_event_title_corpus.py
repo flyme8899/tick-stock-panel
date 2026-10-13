@@ -1475,21 +1475,22 @@ def test_importance_resync_keeps_score_in_step_with_the_label():
     event = {
         "importance": "一般",
         "breakdown": {
-            "importance": 20,
+            "importance": 40,
             "confirmation": 10.0,
             "mapping": 30.0,
             "freshness": 12.5,
             "heat": 5.0,
         },
-        "score": 77.5,
+        "score": 40 * (1 + 57.5 / 98.5),
     }
     _apply_llm(event, {"importance": "重大"})
     assert event["importance"] == "重大"
     # 修复前：标签已是「重大」，breakdown 还是「一般」的分。
-    assert event["breakdown"]["importance"] == 20
+    assert event["breakdown"]["importance"] == 40
     _resync_importance_score(event)
-    assert event["breakdown"]["importance"] == 130
-    assert event["score"] == round(130 + 10.0 + 30.0 + 12.5 + 5.0, 4)
+    assert event["breakdown"]["importance"] == 200
+    # 乘性结构：总分 = importance ×(1 + 辅助/98.5)，不是「把各项加起来」。
+    assert event["score"] == round(200 * (1 + 57.5 / 98.5), 4)
     # 其余分项保持写要点前的值。
     assert event["breakdown"]["confirmation"] == 10.0
     assert event["breakdown"]["mapping"] == 30.0
@@ -1507,7 +1508,7 @@ def test_llm_importance_leaves_score_consistent(tmp_path, monkeypatch):
 
     from app.news import hot_events as hot_mod
     from app.news import service as news_service
-    from app.news.hot_events import _IMPORTANCE_POINTS
+    from app.news.hot_events import _AUX_SCALE, _IMPORTANCE_POINTS
 
     reset_store_for_tests(tmp_path / "importance-resync.sqlite")
     fed = "美联储宣布降息25基点"
@@ -1538,7 +1539,12 @@ def test_llm_importance_leaves_score_consistent(tmp_path, monkeypatch):
         label = str(event["importance"])
         assert label in _IMPORTANCE_POINTS
         assert breakdown["importance"] == _IMPORTANCE_POINTS[label], label
-        assert event["score"] == round(sum(breakdown.values()), 4), label
+        # 乘性口径：总分是 importance 乘系数，不是各项相加。
+        assert event["score"] == round(
+            _IMPORTANCE_POINTS[label]
+            * (1 + sum(v for k, v in breakdown.items() if k != "importance") / _AUX_SCALE),
+            4,
+        ), label
 
 
 def test_wire_flash_body_opening_with_the_title_is_not_a_cutoff():

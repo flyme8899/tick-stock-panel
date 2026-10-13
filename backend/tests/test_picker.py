@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.api import picker as picker_api
 from app.market_time import CN_TZ
+from app.news.hot_events import _AUX_SCALE
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
 from app.services.picker import (
     Dimensions,
@@ -162,6 +163,176 @@ def test_hot_sector_exact_match_respects_min_sources_and_broad_substring():
 
     narrow = Dimensions(concepts={"000002.SZ": ["AI概念"]})
     assert match_sector_symbols("AI", "AI", build_label_index(narrow)) == {"000002.SZ"}
+
+
+def test_match_sector_symbols_strips_news_column_suffix():
+    """资讯栏目名（「汽车大新闻」「能源行业新闻」）剥掉后缀后要能落回真实板块。"""
+    dimensions = Dimensions(concepts={
+        "601127.SH": ["汽车"],
+        "600900.SH": ["新能源"],
+    })
+    index = build_label_index(dimensions)
+    assert match_sector_symbols("汽车大新闻", "汽车大新闻", index) == {"601127.SH"}
+    assert match_sector_symbols("能源行业新闻", "能源行业新闻", index) == {"600900.SH"}
+    # 剥完还是查不到的真·栏目名（中东、美联储动态）不能瞎命中。
+    assert match_sector_symbols("美联储动态", "美联储动态", index) == set()
+
+
+def test_match_sector_symbols_falls_back_to_token_overlap():
+    """无包含关系的同义说法靠词素接上：「数据中心液冷」→「液冷服务器」。"""
+    dimensions = Dimensions(concepts={"300001.SZ": ["液冷服务器"], "600519.SH": ["白酒"]})
+    index = build_label_index(dimensions)
+    assert match_sector_symbols("数据中心液冷", "数据中心液冷", index) == {"300001.SZ"}
+    # 词素太泛（命中超过 30 个不同标签）仍要拒绝，不能把半个市场拉进来。
+    broad = Dimensions(concepts={f"{i:06d}.SZ": [f"科技{i}"] for i in range(31)})
+    assert match_sector_symbols("科技论坛", "科技论坛", build_label_index(broad)) == set()
+
+
+def test_token_match_rejects_generic_and_ambiguous_terms():
+    """词素匹配的精度护栏：通用词直接跳过；2 字词素必须唯一定位。"""
+    # 「个股」是通用词，不该把「次新股」「个股期权」这类标签拉进来。
+    ambiguous = Dimensions(concepts={
+        "000001.SZ": ["次新股"],
+        "000002.SZ": ["个股期权"],
+        "000003.SZ": ["个股融资融券"],
+    })
+    index = build_label_index(ambiguous)
+    assert match_sector_symbols("全市场超4300只个股下挫", "全市场超4300只个股下挫", index) == set()
+    # 通用词（「个股」「美股」）在**词素匹配**这一层必须被停用词挡掉。
+    # 注意：包含匹配是更早、独立的一层（`美股` ⊂ `美股概念` 属包含，不属词素），
+    # 这里直接测词素函数本身，避免把两层混在一起。
+    from app.services.picker import _concept_tokens, _TOKEN_STOPWORDS
+
+    assert "个股" in _TOKEN_STOPWORDS
+    assert "美股" in _TOKEN_STOPWORDS
+    # 「全市场超4300只个股下挫」切出的词素里不应残留「个股」等通用词。
+    tokens = _concept_tokens("全市场超4300只个股下挫")
+    assert not any(token in _TOKEN_STOPWORDS for token in tokens)
+    assert not any(len(token) < 2 for token in tokens)
+
+
+def test_hot_group_reserves_slots_for_unmappable_major():
+    """重大档保底席位：可映射事件占满前 8 时，用榜外最靠前的「重大」补到末尾。"""
+    from app.services.picker import _hot_group
+
+    def ev(key, name, importance, concepts):
+        return {
+            "key": key,
+            "name": name,
+            "importance": importance,
+            "concepts": concepts,
+            "mentions": 1,
+            "source_count": 1,
+        }
+
+    dims = Dimensions(concepts={
+        "000001.SZ": ["机器人"],
+        "000002.SZ": ["白酒"],
+        "000003.SZ": ["光伏"],
+        "000004.SZ": ["储能"],
+        "000005.SZ": ["芯片"],
+        "000006.SZ": ["军工"],
+        "000007.SZ": ["医药"],
+        "000008.SZ": ["券商"],
+    })
+    concepts_pool = ["机器人", "白酒", "光伏", "储能", "芯片", "军工", "医药", "券商"]
+    events = [
+        # 3 条无映射「重大」排在最前（按可映射性会被压到后面）。
+        ev("m1", "重大-无映射A", "重大", ["中东"]),
+        ev("m2", "重大-无映射B", "重大", ["美联储动态"]),
+        ev("m3", "重大-无映射C", "重大", []),
+    ]
+    # 9 条可映射「重要」—— 足够挤满前 8，把「重大」全推出去。
+    for i in range(9):
+        events.append(ev(f"i{i}", f"重要-可映射{i}", "重要", [concepts_pool[i % 8]]))
+
+    group = _hot_group({"events": events}, None, dims)
+    names = [item["name"] for item in group["items"]]
+    assert len(names) == 8
+    majors = [item for item in group["items"] if item["importance"] == "重大"]
+    # 保底 2 条「重大」被补进来（榜内本来 0 条），且都是无映射的。
+    assert len(majors) == 2
+    assert all(item["mapping_breadth"] == "none" for item in majors)
+    # 保底不会重复、也不会把可映射事件全挤掉：仍有 6 条可映射。
+    assert len(set(names)) == len(names)
+    assert sum(1 for item in group["items"] if item["selectable_count"] > 0) == 6
+
+
+def test_hot_group_keeps_existing_major_that_sits_at_tail():
+    """榜内「重大」排在末位时，补位只能砍非重大，不能把它换掉。
+
+    评审给的反例：top8 = 7 条 usable「重要」+ 1 条「重大」但无映射 M1（正好在末位），
+    此时 majors_in=1、shortfall=1，会从榜外补 M2。若按位置砍末尾（旧实现），砍掉的
+    就是 M1 —— 重大席位数没变，还换成了排名更差的 M2。
+    """
+    from app.services.picker import _hot_group
+
+    def ev(key, name, importance, concepts):
+        return {
+            "key": key,
+            "name": name,
+            "importance": importance,
+            "concepts": concepts,
+            "mentions": 1,
+            "source_count": 1,
+        }
+
+    pool = ["机器人", "白酒", "光伏", "储能", "芯片", "军工", "医药", "券商"]
+    dims = Dimensions(concepts={f"{i:06d}.SZ": [c] for i, c in enumerate(pool)})
+    events = []
+    # 7 条可映射「重要」—— 它们按可映射性排在 M1 之前，占满前 7 位。
+    for i in range(7):
+        events.append(ev(f"i{i}", f"重要-可映射{i}", "重要", [pool[i]]))
+    # 1 条「重大」但无映射 —— 排在 usable 之后，正好落在第 8 位（末位）。
+    events.append(ev("M1", "榜内重大-末位", "重大", ["中东"]))
+    # 榜外还有 1 条无映射「重大」，会被保底拉进来补第 2 个席位。
+    events.append(ev("M2", "榜外重大-无映射", "重大", ["美联储动态"]))
+
+    group = _hot_group({"events": events}, None, dims)
+    names = [item["name"] for item in group["items"]]
+    assert len(names) == 8
+    # 榜内那条末位「重大」必须保住，不能被榜外的 M2 顶掉。
+    assert "榜内重大-末位" in names
+    majors = [item["name"] for item in group["items"] if item["importance"] == "重大"]
+    assert set(majors) == {"榜内重大-末位", "榜外重大-无映射"}
+    # 让位的是「重要」而非「重大」：可映射条数从 7 降到 6。
+    assert sum(1 for item in group["items"] if item["selectable_count"] > 0) == 6
+
+
+def test_event_pick_rank_is_mappability_first_tier_second():
+    """选股列表里可映射性主导, 档位降为次级键（与新闻榜单口径刻意不同）。"""
+    from app.services.picker import _event_pick_rank, _mapping_breadth
+
+    assert _mapping_breadth(0) == "none"
+    assert _mapping_breadth(50) == "usable"
+    assert _mapping_breadth(2000) == "broad"
+
+    major_none = {"importance": "重大", "name": "A"}
+    minor_usable = {"importance": "一般", "name": "B"}
+    broad = {"importance": "重大", "name": "C"}
+    ranks = {
+        "usable": _event_pick_rank(minor_usable, 40, index_ready=True),
+        "broad": _event_pick_rank(broad, 2000, index_ready=True),
+        "none": _event_pick_rank(major_none, 0, index_ready=True),
+    }
+    assert ranks["usable"] < ranks["broad"] < ranks["none"]
+    # 可映射性压过档位: 一般档的可映射事件排在重大档无映射事件之前。
+    assert _event_pick_rank(minor_usable, 40, index_ready=True) < _event_pick_rank(
+        major_none, 0, index_ready=True
+    )
+    # usable 内部按舒适区排队: 40 只在区里, 1 只在区外。
+    assert _event_pick_rank(minor_usable, 40, index_ready=True) < _event_pick_rank(
+        minor_usable, 1, index_ready=True
+    )
+    # 同组内档位仍起作用: 重大 > 一般。
+    assert _event_pick_rank({"importance": "重大", "name": "x"}, 40, index_ready=True) < _event_pick_rank(
+        {"importance": "一般", "name": "x"}, 40, index_ready=True
+    )
+    # 索引不可用时退化为「档位 + 热度」, 不再按可映射性。
+    assert _event_pick_rank(major_none, 0, index_ready=False)[:2] == (0, 0)
+    assert _event_pick_rank(major_none, 999, index_ready=False) < _event_pick_rank(
+        minor_usable, 999, index_ready=False
+    )
 
 
 def test_filters_drop_st_financial_and_cap_outside_range():
@@ -579,9 +750,11 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert head["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利好"}]
     assert head["first_seen"] == "10-09 14:52"
     assert head["importance"] == "重大"
-    assert head["breakdown"]["importance"] == 130
-    assert head["breakdown"]["mapping"] == 35
-    assert abs(head["score"] - sum(head["breakdown"].values())) < 0.02
+    # 乘性计分：档位 0/40/90/200，概念 1 个 → 10，个股 2 个 → 9.5，方向 5。
+    assert head["breakdown"]["importance"] == 200
+    assert head["breakdown"]["mapping"] == 24.5
+    aux = sum(value for key, value in head["breakdown"].items() if key != "importance")
+    assert abs(head["score"] - 200 * (1 + aux / _AUX_SCALE)) < 0.02
     assert [stock["key"] for stock in head["mentioned_stocks"]] == ["600519.SH", "000001.SZ"]
     assert head["mentioned_stocks"][0]["mentions"] == 2
 
@@ -640,13 +813,30 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     catalog = client.get("/api/picker/sources")
     assert catalog.status_code == 200
     group = next(item for item in catalog.json()["groups"] if item["id"] == "hot_events")
-    assert [item["name"] for item in group["items"]] == names[:8]
+    # 选股目录不再原样照抄快照顺序: 它在「同档内」按可映射性重排, 把能真正选出
+    # 股的事件提前(见 _event_pick_rank)。所以这里锁集合与前 8 的档位不变量,
+    # 不锁逐位相等 —— 否则每次盘面映射数据变动都要改断言。
+    assert {item["name"] for item in group["items"]} == set(names[:8])
+    assert group["items"][0]["name"] == "华为发布盘古新模型，昇腾链走强"
+    # 同档内, 能映射到成分股的事件必须排在映射为空的事件之前。
+    mapped_at = [
+        index for index, item in enumerate(group["items"]) if item["selectable_count"] > 0
+    ]
+    unmapped_at = [
+        index for index, item in enumerate(group["items"]) if item["selectable_count"] == 0
+    ]
+    if mapped_at and unmapped_at:
+        assert max(mapped_at) < min(unmapped_at)
     assert "光伏组件厂下调报价" not in {item["name"] for item in group["items"]}
     assert all("mentioned_stocks" not in item for item in group["items"])
     assert group["items"][0]["description"] == "提及 3 · 来源 3"
     assert group["items"][0]["importance"] == "重大"
     assert group["items"][0]["concepts"] == ["昇腾"]
     assert group["items"][0]["headline"] == "华为发布盘古新模型，昇腾链走强"
+    # 可选股 = 概念成分股(昇腾→300001/300002) ∪ 事件直接点到的个股(600519/000001) = 4 只。
+    # 前端据此显示「会选出 4 只」, 而不是被截断的 mapped_stocks 前 3 个。
+    assert group["items"][0]["selectable_count"] == 4
+    assert group["items"][0]["mapping_breadth"] == "usable"
     assert group["hint"] == "交易日 10月12日 · 待开盘验证 · 更新于 08:30"
     assert group["fallback"] is False
     ran = client.post("/api/picker/run", json={

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import pytest
 
 from app.market_time import CN_TZ
 from app.news import hot_events as hot_mod
@@ -170,23 +172,23 @@ def test_resync_then_sort_puts_the_display_score_in_order():
         "name": "美股三大指数集体收涨",
         "importance": "重大",
         "score": 190.0,
-        "breakdown": {"importance": 130.0, "confirmation": 0.0, "mapping": 35.0,
-                      "freshness": 20.0, "heat": 5.0},
+        "breakdown": {"importance": 200.0, "confirmation": 0.0, "mapping": 28.5,
+                      "freshness": 15.0, "heat": 5.0},
         "heat": 5.0,
     }
     middle = {
         "name": "存储芯片厂宣布涨价",
         "importance": "重要",
         "score": 115.0,
-        "breakdown": {"importance": 55.0, "confirmation": 0.0, "mapping": 35.0,
-                      "freshness": 20.0, "heat": 5.0},
+        "breakdown": {"importance": 90.0, "confirmation": 0.0, "mapping": 28.5,
+                      "freshness": 15.0, "heat": 5.0},
         "heat": 5.0,
     }
     deep = {
         "name": "碳酸锂期货继续下跌",
         "importance": "一般",
         "score": 30.0,
-        "breakdown": {"importance": 20.0, "confirmation": 0.0, "mapping": 0.0,
+        "breakdown": {"importance": 40.0, "confirmation": 0.0, "mapping": 0.0,
                       "freshness": 10.0, "heat": 0.0},
         "heat": 0.0,
     }
@@ -203,7 +205,75 @@ def test_resync_then_sort_puts_the_display_score_in_order():
     ]
     scores = _scores(events)
     assert scores == sorted(scores, reverse=True)
-    assert scores[0] == 140.0  # 30 + (130 - 20)
+    # 深位那条：重要性 40→200，辅助项 (0+0+10+0)=10，乘性 = 200×(1+10/98.5)。
+    assert scores[0] == pytest.approx(220.3046, abs=1e-3)
+
+
+def test_score_is_multiplicative_and_never_inverts_across_tiers():
+    """加性结构会倒挂，乘性结构不会 —— 这是本次改计分结构的唯一目的。
+
+    旧的加性口径 `score = importance + 辅助`，辅助满额 150 超过「一般」档本身，
+    实测「一般+满辅助」115 分压过「裸重要」50 分（倒挂 65 分），
+    「重要+满」150 分与「裸重大」150 分并列。新的乘性口径
+    `score = importance × (1 + 辅助/98.5)` 下，满辅助只把分数翻倍不到两倍，
+    而档位比值 2.25/2.22 都大于它，所以低档永远追不上上一档。
+    """
+    now = datetime(2026, 10, 9, 9, 0, tzinfo=CN_TZ)
+
+    def build(label: str, *, max_aux: bool) -> dict:
+        event: dict = {
+            "name": f"{label}事件",
+            "importance": label,
+            "heat": 999.0 if max_aux else 0.0,
+            "_first": now if max_aux else now - timedelta(hours=6 * 12),
+        }
+        if max_aux:
+            event["concepts"] = ["甲", "乙", "丙", "丁"]
+            event["mentioned_stocks"] = [{"key": f"{index}"} for index in range(4)]
+            event["direction"] = "利好"
+            event["confirmation"] = {"score": 999}
+        hot_mod._score_event(event, now)
+        return event
+
+    bare = {label: build(label, max_aux=False) for label in hot_mod._IMPORTANCE_ORDER[1:]}
+    full = {label: build(label, max_aux=True) for label in hot_mod._IMPORTANCE_ORDER[1:]}
+    for label in ("一般", "重要"):
+        upper = hot_mod._IMPORTANCE_ORDER[hot_mod._IMPORTANCE_ORDER.index(label) + 1]
+        assert full[label]["score"] < bare[upper]["score"], (
+            f"「{label}+满辅助」{full[label]['score']} 追上了「裸{upper}」"
+            f"{bare[upper]['score']}，档位又倒挂了"
+        )
+    # 同档之内，辅助多的必须更高（否则辅助项白给）。
+    assert bare["一般"]["score"] < full["一般"]["score"]
+
+
+def test_aux_scale_is_reachable_ceiling():
+    """满辅助的分数必须恰好是 importance ×2，封顶不能被越过。
+
+    _AUX_SCALE 等于各项封顶之和，所以 aux 打满时乘性系数正好是 2.0。
+    """
+    now = datetime(2026, 10, 9, 9, 0, tzinfo=CN_TZ)
+    event = {
+        "name": "顶格事件",
+        "importance": "重大",
+        "concepts": ["甲", "乙", "丙", "丁", "戊", "己"],
+        "mentioned_stocks": [{"key": f"{index}"} for index in range(6)],
+        "direction": "利好",
+        "confirmation": {"score": 999},
+        "heat": 999.0,
+        "_first": now,
+    }
+    hot_mod._score_event(event, now)
+    aux = hot_mod._aux_points(event["breakdown"])
+    assert aux == pytest.approx(hot_mod._AUX_SCALE, abs=1e-6)
+    assert event["score"] == pytest.approx(200.0 * 2.0, abs=1e-3)
+
+
+def test_confirmation_cap_is_forty():
+    """盘面验证封顶从 80 降到 40：它只是辅助项的一部分，不再「和重要性同级」。"""
+    assert hot_mod._confirmation_points({"score": 500}) == 40.0
+    assert hot_mod._confirmation_points({"score": 12.5}) == 12.5
+    assert hot_mod._confirmation_points(None) == 0.0
 
 
 def test_ranking_is_monotonic_and_top20_keeps_titles(tmp_path, monkeypatch):

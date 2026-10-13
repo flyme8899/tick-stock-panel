@@ -179,7 +179,19 @@ _TITLE_CACHE_VERSION = 22
 #     计分，分数因此变动，旧快照算不出新分，升版本只建基线不比较。
 # v7: 句尾电头也剥掉（「下调至9%金十数据10月12日讯」，2026-10-12）。此前只认
 #     开头。展示标题一变，旧快照和下一轮榜对不上，部署后第一轮只建基线不比较。
-HOT_RULES_VERSION = 7
+# v8: 计分改**乘性**结构（2026-10-13）——`score = importance × (1 + 辅助/98.5)`，
+#     档位 0/20/55/130 → 0/40/90/200，mapping 由布尔式改成按个数递增（概念
+#     10+2×min(n-1,3)、个股 8+1.5×min(n-1,3)），验证封顶 80→40、新鲜度 20→15、
+#     热度 15→10。动因：加性下辅助项合计可达 150，超过「一般」档本身，实测
+#     「一般+满」115 分压过「裸重要」50 分（倒挂 65 分）、「重要+满」与「裸重大」
+#     并列；且加性要让档位单调必须 A < gap_min，而 A≈100 无论档位怎么拉都
+#     不成立，属结构死锁。所有分数与名次整体变动，旧快照算不出新分，
+#     升版本让部署后第一轮只建基线不比较。
+# v9: 榜单排序键去掉子项（2026-10-13）——`(-score, name)`，平局不再按
+#     重要性/映射/新鲜度/热度决胜。展示分本就是这些子项的单调函数，子项留在
+#     键里只制造「名次受子项影响」的错觉。补验后补一次重排（issue #53 残留
+#     倒挂）。同分事件的名次可能与 v8 不同，push 按名次判新进，升版本。
+HOT_RULES_VERSION = 9
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -285,15 +297,48 @@ _BULL_CUES = ("补贴", "获批", "订单", "涨价", "回购", "发布", "出�
 _NOISE_EXACT = frozenset({"图片", "广告", "视频", "转发", "分享", "推广", "赞助"})
 _NOISE_HINTS = ("闲聊", "广告", "推广", "赞助", "加微信", "点击领取", "转发微博")
 _RELEVANCE_MIN = 3
-# 重要性高于映射、新鲜度和热度。热度封顶，避免条数把寻常涨价顶过降息或政策。
-# 盘面验证另计，权重和重要性同级，不放进这个封顶。
-_IMPORTANCE_POINTS = {"琐碎": 0, "一般": 20, "重要": 55, "重大": 130}
+# 重要性是**倍率**，不是加数。总分 = importance × (1 + 辅助合计 / _AUX_SCALE)。
+#
+# 改乘性之前是加性 `score = importance + confirmation + mapping + freshness +
+# heat`，档位 0/20/55/130。加性下辅助项满额 15+15+5+20+15=70，加盘面验证最多
+# +80，合计 150 —— 超过「一般」档本身（20）七倍多。于是「一般 + 满规则 + 满验证」
+# 能压过任何裸的「重要」甚至「重大」：线上实测「一般+满」115 分 > 「裸重要」50 分，
+# 倒挂 65 分；「重要+满」150 分 == 「裸重大」150 分，并列。
+#
+# 这不是参数没调好，是加性结构本身解不出来。要让档位单调必须让辅助项合计 A
+# 小于最小档差 gap_min（否则低档吃满辅助就能追上高档），而现实里 A≈100、
+# 拉大档差到 0/40/90/180 也只有 gap_min=40 —— A < gap_min 永远不成立（差 2.5 倍
+# 以上）。乘性把「辅助项不能超过一个档差」放松成「相邻档比 > 2」，才算可解：
+# 满辅助的「一般」(40×1.985=79.4) < 裸「重要」(90)；满辅助的「重要」(178.7)
+# < 裸「重大」(200)。档位 40/90/200 的比值 2.25/2.22 正是照这条反推出来的。
+_IMPORTANCE_POINTS = {"琐碎": 0, "一般": 40, "重要": 90, "重大": 200}
 _IMPORTANCE_ORDER = ("琐碎", "一般", "重要", "重大")
-_MAPPING_CONCEPT = 15
-_MAPPING_ASSET = 15
+# 辅助项合计的最大值。乘性系数 = 1 + aux / _AUX_SCALE，所以 aux=_AUX_SCALE 时
+# 辅助项恰好把分数翻倍（上限 ×1.985，顶到不了 ×2，给「满辅助的次档 < 裸的上一档」
+# 留出 0.015 的余量）。
+#
+# _AUX_SCALE 必须等于下面各项封顶之和。改任何一项封顶都要同步改它 —— 这是
+# 「辅助项最多翻倍」这条不变量的唯一来源，掉一个就会出现封顶失配。
+#   概念 10+2×min(n-1,3) → 16
+#   个股  8+1.5×min(n-1,3) → 12.5
+#   方向  5
+#   盘面验证 40
+#   新鲜度 15
+#   热度 10
+#   = 98.5
+_AUX_SCALE = 98.5
+# 概念/个股按**个数**递增，不再只看「有没有」。此前 `if concepts: mapping += 15`
+# 是布尔式：点到 1 个概念和点到 4 个概念同分，反而鼓励多挂概念凑分。基数下调、
+# 增量递增，既保留「有映射」的信息，又让映射越准越高。
+_MAPPING_CONCEPT_BASE = 10
+_MAPPING_CONCEPT_STEP = 2
+_MAPPING_CONCEPT_CAP = 16
+_MAPPING_ASSET_BASE = 8
+_MAPPING_ASSET_STEP = 1.5
+_MAPPING_ASSET_CAP = 12.5
 _MAPPING_DIRECTION = 5
-_FRESH_MAX = 20
-_HEAT_BONUS_CAP = 15
+_FRESH_MAX = 15
+_HEAT_BONUS_CAP = 10
 _MAJOR_RATE = ("降息", "加息", "降准", "美联储", "欧央行", "日本央行", "英央行")
 _MAJOR_ORGS = ("国务院", "发改委", "工信部", "证监会", "财政部", "央行")
 _MAJOR_POLICY_ACTS = ("出台", "补贴", "政策", "降准")
@@ -373,6 +418,40 @@ _CONCEPT_LINK_SKIP = _GENERIC_TOKENS | _STOP | _CONCEPT_GLUE | frozenset({
     "美元", "目标", "价格", "预期", "上调", "下调", "美股", "发布", "订单",
     "全球", "同比", "环比",
 })
+# 通用产业壳。它们能出现在任何稿子里，单独一个壳词素撞上不该算概念命中。
+# 线上实测反例：「低空经济」被「经济回暖」误挂、「工业母机」被「工业增加值」
+# 误挂、「固态电池」被「电池级碳酸锂」误挂、「可控核聚变」被「可控硅」误挂。
+# 只用于**子串锚过滤**，绝不用来否决整个概念名 —— 「固态电池」本身是合法概念。
+_CONCEPT_SHELL = frozenset({
+    "经济", "工业", "电池", "数据", "智能", "产业", "制造", "科技", "市场",
+    "板块", "概念", "行业", "企业", "公司", "产品", "技术", "设备", "材料",
+    "能源", "金融", "消费", "医药", "化工", "汽车", "电力", "地产", "农业",
+})
+# 能当概念名**开头**的 2 字锚。允许「低空经济」被「低空飞行」「低空」命中，
+# 但不允许「一般话题」里的「低空」以外的任意 2 字切口触发。
+# 判据：这个词素是产业的限定语（低空/算力/固态/可控…），不是通用壳。
+# 与 _CONCEPT_SHELL 刻意保持不相交 —— 同一个词同时进两张表时「哪张赢」会变成
+# 隐式规则，靠 test_concept_anchor_tables_stay_disjoint_from_shell 钉死。
+_ANCHOR_HEAD_OK = frozenset({
+    "低空", "算力", "固态", "光伏", "储能", "氢能", "钠电", "锂电",
+    "芯片", "军工", "稀土", "券商", "白酒", "煤炭", "钢铁",
+    "有色", "黄金", "原油", "天然", "机器", "无人", "数字", "卫星", "商业",
+    "免税", "水泥", "航空", "船运", "游戏", "传媒", "教育", "养殖", "种业",
+    "培育", "可再", "核聚", "新型", "高端", "精细", "创新", "绿色",
+})
+# 词尾 2 字锚。概念名的**收尾成分是产品/环节**时，正文提到这个环节就算命中
+# （「半导体设备」← 「设备国产化率提升」）。收尾是通用主语（公司/行业/价格）
+# 的一律不算，否则「新能源行业」会被任何带「行业」的稿子挂上。
+# 允许少量壳词留在表里（见下面的白名单），但那意味着它们**只在尾锚位**放行：
+# 「半导体设备」能被「设备扩产」挂上，「固态电池」不会被「电池XX」挂上
+# （`电池` 不在这张表里）。
+_ANCHOR_TAIL_OK = frozenset({
+    "设备", "零部件", "组件", "芯片", "模块", "整机",
+    "产能", "工程", "物流", "零售", "银行", "保险", "养殖", "种业",
+})
+# 壳词表里允许同时出现在锚表里的那几个。它们在概念名里占锚位时指的是具体
+# 产业环节，不再算通用壳。除此之外两张表不相交。
+_ANCHOR_SHELL_EXEMPT = frozenset({"设备", "地产"})
 _CLAUSE = re.compile(r"[，。！？、；：:\n]")
 # 半句话常见的起笔。完整标题不会从这些词开始。
 _FRAGMENT_LEADS = (
@@ -855,8 +934,15 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
         # 补问是裕度的保险不是常规路径，正常情况下这条日志不出现；出现即说明
         # 重排真的把切片外条目送进了前 _TITLE_LIMIT，条数进监控。
         logger.info("热门事件重排后补问切片外未标注条目 %d 条", len(unlabeled))
-    # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上，不改已经排好的顺序。
+    # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上。
+    # 补验会改 confirmation，也就改了**展示分** —— 改完必须按同一把尺重排一次。
+    # 此前这里写着「不改已经排好的顺序」，但 _score_event 已经把 score 改了，
+    # 顺序就成了旧分数序，I1 当场被破坏（issue #53：服务器快照里残留 2 对倒挂
+    # 是纯盘面验证驱动的）。重排只改顺序、不重跑 _score_event，mapping 仍保持
+    # 写要点前的值，「前 20 必有要点」的保证不受影响。
     _confirm_newly_mapped(kept, now, mapped_before)
+    kept.sort(key=_event_sort_key)
+    _log_ranking_violations(kept)
     # 模型留空（补问一轮也一样）时，从正文抽一句和标题不同的要点。抽不到就留空，
     # 不用标题再写一遍。不改分数、不改已经排好的顺序。候选正文还在，抽句要用，下面才丢掉。
     shown = kept[:_TITLE_LIMIT]
@@ -1355,19 +1441,21 @@ def _event_from(members: list[dict], now: datetime) -> dict:
 
 
 def _event_sort_key(item: dict) -> tuple:
-    """榜单排序键：总分、重要性、映射、新鲜度、热度、名称。
+    """榜单排序键：展示分、名称。
 
     规则排序（_rank_events）和模型改判后的重排（_compute 里 _resync 之后）
     共用它 —— 两处必须是同一把尺。曾经不是：名次按 LLM 改判前的规则分排，
     score 字段却是改判后的展示分，榜单出现 #12 的 168 分压在 #2 的 105 分
     上面这种倒挂（服务器快照实测相邻倒挂 9/996 对）。
+
+    除展示分以外的分项**全部去掉**。它们曾经作为平局决胜（重要性 → 映射 →
+    新鲜度 → 热度）留在键里，但展示分已经是这几项的单调函数：importance 涨、
+    分项和涨，score 必涨。留着只是把「同分怎么排」绑定到「哪一项出了力」，
+    而这一层是多余的因果，只在同分时生效却让人以为名次还受子项影响。
+    真同分时退回名称，稳定且可复现。
     """
     return (
         -float(item["score"]),
-        -_IMPORTANCE_POINTS.get(str(item.get("importance")), 0),
-        -float(item["breakdown"]["mapping"]),
-        -float(item["breakdown"]["freshness"]),
-        -float(item["heat"]),
         str(item["name"]),
     )
 
@@ -1386,6 +1474,45 @@ def _rank_events(events: list[dict], now: datetime, *, grade: bool) -> list[dict
     return kept
 
 
+def _mapping_points(concepts: list[str], stocks: list[dict], direction: str) -> float:
+    """映射分：概念和个股各按**命中个数**递增，方向分单独加。
+
+    两个封顶必须等于常量表里写的 _MAPPING_CONCEPT_CAP / _MAPPING_ASSET_CAP，
+    _AUX_SCALE 是按它们加出来的。改这里就改那边。
+    """
+    points = 0.0
+    if concepts:
+        points += min(
+            _MAPPING_CONCEPT_CAP,
+            _MAPPING_CONCEPT_BASE + _MAPPING_CONCEPT_STEP * min(len(concepts) - 1, 3),
+        )
+    if stocks:
+        points += min(
+            _MAPPING_ASSET_CAP,
+            _MAPPING_ASSET_BASE + _MAPPING_ASSET_STEP * min(len(stocks) - 1, 3),
+        )
+    if direction in {"利好", "利空"} and (concepts or stocks):
+        points += _MAPPING_DIRECTION
+    return min(_MAPPING_CONCEPT_CAP + _MAPPING_ASSET_CAP + _MAPPING_DIRECTION, points)
+
+
+def _aux_points(breakdown: dict) -> float:
+    """辅助项合计。乘性结构下这是总分的唯一增量来源。"""
+    return (
+        float(breakdown.get("confirmation") or 0.0)
+        + float(breakdown.get("mapping") or 0.0)
+        + float(breakdown.get("freshness") or 0.0)
+        + float(breakdown.get("heat") or 0.0)
+    )
+
+
+def _combined_score(importance: float, aux: float) -> float:
+    """总分 = 重要性 ×(1 + 辅助/尺度)。辅助封顶时恰好把分数翻倍。"""
+    if importance <= 0:
+        return 0.0
+    return round(importance * (1.0 + max(0.0, aux) / _AUX_SCALE), 4)
+
+
 def _score_event(event: dict, now: datetime) -> None:
     label = str(event.get("importance") or "一般")
     if label not in _IMPORTANCE_POINTS:
@@ -1394,14 +1521,7 @@ def _score_event(event: dict, now: datetime) -> None:
     importance = _IMPORTANCE_POINTS[label]
     concepts = [str(name).strip() for name in (event.get("concepts") or []) if str(name).strip()]
     stocks = [item for item in (event.get("mentioned_stocks") or []) if isinstance(item, dict)]
-    mapping = 0
-    if concepts:
-        mapping += _MAPPING_CONCEPT
-    if stocks:
-        mapping += _MAPPING_ASSET
-    direction = str(event.get("direction") or "")
-    if direction in {"利好", "利空"} and (concepts or stocks):
-        mapping += _MAPPING_DIRECTION
+    mapping = _mapping_points(concepts, stocks, str(event.get("direction") or ""))
     age_hours = _freshness_age_hours(event, now)
     freshness = _FRESH_MAX * math.exp(-math.log(2) * age_hours / _HEAT_HALF_LIFE_HOURS)
     try:
@@ -1417,7 +1537,7 @@ def _score_event(event: dict, now: datetime) -> None:
         "freshness": round(freshness, 4),
         "heat": round(heat_bonus, 4),
     }
-    event["score"] = round(importance + confirmation + mapping + freshness + heat_bonus, 4)
+    event["score"] = _combined_score(importance, _aux_points(event["breakdown"]))
 
 
 def _resync_importance_score(event: dict) -> None:
@@ -1429,6 +1549,10 @@ def _resync_importance_score(event: dict) -> None:
     这里只补 importance 一项和总分：mapping 会随 concepts/stocks 变，
     连它一起重算会让名次跟着「写没写过要点」漂移，打破 _compute 里
     「前 20 必有要点」的保证，所以其余分项保持写要点前的值。
+
+    **乘性结构下这里必须用 _combined_score 重算，不能沿用加性的「只换一项再相加」
+    —— 加性重算在乘性口径下算出来的数是另一个量纲，名次数序会 ≠ 展示分数序，
+    直接把 PR #106 修好的倒挂重新引入。**
     """
     label = str(event.get("importance") or "一般")
     if label not in _IMPORTANCE_POINTS:
@@ -1441,14 +1565,43 @@ def _resync_importance_score(event: dict) -> None:
     if float(breakdown.get("importance") or 0.0) == float(importance):
         return
     breakdown["importance"] = importance
-    event["score"] = round(
-        importance
-        + float(breakdown.get("confirmation") or 0.0)
-        + float(breakdown.get("mapping") or 0.0)
-        + float(breakdown.get("freshness") or 0.0)
-        + float(breakdown.get("heat") or 0.0),
-        4,
-    )
+    event["score"] = _combined_score(importance, _aux_points(breakdown))
+
+
+def _ranking_violations(events: list[dict]) -> list[str]:
+    """榜单不变量的体检结果。空列表 = 干净。
+
+    这些不是风格问题，是**结果可信性的前提**。前两条曾经都被实际违反过：
+
+    * I1 展示分单调：「名次以展示分为准」唯一的含义就是 score 非增。违反 =
+      用户看到第 12 名比第 2 名分高，直接判榜单坏了。
+    * I2 前 _TITLE_LIMIT 条有要点：进入前 20 的事件都必须能点开看到内容，
+      空白卡片等于这条事件没上过榜。
+
+    这里**只查 I1、I2**。还有一条 I3（切片线不因补验被跨越 —— 切片切在盘面验证
+    之后，切片外事件不该再涨分；否则「前 20 必有要点」会退化成「一般情况下成立」）
+    本函数**查不了**：它需要知道切片截止分，而截止分是切片时的上下文，不在 events
+    里。I3 目前由切片逻辑自身的顺序保证（先补验、后切片），没有独立断言。
+    """
+    problems: list[str] = []
+    scores = [float(event.get("score") or 0.0) for event in events]
+    for index in range(1, len(scores)):
+        if scores[index] > scores[index - 1] + 1e-9:
+            problems.append(
+                f"I1 第{index + 1}名 {scores[index]} 高于第{index}名 {scores[index - 1]}"
+            )
+            break
+    for index, event in enumerate(events[:_TITLE_LIMIT]):
+        if _point_is_empty(event):
+            problems.append(f"I2 第{index + 1}名 {event.get('name')} 要点为空")
+            break
+    return problems
+
+
+def _log_ranking_violations(events: list[dict]) -> None:
+    problems = _ranking_violations(events)
+    if problems:
+        logger.warning("热门事件榜单不变量被打破：%s", "；".join(problems))
 
 
 def _confirmation_mapping(event: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1503,8 +1656,16 @@ def _confirm_newly_mapped(
         logger.info("热门事件本轮完成盘面验证 %s", "、".join(upgraded))
 
 
+_CONFIRMATION_CAP = 40
+
+
 def _confirmation_points(raw) -> float:
-    """验证分只加不减。待开盘的事件这里是 0，不因为还没盘面再扣一档。"""
+    """验证分只加不减。待开盘的事件这里是 0，不因为还没盘面再扣一档。
+
+    封顶从 80 降到 40：80 是加性口径下「和重要性同级」的写法，乘性口径里没有
+    「同级」这回事，验证分只该是辅助项的一部分。40 和「概念+个股」满额（28.5）
+    同量级，加满也只把分数推到 ×1.41，不会单独把一条事件顶上去。
+    """
     if not isinstance(raw, dict):
         return 0.0
     try:
@@ -1513,7 +1674,7 @@ def _confirmation_points(raw) -> float:
         return 0.0
     if points != points:
         return 0.0
-    return round(min(80.0, max(0.0, points)), 4)
+    return round(min(_CONFIRMATION_CAP, max(0.0, points)), 4)
 
 
 def _event_text(event: dict) -> str:
@@ -2102,6 +2263,8 @@ def _concept_entity_miss(name: str, blob: str) -> bool:
 def _concept_relevant(name: str, blob: str, subjects: set[str]) -> bool:
     if _is_column_concept(name) or _concept_entity_miss(name, blob):
         return False
+    if _semantically_excluded(name, blob):
+        return False
     if name and name in blob:
         return True
     # 细概念延伸标题里已经出现的词，例如标题写「机器人」、提及是「工业机器人」。
@@ -2124,15 +2287,60 @@ def _concept_relevant(name: str, blob: str, subjects: set[str]) -> bool:
 
 
 def _headline_maps_concept(name: str, blob: str) -> bool:
+    """概念名的一部分出现在事件文本里，算这条概念指向的是同一件事。
+
+    **这里必须三重约束，光靠「2 字子串命中」会大面积错挂。** 线上实测的四类
+    反例（都是 2 字子串命中、语义完全无关）：
+
+      「低空经济」← 「经济回暖」      撞「经济」
+      「工业母机」← 「工业增加值」    撞「工业」
+      「固态电池」← 「电池级碳酸锂」  撞「电池」
+      「可控核聚变」← 「可控硅」      撞「可控」
+
+    最简单的修法是「子串长度 ≥ 3」，但实测会误杀真实映射：「低空 → 低空飞行」、
+    「算力 → 算力租赁」都只有 2 字。所以改成三条并列约束，任一满足即可：
+
+      1. 子串长度 ≥ 3：右边界对齐时取足够长的词素，或
+      2. 子串长度 == 2 且落在词首（`_anchor_head_ok` 白名单）：能当概念名开头的
+         2 字锚，「低空」「算力」「固态」在这类；「经济」「工业」「电池」不在，或
+      3. 子串长度 == 2 且落在词尾，且这个词尾在该概念对应词典的触发词里
+         （词典兜底，见 `_dictionary_names`）。
+
+    另外，只有**非壳词素**才能触发命中：`_CONCEPT_SHELL` 里的通用产业壳
+    （经济/工业/电池/数据/智能/产业/制造…）单独出现时一律不算 —— 它们能出现在
+    任何稿子里，是最主要的误挂来源。壳词素若和更长词素连在一起（「低空经济」
+    里的「经济」），由更长的那段负责命中，依旧有效。
+    """
     if len(name) < 3 or not blob or name in blob:
         return False
+    dictionary = _dictionary_names()
     for size in range(min(len(name) - 1, 6), 1, -1):
         for start in range(0, len(name) - size + 1):
             token = name[start:start + size]
             if token in _CONCEPT_LINK_SKIP:
                 continue
-            if token in blob:
+            if token not in blob:
+                continue
+            head = start == 0
+            tail = start + size == len(name)
+            # 白名单锚**先于**壳词判：壳词表是拦「单独撞上一个通用词」的，
+            # 不拦「这个词素在概念名里占的是首尾锚位」。`设备` 既在壳表里也
+            # 在词尾锚表里 —— 「半导体设备」←「设备国产化率提升」要靠后者放行。
+            if size == 2 and head and token in _ANCHOR_HEAD_OK:
                 return True
+            if size == 2 and tail and token in _ANCHOR_TAIL_OK:
+                return True
+            if token in _CONCEPT_SHELL:
+                continue
+            if size >= 3:
+                return True
+            if tail and any(
+                name in concepts and token in "".join(keys)
+                for keys, concepts in _SUBJECT_CONCEPTS
+            ):
+                return True
+            # 2 字词素两头都不占（概念中间的连接词），或者不在锚表里 —— 不算命中。
+            continue
     return False
 
 
@@ -2158,24 +2366,120 @@ def _dictionary_names() -> tuple[str, ...]:
     return tuple(names)
 
 
-def _dictionary_concepts(blob: str) -> list[str]:
-    """主体在标题里、提及却是空的时候，补上对应的 A 股概念。"""
-    found: list[str] = []
+def _dictionary_concepts(blob: str) -> list[tuple[str, int]]:
+    """主体在标题里、提及却是空的时候，补上对应的 A 股概念**和它的极性**。
 
-    def add(names: tuple[str, ...]) -> None:
+    返回 (概念名, 极性) 三元组。极性 +1 利好 / -1 利空 / 0 中性，用来还原词典
+    条目里被抹掉的因果方向。原实现返回裸概念名，把
+    `(("美联储", "加息"), ("黄金", "银行"))` 当成「美联储 且 加息 → 挂黄金和银行」
+    —— 可加息对黄金是**利空**、对银行是**利好**，同一个键下的两个概念方向相反。
+    返回裸名字就把这条信息丢了，展示层只能按事件整体方向给两边都贴同一个标签。
+
+    词典按 (触发键组, 概念, 极性) 展开，「美联储+加息」这一条因此裂成
+    `("黄金", -1)` 和 `("银行", +1)` 两项。极性表见 `_CONCEPT_POLARITY`，
+    没登记的条目一律 0（不表态），不猜。
+    """
+    found: list[tuple[str, int]] = []
+
+    def add(names: tuple[str, ...], polarity: int = 0) -> None:
         for name in names:
-            if name not in found:
-                found.append(name)
+            if name not in {item[0] for item in found}:
+                found.append((name, polarity))
 
     for keys, concepts in _SUBJECT_CONCEPTS:
         if all(key in blob for key in keys):
-            add(concepts)
+            for name in concepts:
+                add((name,), _concept_polarity(name, keys))
     fiscal = "财政部" in blob or (
         "财政" in blob and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策"))
     )
     if fiscal and any(cue in blob for cue in ("增量", "隐债", "化债", "出台", "政策")):
-        add(("基建", "地方债"))
+        add(("基建", "地方债"), 1)
     return found
+
+
+def _concept_polarity(name: str, keys: tuple[str, ...]) -> int:
+    """词典条目的方向。键型决定谁受益、谁受损，不按「利好/利空」两个字猜。"""
+    rule = _CONCEPT_POLARITY.get((keys, name))
+    if rule is not None:
+        return rule
+    rule = _CONCEPT_POLARITY.get((None, name))
+    return 0 if rule is None else rule
+
+
+# (触发键组, 概念) → 极性。键组用 None 表示「不限键组，只看概念名」。
+# 只登记方向明确、且方向**不随语境翻转**的条目。没登记的一律 0 —— 中性比
+# 猜错方向安全，猜错方向会让展示层把利空事件标成利好。
+_CONCEPT_POLARITY: dict[tuple[tuple[str, ...] | None, str], int] = {
+    # 加息收紧流动性：压黄金、抬银行息差。
+    (("美联储", "加息"), "黄金"): -1,
+    (("美联储", "加息"), "银行"): 1,
+    # 涨价直接抬上游和替代品的盈利预期。
+    (("橡胶",), "橡胶"): 1,
+    (("橡胶",), "天然橡胶"): 1,
+    (("原油",), "石油"): 1,
+    (("原油",), "油服"): 1,
+    (("IEA",), "石油"): 0,
+    (("IEA",), "油服"): 0,
+    # 地缘冲突抬油价和避险，但事件本身是「冲突」不是「利好」，交给事件方向定。
+    (None, "中东"): 0,
+    (None, "聚乳酸"): 1,
+    (None, "基建"): 1,
+    (None, "地方债"): 1,
+}
+
+
+def _concept_polarity_map(blob: str) -> dict[str, int]:
+    """词典给出的「概念 → 极性」映射，供挂概念时按名取方向。"""
+    return {name: polarity for name, polarity in _dictionary_concepts(blob)}
+
+
+def _polarity_direction(polarity: int | None, fallback: object) -> str:
+    """极性转展示方向。极性为 0/None 时退回事件整体方向。"""
+    if polarity == 1:
+        return "利好"
+    if polarity == -1:
+        return "利空"
+    return str(fallback or "")
+
+
+def _semantically_excluded(name: str, blob: str) -> bool:
+    """概念与事件语义互斥：题材不能挂在语义相反的事件上。
+
+    线上实测案例：「上交所向东百集团下发监管工作函」被挂上东百集团的**收购
+    题材**（光芯片收购/光探测芯片）。收购是利好叙事，监管函是利空动作，挂在
+    一起等于用利好题材解释利空事件 —— 展示层照着念就是反的。
+
+    规则是 (概念关键词, 禁止同现的事件关键词) 对。概念名里含左侧任一关键词，
+    且事件文本含右侧任一关键词，就否决这条概念。**两个挂点都要挂**：
+    `_concept_relevant` 管「细概念延伸标题」那条路径，`_merge_mapped_concepts`
+    管词典路径 —— 词典路径绕过前者，只堵一个会漏。
+    """
+    if not name or not blob:
+        return False
+    for concept_keys, event_keys in _SEMANTIC_EXCLUSION:
+        if not any(key in name for key in concept_keys):
+            continue
+        if any(key in blob for key in event_keys):
+            return True
+    return False
+
+
+# (概念名里的关键词, 禁止同现的事件关键词)。
+# 右侧一律用**动作/性质词**，不用主体词 —— 主体和题材本来就该同现。
+_SEMANTIC_EXCLUSION: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    # 收购、重组是主动的利好叙事，不跟监管动作同现。
+    (
+        ("收购", "并购", "重组", "借壳", "资产注入"),
+        ("监管工作函", "关注函", "问询函", "监管函", "立案", "警示函", "处罚", "退市"),
+    ),
+    # 涨价、提价是景气叙事，不跟降价、跌价同现。
+    (("涨价", "提价", "价格上调"), ("降价", "跌价", "价格下调", "下调价格", "暴跌")),
+    # 中标、签约是订单叙事，不跟流标、解约同现。
+    (("中标", "签约", "订单"), ("流标", "废标", "终止合作", "解约", "取消订单")),
+    # 获批、上市是进展叙事，不跟撤回、终止同现。
+    (("获批", "上市", "注册生效"), ("撤回", "终止审核", "被否", "暂缓表决")),
+)
 
 
 def _concept_grounded(name: str, text: str) -> bool:
@@ -2197,9 +2501,18 @@ def _concept_grounded(name: str, text: str) -> bool:
 
 
 def _merge_mapped_concepts(concepts: list[str], blob: str) -> list[str]:
+    """词典概念排在前面，去重后取前 _CONCEPT_LIMIT 个。
+
+    词典条目带极性，这里按 `_dictionary_concepts` 的顺序取名字，极性由调用方
+    经 `_concept_polarity_map` 查（`_event_from` 的 mapping 挂点用）。
+    语义互斥在这里也要滤一遍：词典路径**绕过** `_concept_relevant`，只在那
+    一边堵会漏（监管函挂收购题材就是经词典路径进来的）。
+    """
     merged: list[str] = []
-    for name in [*_dictionary_concepts(blob), *concepts]:
-        if name and not _is_column_concept(name) and name not in merged:
+    for name in [name for name, _polarity in _dictionary_concepts(blob)] + list(concepts):
+        if not name or _is_column_concept(name) or _semantically_excluded(name, blob):
+            continue
+        if name not in merged:
             merged.append(name)
         if len(merged) >= _CONCEPT_LIMIT:
             break
@@ -5729,8 +6042,16 @@ def _apply_llm(event: dict, parsed: dict) -> None:
             if len(picked) >= _CONCEPT_LIMIT:
                 break
         event["concepts"] = picked
+    # 概念方向：词典条目自带的极性优先于事件整体方向。加息利空黄金、利好银行
+    # 这种「同一事件里两个概念方向相反」的情形，只有词典知道；按事件方向一刀切
+    # 会把其中一个标反。词典没登记的走事件方向（原来是唯一来源）。
+    polarity = _concept_polarity_map(story_blob)
     event["mapping"] = [
-        {"name": name, "kind": "concept", "direction": event.get("direction") or ""}
+        {
+            "name": name,
+            "kind": "concept",
+            "direction": _polarity_direction(polarity.get(name), event.get("direction")),
+        }
         for name in event["concepts"]
     ]
     known = {item["key"] for item in event.get("mentioned_stocks") or []}
