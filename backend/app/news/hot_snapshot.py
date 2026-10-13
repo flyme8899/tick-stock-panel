@@ -82,6 +82,15 @@ def load_persisted_snapshot() -> bool:
     return True
 
 
+def current_snapshot() -> dict | None:
+    """内存里的最新快照。没有算过时返回 None，不触发重算。"""
+    with _LOCK:
+        current = _MEMORY
+    if not isinstance(current, dict):
+        return None
+    return copy.deepcopy(current)
+
+
 def read_served_snapshot() -> dict:
     """请求路径。没有快照就返回正在计算；过期则返回旧结果并后台重算。"""
     with _LOCK:
@@ -155,9 +164,11 @@ def _compute_once() -> None:
 
     global _LAST_COST_S
     started = time.monotonic()
+    # 归档窗口看开工时刻。算完已经过了 15:05 的那一份，不能记成收盘榜。
+    started_at = cn_now()
     # 榜首要等这份快照排完才知道。补全写进即将发布的结果，失败也不挡住发布。
     previous_top = _memory_top_key()
-    snapshot = build_top_hot_events(cn_now(), get_store(), refresh=True)
+    snapshot = build_top_hot_events(started_at, get_store(), refresh=True)
     try:
         from app.news.mx_hot import enrich_snapshot
 
@@ -165,7 +176,14 @@ def _compute_once() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("妙想热点补全未能写入快照: %s", type(exc).__name__)
     _LAST_COST_S = time.monotonic() - started
-    publish_hot_snapshot(snapshot, persist=True)
+    snapshot["computed_at"] = started_at.isoformat(timespec="seconds")
+    publish_hot_snapshot(snapshot, persist=True, computed_at=snapshot["computed_at"])
+    try:
+        from app.news.hot_rank import archive_hot_rank
+
+        archive_hot_rank(snapshot, now=started_at)
+    except Exception as exc:  # noqa: BLE001 — 日落盘失败不丢掉已经发布的内存榜
+        logger.warning("热点事件榜日落盘失败: %s", type(exc).__name__)
 
 
 def _computing_payload() -> dict:

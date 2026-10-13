@@ -1,6 +1,8 @@
 """HTTP：热门候选、单股资讯、来源开关、给 DSA 拉的 feed。"""
 from __future__ import annotations
 
+from datetime import date
+
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -95,6 +97,30 @@ def hot(
         ]
         payload["candidates"] = _attach_fund_flow(candidates)
     return payload
+
+
+@router.get("/hot-rank")
+def hot_rank(
+    day: str = Query(..., alias="date", description="分区日 YYYY-MM-DD"),
+    slot: str | None = Query(None, description="preopen、postclose 或 nextday；空则返回当天全部档"),
+):
+    """研究读取某一天的热点事件榜快照。没有这一天时 rows 为空。"""
+    from app.config import settings
+    from app.news.hot_rank import load_hot_event_rank
+
+    try:
+        session = date.fromisoformat(day)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="date 必须是 YYYY-MM-DD") from exc
+    try:
+        frame = load_hot_event_rank(settings.data_dir, session, slot)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "date": session.isoformat(),
+        "slot": slot,
+        "rows": frame.to_dicts(),
+    }
 
 
 def _attach_fund_flow(candidates: list[dict]) -> list[dict]:
