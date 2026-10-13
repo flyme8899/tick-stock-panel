@@ -1378,6 +1378,31 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
+    # 热点事件榜：09:10 收盘前最后一版次日口径，15:06 冻结刚收盘的榜。
+    # 5 分钟热榜循环在窗口内也会落盘；这里补一次，进程刚起来或循环错过窗口时用。
+    def _capture_hot_rank():
+        try:
+            from app.news.hot_rank import capture_hot_rank_now
+
+            capture_hot_rank_now()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("热点事件榜补拍失败: %s", type(exc).__name__)
+
+    scheduler.add_job(
+        _capture_hot_rank,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=10, timezone="Asia/Shanghai"),
+        id="hot_rank_preopen",
+        misfire_grace_time=1800,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _capture_hot_rank,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=15, minute=6, timezone="Asia/Shanghai"),
+        id="hot_rank_postclose",
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
+
     # 周期性能力重探: 付费 Key 中途过期/续费无需重启即可被发现。
     # 只热更新 app.state.capabilities(API 端点、盘后管道 _pipeline_then_refresh 均读它);
     # 档位变化记 WARNING, 让「Key 失效」在日志/前端可见, 不再静默按旧档位打 403 端点。
