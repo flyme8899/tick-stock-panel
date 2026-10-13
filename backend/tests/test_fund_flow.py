@@ -335,6 +335,124 @@ def test_worker_defers_when_tickflow_is_busy(tmp_path, monkeypatch) -> None:
     assert not (tmp_path / "fund_flow" / "stock").exists() or called["n"] == 0
 
 
+def test_stale_intraday_thread_is_restarted(tmp_path, monkeypatch) -> None:
+    """盘中旁路线程卡死超时后，不再挡住下一轮 —— 否则当天剩余时段再也不出快照。
+
+    线上曾停在 13:44：``_intraday_running()`` 只看 ``is_alive()``，线程卡在网络读上
+    时恒为真，后续每轮都只打「仍在拉取」就 continue。
+    """
+    worker = scheduler.FundFlowWorker()
+    started = {"n": 0}
+
+    class FakeThread:
+        def __init__(self, alive: bool) -> None:
+            self._alive = alive
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+    # 刚启动的线程：视为在跑，不重复启动。
+    worker._intraday_thread = FakeThread(True)
+    worker._intraday_started_at = scheduler.time_time()
+    assert worker._intraday_running() is True
+
+    # 已跑超过超时阈值：判定卡死，允许重启。
+    worker._intraday_started_at = scheduler.time_time() - scheduler.INTRADAY_THREAD_TIMEOUT_S - 1
+    assert worker._intraday_running() is False
+
+    # 线程结束：照旧视为没在跑。
+    worker._intraday_thread = FakeThread(False)
+    worker._intraday_started_at = scheduler.time_time()
+    assert worker._intraday_running() is False
+
+
+def test_stock_marked_success_when_fallback_fills_partition(tmp_path, monkeypatch) -> None:
+    """熔断时靠整批兜底把样本补齐，也要标成功 —— 否则收盘分区永远不落盘。
+
+    线上 ``stock`` 一直报「efinance 熔断冷却中」，``_mark_success`` 因
+    ``result.errors`` 非空而从不调用，导致 30 分钟一轮的无限重试且分区缺失。
+    """
+    universe = store.FULL_MARKET_MIN + 10
+    # 无维表时按固定门槛判「板块拉到过」：每个板块至少 20 只。这里造齐五大板块。
+    prefixes = ("600", "688", "000", "300", "920")
+    rows = []
+    for index in range(universe):
+        prefix = prefixes[index % len(prefixes)]
+        code = f"{prefix}{index:03d}"
+        rows.append({
+            "symbol": f"{code}.SH", "code": code, "name": f"股{index}",
+            "trade_date": "2026-10-13", "main_net": float(index),
+            "large_net": None, "super_net": None, "source": "akshare_ths",
+        })
+    # 分区还没落盘 → 不完整。
+    assert scheduler._stock_day_complete(tmp_path, "2026-10-13", universe) is False
+
+    store.write_rows(tmp_path, "stock", "2026-10-13", rows)
+    # 样本达到全市场门槛 → 足够当排名，判成功（这正是修好的落盘判据）。
+    assert scheduler._stock_day_complete(tmp_path, "2026-10-13", universe) is True
+
+    # 分区存在但样本远低于门槛 → 仍不完整。
+    thin = tmp_path / "thin"
+    store.write_rows(thin, "stock", "2026-10-13", rows[:10])
+    assert scheduler._stock_day_complete(thin, "2026-10-13", universe) is False
+
+
+def test_etf_changes_expose_1_5_15_day_windows(tmp_path) -> None:
+    """ETF 份额变化给 1 / 5 / 15 日三个窗口，基准按落盘交易日往前推。"""
+    # 造 20 个交易日的份额：510300 每日 +1e8，510050 每日 -2e8。
+    days = [date(2026, 9, d).isoformat() for d in range(1, 21)]
+    for index, day in enumerate(days):
+        store.write_rows(tmp_path, "etf_shares", day, [
+            {"symbol": "510300", "code": "510300", "name": "沪深300ETF",
+             "trade_date": day, "shares": 1e10 + index * 1e8, "source": "akshare"},
+            {"symbol": "510050", "code": "510050", "name": "50ETF",
+             "trade_date": day, "shares": 5e9 - index * 2e8, "source": "akshare"},
+        ])
+    payload = query.board(tmp_path)["etf_shares"]
+    assert payload["trade_date"] == days[-1]
+    assert payload["windows"] == [1, 5, 15]
+    # 基准日：最新 20 号，往前 1/5/15 个交易日。
+    assert payload["baselines"] == {
+        "1": days[-2], "5": days[-6], "15": days[-16],
+    }
+    assert payload["prev_trade_date"] == days[-2]
+    by_code = {row["code"]: row for row in payload["items"]}
+    maotai = by_code["510300"]
+    assert maotai["change_1d"] == pytest.approx(1e8)
+    assert maotai["change_5d"] == pytest.approx(5e8)
+    assert maotai["change_15d"] == pytest.approx(15e8)
+    # 老字段与新字段同源，保持向后兼容。
+    assert maotai["share_change"] == maotai["change_1d"]
+    pingan = by_code["510050"]
+    assert pingan["change_1d"] == pytest.approx(-2e8)
+    assert pingan["change_15d"] == pytest.approx(-30e8)
+
+
+def test_etf_changes_window_baseline_is_none_when_history_short(tmp_path) -> None:
+    """历史不足 N 个交易日时，该窗口留空，不拿现有最早一天凑数。"""
+    days = [date(2026, 9, d).isoformat() for d in range(1, 4)]  # 只有 3 天
+    for index, day in enumerate(days):
+        store.write_rows(tmp_path, "etf_shares", day, [
+            {"symbol": "510300", "code": "510300", "name": "沪深300ETF",
+             "trade_date": day, "shares": 1e10 + index * 1e8, "source": "akshare"},
+        ])
+    payload = query.board(tmp_path)["etf_shares"]
+    row = payload["items"][0]
+    assert row["change_1d"] == pytest.approx(1e8)      # 有前一交易日
+    assert row["change_5d"] is None                    # 不足 5 日
+    assert row["change_15d"] is None                   # 不足 15 日
+    assert payload["baselines"]["5"] is None
+    assert payload["baselines"]["15"] is None
+
+
+def test_etf_changes_empty_when_no_partition(tmp_path) -> None:
+    payload = query.board(tmp_path)["etf_shares"]
+    assert payload["trade_date"] is None
+    assert payload["items"] == []
+    assert payload["windows"] == [1, 5, 15]
+    assert payload["baselines"] == {}
+
+
 def test_five_day_factor_does_not_use_future_dates(tmp_path) -> None:
     rows = []
     for offset, value in enumerate((1, 2, 3, 4, 5, 100), start=1):
@@ -1341,8 +1459,9 @@ def _close_pair(root, trade_date: str, *, maotai: float, pingan: float, five: fl
 
 
 def test_stocks_today_prefers_today_intraday_snapshot(tmp_path, monkeypatch) -> None:
-    """当天 stock_intraday 有完整快照时，今日榜用最近一次盘中，不读昨收。"""
+    """当天 stock_intraday 有完整快照、且仍在交易时段内时，今日榜用最近一次盘中。"""
     monkeypatch.setattr(query, "cn_today", lambda: date(2026, 10, 13))
+    monkeypatch.setattr(query, "cn_now", lambda: datetime(2026, 10, 13, 10, 35))
     _two_name_universe(tmp_path)
     _close_pair(tmp_path, "2026-10-12", maotai=9e8, pingan=-9e8)
     # 后写的是更早的切片。不先按 captured_at 过滤时，unique(keep=last) 会排到这一份。
@@ -1447,6 +1566,44 @@ def test_stocks_today_falls_back_to_stock_close(tmp_path, monkeypatch) -> None:
     assert missing["stocks_5d"]["snapshot"] is None
     assert missing["stocks_5d"]["captured_at"] is None
     assert missing["stocks_5d"]["source"] is None
+
+
+def test_stocks_today_after_close_ignores_stale_intraday(tmp_path, monkeypatch) -> None:
+    """收盘后当天盘中快照不再代表「今日」：改读当天收盘。
+
+    线上曾出现 17:36 仍显示「盘中 13:44」—— 当天盘中快照停在午盘，收盘分区
+    又没落下来，页面就把定格在 13:44 的旧快照当成实时。收盘后当天盘中一律不采用。
+    """
+    monkeypatch.setattr(query, "cn_today", lambda: date(2026, 10, 13))
+    monkeypatch.setattr(query, "cn_now", lambda: datetime(2026, 10, 13, 17, 36))
+    _two_name_universe(tmp_path)
+    # 当天盘中快照停在 13:44（模拟线上），收盘分区也已就绪。
+    store.write_rows(tmp_path, "stock_intraday", "2026-10-13", [
+        {
+            "symbol": "000001.SZ", "code": "000001", "name": "平安银行",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T13:44:50",
+            "main_net": 8e8, "source": "akshare_em_rank",
+        },
+        {
+            "symbol": "600519.SH", "code": "600519", "name": "贵州茅台",
+            "trade_date": "2026-10-13", "captured_at": "2026-10-13T13:44:50",
+            "main_net": -1e8, "source": "akshare_em_rank",
+        },
+    ])
+    _close_pair(tmp_path, "2026-10-13", maotai=-5e8, pingan=3e8)
+    today = query.board(tmp_path)["stocks_today"]
+    assert today["snapshot"] == "close", "收盘后不该再把盘中快照当今日"
+    assert today["trade_date"] == "2026-10-13"
+    assert today["captured_at"] is None
+    assert [row["code"] for row in today["inflow"]] == ["000001"]
+    assert today["inflow"][0]["main_net"] == 3e8
+
+
+def test_intraday_fresh_line_is_close_clock() -> None:
+    """15:00 是盘中快照的新鲜分界：之前采用，之后不采用。"""
+    assert query._intraday_still_fresh(datetime(2026, 10, 13, 14, 59)) is True
+    assert query._intraday_still_fresh(datetime(2026, 10, 13, 15, 0)) is False
+    assert query._intraday_still_fresh(datetime(2026, 10, 13, 17, 36)) is False
 
 
 def test_sector_board_splits_inflow_and_outflow(tmp_path) -> None:

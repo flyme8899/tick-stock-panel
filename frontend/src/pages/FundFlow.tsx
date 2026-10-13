@@ -109,6 +109,34 @@ function stockName(row: FundFlowAmountRow): string {
   return row.code || '—'
 }
 
+type EtfWindow = {
+  days: number
+  label: string
+  value: (row: FundFlowAmountRow) => number | null | undefined
+}
+
+// 份额变化的三个窗口。1 日变化与后端的 share_change 同源，单独取字段以便统一渲染。
+const ETF_WINDOWS: EtfWindow[] = [
+  { days: 1, label: '1日', value: row => row.change_1d ?? row.share_change },
+  { days: 5, label: '5日', value: row => row.change_5d },
+  { days: 15, label: '15日', value: row => row.change_15d },
+]
+
+function formatShares(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  const n = value / 1e8
+  const sign = n > 0 ? '+' : ''
+  return `${sign}${n.toFixed(2)}亿份`
+}
+
+function etfBaselineTitle(
+  baselines: Record<string, string | null> | undefined,
+  days: number,
+): string {
+  const base = baselines?.[String(days)]
+  return base ? `较 ${base}（前 ${days} 个交易日）` : `不足 ${days} 个交易日的份额，无法计算`
+}
+
 function StockLabel({ row }: { row: FundFlowAmountRow }) {
   const name = row.name?.trim()
   const code = row.code || ''
@@ -336,31 +364,51 @@ export function FundFlow() {
               meta={etf?.trade_date ? `${etf.prev_trade_date ? `${etf.prev_trade_date} → ` : ''}${etf.trade_date}` : undefined}
             >
               {(etf?.items.length ?? 0) === 0 ? <Empty text="还没有 ETF 份额。只有一天时只显示份额，不编造变化。" /> : (
-                <ul className="space-y-2">
-                  {etf?.items.map(row => (
-                    <li key={row.code} className="min-w-0">
-                      <div className="flex items-baseline justify-between gap-3 text-sm">
-                        <span className="min-w-0 truncate">
-                          {row.name || row.code}
-                          {row.broad ? (
-                            <span className="ml-2 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent">
-                              {row.broad}
-                              {row.broad === '沪深300' || row.broad === '科创50' ? ' · 国家队代理' : ''}
-                            </span>
-                          ) : null}
+                <div className="min-w-0">
+                  <div className="mb-1 flex items-baseline justify-between gap-3 text-[11px] text-muted">
+                    <span>名称</span>
+                    <span className="flex shrink-0 gap-3">
+                      {ETF_WINDOWS.map(window => (
+                        <span key={window.label} className="w-[68px] text-right">
+                          {window.label}
                         </span>
-                        <span className={cn('shrink-0 font-mono text-xs', signedClass(row.share_change))}>
-                          {row.share_change == null ? '—' : yi(row.share_change).replace('亿', '亿份')}
-                        </span>
-                      </div>
-                      <div className="mt-0.5 text-[11px] text-muted">
-                        {row.code}
-                        {row.shares != null ? ` · 份额 ${(row.shares / 1e8).toFixed(2)} 亿份` : ''}
-                        {row.flow_net != null ? ` · 领航者净流入 ${yi(row.flow_net)}` : ''}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+                      ))}
+                    </span>
+                  </div>
+                  <ul className="space-y-2">
+                    {etf?.items.map(row => (
+                      <li key={row.code} className="min-w-0">
+                        <div className="flex items-baseline justify-between gap-3 text-sm">
+                          <span className="min-w-0 truncate">
+                            {row.name || row.code}
+                            {row.broad ? (
+                              <span className="ml-2 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent">
+                                {row.broad}
+                                {row.broad === '沪深300' || row.broad === '科创50' ? ' · 国家队代理' : ''}
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="flex shrink-0 gap-3">
+                            {ETF_WINDOWS.map(window => (
+                              <span
+                                key={window.label}
+                                className={cn('w-[68px] text-right font-mono text-xs', signedClass(window.value(row)))}
+                                title={etfBaselineTitle(etf?.baselines, window.days)}
+                              >
+                                {formatShares(window.value(row))}
+                              </span>
+                            ))}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-muted">
+                          {row.code}
+                          {row.shares != null ? ` · 份额 ${(row.shares / 1e8).toFixed(2)} 亿份` : ''}
+                          {row.flow_net != null ? ` · 领航者净流入 ${yi(row.flow_net)}` : ''}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </Card>
           </div>

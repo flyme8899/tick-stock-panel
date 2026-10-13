@@ -2440,6 +2440,10 @@ export interface FundFlowAmountRow {
   shares?: number | null
   prev_shares?: number | null
   share_change?: number | null
+  /** ETF 份额变化：1 / 5 / 15 个交易日。基准按落盘交易日往前推，不足时为 null。 */
+  change_1d?: number | null
+  change_5d?: number | null
+  change_15d?: number | null
   broad?: string | null
   flow_net?: number | null
 }
@@ -2481,7 +2485,15 @@ export interface FundFlowBoard {
   stocks_5d: FundFlowStockBlock
   margin: { items: FundFlowAmountRow[]; days?: FundFlowMarginDay[] }
   southbound: { items: FundFlowAmountRow[] }
-  etf_shares: { trade_date: string | null; prev_trade_date: string | null; items: FundFlowAmountRow[] }
+  etf_shares: {
+    trade_date: string | null
+    prev_trade_date: string | null
+    /** 变化窗口（交易日数）。缺失时前端按 [1,5,15] 兜底。 */
+    windows?: number[]
+    /** 每个窗口的基准交易日，键是窗口天数的字符串。 */
+    baselines?: Record<string, string | null>
+    items: FundFlowAmountRow[]
+  }
 }
 
 export interface NewsCandidate {

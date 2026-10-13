@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from datetime import time as dt_time
 from pathlib import Path
 
 import polars as pl
@@ -9,7 +11,12 @@ import polars as pl
 from app.fund_flow import factors, normalize, store
 from app.fund_flow.scheduler import current_flags, get_worker
 from app.fund_flow.units import percent_points_to_decimal
-from app.market_time import cn_today
+from app.market_time import cn_now, cn_today
+
+# 收盘时刻。过了这个点，当天盘中快照就不再代表「今日」，改读当天收盘分区。
+# 用 15:00 而不是收盘数据就绪的 16:30：15:00 一过，盘中快照的技术含义就变了
+# （定格的最后一笔竞价），继续拿它当「今日」会把旧快照当成实时。
+_INTRADAY_FRESH_UNTIL = dt_time(15, 0)
 
 _FLOW_COLUMNS = ("net_flow", "flow_net", "net_inflow", "净流入")
 _CODE_COLUMNS = ("code", "symbol", "基金代码")
@@ -529,8 +536,24 @@ def _sector_board(root: Path, kind: str) -> dict:
     return payload
 
 
-def _stocks_today(root: Path) -> dict:
-    """今日优先用当天最近一份盘中快照。样本不够或没有快照时，仍读 ``stock`` 收盘。"""
+def _intraday_still_fresh(now: datetime | None = None) -> bool:
+    """当天盘中快照是否仍代表「今日」。
+
+    收盘（15:00）之后不再新鲜 —— 最后一笔盘中快照定格在收盘前某个时点，
+    继续拿它当「今日」会把旧快照当实时展示（线上曾出现 17:36 仍显示 13:44）。
+    非交易日同样视为不新鲜，交给收盘分区或上一交易日兜底。
+    """
+    current = now or cn_now()
+    return current.timetz().replace(tzinfo=None) < _INTRADAY_FRESH_UNTIL
+
+
+def _stocks_today(root: Path, *, now: datetime | None = None) -> dict:
+    """今日优先用当天最近一份盘中快照。样本不够或没有快照时，仍读 ``stock`` 收盘。
+
+    收盘后（见 ``_intraday_still_fresh``）不再采用当天盘中：此时应改读当天
+    收盘分区；收盘分区尚未落盘时退回上一交易日收盘，而不是把定格在
+    午盘的旧快照冒充「今日实时」。
+    """
     day = cn_today().isoformat()
     intra = _partition(root, "stock_intraday", day)
     captured = None
@@ -542,7 +565,9 @@ def _stocks_today(root: Path) -> dict:
             intra = store.empty_frame("stock_intraday")
     else:
         intra = store.empty_frame("stock_intraday")
-    ranked = _stock_sides(root, intra, "main_net") if captured else None
+    ranked = None
+    if captured and _intraday_still_fresh(now):
+        ranked = _stock_sides(root, intra, "main_net")
     if ranked is not None:
         inflow, outflow = ranked
         return {
@@ -676,21 +701,54 @@ def _southbound_trend(root: Path) -> dict:
     return {"items": ranked.select("trade_date", "net_flow").to_dicts()}
 
 
+# ETF 份额变化的窗口（交易日数）。1 日为「比上一交易日」，5/15 日为「比 N 个
+# 交易日之前」。基准按落盘日期往前推，不按自然日 —— 跨周末和长假时自然日会
+# 取到更早的日期，与「5 日变化」的直觉不符。
+_ETF_WINDOWS = (1, 5, 15)
+
+
+def _window_baseline_dates(dates: list[str], day: str) -> dict[int, str | None]:
+    """每个窗口对应的基准交易日。不足 N 个交易日时为 None（不编造变化）。"""
+    index = len(dates) - 1
+    assert dates[index] == day
+    return {
+        window: (dates[index - window] if index - window >= 0 else None)
+        for window in _ETF_WINDOWS
+    }
+
+
+def _shares_by_code(root: Path, day: str | None) -> dict[str, float]:
+    if day is None:
+        return {}
+    frame = _partition(root, "etf_shares", day)
+    out: dict[str, float] = {}
+    for row in frame.to_dicts():
+        code = row.get("code")
+        shares = row.get("shares")
+        if code and shares is not None:
+            out[code] = shares
+    return out
+
+
 def _etf_changes(root: Path) -> dict:
     dates = store.list_dates(root, "etf_shares")
     if not dates:
-        return {"trade_date": None, "prev_trade_date": None, "items": []}
+        return {
+            "trade_date": None,
+            "prev_trade_date": None,
+            "windows": list(_ETF_WINDOWS),
+            "baselines": {},
+            "items": [],
+        }
     day = dates[-1]
-    prev_day = dates[-2] if len(dates) > 1 else None
-    current = _partition(root, "etf_shares", day)
-    previous: dict[str, float] = {}
-    if prev_day is not None:
-        prev = _partition(root, "etf_shares", prev_day)
-        for row in prev.to_dicts():
-            code = row.get("code")
-            if code and row.get("shares") is not None:
-                previous[code] = row["shares"]
+    baseline_days = _window_baseline_dates(dates, day)
+    # 按窗口预读每个基准交易日的份额。同一日被多个窗口共用时只读一次。
+    baselines: dict[int, dict[str, float]] = {}
+    for window, base_day in baseline_days.items():
+        baselines[window] = _shares_by_code(root, base_day)
+    prev_day = baseline_days.get(1)
     linked = _etf_flow_map(root, day)
+    current = _partition(root, "etf_shares", day)
     broad = []
     others = []
     for row in current.to_dicts():
@@ -698,15 +756,27 @@ def _etf_changes(root: Path) -> dict:
         if not code:
             continue
         label = _broad_label(code, row.get("name"))
-        prev_shares = previous.get(code)
         shares = row.get("shares")
+        prev_shares = baselines[1].get(code)
         change = None if prev_shares is None or shares is None else shares - prev_shares
+        changes = {
+            window: (
+                None
+                if shares is None or baselines[window].get(code) is None
+                else shares - baselines[window][code]
+            )
+            for window in _ETF_WINDOWS
+        }
         item = {
             "code": code,
             "name": row.get("name"),
             "shares": shares,
             "prev_shares": prev_shares,
             "share_change": change,
+            # 1 日变化与 share_change 同源，独立成字段便于前端统一按窗口渲染。
+            "change_1d": changes[1],
+            "change_5d": changes[5],
+            "change_15d": changes[15],
             "broad": label,
             "flow_net": linked.get(code),
         }
@@ -720,6 +790,10 @@ def _etf_changes(root: Path) -> dict:
     return {
         "trade_date": day,
         "prev_trade_date": prev_day,
+        "windows": list(_ETF_WINDOWS),
+        "baselines": {
+            str(window): baseline_days[window] for window in _ETF_WINDOWS
+        },
         "items": broad + others[:_BOARD_ETF_OTHERS],
     }
 

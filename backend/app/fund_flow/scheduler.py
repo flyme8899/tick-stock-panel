@@ -24,6 +24,13 @@ SECTOR_GAP_S = 180
 # 个股即时资金流落在 5–10 分钟这一档。6 分钟是固定间隔，文档和页面按这个数写。
 # 东财当日排名要翻页，再加 1 秒限流，一次大约一分多钟，不能占住这条线程。
 STOCK_INTRADAY_GAP_S = 6 * 60
+# 盘中旁路线程的最长允许时长。正常一轮一分多钟；超过这个数视为卡死，
+# 允许下一轮重新启动 —— 否则一次卡死会让当天剩余时段再也不出快照。
+# 取 12 分钟，是 6 分钟间隔的 2 倍，留足慢网络余量。
+INTRADAY_THREAD_TIMEOUT_S = 12 * 60
+# 主循环看门狗：单轮 run_once 超过这个时长就记 WARNING。
+# 主循环是单线程，卡住一次会让之后所有任务（含收盘分区）全部停摆。
+LOOP_STALL_WARN_S = 5 * 60
 
 _worker: FundFlowWorker | None = None
 _worker_lock = threading.Lock()
@@ -238,6 +245,15 @@ def _stock_incomplete(data_dir: Path, day: str, universe: int) -> bool:
     )
 
 
+def _stock_day_complete(data_dir: Path, day: str, universe: int) -> bool:
+    """这一天的 ``stock`` 分区是否已够当全市场排名。
+
+    与 ``_stock_incomplete`` 互补，供落盘判据使用：上游熔断 / 部分失败时，
+    只要整批兜底把样本补齐了，这一天就算拿到了。
+    """
+    return not _stock_incomplete(data_dir, day, universe)
+
+
 # 同一交易日的板块缺口最多补几次。上游同花顺个股榜长期不覆盖深主板，
 # 缺口不是「这次拉失败」而是数据源的已知局限；不设上限就会每 30 分钟
 # 全量重跑一轮。达到上限后只记 WARNING，等次日新分区再看。
@@ -396,6 +412,7 @@ class FundFlowWorker:
         }
         self.deferred_reason: str | None = None
         self._intraday_thread: threading.Thread | None = None
+        self._intraday_started_at: float | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -420,11 +437,19 @@ class FundFlowWorker:
             self._wake.clear()
             if self._stop.is_set():
                 return
+            started = time_time()
             try:
                 # 盘中个股要翻页，放到旁路线程，避免这一轮的板块和收盘任务干等。
                 self.run_once(detach_intraday=True)
             except Exception:
                 logger.exception("资金进出本轮失败")
+            finally:
+                # 主循环是单线程：一轮里任何一处网络读卡住，之后到点的收盘任务
+                # （stock / etf_shares / southbound 等）都会一起停摆。这里只做
+                # 事后告警 —— 真正的超时交给各客户端自身的超时设置。
+                elapsed = time_time() - started
+                if elapsed > LOOP_STALL_WARN_S:
+                    logger.warning("资金进出一轮耗时 %.0f 秒，已超过看门狗阈值", elapsed)
 
     def run_once(
         self,
@@ -531,8 +556,25 @@ class FundFlowWorker:
         return ran
 
     def _intraday_running(self) -> bool:
+        """旁路盘中线程是否仍在跑。
+
+        只看 ``is_alive()`` 不够：线程卡在网络读上时永远为真，当天剩余时段
+        再也不会启动新快照（线上曾停在 13:44）。超过 ``INTRADAY_THREAD_TIMEOUT_S``
+        的一律按卡死处理，让下一轮重新拉。
+        """
         thread = self._intraday_thread
-        return thread is not None and thread.is_alive()
+        if thread is None or not thread.is_alive():
+            return False
+        started = self._intraday_started_at
+        if started is None:
+            return True
+        if (time_time() - started) > INTRADAY_THREAD_TIMEOUT_S:
+            logger.warning(
+                "盘中个股主力净流入线程已运行 %.0f 秒，判定卡死，本轮重新启动",
+                time_time() - started,
+            )
+            return False
+        return True
 
     def wait_intraday(self, timeout: float = 5) -> None:
         """测试里等旁路拉取结束。生产循环不调用。"""
@@ -571,6 +613,7 @@ class FundFlowWorker:
 
         thread = threading.Thread(target=target, name="fund-flow-intraday", daemon=True)
         self._intraday_thread = thread
+        self._intraday_started_at = time_time()
         thread.start()
 
     def _execute(
@@ -594,7 +637,11 @@ class FundFlowWorker:
                 efinance=self.breakers["efinance"], mx=self.breakers["mx"],
                 trade_date=trade_day,
             )
-            if not result.errors:
+            # 落盘判据看「这一天的分区是否够当全市场排名」，而不是「有没有 error」。
+            # 上游熔断时 sync_stock 仍会用全市场排名兜底并把数据写盘；只要样本达标，
+            # 这一天就算拿到了，不能因为同时记了一条熔断 error 就永远不标成功 ——
+            # 那会导致 30 分钟一轮的无限重试，且收盘分区一直不落盘。
+            if not result.errors or _stock_day_complete(data_dir, trade_day, len(symbols)):
                 _mark_success(data_dir, "stock", day)
             return result
         if name == "stock_intraday":
