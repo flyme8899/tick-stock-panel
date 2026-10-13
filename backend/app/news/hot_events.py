@@ -179,7 +179,19 @@ _TITLE_CACHE_VERSION = 22
 #     计分，分数因此变动，旧快照算不出新分，升版本只建基线不比较。
 # v7: 句尾电头也剥掉（「下调至9%金十数据10月12日讯」，2026-10-12）。此前只认
 #     开头。展示标题一变，旧快照和下一轮榜对不上，部署后第一轮只建基线不比较。
-HOT_RULES_VERSION = 7
+# v8: 计分改**乘性**结构（2026-10-13）——`score = importance × (1 + 辅助/98.5)`，
+#     档位 0/20/55/130 → 0/40/90/200，mapping 由布尔式改成按个数递增（概念
+#     10+2×min(n-1,3)、个股 8+1.5×min(n-1,3)），验证封顶 80→40、新鲜度 20→15、
+#     热度 15→10。动因：加性下辅助项合计可达 150，超过「一般」档本身，实测
+#     「一般+满」115 分压过「裸重要」50 分（倒挂 65 分）、「重要+满」与「裸重大」
+#     并列；且加性要让档位单调必须 A < gap_min，而 A≈100 无论档位怎么拉都
+#     不成立，属结构死锁。所有分数与名次整体变动，旧快照算不出新分，
+#     升版本让部署后第一轮只建基线不比较。
+# v9: 榜单排序键去掉子项（2026-10-13）——`(-score, name)`，平局不再按
+#     重要性/映射/新鲜度/热度决胜。展示分本就是这些子项的单调函数，子项留在
+#     键里只制造「名次受子项影响」的错觉。补验后补一次重排（issue #53 残留
+#     倒挂）。同分事件的名次可能与 v8 不同，push 按名次判新进，升版本。
+HOT_RULES_VERSION = 9
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -285,15 +297,48 @@ _BULL_CUES = ("补贴", "获批", "订单", "涨价", "回购", "发布", "出�
 _NOISE_EXACT = frozenset({"图片", "广告", "视频", "转发", "分享", "推广", "赞助"})
 _NOISE_HINTS = ("闲聊", "广告", "推广", "赞助", "加微信", "点击领取", "转发微博")
 _RELEVANCE_MIN = 3
-# 重要性高于映射、新鲜度和热度。热度封顶，避免条数把寻常涨价顶过降息或政策。
-# 盘面验证另计，权重和重要性同级，不放进这个封顶。
-_IMPORTANCE_POINTS = {"琐碎": 0, "一般": 20, "重要": 55, "重大": 130}
+# 重要性是**倍率**，不是加数。总分 = importance × (1 + 辅助合计 / _AUX_SCALE)。
+#
+# 改乘性之前是加性 `score = importance + confirmation + mapping + freshness +
+# heat`，档位 0/20/55/130。加性下辅助项满额 15+15+5+20+15=70，加盘面验证最多
+# +80，合计 150 —— 超过「一般」档本身（20）七倍多。于是「一般 + 满规则 + 满验证」
+# 能压过任何裸的「重要」甚至「重大」：线上实测「一般+满」115 分 > 「裸重要」50 分，
+# 倒挂 65 分；「重要+满」150 分 == 「裸重大」150 分，并列。
+#
+# 这不是参数没调好，是加性结构本身解不出来。要让档位单调必须让辅助项合计 A
+# 小于最小档差 gap_min（否则低档吃满辅助就能追上高档），而现实里 A≈100、
+# 拉大档差到 0/40/90/180 也只有 gap_min=40 —— A < gap_min 永远不成立（差 2.5 倍
+# 以上）。乘性把「辅助项不能超过一个档差」放松成「相邻档比 > 2」，才算可解：
+# 满辅助的「一般」(40×1.985=79.4) < 裸「重要」(90)；满辅助的「重要」(178.7)
+# < 裸「重大」(200)。档位 40/90/200 的比值 2.25/2.22 正是照这条反推出来的。
+_IMPORTANCE_POINTS = {"琐碎": 0, "一般": 40, "重要": 90, "重大": 200}
 _IMPORTANCE_ORDER = ("琐碎", "一般", "重要", "重大")
-_MAPPING_CONCEPT = 15
-_MAPPING_ASSET = 15
+# 辅助项合计的最大值。乘性系数 = 1 + aux / _AUX_SCALE，所以 aux=_AUX_SCALE 时
+# 辅助项恰好把分数翻倍（上限 ×1.985，顶到不了 ×2，给「满辅助的次档 < 裸的上一档」
+# 留出 0.015 的余量）。
+#
+# _AUX_SCALE 必须等于下面各项封顶之和。改任何一项封顶都要同步改它 —— 这是
+# 「辅助项最多翻倍」这条不变量的唯一来源，掉一个就会出现封顶失配。
+#   概念 10+2×min(n-1,3) → 16
+#   个股  8+1.5×min(n-1,3) → 12.5
+#   方向  5
+#   盘面验证 40
+#   新鲜度 15
+#   热度 10
+#   = 98.5
+_AUX_SCALE = 98.5
+# 概念/个股按**个数**递增，不再只看「有没有」。此前 `if concepts: mapping += 15`
+# 是布尔式：点到 1 个概念和点到 4 个概念同分，反而鼓励多挂概念凑分。基数下调、
+# 增量递增，既保留「有映射」的信息，又让映射越准越高。
+_MAPPING_CONCEPT_BASE = 10
+_MAPPING_CONCEPT_STEP = 2
+_MAPPING_CONCEPT_CAP = 16
+_MAPPING_ASSET_BASE = 8
+_MAPPING_ASSET_STEP = 1.5
+_MAPPING_ASSET_CAP = 12.5
 _MAPPING_DIRECTION = 5
-_FRESH_MAX = 20
-_HEAT_BONUS_CAP = 15
+_FRESH_MAX = 15
+_HEAT_BONUS_CAP = 10
 _MAJOR_RATE = ("降息", "加息", "降准", "美联储", "欧央行", "日本央行", "英央行")
 _MAJOR_ORGS = ("国务院", "发改委", "工信部", "证监会", "财政部", "央行")
 _MAJOR_POLICY_ACTS = ("出台", "补贴", "政策", "降准")
@@ -855,8 +900,15 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
         # 补问是裕度的保险不是常规路径，正常情况下这条日志不出现；出现即说明
         # 重排真的把切片外条目送进了前 _TITLE_LIMIT，条数进监控。
         logger.info("热门事件重排后补问切片外未标注条目 %d 条", len(unlabeled))
-    # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上，不改已经排好的顺序。
+    # 要点可能刚补上映射。趁 _first 还在，同一轮就把盘面验证补上。
+    # 补验会改 confirmation，也就改了**展示分** —— 改完必须按同一把尺重排一次。
+    # 此前这里写着「不改已经排好的顺序」，但 _score_event 已经把 score 改了，
+    # 顺序就成了旧分数序，I1 当场被破坏（issue #53：服务器快照里残留 2 对倒挂
+    # 是纯盘面验证驱动的）。重排只改顺序、不重跑 _score_event，mapping 仍保持
+    # 写要点前的值，「前 20 必有要点」的保证不受影响。
     _confirm_newly_mapped(kept, now, mapped_before)
+    kept.sort(key=_event_sort_key)
+    _log_ranking_violations(kept)
     # 模型留空（补问一轮也一样）时，从正文抽一句和标题不同的要点。抽不到就留空，
     # 不用标题再写一遍。不改分数、不改已经排好的顺序。候选正文还在，抽句要用，下面才丢掉。
     shown = kept[:_TITLE_LIMIT]
@@ -1355,19 +1407,21 @@ def _event_from(members: list[dict], now: datetime) -> dict:
 
 
 def _event_sort_key(item: dict) -> tuple:
-    """榜单排序键：总分、重要性、映射、新鲜度、热度、名称。
+    """榜单排序键：展示分、名称。
 
     规则排序（_rank_events）和模型改判后的重排（_compute 里 _resync 之后）
     共用它 —— 两处必须是同一把尺。曾经不是：名次按 LLM 改判前的规则分排，
     score 字段却是改判后的展示分，榜单出现 #12 的 168 分压在 #2 的 105 分
     上面这种倒挂（服务器快照实测相邻倒挂 9/996 对）。
+
+    除展示分以外的分项**全部去掉**。它们曾经作为平局决胜（重要性 → 映射 →
+    新鲜度 → 热度）留在键里，但展示分已经是这几项的单调函数：importance 涨、
+    分项和涨，score 必涨。留着只是把「同分怎么排」绑定到「哪一项出了力」，
+    而这一层是多余的因果，只在同分时生效却让人以为名次还受子项影响。
+    真同分时退回名称，稳定且可复现。
     """
     return (
         -float(item["score"]),
-        -_IMPORTANCE_POINTS.get(str(item.get("importance")), 0),
-        -float(item["breakdown"]["mapping"]),
-        -float(item["breakdown"]["freshness"]),
-        -float(item["heat"]),
         str(item["name"]),
     )
 
@@ -1386,6 +1440,45 @@ def _rank_events(events: list[dict], now: datetime, *, grade: bool) -> list[dict
     return kept
 
 
+def _mapping_points(concepts: list[str], stocks: list[dict], direction: str) -> float:
+    """映射分：概念和个股各按**命中个数**递增，方向分单独加。
+
+    两个封顶必须等于常量表里写的 _MAPPING_CONCEPT_CAP / _MAPPING_ASSET_CAP，
+    _AUX_SCALE 是按它们加出来的。改这里就改那边。
+    """
+    points = 0.0
+    if concepts:
+        points += min(
+            _MAPPING_CONCEPT_CAP,
+            _MAPPING_CONCEPT_BASE + _MAPPING_CONCEPT_STEP * min(len(concepts) - 1, 3),
+        )
+    if stocks:
+        points += min(
+            _MAPPING_ASSET_CAP,
+            _MAPPING_ASSET_BASE + _MAPPING_ASSET_STEP * min(len(stocks) - 1, 3),
+        )
+    if direction in {"利好", "利空"} and (concepts or stocks):
+        points += _MAPPING_DIRECTION
+    return min(_MAPPING_CONCEPT_CAP + _MAPPING_ASSET_CAP + _MAPPING_DIRECTION, points)
+
+
+def _aux_points(breakdown: dict) -> float:
+    """辅助项合计。乘性结构下这是总分的唯一增量来源。"""
+    return (
+        float(breakdown.get("confirmation") or 0.0)
+        + float(breakdown.get("mapping") or 0.0)
+        + float(breakdown.get("freshness") or 0.0)
+        + float(breakdown.get("heat") or 0.0)
+    )
+
+
+def _combined_score(importance: float, aux: float) -> float:
+    """总分 = 重要性 ×(1 + 辅助/尺度)。辅助封顶时恰好把分数翻倍。"""
+    if importance <= 0:
+        return 0.0
+    return round(importance * (1.0 + max(0.0, aux) / _AUX_SCALE), 4)
+
+
 def _score_event(event: dict, now: datetime) -> None:
     label = str(event.get("importance") or "一般")
     if label not in _IMPORTANCE_POINTS:
@@ -1394,14 +1487,7 @@ def _score_event(event: dict, now: datetime) -> None:
     importance = _IMPORTANCE_POINTS[label]
     concepts = [str(name).strip() for name in (event.get("concepts") or []) if str(name).strip()]
     stocks = [item for item in (event.get("mentioned_stocks") or []) if isinstance(item, dict)]
-    mapping = 0
-    if concepts:
-        mapping += _MAPPING_CONCEPT
-    if stocks:
-        mapping += _MAPPING_ASSET
-    direction = str(event.get("direction") or "")
-    if direction in {"利好", "利空"} and (concepts or stocks):
-        mapping += _MAPPING_DIRECTION
+    mapping = _mapping_points(concepts, stocks, str(event.get("direction") or ""))
     age_hours = _freshness_age_hours(event, now)
     freshness = _FRESH_MAX * math.exp(-math.log(2) * age_hours / _HEAT_HALF_LIFE_HOURS)
     try:
@@ -1417,7 +1503,7 @@ def _score_event(event: dict, now: datetime) -> None:
         "freshness": round(freshness, 4),
         "heat": round(heat_bonus, 4),
     }
-    event["score"] = round(importance + confirmation + mapping + freshness + heat_bonus, 4)
+    event["score"] = _combined_score(importance, _aux_points(event["breakdown"]))
 
 
 def _resync_importance_score(event: dict) -> None:
@@ -1429,6 +1515,10 @@ def _resync_importance_score(event: dict) -> None:
     这里只补 importance 一项和总分：mapping 会随 concepts/stocks 变，
     连它一起重算会让名次跟着「写没写过要点」漂移，打破 _compute 里
     「前 20 必有要点」的保证，所以其余分项保持写要点前的值。
+
+    **乘性结构下这里必须用 _combined_score 重算，不能沿用加性的「只换一项再相加」
+    —— 加性重算在乘性口径下算出来的数是另一个量纲，名次数序会 ≠ 展示分数序，
+    直接把 PR #106 修好的倒挂重新引入。**
     """
     label = str(event.get("importance") or "一般")
     if label not in _IMPORTANCE_POINTS:
@@ -1441,14 +1531,41 @@ def _resync_importance_score(event: dict) -> None:
     if float(breakdown.get("importance") or 0.0) == float(importance):
         return
     breakdown["importance"] = importance
-    event["score"] = round(
-        importance
-        + float(breakdown.get("confirmation") or 0.0)
-        + float(breakdown.get("mapping") or 0.0)
-        + float(breakdown.get("freshness") or 0.0)
-        + float(breakdown.get("heat") or 0.0),
-        4,
-    )
+    event["score"] = _combined_score(importance, _aux_points(breakdown))
+
+
+def _ranking_violations(events: list[dict]) -> list[str]:
+    """榜单三条不变量的体检结果。空列表 = 干净。
+
+    这三条不是风格问题，是**结果可信性的前提**。前两条曾经都被实际违反过：
+
+    * I1 展示分单调：「名次以展示分为准」唯一的含义就是 score 非增。违反 =
+      用户看到第 12 名比第 2 名分高，直接判榜单坏了。
+    * I2 前 _TITLE_LIMIT 条有要点：进入前 20 的事件都必须能点开看到内容，
+      空白卡片等于这条事件没上过榜。
+    * I3 切片线不因补验被跨越：切片切在盘面验证之后，切片外事件没有路径再
+      涨分，所以「前 20 必有要点」才有结构性保证。盘面验证补验会改分，若它
+      让切片外事件的分越过切片截止分，前面那条保证就退化成「一般情况下成立」。
+    """
+    problems: list[str] = []
+    scores = [float(event.get("score") or 0.0) for event in events]
+    for index in range(1, len(scores)):
+        if scores[index] > scores[index - 1] + 1e-9:
+            problems.append(
+                f"I1 第{index + 1}名 {scores[index]} 高于第{index}名 {scores[index - 1]}"
+            )
+            break
+    for index, event in enumerate(events[:_TITLE_LIMIT]):
+        if _point_is_empty(event):
+            problems.append(f"I2 第{index + 1}名 {event.get('name')} 要点为空")
+            break
+    return problems
+
+
+def _log_ranking_violations(events: list[dict]) -> None:
+    problems = _ranking_violations(events)
+    if problems:
+        logger.warning("热门事件榜单不变量被打破：%s", "；".join(problems))
 
 
 def _confirmation_mapping(event: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -1503,8 +1620,16 @@ def _confirm_newly_mapped(
         logger.info("热门事件本轮完成盘面验证 %s", "、".join(upgraded))
 
 
+_CONFIRMATION_CAP = 40
+
+
 def _confirmation_points(raw) -> float:
-    """验证分只加不减。待开盘的事件这里是 0，不因为还没盘面再扣一档。"""
+    """验证分只加不减。待开盘的事件这里是 0，不因为还没盘面再扣一档。
+
+    封顶从 80 降到 40：80 是加性口径下「和重要性同级」的写法，乘性口径里没有
+    「同级」这回事，验证分只该是辅助项的一部分。40 和「概念+个股」满额（28.5）
+    同量级，加满也只把分数推到 ×1.41，不会单独把一条事件顶上去。
+    """
     if not isinstance(raw, dict):
         return 0.0
     try:
@@ -1513,7 +1638,7 @@ def _confirmation_points(raw) -> float:
         return 0.0
     if points != points:
         return 0.0
-    return round(min(80.0, max(0.0, points)), 4)
+    return round(min(_CONFIRMATION_CAP, max(0.0, points)), 4)
 
 
 def _event_text(event: dict) -> str:

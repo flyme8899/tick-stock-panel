@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.api import picker as picker_api
 from app.market_time import CN_TZ
+from app.news.hot_events import _AUX_SCALE
 from app.news.service import get_store, reset_store_for_tests, top_hot_events
 from app.services.picker import (
     Dimensions,
@@ -579,9 +580,11 @@ def test_top_hot_events_rank_trading_day_and_picker_uses_constituents(tmp_path, 
     assert head["mapping"] == [{"name": "昇腾", "kind": "concept", "direction": "利好"}]
     assert head["first_seen"] == "10-09 14:52"
     assert head["importance"] == "重大"
-    assert head["breakdown"]["importance"] == 130
-    assert head["breakdown"]["mapping"] == 35
-    assert abs(head["score"] - sum(head["breakdown"].values())) < 0.02
+    # 乘性计分：档位 0/40/90/200，概念 1 个 → 10，个股 2 个 → 9.5，方向 5。
+    assert head["breakdown"]["importance"] == 200
+    assert head["breakdown"]["mapping"] == 24.5
+    aux = sum(value for key, value in head["breakdown"].items() if key != "importance")
+    assert abs(head["score"] - 200 * (1 + aux / _AUX_SCALE)) < 0.02
     assert [stock["key"] for stock in head["mentioned_stocks"]] == ["600519.SH", "000001.SZ"]
     assert head["mentioned_stocks"][0]["mentions"] == 2
 

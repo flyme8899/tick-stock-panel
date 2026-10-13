@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from app.market_time import CN_TZ
-from app.news.hot_events import build_top_hot_events, display_view_key
+from app.news.hot_events import _AUX_SCALE, build_top_hot_events, display_view_key
 from app.news.service import get_store, public_hot_event, reset_store_for_tests
 from app.services.picker import _confirmation_brief
 
@@ -73,7 +73,10 @@ def _pending(event: dict) -> bool:
     parts = event["breakdown"]
     assert parts["confirmation"] == 0
     assert all(float(value) >= 0 for value in parts.values())
-    assert abs(event["score"] - sum(float(value) for value in parts.values())) < 0.02
+    # 乘性计分：总分 = importance ×(1 + 辅助/98.5)，不是各项相加。
+    aux = sum(float(value) for key, value in parts.items() if key != "importance")
+    expected = float(parts["importance"]) * (1 + aux / _AUX_SCALE)
+    assert abs(event["score"] - expected) < 0.02
     return True
 
 
