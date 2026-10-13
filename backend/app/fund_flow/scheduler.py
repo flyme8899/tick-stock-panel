@@ -24,6 +24,16 @@ SECTOR_GAP_S = 180
 # 个股即时资金流落在 5–10 分钟这一档。6 分钟是固定间隔，文档和页面按这个数写。
 # 东财当日排名要翻页，再加 1 秒限流，一次大约一分多钟，不能占住这条线程。
 STOCK_INTRADAY_GAP_S = 6 * 60
+# 盘中旁路线程的最长允许时长。正常一轮一分多钟；超过这个数视为卡死，
+# 允许下一轮重新启动 —— 否则一次卡死会让当天剩余时段再也不出快照。
+# 取 12 分钟，是 6 分钟间隔的 2 倍，留足慢网络余量。
+INTRADAY_THREAD_TIMEOUT_S = 12 * 60
+# 主循环看门狗：单轮 run_once 超过这个时长就记 WARNING。
+# 主循环是单线程，卡住一次会让之后所有任务（含收盘分区）全部停摆。
+LOOP_STALL_WARN_S = 5 * 60
+# 让路的轮数上限。30 秒一轮，120 轮约一小时 —— 重任务再慢也该出结果了。
+# 到点就强行放行一次，避免 ``tickflow_sync_busy`` 恒真导致全天不落盘。
+DEFER_MAX_STREAK = 120
 
 _worker: FundFlowWorker | None = None
 _worker_lock = threading.Lock()
@@ -238,6 +248,15 @@ def _stock_incomplete(data_dir: Path, day: str, universe: int) -> bool:
     )
 
 
+def _stock_day_complete(data_dir: Path, day: str, universe: int) -> bool:
+    """这一天的 ``stock`` 分区是否已够当全市场排名。
+
+    与 ``_stock_incomplete`` 互补，供落盘判据使用：上游熔断 / 部分失败时，
+    只要整批兜底把样本补齐了，这一天就算拿到了。
+    """
+    return not _stock_incomplete(data_dir, day, universe)
+
+
 # 同一交易日的板块缺口最多补几次。上游同花顺个股榜长期不覆盖深主板，
 # 缺口不是「这次拉失败」而是数据源的已知局限；不设上限就会每 30 分钟
 # 全量重跑一轮。达到上限后只记 WARNING，等次日新分区再看。
@@ -396,6 +415,38 @@ class FundFlowWorker:
         }
         self.deferred_reason: str | None = None
         self._intraday_thread: threading.Thread | None = None
+        self._intraday_started_at: float | None = None
+        # 连续让路计数与首次让路时刻。让路是一次性的礼让，不该变成永久停摆：
+        # ``tickflow_sync`` 的判据一旦恒真，主循环会一轮轮空转、什么都不落盘。
+        # 超过 ``DEFER_MAX_STREAK`` 轮就强行放行一次，宁可和重任务抢一下，
+        # 也不能整天不出数据。
+        self._defer_streak = 0
+        self._defer_since: float | None = None
+        # 每次启动盘中拉取自增。线程杀不掉，只能靠世代号让旧结果自我作废。
+        self._intraday_generation = 0
+
+    def _defer_allowed(self, now: datetime) -> tuple[bool, str | None]:
+        """这一轮是否还让路。返回 ``(是否让路, 原因说明)``。
+
+        连续让路到 ``DEFER_MAX_STREAK`` 轮就放行，并把原因记进日志 ——
+        让路必须可见、有上限，否则就是静默停摆。
+        """
+        self._defer_streak += 1
+        if self._defer_since is None:
+            self._defer_since = time_time()
+        waited = time_time() - self._defer_since
+        if self._defer_streak > DEFER_MAX_STREAK:
+            logger.warning(
+                "资金流已连续让路 %d 轮 / %.0f 秒（tickflow_sync 一直忙），本轮强制放行",
+                self._defer_streak,
+                waited,
+            )
+            return False, "tickflow_sync_busy_forced"
+        return True, None
+
+    def _defer_reset(self) -> None:
+        self._defer_streak = 0
+        self._defer_since = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -420,11 +471,28 @@ class FundFlowWorker:
             self._wake.clear()
             if self._stop.is_set():
                 return
+            started = time_time()
+            ran: list[str] = []
             try:
                 # 盘中个股要翻页，放到旁路线程，避免这一轮的板块和收盘任务干等。
-                self.run_once(detach_intraday=True)
+                ran = self.run_once(detach_intraday=True) or []
             except Exception:
                 logger.exception("资金进出本轮失败")
+            finally:
+                # 主循环是单线程：一轮里任何一处网络读卡住，之后到点的收盘任务
+                # （stock / etf_shares / southbound 等）都会一起停摆。这里只做
+                # 事后告警 —— 真正的超时交给各客户端自身的超时设置。
+                elapsed = time_time() - started
+                # 每轮都留痕：启动了什么、耗时多久、是否让路。13:44 那类「快照
+                # 突然不再更新」的事后排查，全靠这一行日志自证卡在哪一步。
+                logger.info(
+                    "资金流一轮完成 耗时=%.0fs 启动=%s 让路=%s",
+                    elapsed,
+                    ",".join(ran) if ran else "-",
+                    self.deferred_reason or "-",
+                )
+                if elapsed > LOOP_STALL_WARN_S:
+                    logger.warning("资金进出一轮耗时 %.0f 秒，已超过看门狗阈值", elapsed)
 
     def run_once(
         self,
@@ -468,11 +536,13 @@ class FundFlowWorker:
             trading = _default_trading(now)
         if busy is None:
             busy = tickflow_sync_busy()
-        if busy:
+        if busy and self._defer_allowed(now)[0]:
             self.deferred_reason = "tickflow_sync"
-            store.update_kind_state(data_dir, "_scheduler", deferred="tickflow_sync")
+            # 心跳独立写：绝不因为让路而让「循环还活着」的信号倒退。
+            store.touch_heartbeat(data_dir, deferred="tickflow_sync")
             return []
         self.deferred_reason = None
+        self._defer_reset()
         state = store.load_state(data_dir)
         open_sources = {name for name, breaker in self.breakers.items() if not breaker.allow()}
         known = known_trading_days(data_dir)
@@ -494,8 +564,10 @@ class FundFlowWorker:
             if name not in planned:
                 planned.append(name)
         if not planned:
+            store.touch_heartbeat(data_dir, deferred=None)
             self._persist_breakers(data_dir)
             return []
+        store.touch_heartbeat(data_dir, deferred=None)
         if clients is None:
             from app.fund_flow.sources import live_clients
 
@@ -531,8 +603,31 @@ class FundFlowWorker:
         return ran
 
     def _intraday_running(self) -> bool:
+        """旁路盘中线程是否仍在跑。
+
+        只看 ``is_alive()`` 不够：线程卡在网络读上时永远为真，当天剩余时段
+        再也不会启动新快照（线上曾停在 13:44）。超过 ``INTRADAY_THREAD_TIMEOUT_S``
+        的一律按卡死处理，让下一轮重新拉。
+
+        注意：Python 线程杀不掉，超时只是「不再等它」，旧线程仍在跑。所以每次
+        启动都带一个 ``generation`` 序号，旧代线程结束时发现自己不是当前代就
+        丢弃结果 —— 否则新旧两个线程会同时写分区、同时回写熔断状态。
+        """
         thread = self._intraday_thread
-        return thread is not None and thread.is_alive()
+        if thread is None or not thread.is_alive():
+            return False
+        started = self._intraday_started_at
+        if started is None:
+            return True
+        if (time_time() - started) > INTRADAY_THREAD_TIMEOUT_S:
+            logger.warning(
+                "盘中个股主力净流入线程已运行 %.0f 秒，判定卡死，本轮重新启动"
+                "（旧线程 gen=%d 仍在跑，其结果将被丢弃）",
+                time_time() - started,
+                self._intraday_generation,
+            )
+            return False
+        return True
 
     def wait_intraday(self, timeout: float = 5) -> None:
         """测试里等旁路拉取结束。生产循环不调用。"""
@@ -553,24 +648,55 @@ class FundFlowWorker:
         trade_day = task_day("stock_intraday", now, trading=trading, known_days=known_days)
         captured = f"{trade_day}T{now.strftime('%H:%M:%S')}"
         breaker = self.breakers["akshare"]
+        self._intraday_generation += 1
+        generation = self._intraday_generation
+
+        def current_generation() -> bool:
+            """这一代是否仍是当前代。线程之间只读一个 int，无需加锁。"""
+            return generation == self._intraday_generation
 
         def target() -> None:
             try:
+                # 世代回调一路传进 jobs：``sync_stock_intraday`` **内部**就会落盘，
+                # 校验必须发生在写之前。等函数返回再查就晚了 —— 旧代已经写进去了。
                 result = jobs.sync_stock_intraday(
-                    data_dir, clients, trade_date=trade_day, captured_at=captured, breaker=breaker,
+                    data_dir,
+                    clients,
+                    trade_date=trade_day,
+                    captured_at=captured,
+                    breaker=breaker,
+                    is_current=current_generation,
                 )
+                if not current_generation():
+                    logger.warning(
+                        "盘中快照 gen=%d 已过期（当前 gen=%d），丢弃本次结果 %s",
+                        generation,
+                        self._intraday_generation,
+                        captured,
+                    )
+                    return
                 if not result.errors:
                     _mark_success(data_dir, "stock_intraday", day)
+                    logger.info(
+                        "盘中快照已落盘 gen=%d captured=%s 写入=%s",
+                        generation,
+                        captured,
+                        result.wrote,
+                    )
             except Exception:
                 logger.exception("盘中个股主力净流入拉取失败")
             finally:
-                try:
-                    self._persist_breakers(data_dir)
-                except Exception:
-                    logger.exception("盘中个股主力净流入写回熔断状态失败")
+                # 过期代连熔断状态都不该回写：那是新一代的账，旧代写进去只会
+                # 用「解卡后迟到的成功」把新代的失败盖掉。
+                if current_generation():
+                    try:
+                        self._persist_breakers(data_dir)
+                    except Exception:
+                        logger.exception("盘中个股主力净流入写回熔断状态失败")
 
         thread = threading.Thread(target=target, name="fund-flow-intraday", daemon=True)
         self._intraday_thread = thread
+        self._intraday_started_at = time_time()
         thread.start()
 
     def _execute(
@@ -594,7 +720,11 @@ class FundFlowWorker:
                 efinance=self.breakers["efinance"], mx=self.breakers["mx"],
                 trade_date=trade_day,
             )
-            if not result.errors:
+            # 落盘判据看「这一天的分区是否够当全市场排名」，而不是「有没有 error」。
+            # 上游熔断时 sync_stock 仍会用全市场排名兜底并把数据写盘；只要样本达标，
+            # 这一天就算拿到了，不能因为同时记了一条熔断 error 就永远不标成功 ——
+            # 那会导致 30 分钟一轮的无限重试，且收盘分区一直不落盘。
+            if not result.errors or _stock_day_complete(data_dir, trade_day, len(symbols)):
                 _mark_success(data_dir, "stock", day)
             return result
         if name == "stock_intraday":

@@ -28,6 +28,10 @@ Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
 HISTORY_SOURCES = frozenset({"efinance", "mx"})
 
+# 盘中快照的世代已过期。放进 ``errors`` 让它和其它失败一样可被日志/测试观察到，
+# 但它不是数据源出错 —— 调用方看到它只需要知道「这一份不该要了」。
+STALE_GENERATION = "盘中快照世代已过期，放弃本次结果"
+
 logger = logging.getLogger(__name__)
 
 
@@ -512,6 +516,11 @@ def _call_ths_intraday(clients: SourceClients) -> list[dict]:
     return clients.ak("stock_fund_flow_individual", symbol="即时")
 
 
+def _stale_generation(is_current: Callable[[], bool] | None) -> bool:
+    """这一代是否已经过期（有更新的线程接手了）。没有回调时永远算当前代。"""
+    return is_current is not None and not is_current()
+
+
 def _write_intraday(
     data_dir: Path,
     rows: list[dict],
@@ -519,7 +528,12 @@ def _write_intraday(
     trade_date: str,
     captured_at: str,
     result: RunResult,
+    is_current: Callable[[], bool] | None = None,
 ) -> RunResult:
+    # 落盘前再查一次：``store.write_rows`` 会直接覆盖分区，过期代写进去就是脏数据。
+    if _stale_generation(is_current):
+        result.errors.append(STALE_GENERATION)
+        return result
     if not rows:
         message = "同花顺即时个股资金流为空"
         result.errors.append(message)
@@ -538,6 +552,7 @@ def sync_stock_intraday(
     captured_at: str,
     breaker: CircuitBreaker,
     sleeper: Sleeper | None = None,
+    is_current: Callable[[], bool] | None = None,
 ) -> RunResult:
     """一份全市场盘中快照。
 
@@ -549,6 +564,11 @@ def sync_stock_intraday(
 
     空表不当成成功，避免把上一份快照标成刚更新过。真正出网的客户端把东财排名
     和同花顺即时榜送进共用限流和缺省超时；测试注入的客户端不出网。
+
+    ``is_current`` 是给调用方（盘中线程）传的世代回调。这个函数**内部**就会落盘
+    （见 ``store.write_rows``），所以过期判断必须在**写之前**做，不能等函数返回后
+    再查 —— 否则卡死重启时新旧两代会同时写同一个分区。回调返回 ``False`` 时本代
+    直接放弃：不写盘、不写状态，把 ``STALE_GENERATION`` 记进 ``errors``。
     """
     result = RunResult(kind="stock_intraday")
     primary = config.intraday_primary()
@@ -565,6 +585,9 @@ def sync_stock_intraday(
             logger.warning("盘中个股主力净流入东财失败，改走同花顺: %s", str(exc)[:300])
         else:
             if len(rows) >= store.FULL_MARKET_MIN:
+                if _stale_generation(is_current):
+                    result.errors.append(STALE_GENERATION)
+                    return result
                 result.wrote = store.write_rows(data_dir, "stock_intraday", trade_date, rows)
                 store.update_kind_state(
                     data_dir, "stock_intraday", last_error=None, last_snapshot=captured_at,
@@ -593,7 +616,12 @@ def sync_stock_intraday(
         source=normalize.SOURCE_THS,
     )
     return _write_intraday(
-        data_dir, rows, trade_date=trade_date, captured_at=captured_at, result=result,
+        data_dir,
+        rows,
+        trade_date=trade_date,
+        captured_at=captured_at,
+        result=result,
+        is_current=is_current,
     )
 
 
