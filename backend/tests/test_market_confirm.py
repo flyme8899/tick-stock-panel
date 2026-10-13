@@ -562,3 +562,84 @@ def test_next_open_day_after_the_calendar_uses_weekdays(monkeypatch):
     assert _known_holiday(date(2027, 1, 1)) is False
     assert _next_open_day(date(2026, 12, 31)) == date(2027, 1, 1)
     assert _next_open_day(date(2027, 1, 2)) == date(2027, 1, 4)
+
+
+def test_state_separates_unverifiable_from_unconfirmed():
+    """`state` 把「无标可验」与「验证未兑现」分开 —— 二者都是 score=0 + strength="无"。
+
+    规格来源：会诊裁定 A。线上实测（16:09 快照 381 条）两者同时存在：
+    约 130 条无标可验、约 11 条有观测未兑现（如「奥克股份终止重组复牌」，
+    excess=-4.96%、看过 4 个窗口仍不认）。在此之前只能靠 score 猜，是异质簇。
+    """
+    # ① 有标的、有观测，但盘面不认（消息前已涨停，事后不涨）→ 验证未兑现。
+    bars = [
+        _bar(10, 0, 11.0, volume=500_000),
+        _bar(10, 1, 11.0, volume=500_000),
+        _bar(14, 30, 10.01, volume=100),
+    ]
+    unconfirmed = score_confirmation(_event("平安银行回购", "利好", 14, 0), _tape(bars), NOW)
+    assert unconfirmed["score"] == 0
+    assert unconfirmed["strength"] == "无"
+    assert unconfirmed["state"] == "unconfirmed"
+
+    # ② 标的为空的事件 → 无标可验。
+    no_symbol = dict(_event("欧盟制裁俄军工", "利好", 9, 0))
+    no_symbol["mentioned_stocks"] = []
+    no_symbol["concepts"] = []
+    unverifiable = score_confirmation(no_symbol, _tape(bars), NOW)
+    assert unverifiable["score"] == 0
+    assert unverifiable["strength"] == "无"
+    assert unverifiable["state"] == "unverifiable"
+
+    # 两者 score/strength 完全同形，只有 state 能区分 —— 这正是本改动存在的理由。
+    assert (unconfirmed["score"], unconfirmed["strength"]) == (unverifiable["score"], unverifiable["strength"])
+    assert unconfirmed["state"] != unverifiable["state"]
+
+
+def test_state_scored_when_confirmation_lands():
+    """打出分时 state='scored'，与两条 0 分支区分开。"""
+    bars = [
+        _bar(10, 0, 10.2),
+        _bar(10, 20, 10.4),
+        _bar(14, 0, 10.7),
+        _bar(14, 40, 11.0, volume=80_000),
+    ]
+    flows = [{"at": datetime(2026, 10, 9, 10, 30, tzinfo=CN_TZ), "value": 8e7, "kind": "snapshot"}]
+    scored = score_confirmation(_event("平安银行回购", "利好", 9, 0), _tape(bars, flows=flows), NOW)
+    assert scored["score"] > 0
+    assert scored["state"] == "scored"
+
+
+def test_public_confirmation_exposes_state_and_backfills_legacy_snapshots():
+    """对外接口透出 state；老快照缺 state 时按 strength/pending 反推，不返回空串。"""
+    from app.news.service import _public_confirmation
+
+    # 新数据：直接透传。
+    assert _public_confirmation({"strength": "无", "state": "unverifiable"})["state"] == "unverifiable"
+    assert _public_confirmation({"strength": "强", "state": "scored"})["state"] == "scored"
+    # 老快照没有 state：反推。
+    assert _public_confirmation({"strength": "无", "pending": True})["state"] == "pending"
+    assert _public_confirmation({"strength": "强"})["state"] == "scored"
+    assert _public_confirmation({"strength": "无"})["state"] == "unverifiable"
+
+
+def test_unverifiable_state_keeps_legacy_score_and_strength():
+    """核心向后兼容保证：state='unverifiable' 时 score 仍是 0、strength 仍是「无」、pending 仍为 False。
+
+    这是本次改动「加字段不改值域」承诺的可执行断言 —— 只要这条成立，
+    `_confirmation_points`、`service._public_confirmation` 的 strength 白名单、
+    前端既有的 `strength === '无'` 分支就全部无需改动、行为不变。
+    """
+    from app.news.market_confirm import _result
+
+    r = _result(0, False, "无", "无", "暂无行情", None, False, {}, state="unverifiable")
+    assert r["state"] == "unverifiable"
+    assert r["score"] == 0
+    assert r["strength"] == "无"
+    assert r["pending"] is False
+
+    # 未显式传 state 时按旧字段兜底推断，不返回空串。
+    legacy = _result(0, False, "无", "无", "暂无行情", None, False, {})
+    assert legacy["state"] in {"unverifiable", "pending", "scored"}
+    assert _result(50, True, "强", "持续", "最近交易日", None, False, {},
+                   state="scored")["state"] == "scored"

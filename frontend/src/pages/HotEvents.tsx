@@ -89,6 +89,10 @@ function StockLinkList({
 
 function confirmBadge(confirm: NonNullable<NewsHotEvent['confirmation']>): string {
   if (confirm.pending || confirm.label === '待开盘验证') return '待开盘验证'
+  // 新闻页是阅读流，这里给「无标可验」一句诚实的说明 —— 它既不是「盘面不认」，
+  // 也不是没结论。用独立 state 判断，不要用 score===0（0 分里还混着「验证未兑现」，
+  // 那种才是真正盘面不认的负样本）。选股下拉则不显示此徽章（见 StockPicker）。
+  if (confirm.state === 'unverifiable') return '暂无可映射标的'
   const session = confirm.label && !confirm.live ? confirm.label : ''
   const horizon = confirm.horizon
     || (confirm.persistence && confirm.persistence !== '无' ? confirm.persistence : '')

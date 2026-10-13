@@ -99,6 +99,16 @@ def test_verified_confirmation_labels_auction_and_lag():
     assert _confirm_label({"lagged": True, "strength": "无"}) == "消息滞后确认"
     assert event_is_verified({"strength": "中"}) is True
     assert event_is_verified({"strength": "无"}) is False
+    # state 优先：只有 scored 才算已验证，「无标可验」绝不能被当成有效信号。
+    # 这正是把黑名单改成白名单要防的 fail-open：早前 `strength not in {"","无"}`
+    # 会让任何新增取值默认落进「已验证」，把无标事件映射进钉钉推送。
+    assert event_is_verified({"strength": "无", "state": "unverifiable"}) is False
+    assert event_is_verified({"strength": "无", "state": "unconfirmed"}) is False
+    assert event_is_verified({"strength": "无", "state": "pending"}) is False
+    assert event_is_verified({"strength": "强", "state": "scored"}) is True
+    # 未知/未来新增的 strength 取值一律不算已验证（白名单语义）。
+    assert event_is_verified({"strength": "无标"}) is False
+    assert event_is_verified({"strength": "某种新档位"}) is False
     packed = format_hot_markdown([], [], heading="【热点候选】盘前", events=[{
         "name": "平安银行回购",
         "story_count": 1,

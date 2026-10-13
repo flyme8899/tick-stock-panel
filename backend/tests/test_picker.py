@@ -211,8 +211,16 @@ def test_token_match_rejects_generic_and_ambiguous_terms():
     assert not any(len(token) < 2 for token in tokens)
 
 
-def test_hot_group_reserves_slots_for_unmappable_major():
-    """重大档保底席位：可映射事件占满前 8 时，用榜外最靠前的「重大」补到末尾。"""
+def test_hot_group_skips_unmappable_major_for_reserved_slots():
+    """保底席位只收「有映射」的重大 —— 无映射的重大不再占位（口径 A）。
+
+    规格变更（会诊 4:0 裁定）：原实现允许无映射的「重大」占保底席位，但它与本函数
+    前半段自相矛盾 —— `_event_pick_rank` 刚把 `selectable<=0` 排到最末，保底又把它
+    抬回前 8。线上实测：全量 6 条「重大」里 5 条零可选股，榜外可补的「重大」候选
+    100% 零可选股，保底必然把「点不动」的条目塞进选股列表。
+
+    新规格：保底只从 `selectable > 0` 的重大里补；榜外全无映射则放弃保底。
+    """
     from app.services.picker import _hot_group
 
     def ev(key, name, importance, concepts):
@@ -237,7 +245,7 @@ def test_hot_group_reserves_slots_for_unmappable_major():
     })
     concepts_pool = ["机器人", "白酒", "光伏", "储能", "芯片", "军工", "医药", "券商"]
     events = [
-        # 3 条无映射「重大」排在最前（按可映射性会被压到后面）。
+        # 3 条无映射「重大」—— 保底**不该**收它们。
         ev("m1", "重大-无映射A", "重大", ["中东"]),
         ev("m2", "重大-无映射B", "重大", ["美联储动态"]),
         ev("m3", "重大-无映射C", "重大", []),
@@ -249,21 +257,60 @@ def test_hot_group_reserves_slots_for_unmappable_major():
     group = _hot_group({"events": events}, None, dims)
     names = [item["name"] for item in group["items"]]
     assert len(names) == 8
+    # 榜外没有「有映射的重大」可补 → 放弃保底，前 8 全是有映射的「重要」。
+    assert all(item["importance"] != "重大" for item in group["items"])
+    assert all(item["selectable_count"] > 0 for item in group["items"])
+    # 前 8 条全部可点（这是口径 A 的立身之本）。
+    assert sum(1 for item in group["items"] if item["selectable_count"] > 0) == 8
+
+
+def test_hot_group_reserves_only_mappable_major():
+    """榜外存在「有映射的重大」时，保底仍要把它们补进来（口径 A 的正向用例）。"""
+    from app.services.picker import _hot_group
+
+    def ev(key, name, importance, concepts):
+        return {
+            "key": key,
+            "name": name,
+            "importance": importance,
+            "concepts": concepts,
+            "mentions": 1,
+            "source_count": 1,
+        }
+
+    pool = ["机器人", "白酒", "光伏", "储能", "芯片", "军工", "医药", "券商"]
+    dims = Dimensions(concepts={f"{i:06d}.SZ": [c] for i, c in enumerate(pool)})
+    events = []
+    # 9 条可映射「重要」占满前 8。
+    for i in range(9):
+        events.append(ev(f"i{i}", f"重要-可映射{i}", "重要", [pool[i % 8]]))
+    # 榜外 1 条**有映射**的「重大」—— 会被保底补进来。
+    events.append(ev("M1", "重大-有映射", "重大", [pool[0]]))
+    # 榜外 1 条**无映射**的「重大」—— 必须被跳过。
+    events.append(ev("M2", "重大-无映射", "重大", ["中东"]))
+
+    group = _hot_group({"events": events}, None, dims)
+    names = [item["name"] for item in group["items"]]
+    assert len(names) == 8
+    # 有映射的重大补进来了，无映射的没有。
+    assert "重大-有映射" in names
+    assert "重大-无映射" not in names
     majors = [item for item in group["items"] if item["importance"] == "重大"]
-    # 保底 2 条「重大」被补进来（榜内本来 0 条），且都是无映射的。
-    assert len(majors) == 2
-    assert all(item["mapping_breadth"] == "none" for item in majors)
-    # 保底不会重复、也不会把可映射事件全挤掉：仍有 6 条可映射。
-    assert len(set(names)) == len(names)
-    assert sum(1 for item in group["items"] if item["selectable_count"] > 0) == 6
+    assert [item["name"] for item in majors] == ["重大-有映射"]
+    # 保底让位的是排名末位的「重要」：可映射条数从 8 降到 7，但**全部可点**。
+    assert all(item["selectable_count"] > 0 for item in group["items"])
 
 
 def test_hot_group_keeps_existing_major_that_sits_at_tail():
     """榜内「重大」排在末位时，补位只能砍非重大，不能把它换掉。
 
-    评审给的反例：top8 = 7 条 usable「重要」+ 1 条「重大」但无映射 M1（正好在末位），
+    评审给的反例：top8 = 7 条 usable「重要」+ 1 条「重大」M1（正好在末位），
     此时 majors_in=1、shortfall=1，会从榜外补 M2。若按位置砍末尾（旧实现），砍掉的
     就是 M1 —— 重大席位数没变，还换成了排名更差的 M2。
+
+    口径 A 下补位候选必须**有映射**。这里构造：榜内 M1 有映射但排在末位（usable 距离
+    最大），榜外 M2 有映射且排名更靠前 —— 保底应补 M2、砍末位的「重要」，M1 与 M2
+    都在榜内。
     """
     from app.services.picker import _hot_group
 
@@ -280,13 +327,13 @@ def test_hot_group_keeps_existing_major_that_sits_at_tail():
     pool = ["机器人", "白酒", "光伏", "储能", "芯片", "军工", "医药", "券商"]
     dims = Dimensions(concepts={f"{i:06d}.SZ": [c] for i, c in enumerate(pool)})
     events = []
-    # 7 条可映射「重要」—— 它们按可映射性排在 M1 之前，占满前 7 位。
+    # 7 条可映射「重要」占前 7 位。
     for i in range(7):
         events.append(ev(f"i{i}", f"重要-可映射{i}", "重要", [pool[i]]))
-    # 1 条「重大」但无映射 —— 排在 usable 之后，正好落在第 8 位（末位）。
-    events.append(ev("M1", "榜内重大-末位", "重大", ["中东"]))
-    # 榜外还有 1 条无映射「重大」，会被保底拉进来补第 2 个席位。
-    events.append(ev("M2", "榜外重大-无映射", "重大", ["美联储动态"]))
+    # 1 条「重大」但有映射 —— usable，排在末位（第 8）。
+    events.append(ev("M1", "榜内重大-末位", "重大", [pool[7]]))
+    # 榜外还有 1 条**有映射**的「重大」，会被保底拉进来补第 2 个席位。
+    events.append(ev("M2", "榜外重大-有映射", "重大", [pool[0]]))
 
     group = _hot_group({"events": events}, None, dims)
     names = [item["name"] for item in group["items"]]
@@ -294,9 +341,10 @@ def test_hot_group_keeps_existing_major_that_sits_at_tail():
     # 榜内那条末位「重大」必须保住，不能被榜外的 M2 顶掉。
     assert "榜内重大-末位" in names
     majors = [item["name"] for item in group["items"] if item["importance"] == "重大"]
-    assert set(majors) == {"榜内重大-末位", "榜外重大-无映射"}
-    # 让位的是「重要」而非「重大」：可映射条数从 7 降到 6。
-    assert sum(1 for item in group["items"] if item["selectable_count"] > 0) == 6
+    assert set(majors) == {"榜内重大-末位", "榜外重大-有映射"}
+    # 让位的是「重要」而非「重大」：9 条候选抢 8 席，被挤掉的 1 条是「重要」。
+    # 口径 A 的核心保证 —— 前 8 **全部可点**。
+    assert all(item["selectable_count"] > 0 for item in group["items"])
 
 
 def test_event_pick_rank_is_mappability_first_tier_second():

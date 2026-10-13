@@ -200,9 +200,20 @@ def _confirm_label(confirm: dict) -> str:
 
 
 def event_is_verified(confirm: dict | None) -> bool:
+    """该事件是否**盘面已验证**（有真实观测并打出分）。
+
+    改为**白名单**：只有 `strength` 是 强/中/弱 才算已验证。
+    早前是黑名单（`strength not in {"", "无"}`）—— 那是 fail-open 写法：任何新增的
+    strength 取值都会默认落进「已验证」，被 `_verified_event_names()` 当成有效信号
+    映射进钉钉推送。同时优先看 `state`（更准）：`scored` 才算已验证，
+    `unverifiable`/`unconfirmed`/`pending` 一律不算。
+    """
     if not isinstance(confirm, dict):
         return False
-    return str(confirm.get("strength") or "") not in {"", "无"}
+    state = str(confirm.get("state") or "")
+    if state:
+        return state == "scored"
+    return str(confirm.get("strength") or "") in {"强", "中", "弱"}
 
 
 def _verified_event_names() -> dict[str, str]:
