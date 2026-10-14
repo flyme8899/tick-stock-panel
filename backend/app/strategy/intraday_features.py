@@ -17,6 +17,7 @@ from datetime import datetime
 import polars as pl
 
 from app.market_time import CN_TZ
+from app.services.amount_guard import sanitize_minute_amount
 
 # ── 特征白名单(供 custom_signals 校验与 /options 展示) ──────────
 # 字段 → 中文标签。数值均为「每根已完成 bar 一个值」的序列。
@@ -100,7 +101,11 @@ def build_feature_frame(
     cols = {"price": pl.col("close").cast(pl.Float64)}
 
     # ── 日累计特征(跨上午/下午累计) ──
+    # 累计前先洗掉对不上本根高低价/收盘的 amount。价格与 amount 须已是同一复权口径
+    # （读取投影会把二者同乘），否则除权日会被误判成脏数据。
     if {"volume", "amount"}.issubset(df.columns):
+        if "close" in df.columns:
+            df = sanitize_minute_amount(df)
         cum_vol = pl.col("volume").cast(pl.Float64).cum_sum().over(_DAY_KEY)
         cum_amt = pl.col("amount").cast(pl.Float64).cum_sum().over(_DAY_KEY)
         cols["vwap"] = pl.when(cum_vol > 0).then(cum_amt / (cum_vol * 100.0))

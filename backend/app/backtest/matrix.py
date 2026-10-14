@@ -4200,7 +4200,23 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         shares = market.volume * np.float32(100.0)
         # amount/(volume×100) 是不复权均价。除权日用 raw_close, 缺列时回退 close
         # (与 strategy/scoring.py 同口径; raw_close == close 时结果不变)。
-        price = market.fields.get("raw_close", market.close)
+        # 脏 amount 只对照不复权价格回填。没有 raw_close 时不改 amount，避免复权价误判。
+        raw_close = market.fields.get("raw_close")
+        raw_low = market.fields.get("raw_low")
+        raw_high = market.fields.get("raw_high")
+        # 缺任一不复权高低价就不洗。raw_close 在列缺失时会被合成成 close，
+        # 不能拿它单独判断原始成交额。
+        if raw_close is not None and raw_low is not None and raw_high is not None:
+            from app.services.amount_guard import sanitize_amount_array
+
+            amount = sanitize_amount_array(
+                amount,
+                market.volume,
+                low=raw_low,
+                high=raw_high,
+                close=raw_close,
+            ).astype(np.float32, copy=False)
+        price = raw_close if raw_close is not None else market.close
         price_valid = np.isfinite(price) & (price > 0)
         valid = price_valid & np.isfinite(amount) & (market.volume > 0) & (amount > 0)
         vwap = np.full(market.shape, np.nan, dtype=np.float32)

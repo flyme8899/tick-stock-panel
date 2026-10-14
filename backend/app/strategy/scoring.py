@@ -12,6 +12,7 @@ from app.factors.registry import (
 from app.factors.registry import get_factor as _registry_get_factor
 from app.factors.registry import scoring_warmups as _registry_scoring_warmups
 from app.factors.registry import virtual_dependencies as _registry_virtual_dependencies
+from app.services.amount_guard import sanitized_amount_expr
 
 SCORING_DIRECTION_HIGH = "high"
 SCORING_DIRECTION_LOW = "low"
@@ -106,7 +107,19 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
     if name == "vwap_bias":
         if not {"close", "volume", "amount"}.issubset(available):
             return None
-        vwap = _ratio(pl.col("amount"), pl.col("volume") * 100.0)
+        # amount 是不复权成交额。只有三条不复权价格都在时才回填，避免把除权日的
+        # 复权 high/low 当成脏数据。没有 raw_close 时保持旧的 close 回退，不回填。
+        # 矩阵在 raw_close 缺列时会把它合成成复权 close，所以不能只凭 raw_close 清洗。
+        amount = pl.col("amount")
+        if {"raw_close", "raw_high", "raw_low"}.issubset(available):
+            amount = sanitized_amount_expr(
+                amount,
+                pl.col("volume"),
+                low=pl.col("raw_low"),
+                high=pl.col("raw_high"),
+                close=pl.col("raw_close"),
+            )
+        vwap = _ratio(amount, pl.col("volume") * 100.0)
         price = pl.col("raw_close") if "raw_close" in available else pl.col("close")
         return _relative(price, vwap)
     # composite 在 VIRTUAL 字典门控之前分派 (依赖经注册表递归展开) —— P3
