@@ -50,6 +50,8 @@ from app.news.etf_flow import (
     sogou_begin,
     trade_date_from_title,
     vision_payload,
+    wechat_article_id,
+    wechat_published_at,
 )
 from app.news.extract import Lexicon
 from app.news.service import get_store, health_payload, hot_candidates, reset_store_for_tests
@@ -1335,6 +1337,38 @@ def test_short_wechat_link_restores_sn_before_parse():
     )
     assert "sn=a1b2c3d4" in kept
     assert "ffffffff" not in kept
+
+
+def test_template_wechat_url_yields_to_real_sn_and_create_time():
+    """正文先出现 ${window.*} 模板时，不能挡住后面的真实 sn 和 create_time。"""
+    html = """
+    <em id="publish_time" class="rich_media_meta rich_media_meta_text"></em>
+    <script>
+    var msg_link = "https://mp.weixin.qq.com/s?__biz=${window.biz}&mid=${window.mid}&idx=${window.idx}&sn=${window.sn}";
+    biz: 'MzAbCdEf',
+    mid: '2247490079',
+    idx: '1',
+    sn: '2c4167ebf6a527f91b54fb5c3668ba60',
+    create_time: '2026-10-14 07:31'
+    </script>
+    """
+    short = "https://mp.weixin.qq.com/s/BCGKcAs8apIND10N5QFwwA"
+    resolved = resolve_wechat_article_url(html, short)
+    assert "window." not in resolved
+    assert "%24%7B" not in resolved
+    assert "__biz=MzAbCdEf" in resolved
+    assert "mid=2247490079" in resolved
+    assert "idx=1" in resolved
+    assert wechat_article_id(resolved) == "2c4167ebf6a527f91b54fb5c3668ba60"
+    placeholder = (
+        "https://mp.weixin.qq.com/s?__biz=${window.biz}&mid=${window.mid}"
+        "&idx=${window.idx}&sn=${window.sn}"
+    )
+    overridden = resolve_wechat_article_url(html, placeholder)
+    assert wechat_article_id(overridden) == "2c4167ebf6a527f91b54fb5c3668ba60"
+    assert "window." not in overridden
+    published = wechat_published_at(html)
+    assert published == datetime(2026, 10, 14, 7, 31, tzinfo=CN_TZ)
 
 
 def test_manual_short_link_stores_like_daily_article(news_db):
