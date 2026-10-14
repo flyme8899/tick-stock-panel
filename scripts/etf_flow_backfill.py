@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""回补公众号「ETF领航者」指定交易日的申赎稿。
+"""回补公众号「ETF领航者」指定交易日的申赎稿，或用微信原文链接补采。
 
 网易号列表和搜狗微信归档都搜。可以早于 2026-07-08。
 没有稿件的日期记成「源缺失」，下次默认不再请求。
+
+``--url`` 接受 mp.weixin.qq.com 的长链或 /s/ 短链。短链会先还原 sn。
+入库和每日采集相同。
 
 示例::
 
     python scripts/etf_flow_backfill.py --data-dir ./data --dates 2026-07-07,2026-06-30
     python scripts/etf_flow_backfill.py --data-dir ./data --since 2026-06-01 --until 2026-07-07
+    python scripts/etf_flow_backfill.py --data-dir ./data --url https://mp.weixin.qq.com/s/xxxx
 """
 from __future__ import annotations
 

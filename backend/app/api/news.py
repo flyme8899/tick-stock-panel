@@ -50,6 +50,10 @@ class MxHotUpdate(BaseModel):
     enabled: bool
 
 
+class EtfFlowIngest(BaseModel):
+    url: str = Field(..., min_length=8, max_length=800)
+
+
 @router.get("/hot")
 def hot(
     kind: str = Query("all", pattern="all|stock|sector|etf|event"),
@@ -201,6 +205,20 @@ def update_mx_hot(body: MxHotUpdate):
     from app.news.mx_hot import set_enabled
 
     return set_enabled(body.enabled)
+
+
+@router.post("/etf-flow/ingest")
+def ingest_etf_flow_url(body: EtfFlowIngest):
+    """用一篇 mp.weixin.qq.com 原文补采 ETF领航者。短链会先解析出 sn。
+
+    只接受面板登录会话。不进开放 API Token 清单。
+    """
+    from app.news.etf_flow import ExtractFailedError, _public_error, ingest_wechat_url
+
+    try:
+        return ingest_wechat_url(body.url)
+    except ExtractFailedError as exc:
+        raise HTTPException(status_code=400, detail=_public_error(exc) or "采集失败") from exc
 
 
 @router.post("/push/test")
