@@ -32,6 +32,8 @@ IC 高也不等于扣费后能赚钱，下单前要看分层多空和换手。
 - 极值下标从 1 开始，1 表示最旧；并列取最先出现的那个。
 - enriched 的 open/high/low/close 是前复权，amount 和 volume 是不复权。
   vwap_0 = (amount / (volume * 100)) / raw_close，分子分母都是不复权价格。
+  隐含价相对 raw_close 偏离超过 20% 时视为脏成交额，因子改为 1（均价按不复权收盘回填）。
+  这里不用 high/low：它们是前复权，和 amount 不是同一口径；raw_high/raw_low 也不是本因子的依赖。
   成交量单位仍是手，且不做复权。vma / vstd / vsum* / corr / cord 在送转除权日
   会看到成交量跳变，这是现有日线口径，不是另做了一套复权。
 - 1e-12 写成十进制字面量，因为 DSL 不支持科学计数法。
@@ -114,7 +116,9 @@ def _bar_specs() -> list[FactorSpec]:
         ("low_0", "LOW0 最低/收盘", "low / close", frozenset({"low", "close"}), 1),
         (
             "vwap_0", "VWAP0 均价/不复权收盘",
-            "(amount / (volume * 100)) / raw_close",
+            "if_else((volume > 0) and (raw_close > 0) and "
+            "(abs((amount / (volume * 100)) / raw_close - 1) > 0.2), "
+            "1, (amount / (volume * 100)) / raw_close)",
             _VWAP, 1,
         ),
     ]

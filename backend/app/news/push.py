@@ -23,6 +23,7 @@ from app.news.config import (
 )
 from app.news.dingtalk import send_markdown
 from app.news.hot_events import HOT_RULES_VERSION, display_view_key
+from app.services.amount_guard import sanitize_bar_amount, vwap_outside_day_range
 
 logger = logging.getLogger(__name__)
 
@@ -513,8 +514,13 @@ def session_signal_sets(
             running_high = high if running_high is None else max(running_high, high)
         if low is not None:
             running_low = low if running_low is None else min(running_low, low)
-        volume += _num(bar.get("volume")) or 0.0
-        amount += _num(bar.get("amount")) or 0.0
+        bar_volume = _num(bar.get("volume")) or 0.0
+        # 用本根高低价/收盘清洗 amount，再累加。一根 10 倍脏额会把后续 VWAP 全部抬出区间。
+        bar_amount = sanitize_bar_amount(
+            _num(bar.get("amount")), bar_volume, low=low, high=high, close=close,
+        )
+        volume += bar_volume
+        amount += 0.0 if bar_amount is None else bar_amount
         row = {
             "symbol": symbol,
             "name": name,
@@ -557,7 +563,9 @@ def t_conditions(
     pct = None
     if price and volume and amount and volume > 0:
         vwap = amount / (volume * 100.0)
-        if vwap > 0:
+        # 累计均价落在当日高低价之外时，成交额与价格对不上。跳过 VWAP 条件，
+        # 不改偏离阈值，也不改近高/近低。实时报价只有日累计，洗不了单根 bar。
+        if vwap > 0 and not vwap_outside_day_range(vwap, low, high):
             dev = price / vwap - 1
             if dev >= vwap_band:
                 found.add("above_vwap")
