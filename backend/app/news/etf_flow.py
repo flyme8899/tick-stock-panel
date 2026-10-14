@@ -1,14 +1,18 @@
 """公众号「ETF领航者」的每日 ETF 申赎。
 
 文章标题像「10月9日ETF基金申购和赎回」，正文是表格图片。优先读网易号
-https://www.163.com/dy/media/T1730214999977.html ；列表里没有当天稿件，
-或列表请求失败时，才用搜狗微信搜索备份，再打开 mp.weixin.qq.com。
-不登录微信。
+https://www.163.com/dy/media/T1730214999977.html 。列表里没有当天稿件时，
+才按额度试搜狗微信。这个号从服务器 IP 搜出来经常是空的，所以日内轮询
+每个阶段最多打一次，不把和回补共用的额度在上午用完。不登录微信。
 
-发布时刻是交易日的次日早晨（实测周五的稿在周六 07:30 左右），所以
-「昨天开市」的早晨才期待新稿，并在 09:00 仍缺稿时告警。今天开市但昨天
-休市（例如周一）只补抓列表里还没入库的最新一篇，不把「今天没有新稿」
-报成故障。交易日历不可用时，周一到周五视作开市。
+发布时刻是交易日的次日早晨（实测周五的稿在周六 07:30 左右），网易号
+可能再晚几个小时。昨天开市时，07:35–09:00 每 15 分钟看一次，09:00 仍缺
+先发「暂缺」，然后每 30 分钟再看到 15:00。15:00 仍缺才发失败提醒。
+今天开市但昨天休市（例如周一）只补抓列表里还没入库的最新一篇，不把
+「今天没有新稿」报成故障。交易日历不可用时，周一到周五视作开市。
+
+也可以把 mp.weixin.qq.com 原文链接交进来补采。短链 /s/xxx 没有 sn，
+要先还原成带 __biz/mid/idx/sn 的长链，否则解析会报「缺少 id」。
 
 表格交给视觉模型。密钥只用 VISION_AI_*，不读取文本模型的 AI_API_KEY。
 默认模型是 deepseek/deepseek-v4-flash-vision-exp。表格 OCR 保持思考，
@@ -50,10 +54,14 @@ NETEASE_HOST = "www.163.com"
 SOGOU_SEARCH_URL = "https://weixin.sogou.com/weixin"
 WECHAT_HOST = "mp.weixin.qq.com"
 POLL_START = dt_time(7, 35)
-POLL_END = dt_time(9, 0)
+SOFT_AT = dt_time(9, 0)
+POLL_END = dt_time(15, 0)
 POLL_EVERY = 15 * 60
+POLL_EVERY_LATE = 30 * 60
 SOGOU_DAILY_CAP = 4
 SOGOU_MIN_GAP = timedelta(minutes=20)
+# 日内轮询：09:00 前一次、09:00 后一次。回补不占这个次数，但共用日额度。
+LIVE_SOGOU_PER_PHASE = 1
 MAX_VISION_IMAGES = 6
 # 一张表大约 20 只 ETF。思考占掉 completion 预算，多张图叠在一次请求里会把正文挤空。
 VISION_BATCH_SIZE = 1
@@ -93,9 +101,13 @@ _BROWSER = {
     ),
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
-MISSING_TEXT = "09:00 仍未采集到 ETF领航者当日申赎文章"
+SOFT_MISSING_TEXT = "09:00 暂缺 ETF领航者当日申赎文章，继续采集到 15:00"
+SOFT_MISSING_ALERT = f"TSP 资讯采集：{SOFT_MISSING_TEXT}。"
+SOFT_EXTRACT_ALERT = "TSP 资讯采集：09:00 暂缺 ETF领航者当日申赎表格，继续采集到 15:00。"
+MISSING_TEXT = "15:00 仍未采集到 ETF领航者当日申赎文章"
 MISSING_ALERT = f"TSP 资讯采集：{MISSING_TEXT}。"
-EXTRACT_ALERT = "TSP 资讯采集：09:00 仍未完成 ETF领航者当日申赎表格抽取。"
+EXTRACT_ALERT = "TSP 资讯采集：15:00 仍未完成 ETF领航者当日申赎表格抽取。"
+RECOVERED_ALERT = "TSP 资讯采集：ETF领航者当日申赎已补采。"
 VISION_PROMPT = (
     "你是表格抽取器。下面这张图是公众号「ETF领航者」申赎表中的一张，正文几乎没有文字。\n"
     "只输出一个 JSON 对象，不要解释，不要编造看不清的数字。\n"
@@ -151,18 +163,25 @@ def _until(now: datetime, target: datetime) -> int:
 
 
 def etf_wait_seconds(now: datetime, *, pending: bool) -> int:
-    """pending 时停在 07:35–09:00 里每 15 分钟再看；否则等到下一个 07:35。"""
+    """pending 时 07:35–09:00 每 15 分钟，09:00–15:00 每 30 分钟；否则等到下一个 07:35。"""
     now = now.astimezone(CN_TZ)
     clock = _clock(now)
     start = datetime.combine(now.date(), POLL_START, tzinfo=CN_TZ)
+    soft = datetime.combine(now.date(), SOFT_AT, tzinfo=CN_TZ)
     end = datetime.combine(now.date(), POLL_END, tzinfo=CN_TZ)
     if clock < POLL_START:
         return _until(now, start)
     if pending and clock < POLL_END:
-        nxt = now + timedelta(seconds=POLL_EVERY)
-        if nxt >= end:
-            return _until(now, end)
-        return POLL_EVERY
+        if clock < SOFT_AT:
+            step = POLL_EVERY
+            boundary = soft
+        else:
+            step = POLL_EVERY_LATE
+            boundary = end
+        nxt = now + timedelta(seconds=step)
+        if nxt >= boundary:
+            return _until(now, boundary)
+        return step
     return _until(now, start + timedelta(days=1))
 
 
@@ -188,7 +207,7 @@ def is_check_morning(
     today_trading: bool | None,
     yesterday_trading: bool | None,
 ) -> bool:
-    """期待新稿的早晨，以及今天开市的早晨（用于补抓）。"""
+    """期待新稿的日子，以及今天开市的日子（用于补抓）。不看钟点。"""
     if expects_publication(now, yesterday_trading):
         return True
     if today_trading is False:
@@ -608,25 +627,41 @@ def _remember_backfill(root: Path, status: dict[str, str], day: str, value: str)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """命令行回补。``--dates`` 指定交易日，``--since`` 可以早于 2026-07-08。"""
+    """命令行回补，或用一篇微信原文补采。``--since`` 可以早于 2026-07-08。"""
     import argparse
 
-    parser = argparse.ArgumentParser(description="回补 ETF领航者指定交易日的申赎稿")
+    parser = argparse.ArgumentParser(description="回补 ETF领航者指定交易日的申赎稿，或用微信原文链接补采")
     parser.add_argument("--data-dir", default="", help="TSP data 目录，默认 DATA_DIR 或 ./data")
     parser.add_argument("--dates", default="", help="逗号分隔的交易日，如 2026-07-07,2026-06-30")
     parser.add_argument("--since", default="", help="回补起点（含）。可以早于 2026-07-08")
     parser.add_argument("--until", default="", help="回补终点（含）。默认今天（北京时间）")
     parser.add_argument("--retry-missing", action="store_true", help="重新查找已经标成源缺失的日期")
+    parser.add_argument(
+        "--url",
+        default="",
+        help="直接采集一篇 mp.weixin.qq.com 文章，支持 /s/ 短链",
+    )
     args = parser.parse_args(argv)
+    root = _cli_data_dir(args.data_dir)
+    if args.url.strip():
+        if args.dates.strip() or args.since.strip() or args.until.strip() or args.retry_missing:
+            print("--url 不要和回补日期一起用。")
+            return 2
+        try:
+            result = ingest_wechat_url(args.url, data_dir=root)
+        except ExtractFailedError as exc:
+            print(_public_error(exc) or "采集失败")
+            return 1
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result.get("found") else 1
     try:
         days = backfill_dates(dates=args.dates, since=args.since, until=args.until)
     except ValueError as exc:
         print(str(exc))
         return 2
     if not days:
-        print("没有要回补的日期。用 --dates 或 --since。")
+        print("没有要回补的日期。用 --dates、--since，或 --url。")
         return 2
-    root = _cli_data_dir(args.data_dir)
     summary = backfill_etf_flow(dates=days, data_dir=root, retry_missing=args.retry_missing)
     print(json.dumps(summary, ensure_ascii=False))
     return 1 if summary.get("errors") else 0
@@ -689,6 +724,111 @@ def wechat_article_id(url: str) -> str:
     if mid.isdigit():
         return mid
     return ""
+
+
+def resolve_wechat_article_url(html_text: str, final_url: str) -> str:
+    """短链 /s/xxx 没有 sn。从长链和正文里补齐 __biz、mid、idx、sn。
+
+    只填空缺。跳转地址上已经有的 sn 不被正文里的另一条链接覆盖。
+    """
+    params = _wechat_query_params(final_url)
+    text = html.unescape(html_text or "")
+    text = text.replace("\\u0026", "&").replace("\\/", "/")
+    for match in re.finditer(r"https://mp\.weixin\.qq\.com/s\?[^\"'\s<>\\]+", text, re.I):
+        found = _wechat_query_params(match.group(0))
+        for key in ("__biz", "mid", "idx", "sn"):
+            if found.get(key) and not params.get(key):
+                params[key] = found[key]
+    for key, value in _wechat_js_params(text).items():
+        if value and not params.get(key):
+            params[key] = value
+    if not params.get("sn") and not (params.get("mid") or "").isdigit():
+        return (final_url or "").split("#", 1)[0][:500]
+    if params.get("mid") and not params.get("idx"):
+        params["idx"] = "1"
+    pairs = [(key, params[key]) for key in ("__biz", "mid", "idx", "sn") if params.get(key)]
+    if not pairs:
+        return (final_url or "").split("#", 1)[0][:500]
+    return "https://mp.weixin.qq.com/s?" + urlencode(pairs)
+
+
+def wechat_published_at(html_text: str) -> datetime | None:
+    """微信正文里的发布时间。短链补采没有列表时间，只能读页面。"""
+    text = html.unescape(html_text or "")
+    match = re.search(r"""id=["']publish_time["'][^>]*>([^<]+)""", text)
+    if match:
+        parsed = _parse_cn_clock(match.group(1))
+        if parsed is not None:
+            return parsed
+    ct = re.search(r"""(?<![A-Za-z0-9_])ct\s*[:=]\s*["'](\d{10})["']""", text)
+    if not ct:
+        return None
+    try:
+        return datetime.fromtimestamp(int(ct.group(1)), tz=CN_TZ)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _wechat_query_params(url: str) -> dict[str, str]:
+    query = parse_qs(urlparse(html.unescape(url or "")).query)
+    found: dict[str, str] = {}
+    for key in ("__biz", "mid", "idx", "sn"):
+        values = query.get(key) or []
+        if values and str(values[0]).strip():
+            found[key] = str(values[0]).strip()
+    return found
+
+
+def _wechat_js_params(text: str) -> dict[str, str]:
+    found: dict[str, str] = {}
+    biz = _grab_js(text, "biz") or _grab_js(text, "__biz")
+    if biz:
+        found["__biz"] = biz
+    for key in ("mid", "idx", "sn"):
+        value = _grab_js(text, key)
+        if value:
+            found[key] = value
+    return found
+
+
+def _grab_js(text: str, name: str) -> str:
+    pattern = rf"""(?<![A-Za-z0-9_])["']?{re.escape(name)}["']?\s*[:=]\s*["']([^"']*)["']"""
+    for match in re.finditer(pattern, text):
+        value = _valid_js_value(name, match.group(1).strip())
+        if value:
+            return value
+    return ""
+
+
+def _valid_js_value(name: str, value: str) -> str:
+    if name in {"mid", "idx"}:
+        return value if value.isdigit() else ""
+    if name == "sn":
+        return value if re.fullmatch(r"[0-9A-Za-z_-]{6,128}", value) else ""
+    if name in {"biz", "__biz"}:
+        return value if re.fullmatch(r"[0-9A-Za-z_=+/-]{4,128}", value) else ""
+    return ""
+
+
+def _parse_cn_clock(raw: str) -> datetime | None:
+    match = re.search(
+        r"(?P<y>\d{4})\s*年\s*(?P<m>\d{1,2})\s*月\s*(?P<d>\d{1,2})\s*日"
+        r"(?:\s*(?P<h>\d{1,2})\s*:\s*(?P<min>\d{2}))?",
+        raw or "",
+    )
+    if not match:
+        return parse_time(raw)
+    try:
+        return datetime(
+            int(match.group("y")),
+            int(match.group("m")),
+            int(match.group("d")),
+            int(match.group("h") or 0),
+            int(match.group("min") or 0),
+            tzinfo=CN_TZ,
+        )
+    except ValueError:
+        return None
 
 
 def vision_payload(
@@ -916,6 +1056,38 @@ def sogou_begin(path: Path, now: datetime) -> bool:
     return True
 
 
+def _consume_live_sogou(root: Path, now: datetime) -> bool:
+    """日内采集少打搜狗。07:35–09:00 一次，09:00 之后一次。
+
+    这个公众号从服务器 IP 搜出来是空的。15 分钟轮询不能把和回补共用的
+    一天 4 次额度在上午用完。两次仍至少隔 20 分钟。
+    """
+    now = now.astimezone(CN_TZ)
+    budget = root / "news" / "etf_sogou_budget.json"
+    phase = "live_morning" if _clock(now) < SOFT_AT else "live_afternoon"
+    state = _load_budget(budget)
+    if state.get("date") == now.date().isoformat():
+        try:
+            used = int(state.get(phase) or 0)
+        except (TypeError, ValueError):
+            used = 0
+        if used >= LIVE_SOGOU_PER_PHASE:
+            return False
+    if not sogou_begin(budget, now):
+        return False
+    state = _load_budget(budget)
+    try:
+        state[phase] = int(state.get(phase) or 0) + 1
+    except (TypeError, ValueError):
+        state[phase] = 1
+    try:
+        budget.parent.mkdir(parents=True, exist_ok=True)
+        budget.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        logger.warning("ETF领航者搜狗次数写不进去")
+    return True
+
+
 def collect_etf_flow(
     client: httpx.Client | None = None,
     *,
@@ -948,20 +1120,24 @@ def collect_etf_flow(
         message = _public_error(exc) or "表格抽取失败"
         logger.warning("ETF领航者表格抽取失败: %s", message)
         _mark_err(message)
-        if _deadline(now):
+        if _hard_deadline(now):
             # 只在「今天应有新稿」时提醒。周一补抓失败记健康检查，不把旧稿抽失败报成当日缺稿。
             if expect:
-                _alert(root, now.date(), EXTRACT_ALERT)
+                _alert(root, now.date(), EXTRACT_ALERT, kind="hard")
             return _result(error=message)
+        if expect and _soft_due(now):
+            _alert(root, now.date(), SOFT_EXTRACT_ALERT, kind="soft")
         return _result(error=message, pending=True)
     except Exception as exc:  # noqa: BLE001 — 单源失败不能拖垮其他资讯轮询
         message = _public_error(exc) or "采集失败"
         logger.warning("ETF领航者采集失败: %s", message)
         _mark_err(message)
-        if _deadline(now) and expect:
-            _alert(root, now.date(), MISSING_ALERT)
+        if expect and _hard_deadline(now):
+            _alert(root, now.date(), MISSING_ALERT, kind="hard")
             return _result(error=message)
-        return _result(error=message, pending=not _deadline(now))
+        if expect and _soft_due(now):
+            _alert(root, now.date(), SOFT_MISSING_ALERT, kind="soft")
+        return _result(error=message, pending=not _hard_deadline(now))
     finally:
         if own:
             client.close()
@@ -969,7 +1145,68 @@ def collect_etf_flow(
 
 def _pull(client, now: datetime, root: Path, expect: bool) -> dict:
     ref, _reason = _resolve_ref(client, now, root, expect)
-    return _ingest_ref(client, ref)
+    return _note_recovered(root, now, _ingest_ref(client, ref))
+
+
+def ingest_wechat_url(
+    url: str,
+    client: httpx.Client | None = None,
+    *,
+    now: datetime | None = None,
+    data_dir: Path | None = None,
+) -> dict:
+    """用一篇 mp.weixin.qq.com 原文补采。短链先还原 sn，入库和每日采集相同。"""
+    now = (now or _cn_now()).astimezone(CN_TZ)
+    root = data_dir or settings.data_dir
+    target = _normalize_wechat_input(url)
+    if not vision_api_key():
+        raise ExtractFailedError("未配置 VISION_AI_API_KEY")
+    own = client is None
+    client = client or httpx.Client(timeout=60.0, follow_redirects=False)
+    try:
+        html_text, final = _fetch(client, target, allow_hosts={WECHAT_HOST})
+        if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
+            raise ExtractFailedError("微信文章地址无效")
+        resolved = resolve_wechat_article_url(html_text, final)
+        published = wechat_published_at(html_text)
+        if published is None:
+            raise ExtractFailedError("微信文章缺少发布时间")
+        ref = ArticleRef(
+            article_id="",
+            title=_activity_title(html_text),
+            url=resolved,
+            published_at=published,
+            channel="wechat",
+        )
+        page = parse_wechat_article(html_text, resolved, ref)
+        result = _store_page(client, page)
+        _mark_manual_backfill(root, page)
+        return _note_recovered(root, now, result)
+    except ExtractFailedError:
+        raise
+    except Exception as exc:  # 补采失败要带回给命令行和接口
+        raise ExtractFailedError(_public_error(exc) or "采集失败") from exc
+    finally:
+        if own:
+            client.close()
+
+
+def _normalize_wechat_input(url: str) -> str:
+    text = (url or "").strip()
+    if len(text) > 800:
+        raise ExtractFailedError("文章地址过长")
+    parsed = urlparse(text)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or ""
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or host != WECHAT_HOST
+        or not (path == "/s" or path.startswith("/s/"))
+    ):
+        raise ExtractFailedError("只接受 mp.weixin.qq.com 的文章地址")
+    return text.split("#", 1)[0]
 
 
 def _ingest_ref(client, ref: ArticleRef) -> dict:
@@ -977,6 +1214,10 @@ def _ingest_ref(client, ref: ArticleRef) -> dict:
         _mark_ok()
         return _result(found=True)
     page = _load_page(client, ref)
+    return _store_page(client, page)
+
+
+def _store_page(client, page: ArticlePage) -> dict:
     source_id = f"{page.channel}:{page.article_id}"
     if _known(source_id):
         _mark_ok()
@@ -1028,8 +1269,7 @@ def _resolve_ref(client, now: datetime, root: Path, expect: bool) -> tuple[Artic
     chosen, reason = choose_flow_article(refs, day=now.date(), expect=expect)
     if chosen is not None and (reason == "today" or not expect):
         return chosen, reason
-    budget = root / "news" / "etf_sogou_budget.json"
-    if not sogou_begin(budget, now):
+    if not _consume_live_sogou(root, now):
         if netease_error is not None and chosen is None:
             raise netease_error
         raise ArticleMissingError()
@@ -1074,7 +1314,7 @@ def _load_page(client, ref: ArticleRef) -> ArticlePage:
     html_text, final = _fetch(client, ref.url, allow_hosts=_WECHAT_FETCH_HOSTS)
     if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
         raise ExtractFailedError("微信文章地址无效")
-    return parse_wechat_article(html_text, final, ref)
+    return parse_wechat_article(html_text, resolve_wechat_article_url(html_text, final), ref)
 
 
 def _call_vision(client, images: list[str]) -> dict:
@@ -1183,14 +1423,17 @@ def _post_vision(client, body: dict, key: str) -> dict:
 
 
 def _missing(now: datetime, root: Path, expect: bool) -> dict:
-    if not _deadline(now):
-        return _result(pending=True)
-    if not expect:
+    if _hard_deadline(now):
+        if not expect:
+            return _result()
+        logger.warning("ETF领航者当日文章缺失")
+        _mark_err(MISSING_TEXT)
+        _alert(root, now.date(), MISSING_ALERT, kind="hard")
         return _result()
-    logger.warning("ETF领航者当日文章缺失")
-    _mark_err(MISSING_TEXT)
-    _alert(root, now.date(), MISSING_ALERT)
-    return _result()
+    if expect and _soft_due(now):
+        _mark_err(SOFT_MISSING_TEXT)
+        _alert(root, now.date(), SOFT_MISSING_ALERT, kind="soft")
+    return _result(pending=True)
 
 
 def _fetch(
@@ -1294,8 +1537,8 @@ def _location(response) -> str:
     return str(getter("location") or getter("Location") or "")
 
 
-def _alert(root: Path, day: date, message: str) -> None:
-    path = root / "news" / "health" / f"alert-etf_flow-{day.isoformat()}.txt"
+def _alert(root: Path, day: date, message: str, *, kind: str) -> None:
+    path = _alert_path(root, day, kind)
     if path.is_file():
         return
     try:
@@ -1305,6 +1548,35 @@ def _alert(root: Path, day: date, message: str) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(day.isoformat(), encoding="utf-8")
+
+
+def _alert_path(root: Path, day: date, kind: str) -> Path:
+    return root / "news" / "health" / f"alert-etf_flow-{kind}-{day.isoformat()}.txt"
+
+
+def _alert_sent(root: Path, day: date, kind: str) -> bool:
+    return _alert_path(root, day, kind).is_file()
+
+
+def _note_recovered(root: Path, now: datetime, result: dict) -> dict:
+    """暂缺或失败之后补进了当天的稿，再发一条不带数字的「已补采」。"""
+    if int(result.get("inserted") or 0) <= 0:
+        return result
+    day = now.astimezone(CN_TZ).date()
+    if not _published_on(day):
+        return result
+    if not (_alert_sent(root, day, "soft") or _alert_sent(root, day, "hard")):
+        return result
+    _alert(root, day, RECOVERED_ALERT, kind="recovered")
+    return result
+
+
+def _mark_manual_backfill(root: Path, page: ArticlePage) -> None:
+    day = trade_date_from_title(page.title, page.published_at)
+    if not day:
+        return
+    status = _load_backfill_status(root)
+    _remember_backfill(root, status, day, "已入库")
 
 
 def _trading_flags(
@@ -1319,8 +1591,13 @@ def _trading_flags(
     return today_trading, yesterday_trading
 
 
-def _deadline(now: datetime) -> bool:
+def _hard_deadline(now: datetime) -> bool:
     return _clock(now) >= POLL_END
+
+
+def _soft_due(now: datetime) -> bool:
+    clock = _clock(now)
+    return SOFT_AT <= clock < POLL_END
 
 
 def _result(

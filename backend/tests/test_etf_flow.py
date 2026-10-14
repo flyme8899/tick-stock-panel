@@ -36,6 +36,7 @@ from app.news.etf_flow import (
     etf_wait_seconds,
     expects_publication,
     flow_mentions,
+    ingest_wechat_url,
     is_check_morning,
     main,
     normalize_flow,
@@ -44,6 +45,8 @@ from app.news.etf_flow import (
     parse_sogou_account,
     parse_sogou_articles,
     parse_vision_response,
+    parse_wechat_article,
+    resolve_wechat_article_url,
     sogou_begin,
     trade_date_from_title,
     vision_payload,
@@ -54,6 +57,7 @@ from app.news.service import get_store, health_payload, hot_candidates, reset_st
 FIXTURES = Path(__file__).parent / "fixtures" / "etf_flow"
 SATURDAY = datetime(2026, 10, 10, 7, 40, tzinfo=CN_TZ)
 DEADLINE = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
+HARD_END = datetime(2026, 10, 10, 15, 0, tzinfo=CN_TZ)
 MONDAY = datetime(2026, 10, 12, 7, 40, tzinfo=CN_TZ)
 SUNDAY = datetime(2026, 10, 11, 8, 0, tzinfo=CN_TZ)
 WECHAT_FINAL = "https://mp.weixin.qq.com/s?__biz=abc&mid=9&idx=1&sn=a1b2c3d4"
@@ -620,6 +624,17 @@ def test_schedule_includes_saturday_after_friday_and_skips_sunday():
     done = datetime(2026, 10, 10, 7, 40, tzinfo=CN_TZ)
     nxt = datetime(2026, 10, 11, 7, 35, tzinfo=CN_TZ)
     assert etf_wait_seconds(done, pending=False) == int((nxt - done).total_seconds())
+    at_soft = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
+    assert etf_wait_seconds(at_soft, pending=True) == 30 * 60
+    afternoon = datetime(2026, 10, 10, 14, 20, tzinfo=CN_TZ)
+    assert etf_wait_seconds(afternoon, pending=True) == 30 * 60
+    near_end = datetime(2026, 10, 10, 14, 40, tzinfo=CN_TZ)
+    assert etf_wait_seconds(near_end, pending=True) == int((HARD_END - near_end).total_seconds())
+    almost_hard = datetime(2026, 10, 10, 14, 59, 50, tzinfo=CN_TZ)
+    assert etf_wait_seconds(almost_hard, pending=True) == 30
+    after = datetime(2026, 10, 10, 15, 10, tzinfo=CN_TZ)
+    assert etf_wait_seconds(after, pending=True) == int((nxt - after).total_seconds())
+    assert etf_wait_seconds(after, pending=False) == int((nxt - after).total_seconds())
 
 
 def test_weekend_probe_does_not_ask_calendar(monkeypatch):
@@ -820,18 +835,37 @@ def test_missing_article_alerts_at_deadline_without_numbers(news_db, monkeypatch
     )
     assert early["pending"] is True
     assert sent == []
-    late = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
-    assert late["found"] is False
-    assert late["pending"] is False
+    soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    assert soft["found"] is False
+    assert soft["pending"] is True
     assert len(sent) == 1
-    message = sent[0][2]
+    assert "暂缺" in sent[0][2]
+    assert "仍未采集到" not in sent[0][2]
+    assert "http" not in sent[0][2]
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    assert "暂缺" in rows["etf_flow"]["last_error"]
+    later = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 12, 0, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert later["pending"] is True
+    assert len(sent) == 1
+    hard = _collect(client, news_db, HARD_END, today_trading=False, yesterday_trading=True)
+    assert hard["found"] is False
+    assert hard["pending"] is False
+    assert len(sent) == 2
+    message = sent[1][2]
     assert "仍未采集到" in message
+    assert "15:00" in message
     assert "510300" not in message
     assert "http" not in message
     rows = {row["source"]: row for row in get_store().health_rows()}
     assert "仍未采集到" in rows["etf_flow"]["last_error"]
-    _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
-    assert len(sent) == 1
+    _collect(client, news_db, HARD_END, today_trading=False, yesterday_trading=True)
+    assert len(sent) == 2
 
 
 def test_vision_failure_retries_then_alerts_extract(news_db, monkeypatch):
@@ -852,10 +886,15 @@ def test_vision_failure_retries_then_alerts_extract(news_db, monkeypatch):
     assert early["pending"] is True
     assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 0
     assert sent == []
-    late = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
-    assert late["pending"] is False
-    assert "表格抽取" in sent[0][2]
+    soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    assert soft["pending"] is True
+    assert "暂缺" in sent[0][2]
     assert "12.5" not in sent[0][2]
+    late = _collect(client, news_db, HARD_END, today_trading=False, yesterday_trading=True)
+    assert late["pending"] is False
+    assert len(sent) == 2
+    assert "表格抽取" in sent[1][2]
+    assert "12.5" not in sent[1][2]
 
 
 def test_monday_catchup_skips_sogou_and_known_article(news_db):
@@ -989,10 +1028,20 @@ def test_monday_extract_failure_does_not_alert(news_db, monkeypatch):
         article=_text("netease_article.html"),
         vision={"choices": [{"message": {"content": "不是表格"}}]},
     )
-    late = _collect(
+    soft = _collect(
         client,
         news_db,
         datetime(2026, 10, 12, 9, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert soft["found"] is False
+    assert soft["pending"] is True
+    assert sent == []
+    late = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 15, 0, tzinfo=CN_TZ),
         today_trading=True,
         yesterday_trading=False,
     )
@@ -1170,3 +1219,206 @@ def test_backfill_cli_passes_dates_before_floor(news_db, monkeypatch, capsys):
     printed = json.loads(capsys.readouterr().out)
     assert printed["errors"] == []
     assert printed["missing"] == []
+
+
+def test_live_sogou_runs_once_per_phase(news_db):
+    client = Client(media=_text("netease_media_stale.html"), sogou="<ul class='news-list2'></ul>")
+    first = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 8, 0, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert first["pending"] is True
+    morning = [url for url in client.gets if "sogou.com" in url]
+    assert len(morning) == 1
+    second = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 8, 21, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert second["pending"] is True
+    assert [url for url in client.gets if "sogou.com" in url] == morning
+    third = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 9, 30, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert third["pending"] is True
+    afternoon = [url for url in client.gets if "sogou.com" in url]
+    assert len(afternoon) == 2
+    fourth = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 10, 0, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert fourth["pending"] is True
+    assert [url for url in client.gets if "sogou.com" in url] == afternoon
+    assert any("163.com" in url for url in client.gets)
+
+
+def test_soft_miss_then_recovered_notice(news_db, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        settings, "dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test"
+    )
+    monkeypatch.setattr(
+        "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
+    )
+    client = Client(media=_text("netease_media_stale.html"), sogou="<ul class='news-list2'></ul>")
+    soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    assert soft["pending"] is True
+    assert len(sent) == 1
+    assert "暂缺" in sent[0][2]
+    client.media = _text("netease_media.html")
+    client.article = _text("netease_article.html")
+    saved = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 10, 30, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert saved["inserted"] == 1
+    assert len(sent) == 2
+    assert "已补采" in sent[1][2]
+    assert "12.5" not in sent[1][2]
+    assert "http" not in sent[1][2]
+    again = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 11, 0, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert again["found"] is True
+    assert again["inserted"] == 0
+    assert len(sent) == 2
+
+
+def _short_wechat_html(*, published: datetime) -> str:
+    ct = str(int(published.timestamp()))
+    return (
+        "<h1 id=\"activity-name\">10月9日ETF基金申购和赎回</h1>"
+        "<script>"
+        "var msg_link = \"https://mp.weixin.qq.com/s?__biz=MzAbCdEf&amp;mid=9&amp;idx=1\";"
+        f"var sn = \"a1b2c3d4\"; var ct = \"{ct}\";"
+        "</script>"
+        "<div id=\"js_content\"><img data-src=\"https://mmbiz.qpic.cn/table1.jpg\" /></div>"
+    )
+
+
+def test_short_wechat_link_restores_sn_before_parse():
+    short = "https://mp.weixin.qq.com/s/AbCdEfGhIj"
+    html = _short_wechat_html(published=datetime(2026, 10, 10, 7, 31, tzinfo=CN_TZ))
+    ref = ArticleRef("", "10月9日ETF基金申购和赎回", short, SATURDAY, "wechat")
+    with pytest.raises(ExtractFailedError, match="缺少 id"):
+        parse_wechat_article(html, short, ref)
+    resolved = resolve_wechat_article_url(html, short)
+    assert "__biz=MzAbCdEf" in resolved
+    assert "mid=9" in resolved
+    assert "idx=1" in resolved
+    assert "sn=a1b2c3d4" in resolved
+    page = parse_wechat_article(html, resolved, ref)
+    assert page.article_id == "a1b2c3d4"
+    assert page.images == ["https://mmbiz.qpic.cn/table1.jpg"]
+    kept = resolve_wechat_article_url(
+        "var sn = \"ffffffff\";",
+        "https://mp.weixin.qq.com/s?__biz=abc&mid=9&idx=1&sn=a1b2c3d4",
+    )
+    assert "sn=a1b2c3d4" in kept
+    assert "ffffffff" not in kept
+
+
+def test_manual_short_link_stores_like_daily_article(news_db):
+    published = datetime(2026, 10, 10, 7, 31, tzinfo=CN_TZ)
+    client = Client(media="", wechat=_short_wechat_html(published=published))
+    short = "https://mp.weixin.qq.com/s/AbCdEfGhIj"
+    saved = ingest_wechat_url(
+        short,
+        client,
+        now=published + timedelta(hours=3),
+        data_dir=news_db,
+    )
+    assert saved["inserted"] == 1
+    assert saved["found"] is True
+    row = get_store()._conn.execute(
+        "SELECT source_id, title, url, media_ids, raw_json, published_at FROM news_items"
+    ).fetchone()
+    assert row["source_id"] == "wechat:a1b2c3d4"
+    assert row["title"] == "10月9日ETF基金申购和赎回"
+    assert "sn=a1b2c3d4" in row["url"]
+    assert "__biz=MzAbCdEf" in row["url"]
+    assert "mid=9" in row["url"]
+    assert "idx=1" in row["url"]
+    raw = json.loads(row["raw_json"])
+    assert raw["channel"] == "wechat"
+    assert raw["trade_date"] == "2026-10-09"
+    assert raw["extracted"]["overview"]["net_1d"] == 12.5
+    assert json.loads(row["media_ids"]) == ["https://mmbiz.qpic.cn/table1.jpg"]
+    assert row["published_at"].startswith("2026-10-10T07:31:00")
+    status = json.loads((news_db / "news" / "etf_flow_backfill.json").read_text(encoding="utf-8"))
+    assert status["dates"]["2026-10-09"] == "已入库"
+    again = ingest_wechat_url(short, client, now=published + timedelta(hours=4), data_dir=news_db)
+    assert again["found"] is True
+    assert again["inserted"] == 0
+    with pytest.raises(ExtractFailedError, match=r"mp\.weixin\.qq\.com"):
+        ingest_wechat_url("https://evil.example/s/abc", client, data_dir=news_db)
+
+
+def test_cli_url_ingests_short_link(news_db, monkeypatch, capsys):
+    seen: dict = {}
+
+    def fake(url, client=None, **kwargs):
+        seen["url"] = url
+        seen["data_dir"] = kwargs.get("data_dir")
+        return {"found": True, "pending": False, "inserted": 1, "duplicate": 0}
+
+    monkeypatch.setattr("app.news.etf_flow.ingest_wechat_url", fake)
+    code = main(["--data-dir", str(news_db), "--url", "https://mp.weixin.qq.com/s/AbCdEfGhIj"])
+    assert code == 0
+    assert seen["url"] == "https://mp.weixin.qq.com/s/AbCdEfGhIj"
+    assert seen["data_dir"] == news_db
+    assert json.loads(capsys.readouterr().out)["inserted"] == 1
+    mixed = main(
+        ["--data-dir", str(news_db), "--url", "https://mp.weixin.qq.com/s/x", "--dates", "2026-10-09"]
+    )
+    assert mixed == 2
+
+
+def test_etf_flow_ingest_api_rejects_foreign_host_and_accepts_url(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.news import router
+    from app.services.api_gateway import required_scope
+
+    assert required_scope("POST", "/api/news/etf-flow/ingest") is None
+    app = FastAPI()
+    app.include_router(router)
+    http = TestClient(app)
+    rejected = http.post("/api/news/etf-flow/ingest", json={"url": "https://evil.example/s/abc"})
+    assert rejected.status_code == 400
+    assert "mp.weixin.qq.com" in rejected.json()["detail"]
+
+    seen: dict = {}
+
+    def fake(url, client=None, **kwargs):
+        seen["url"] = url
+        return {"found": True, "pending": False, "inserted": 1, "duplicate": 0}
+
+    monkeypatch.setattr("app.news.etf_flow.ingest_wechat_url", fake)
+    accepted = http.post(
+        "/api/news/etf-flow/ingest",
+        json={"url": "https://mp.weixin.qq.com/s/AbCdEfGhIj"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["inserted"] == 1
+    assert seen["url"] == "https://mp.weixin.qq.com/s/AbCdEfGhIj"
