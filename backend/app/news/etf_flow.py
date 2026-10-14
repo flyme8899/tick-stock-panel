@@ -729,19 +729,17 @@ def wechat_article_id(url: str) -> str:
 def resolve_wechat_article_url(html_text: str, final_url: str) -> str:
     """短链 /s/xxx 没有 sn。从长链和正文里补齐 __biz、mid、idx、sn。
 
-    只填空缺。跳转地址上已经有的 sn 不被正文里的另一条链接覆盖。
+    正文模板里的 ``${window.sn}`` 不是合法参数。真实 JS 赋值可以盖过这种占位。
+    跳转地址上已经合格的 sn 不被另一条链接覆盖。
     """
     params = _wechat_query_params(final_url)
     text = html.unescape(html_text or "")
     text = text.replace("\\u0026", "&").replace("\\/", "/")
     for match in re.finditer(r"https://mp\.weixin\.qq\.com/s\?[^\"'\s<>\\]+", text, re.I):
-        found = _wechat_query_params(match.group(0))
-        for key in ("__biz", "mid", "idx", "sn"):
-            if found.get(key) and not params.get(key):
-                params[key] = found[key]
+        for key, value in _wechat_query_params(match.group(0)).items():
+            _fill_param(params, key, value)
     for key, value in _wechat_js_params(text).items():
-        if value and not params.get(key):
-            params[key] = value
+        _fill_param(params, key, value)
     if not params.get("sn") and not (params.get("mid") or "").isdigit():
         return (final_url or "").split("#", 1)[0][:500]
     if params.get("mid") and not params.get("idx"):
@@ -753,7 +751,11 @@ def resolve_wechat_article_url(html_text: str, final_url: str) -> str:
 
 
 def wechat_published_at(html_text: str) -> datetime | None:
-    """微信正文里的发布时间。短链补采没有列表时间，只能读页面。"""
+    """微信正文里的发布时间。短链补采没有列表时间，只能读页面。
+
+    ``publish_time`` 节点经常是空的，由前端再填。没有它、也没有 unix ``ct`` 时，
+    读 ``create_time: 'YYYY-MM-DD HH:MM'``，按北京时间理解。
+    """
     text = html.unescape(html_text or "")
     match = re.search(r"""id=["']publish_time["'][^>]*>([^<]+)""", text)
     if match:
@@ -761,12 +763,19 @@ def wechat_published_at(html_text: str) -> datetime | None:
         if parsed is not None:
             return parsed
     ct = re.search(r"""(?<![A-Za-z0-9_])ct\s*[:=]\s*["'](\d{10})["']""", text)
-    if not ct:
+    if ct:
+        try:
+            return datetime.fromtimestamp(int(ct.group(1)), tz=CN_TZ)
+        except (OSError, OverflowError, ValueError):
+            pass
+    created = re.search(
+        r"""(?<![A-Za-z0-9_])(?:ori_create_time|create_time)\s*[:=]\s*["']"""
+        r"""(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?)["']""",
+        text,
+    )
+    if not created:
         return None
-    try:
-        return datetime.fromtimestamp(int(ct.group(1)), tz=CN_TZ)
-    except (OSError, OverflowError, ValueError):
-        return None
+    return parse_time(created.group(1).replace("T", " "))
 
 
 def _wechat_query_params(url: str) -> dict[str, str]:
@@ -774,9 +783,26 @@ def _wechat_query_params(url: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for key in ("__biz", "mid", "idx", "sn"):
         values = query.get(key) or []
-        if values and str(values[0]).strip():
-            found[key] = str(values[0]).strip()
+        if not values:
+            continue
+        _fill_param(found, key, str(values[0]))
     return found
+
+
+def _fill_param(params: dict[str, str], key: str, value: str) -> None:
+    """空缺或占位才写入。已经合格的值保持不动。"""
+    cleaned = _clean_param(key, value)
+    if not cleaned:
+        return
+    current = params.get(key) or ""
+    if current and _clean_param(key, current):
+        return
+    params[key] = cleaned
+
+
+def _clean_param(key: str, value: str) -> str:
+    name = "biz" if key == "__biz" else key
+    return _valid_js_value(name, (value or "").strip())
 
 
 def _wechat_js_params(text: str) -> dict[str, str]:
@@ -801,6 +827,9 @@ def _grab_js(text: str, name: str) -> str:
 
 
 def _valid_js_value(name: str, value: str) -> str:
+    # ${window.sn} 这类模板会出现在正文链接里，不能当成已经解析出的参数。
+    if not value or any(mark in value for mark in ("$", "{", "}")):
+        return ""
     if name in {"mid", "idx"}:
         return value if value.isdigit() else ""
     if name == "sn":
