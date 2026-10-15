@@ -42,6 +42,29 @@ v_breadth = 近 20 个交易日, 每日 (上涨家数 / 下跌家数) 的均值
 
 ---
 
+## 2.5 ⚠️ 口径变更的影响与上线必做
+
+本 PR 改动了 `_aggregate_daily` 里**涨跌家数的统计口径**（原先未剔除毛刺，现改为剔除 `|日收益| > 25%`），
+这不只影响宽度提醒，也**顺带改变了这张表本身的 `up_count` / `down_count`**，进而牵连下游：
+
+- 同一行的 `up_ratio` / `up_pct` / `down_pct` 会跟着变（`change_pct` 为小数口径，`strong_up` 用 0.03，故 0.25 阈值同口径）。
+- `_compute_subscores` 里「赚钱」维度占 45% 权重 → **regime 的 `score` / `state` 会有小幅变化**。
+- 下游读取方：回测的 `regime_filter`、AI 助手的 `get_regime`、前端 Regime 页都读这张 `regime_history`。
+
+影响幅度**应该很小**：每天被剔除的 >25% 个股很少，主要是新股与北交所 ±30% 涨跌停的股票。
+
+**但必须注意口径混用**：增量计算只算缺失的日期 —— **历史行仍是旧口径，新行是新口径**，
+20 日窗口会把两种口径混在一起，`score` 序列也会断一截。因此：
+
+> **上线必做**：本 PR 部署后，必须执行一次 **`POST /api/regime/recompute` 全量重算**，
+> 让整条 `regime_history`（含 `up_count/down_count` 与派生的 score/state）统一到新口径。
+> 这是**有意为之**的口径修正 —— regime 分数会小幅变化，不是 bug。
+
+**注意（北交所）**：北交所个股 ±30% 涨跌停会被当作毛刺剔除。
+这与研究口径一致（研究同样剔除 `|r|>25%`），因此**保留该行为**，在此写明即可。
+
+---
+
 ## 3. 如何重算（复现 / 排障）
 
 ### 3.1 数据依赖
@@ -91,7 +114,7 @@ cd backend && .venv/bin/python ../research/regime_sizing/verify_backend_breadth.
 
 | 文件 | 改动 |
 |---|---|
-| `backend/app/services/regime_builder.py` | 新增 `BREADTH_*` 常量与 `classify_breadth` / `daily_breadth_ratio` / `compute_breadth_series` / `compute_breadth_latest`；`_aggregate_daily` 的涨跌家数改为**剔除毛刺**口径 |
+| `backend/app/services/regime_builder.py` | 新增 `BREADTH_*` 常量与 `classify_breadth` / `daily_breadth_ratio` / `compute_breadth_series` / `compute_breadth_latest`；`_aggregate_daily` 的涨跌家数改为**剔除毛刺**口径（连带影响 up_ratio/up_pct/score/state，见 §2.5） |
 | `backend/app/api/regime.py` | 新增只读端点 `GET /api/regime/breadth`、`GET /api/regime/breadth/latest` |
 | `backend/tests/test_regime_breadth.py` | 单测：阈值边界 / 毛刺剔除 / 无未来数据 / latest 辅助 / 阈值冻结 |
 | `frontend/src/lib/api.ts` | 新增 `regimeBreadth` / `regimeBreadthLatest` 与类型 |
@@ -99,6 +122,7 @@ cd backend && .venv/bin/python ../research/regime_sizing/verify_backend_breadth.
 | `frontend/src/components/data/BreadthBanner.tsx` | 新增横幅组件（低档醒目 / 中档弱提示 / 高档不渲染） |
 | `frontend/src/pages/Dashboard.tsx` | 顶部插入 `<BreadthBanner/>` |
 | `frontend/src/components/data/BreadthBanner.test.tsx` | 单测：低/中/高/无数据 四种渲染 |
+| `backend/tests/test_openapi_contract.py` | Tier A 开放契约快照加入两个新端点（有意识的契约变更） |
 | `research/regime_sizing/verify_backend_breadth.py` | 验收一致性脚本 |
 
 ---
