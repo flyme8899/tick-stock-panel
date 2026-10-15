@@ -2361,6 +2361,88 @@ def test_stock_intraday_respects_session_and_gap() -> None:
     )
 
 
+def test_stock_intraday_gap_polarity_and_boundaries() -> None:
+    """``_intraday_due()`` 的间隔边界与调用处**极性**回归护栏。
+
+    ``_intraday_due()`` 回答的是「这一轮**该不该拉**」：**到期返回 True**。所以
+    ``due_tasks`` 里必须写成 ``and _intraday_due(...)``。它与紧邻的 ``_recent()``
+    （「最近跑过」，未到期返回 True，调用处写 ``not _recent(...)``）**返回值语义相反**，
+    两个函数放在一起很容易被误改成 ``and not _intraday_due(...)`` —— 一旦改错，
+    判定整体反转：首轮不拉、成功后立刻重拉。本用例就是拦这一改动的。
+
+    断言是成对的：首轮必须入队、6 分钟内必须不入队、满 6 分钟必须入队。这三种状态
+    放在一起，``and`` 与 ``and not`` 的两种写法不可能同时满足；补上 ``not`` 会让首轮
+    那一条立刻失败。
+
+    与 ``test_stock_intraday_respects_session_and_gap`` 的分工：那条覆盖开关、熔断、
+    时段与基本间隔，本条补**边界值**、``last_snapshot`` 优先级、坏时间戳与极性护栏。
+    """
+    at = _day(10, 0)
+
+    def due(moment: datetime, kind_state: dict) -> list[str]:
+        return scheduler.due_tasks(
+            moment,
+            trading=True,
+            state={"kinds": {"stock_intraday": kind_state}},
+            flags=_flags(),
+            breakers_open=set(),
+        )
+
+    # 首轮：没有任何成功时刻 -> 该拉，保证第一份快照能落盘。
+    assert scheduler._intraday_due({}, at) is True
+    assert "stock_intraday" in due(at, {})
+
+    # 只有 last_attempt_at：那是「尝试」不是「成功」-> 仍然该拉。
+    only_attempt = {"last_attempt_at": at.isoformat()}
+    assert scheduler._intraday_due(only_attempt, at) is True
+    assert "stock_intraday" in due(at, only_attempt)
+
+    # 成功未满 6 分钟 -> 不该拉。含 0 秒与 359 秒两侧边界。
+    fresh = {"last_success_at": at.isoformat()}
+    for seconds in (0, 1, 30, 60, 300, 359):
+        moment = at + timedelta(seconds=seconds)
+        assert scheduler._intraday_due(fresh, moment) is False, seconds
+        assert "stock_intraday" not in due(moment, fresh), seconds
+
+    # 满 6 分钟 -> 该拉。含恰好 360 秒这一条边界。
+    for seconds in (360, 361, 420, 3600):
+        moment = at + timedelta(seconds=seconds)
+        assert scheduler._intraday_due(fresh, moment) is True, seconds
+        assert "stock_intraday" in due(moment, fresh), seconds
+
+    # last_snapshot 优先于 last_success_at：两个字段冲突时以快照时刻为准。
+    mixed = {
+        "last_snapshot": at.isoformat(),
+        "last_success_at": (at - timedelta(hours=2)).isoformat(),
+    }
+    assert scheduler._intraday_due(mixed, at + timedelta(seconds=30)) is False
+    assert scheduler._intraday_due(mixed, at + timedelta(minutes=10)) is True
+
+    # last_snapshot 写成无时区串时按上海时区解释，不能当成 UTC 而提前到期。
+    assert scheduler._intraday_due(
+        {"last_snapshot": at.strftime("%Y-%m-%dT%H:%M:%S")},
+        at + timedelta(seconds=30),
+    ) is False
+
+    # 坏时间戳 / 空串 / None 退化为「首轮，该拉」，不能因此当天再也不落盘。
+    for broken in ("不是时间", "", None):
+        assert scheduler._intraday_due({"last_success_at": broken}, at) is True, broken
+
+    # 间隔满足也不是唯一闸门：时段、开关、熔断仍然各自拦一次。
+    gap_ok = {"last_success_at": (at - timedelta(minutes=10)).isoformat()}
+    for hour, minute in ((9, 0), (12, 0), (15, 30)):
+        moment = datetime(2026, 10, 9, hour, minute, tzinfo=CN)
+        assert "stock_intraday" not in due(moment, gap_ok), (hour, minute)
+    assert "stock_intraday" not in scheduler.due_tasks(
+        at, trading=True, state={"kinds": {"stock_intraday": gap_ok}},
+        flags=_flags(stock_intraday=False), breakers_open=set(),
+    )
+    assert "stock_intraday" not in scheduler.due_tasks(
+        at, trading=True, state={"kinds": {"stock_intraday": gap_ok}},
+        flags=_flags(), breakers_open={"akshare"},
+    )
+
+
 def test_intraday_snapshot_is_latest_today_only(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FUND_FLOW_ENABLED", "true")
     monkeypatch.setenv("FUND_FLOW_INTRADAY_PRIMARY", "ths")
