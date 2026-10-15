@@ -268,8 +268,54 @@ def parse_notices(payload: object) -> list[dict]:
             "notice_date": day,
             "url": url,
             "source": "eastmoney_notice",
+            **notice_timing(row, day),
         })
     return out
+
+
+NOTICE_OPEN_HOUR = 9
+
+
+def notice_timing(row: dict, day: str) -> dict:
+    """公告的「可知时刻」。
+
+    东财公告列表有 ``display_time``（东财上架时刻，精确到毫秒）时，直接用它，
+    ``time_precision='second'``，``available_from`` 就是这一刻。只有日期时绝不编时间：
+    ``published_at`` 留空、``time_precision='date'``，``available_from`` 一律按盘后处理，
+    取下一开市日 09:00（走交易日历），研究和下游都只能在 T+1 开盘起使用。
+    """
+    exact = _notice_stamp(row.get("display_time") or row.get("displayTime"))
+    if exact:
+        return {"published_at": exact, "time_precision": "second", "available_from": exact}
+    return {"published_at": "", "time_precision": "date", "available_from": notice_next_open(day)}
+
+
+def notice_next_open(day: str) -> str:
+    if not day:
+        return ""
+    from datetime import date as _date
+
+    from app.news.market_confirm import _next_open_day
+
+    nxt = _next_open_day(_date.fromisoformat(day))
+    return f"{nxt.isoformat()}T{NOTICE_OPEN_HOUR:02d}:00:00"
+
+
+def _notice_stamp(value: object) -> str:
+    text = str(value or "").strip()
+    if len(text) < 19 or text[4] != "-" or text[10] not in " T":
+        return ""
+    head = text[:19].replace(" ", "T")
+    try:
+        from datetime import datetime as _dt
+
+        _dt.fromisoformat(head)
+    except ValueError:
+        return ""
+    if head.endswith("T00:00:00"):
+        # 只有日期被补成零点的，不算精确时间。
+        return ""
+    return head
 
 
 def parse_changes(payload: object, *, kind: str, trade_date: str) -> list[dict]:

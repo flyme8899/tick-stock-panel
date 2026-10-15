@@ -39,8 +39,11 @@ _worker: FundFlowWorker | None = None
 _worker_lock = threading.Lock()
 
 
-def tickflow_sync_busy() -> bool:
+def tickflow_sync_busy(*, include_minute: bool = True) -> bool:
     """日 K 管道或分钟同步正在写盘时返回 True。
+
+    ``include_minute=False`` 时只看日 K 管道。盘中分钟增量每 10 秒一轮、几乎一直
+    持锁，资金流盘中快照如果也礼让它，整个下午都落不了盘（线上 10-15 11:00 后停摆）。
 
     探测失败时返回 False（按「不忙」处理），但**必须留日志**：静默当成不忙会
     让资金流在重任务写盘期间抢跑，且事后完全查不到原因。
@@ -52,6 +55,8 @@ def tickflow_sync_busy() -> bool:
             return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("tickflow_sync_busy 探测 pipeline_jobs 失败, 按不忙处理: %s", exc)
+        return False
+    if not include_minute:
         return False
     try:
         from app.jobs.daily_pipeline import _get_app_state
@@ -565,7 +570,8 @@ class FundFlowWorker:
         if trading is None:
             trading = _default_trading(now)
         if busy is None:
-            busy = tickflow_sync_busy()
+            # 交易时段不再礼让分钟增量：它常驻持锁，礼让等于盘中快照全停。
+            busy = tickflow_sync_busy(include_minute=not trading)
         if busy and self._defer_allowed(now)[0]:
             self.deferred_reason = "tickflow_sync"
             # 心跳独立写：绝不因为让路而让「循环还活着」的信号倒退。
@@ -626,7 +632,7 @@ class FundFlowWorker:
                 trading=trading, known_days=known,
             )
             ran.append(name)
-            if tickflow_sync_busy():
+            if tickflow_sync_busy(include_minute=not trading):
                 self.deferred_reason = "tickflow_sync"
                 break
         self._persist_breakers(data_dir)

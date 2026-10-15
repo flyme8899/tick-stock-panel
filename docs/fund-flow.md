@@ -111,3 +111,12 @@ backfill_etf_share_history(Path("data"), live_clients(), breaker=CircuitBreaker(
 | `FUND_FLOW_MX_MAX_CALLS` | 30 | 注释 |
 
 总开关关掉时，子开关即使写了 true 也不拉。
+
+## 个股资金流 symbol 口径（2026-10）
+
+- `stock` / `stock_intraday` 分区的 `symbol` 统一为带交易所后缀（`600000.SH`、`000001.SZ`、`920001.BJ`），`code` 始终是 6 位裸代码。写入时补后缀；读取（`store.read_partition`）时同样收口，旧分区不重写也能读到统一口径。
+- 一次性重写历史分区：`python -m scripts.normalize_fund_flow_symbols [--dry-run]`。只改 `symbol` 列，不增删行。行数不足全市场的分区（如 `2026-10-08` 只有 6 行 mx）只标记，不补数。
+
+## 盘中个股快照与分钟同步的让路
+
+交易时段内资金流调度只礼让日 K 管道，不再礼让分钟增量同步（分钟增量每 10 秒一轮、几乎常驻持锁，礼让会让下午的 `stock_intraday` 快照整段缺失）。非交易时段仍两者都礼让。

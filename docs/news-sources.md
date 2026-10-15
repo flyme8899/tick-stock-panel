@@ -273,3 +273,15 @@ PYTHONPATH=backend backend/.venv/bin/python scripts/replay_push_rules.py --symbo
 分钟分区默认是 `data/kline_minute/date=*/part.parquet`。输出每种规则、每个阈值、每只股票、每个交易日的触发次数。
 
 放量异动、以及「上穿分时均价」那种需要分钟 K 的边沿，默认不推。
+
+## 公告可知时刻（notice 分区）
+
+东财公告列表的 `notice_date` 只有日期。现在额外落三列：
+
+| 列 | 含义 |
+|---|---|
+| `published_at` | 东财 `display_time`（上架时刻，到秒）。拿不到就留空，不编时间 |
+| `time_precision` | `second`：有真实时刻；`date`：只有日期 |
+| `available_from` | 研究/下游可用起点。`second` 时等于 `published_at`；`date` 时一律按盘后，取下一开市日 09:00（交易日历） |
+
+研究侧判断某条公告在 t 时刻是否已知，只看 `available_from <= t`。旧分区没有这三列的，按 `date` 处理（T+1 09:00 起可用）。入资讯库的 `published_at` 也改为同一可知时刻，不再硬编码 15:00。
