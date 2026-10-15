@@ -173,12 +173,64 @@ def _looks_like_raw_etf(rows: list[dict]) -> bool:
     )
 
 
+# 个股资金流的 symbol 统一写成带交易所后缀（600000.SH）。历史分区裸代码和带后缀混用，
+# 读的时候也按同一规则收口，研究侧不用再自己猜。code 列始终是 6 位裸代码。
+SUFFIX_SYMBOL_KINDS = frozenset({"stock", "stock_intraday"})
+
+
+def suffixed_symbol(raw: object) -> str:
+    """6 位 A 股代码补交易所后缀。认不出的原样返回，绝不编造。"""
+    text = str(raw or "").strip().upper()
+    if not text:
+        return ""
+    if "." in text:
+        head, _, tail = text.partition(".")
+        if tail in {"SH", "SZ", "BJ"} and len(head) == 6 and head.isdigit():
+            return f"{head}.{tail}"
+        return text
+    for prefix in ("SH", "SZ", "BJ"):
+        if text.startswith(prefix) and len(text) == 8 and text[2:].isdigit():
+            return f"{text[2:]}.{prefix}"
+    if len(text) != 6 or not text.isdigit():
+        return text
+    if text.startswith("92") or text[0] in "48":
+        return f"{text}.BJ"
+    if text[0] in "569":
+        return f"{text}.SH"
+    if text[0] in "023" or text.startswith("1"):
+        return f"{text}.SZ"
+    return text
+
+
+def _suffix_rows(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        item = dict(row)
+        base = item.get("symbol") or item.get("code")
+        if base:
+            item["symbol"] = suffixed_symbol(base)
+        out.append(item)
+    return out
+
+
+def _suffix_frame(frame: pl.DataFrame) -> pl.DataFrame:
+    if frame.is_empty() or "symbol" not in frame.columns:
+        return frame
+    source = pl.when(pl.col("symbol").fill_null("") == "").then(pl.col("code")).otherwise(pl.col("symbol")) \
+        if "code" in frame.columns else pl.col("symbol")
+    return frame.with_columns(
+        source.map_elements(suffixed_symbol, return_dtype=pl.Utf8).alias("symbol")
+    )
+
+
 def prepare_rows(kind: str, rows: list[dict]) -> list[dict]:
-    """ETF 原始行先收成内部字段。其它种类不在这里猜列名。"""
+    """ETF 原始行先收成内部字段；个股资金流 symbol 补后缀。其它种类不在这里猜列名。"""
     if kind == "etf_shares" and _looks_like_raw_etf(rows):
         from app.fund_flow.normalize import normalize_etf_shares
 
         return normalize_etf_shares(rows)
+    if kind in SUFFIX_SYMBOL_KINDS:
+        return _suffix_rows(rows)
     return rows
 
 
@@ -196,6 +248,14 @@ def assert_schema(kind: str, rows: list[dict]) -> None:
 
 
 def align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
+    """把分区收成内部列；个股资金流顺带把 symbol 收成带后缀。"""
+    aligned = _align_frame(kind, frame)
+    if kind in SUFFIX_SYMBOL_KINDS:
+        return _suffix_frame(aligned)
+    return aligned
+
+
+def _align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
     """把分区收成内部列。缺主键的分区能按 ETF 原始列还原，否则整段跳过。"""
     schema = _SCHEMAS[kind]
     if frame.is_empty():

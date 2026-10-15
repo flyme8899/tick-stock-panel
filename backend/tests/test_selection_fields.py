@@ -234,7 +234,7 @@ def test_scheduler_skips_when_the_heavy_slot_is_busy(monkeypatch, tmp_path) -> N
         "SELECTION_PE_TTM",
     ):
         monkeypatch.setenv(name, "true")
-    monkeypatch.setattr("app.fund_flow.scheduler.tickflow_sync_busy", lambda: True)
+    monkeypatch.setattr("app.fund_flow.scheduler.tickflow_sync_busy", lambda **_: True)
     calls: list[str] = []
 
     def ak(name, **_kwargs):
@@ -496,7 +496,7 @@ def test_timed_out_task_does_not_start_another_while_the_old_thread_runs(monkeyp
         "SELECTION_PE_TTM",
     ):
         monkeypatch.setenv(name, "true")
-    monkeypatch.setattr("app.fund_flow.scheduler.tickflow_sync_busy", lambda: False)
+    monkeypatch.setattr("app.fund_flow.scheduler.tickflow_sync_busy", lambda **_: False)
     monkeypatch.setattr("app.selection_fields.timeouts.DEFAULT_TASK_TIMEOUT_S", 0.4)
     now = datetime(2024, 1, 6, 18, 0, tzinfo=CN_TZ)
     day = "2024-01-05"

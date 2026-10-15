@@ -64,6 +64,9 @@ _SCHEMAS: dict[str, dict[str, pl.DataType]] = {
         "notice_date": pl.Utf8,
         "url": pl.Utf8,
         "source": pl.Utf8,
+        "published_at": pl.Utf8,
+        "time_precision": pl.Utf8,
+        "available_from": pl.Utf8,
     },
     "changes": {
         "code": pl.Utf8,

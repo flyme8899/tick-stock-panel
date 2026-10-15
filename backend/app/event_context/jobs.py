@@ -428,7 +428,7 @@ def _ingest_notices(rows: list[dict]) -> int:
 
     items = []
     for row in rows:
-        published = _published(row.get("notice_date"))
+        published = _published(row)
         code = str(row.get("code") or "")
         items.append(Item(
             source="notice",
@@ -459,10 +459,15 @@ def _mark_notice(*, ok: bool, items: int, error: str = "") -> None:
         logger.info("公告新入库 %s 条", items)
 
 
-def _published(day: object) -> datetime:
-    text = day_text(day) or cn_now().date().isoformat()
-    year, month, date = (int(part) for part in text.split("-"))
-    return cn_now().replace(year=year, month=month, day=date, hour=15, minute=0, second=0, microsecond=0)
+def _published(row: dict) -> datetime:
+    """入资讯库的时间。不编时刻：有东财上架时刻用它，只有日期就用 T+1 开盘的可知时刻。"""
+    from app.event_context.parse import notice_timing
+
+    stamp = str(row.get("available_from") or "")
+    if not stamp:
+        day = day_text(row.get("notice_date")) or cn_now().date().isoformat()
+        stamp = notice_timing(row, day)["available_from"]
+    return datetime.fromisoformat(stamp).replace(tzinfo=cn_now().tzinfo)
 
 
 def _load_szse_margin(day: str, stop, get: Getter) -> tuple[list[dict], str]:

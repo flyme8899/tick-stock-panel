@@ -555,7 +555,7 @@ def test_timed_out_task_does_not_start_another(monkeypatch, tmp_path) -> None:
         "EVENT_CONTEXT_CHANGES",
     ):
         monkeypatch.setenv(name, "true")
-    monkeypatch.setattr("app.fund_flow.scheduler.tickflow_sync_busy", lambda: False)
+    monkeypatch.setattr("app.fund_flow.scheduler.tickflow_sync_busy", lambda **_: False)
     monkeypatch.setattr("app.event_context.timeouts.DEFAULT_TASK_TIMEOUT_S", 0.4)
     blocked = threading.Event()
     calls: list[str] = []
