@@ -2695,6 +2695,26 @@ export interface NewsPushStatus {
   types: NewsPushType[]
 }
 
+/** 盘后复盘板的一行主题。`strength` 是笔记作者手写的强弱，原样展示，不是买卖信号。 */
+export interface NewsThemeRow {
+  theme: string
+  strength: string
+  day: string
+  published_at: string
+  source: string
+  title: string
+  url: string
+}
+
+export interface NewsThemeBoard {
+  days: number
+  posts: number
+  posts_with_table: number
+  rows: NewsThemeRow[]
+  note: string
+  error?: string
+}
+
 export interface PickerSourceItem {
   id: string
   name: string
@@ -4817,6 +4837,10 @@ export const api = {
     ),
 
   newsHealth: () => request<NewsHealth>('/api/news/health'),
+
+  /** 盘后复盘板：星球复盘笔记里的主题表，只读。 */
+  newsThemeBoard: (days = 7, limit = 400) =>
+    request<NewsThemeBoard>(`/api/news/theme-board?days=${days}&limit=${limit}`),
 
   newsSetSources: (sources: Record<string, { enabled: boolean }>) =>
     request<NewsHealth & { applied: Record<string, boolean> }>('/api/news/sources', {

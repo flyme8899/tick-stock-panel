@@ -414,6 +414,20 @@ class NewsStore:
             enriched.append(item)
         return enriched
 
+    def zsxq_posts(self, start: datetime, limit: int) -> list[sqlite3.Row]:
+        """知识星球帖子（按发布时间倒序）。只读，供盘后复盘板抽主题表用。"""
+        with self._lock:
+            return list(self._conn.execute(
+                """
+                SELECT id, source_id, published_at, author, title, clean_text, url, raw_json
+                FROM news_items
+                WHERE source = 'zsxq' AND published_at >= ?
+                ORDER BY published_at DESC
+                LIMIT ?
+                """,
+                (start.isoformat(), limit),
+            ))
+
     def items_missing_mentions(self, start: datetime, limit: int) -> list[sqlite3.Row]:
         with self._lock:
             return list(self._conn.execute(

@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 
 from app.config import settings
-from app.market_time import cn_now
+from app.market_time import CN_TZ, cn_now
 from app.news.cleaning import clean_text, content_hash, excerpt
 from app.news.collectors import (
     CLS_URL,
@@ -89,6 +89,7 @@ from app.news.extract import (
 )
 from app.news.scoring import Candidate, MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
+from app.news.theme_table import theme_rows_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -1689,6 +1690,79 @@ def _sector_names(repo) -> list[str]:
             if name and name not in wide:
                 names.append(name)
     return names
+
+
+def theme_board(*, days: int = 7, limit: int = 400) -> dict:
+    """盘后复盘板：把星球复盘笔记里的主题表汇总起来，**只读展示**。
+
+    用途限定（有意为之，勿扩）：
+
+    - 这是**复盘**用的只读视图，回答「这几天笔记里都提了哪些主题、作者怎么看强弱」。
+    - ``strength`` 是笔记作者手写的判断，**原样透传**，服务端不做打分、不算排名、
+      不映射成任何方向。前端也不得据此生成买点/做T 提示。
+    - 不做去重合并：同一主题在不同帖子里出现多次就列多条，保留上下文与原文日期，
+      汇总是前端的事（避免在服务端引入「哪个更新」这类口径）。
+
+    只读：只调 ``store.zsxq_posts``（一条 SELECT），不写库、不发网络请求。
+    """
+    span = max(1, min(int(days), 90))
+    cap = max(1, min(int(limit), 2000))
+    start = datetime.now(CN_TZ) - timedelta(days=span)
+    try:
+        rows = get_store().zsxq_posts(start, cap)
+    except Exception as exc:  # noqa: BLE001 - 复盘板读不到不该让页面 500
+        logger.warning("复盘板读取星球帖子失败: %s", exc)
+        return {"days": span, "posts": 0, "rows": [], "error": str(exc)[:200]}
+
+    items: list[dict] = []
+    posts_with_table = 0
+    for row in rows:
+        text = row["clean_text"] or ""
+        if "|" not in text:
+            continue
+        published = str(row["published_at"] or "")
+        found = theme_rows_from_text(
+            text, published_at=published, title=str(row["title"] or ""),
+        )
+        if not found:
+            continue
+        posts_with_table += 1
+        source = _zsxq_label(row)
+        for entry in found:
+            items.append({
+                "theme": entry.theme,
+                "strength": entry.strength,
+                "day": entry.display_day,
+                "published_at": published,
+                "source": source,
+                "title": str(row["title"] or "")[:120],
+                "url": _zsxq_url(row),
+            })
+
+    items.sort(key=lambda item: (item["day"] or "", item["published_at"] or ""), reverse=True)
+    return {
+        "days": span,
+        "posts": len(rows),
+        "posts_with_table": posts_with_table,
+        "rows": items,
+        "note": "只读复盘视图；强弱为笔记原文，非买卖信号",
+    }
+
+
+def _zsxq_label(row) -> str:
+    """帖子所属星球名。取不到就用配置里的通用标签。"""
+    try:
+        return zsxq_source_label(_zsxq_group_name(row))
+    except Exception:  # noqa: BLE001 - 配不出标签也要能展示
+        return "知识星球"
+
+
+def _zsxq_url(row) -> str:
+    """帖子链接。星球帖子的 URL 不总在库里，取不到就返回空串。"""
+    try:
+        return str(row["url"] or "")
+    except (KeyError, IndexError):
+        return ""
 
 
 def _repo():

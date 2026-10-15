@@ -114,6 +114,7 @@ const nav = [
   { to: '/paper',            label: '模拟盘',   icon: IconPaper },
   { to: '/signals',          label: '信号库',   icon: IconSignals },
   { to: '/review',           label: '复盘',     icon: IconReview },
+  { to: '/theme-board',      label: '复盘板',   icon: IconReview },
   { to: '/indices',          label: '指数',     icon: IconIndices },
   { to: '/data',             label: '数据',     icon: IconData },
 ] as const
