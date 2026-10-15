@@ -12,7 +12,7 @@ HK 服务器上这些入口不可用，调用表里没有它们：
 - `ak.stock_main_fund_flow`
 - 东财 push2 板块资金流（含 `ak.stock_sector_fund_flow_rank`）
 
-个股日频账单用显式 secid 直接请求东财 push2his，不再经 efinance 搜索代码。全市场当日 / 5 日排名才用 akshare：同花顺 `stock_fund_flow_individual` 优先，东财 `stock_individual_fund_flow_rank` 作备选。盘中个股主力净流入相反，默认先打东财当日排名，不够再退回同花顺，见下表。同花顺个股榜缺深市主板和北交所时，用东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 分页补一次当日主力、大单和超大单，走统一限速和超时。深市主板按交易日拉全市场后只留 000/001/002/003。北交所同花顺榜没有，按 430、8 字头和 920 三段代码过滤后再翻页，不把沪深再拉一遍。这套接口和龙虎榜、两融、PE 相同。行情列表 ``push2`` 在部分云服务器上返回 502，这里不再用它补板块，也不再对这两个板块逐只打历史账单。数据中心这三个净额字段的单位是万元，落盘前换成元。日志里的「整段缺板块」按缺失只数占该板块应有只数达到 80% 才写；只缺几只科创板不会报整段缺失。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。东财 push2 的板块资金流接口仍然不调用。
+个股日频账单用显式 secid 直接请求东财 push2his，不再经 efinance 搜索代码。全市场当日 / 5 日排名才用 akshare：同花顺 `stock_fund_flow_individual` 优先，东财 `stock_individual_fund_flow_rank` 作备选。盘中个股主力净流入相反，默认先打东财当日排名，不够再退回同花顺，见下表。同花顺个股榜缺深市主板和北交所时，用东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 分页补一次当日主力、大单和超大单，走统一限速和超时。深市主板按交易日拉全市场后只留 000/001/002/003。北交所同花顺榜没有，按 430、8 字头和 920 三段代码过滤后再翻页，不把沪深再拉一遍。这套接口和龙虎榜、两融、PE 相同。行情列表 ``push2`` 在部分云服务器上返回 502，这里不再用它补板块，也不再对这两个板块逐只打历史账单。数据中心这三个净额字段的单位是万元，落盘前换成元。同花顺兜底只补还没有东财行的代码；分区里已经是东财或数据中心来源的行，后到的 `akshare_ths` 不会覆盖。全市场历史回补见下文。日志里的「整段缺板块」按缺失只数占该板块应有只数达到 80% 才写；只缺几只科创板不会报整段缺失。板块用同花顺 `stock_fund_flow_industry` / `stock_fund_flow_concept`。东财 push2 的板块资金流接口仍然不调用。
 
 ## 来源和时刻
 
@@ -64,6 +64,36 @@ backfill_etf_share_history(Path("data"), live_clients(), breaker=CircuitBreaker(
 深交所报表一次超过 6 个月会返回带表头的空表，回补按不超过 150 天的窗口切。资金页的宽基名单包含沪深 300（含深市 159919）、科创 50，以及创业板（159915，名称像「创业板ETF」「创业板50ETF」）。沪深 300 和科创 50 标成国家队代理，创业板只标指数名。主题产品（例如创业板成长 ETF）不进这份固定名单。
 
 这套拉取不进界面上的数据任务槽，也不占重任务执行槽。调度器每 30 秒只唤醒后台线程。日 K 管道或分钟同步正在写盘时，这一轮让路。
+
+## 历史回补（东财数据中心）
+
+个股日频的历史回补不走 push2his，也不走同花顺。push2his 在部分出口会 403。同花顺 `akshare_ths` 的净额经常符号相反、量级差几个数量级，和东财对不上；它曾经以后写覆盖的方式把已经对齐的东财行盖掉。
+
+接口（与当日深市主板 / 北交所补缺同一张报表）：
+
+```text
+GET https://datacenter-web.eastmoney.com/api/data/v1/get
+    ?reportName=RPT_DMSK_TS_FUNDFLOW
+    &columns=SECURITY_CODE,SECUCODE,SECURITY_NAME_ABBR,TRADE_DATE,NET_INFLOW,BIGDEAL_NET,SUPERDEAL_NET
+    &pageSize=500&pageNumber=1
+    &sortColumns=SECURITY_CODE&sortTypes=1
+    &filter=(TRADE_DATE='YYYY-MM-DD')
+```
+
+`NET_INFLOW` 是主力净流入，`BIGDEAL_NET` 是大单，`SUPERDEAL_NET` 是超大单。金额单位是万元，落盘前乘 10000 换成元，写入现有 `stock` 分区的 `main_net` / `large_net` / `super_net`。接口还有各档净占比，现有表没有这些列，回补不新增字段。`SECUCODE` 已带交易所后缀（`600519.SH`），`symbol` 沿用它。来源写成 `eastmoney_datacenter`。5 日合计不从这张报表来，回补行的 `main_net_5d` 留空；因子仍按已落盘的日净额滚动。
+
+按交易日拉全市场再翻页，一天大约 12 页。出网走东财共用限流（`em_get`，默认间隔 1 秒，`EASTMONEY_MIN_INTERVAL` 最快 0.5 秒）。`--concurrency` 默认 3，只让多天并行排页；实际请求仍被这把限流串起来。
+
+镜像里已经包含 `app`，在容器内执行：
+
+```bash
+python -m app.fund_flow.backfill --days 120 --data-dir /app/data
+python -m app.fund_flow.backfill --from 2026-04-01 --to 2026-10-15 --data-dir /app/data
+```
+
+有本地日 K 分区（`kline_daily/date=`）时只补这些交易日；没有时按工作日。`--days` 取不晚于今天的最近 N 个。某一天请求失败不写该分区，避免半截数据被当成全市场。休市空表跳过。写进去的行会盖掉同一天的 `akshare_ths`。
+
+同花顺覆盖规则：同一主键（`code` + `trade_date`）只要已有 `efinance`、`eastmoney_sz_main`、`eastmoney_bj`、`eastmoney_datacenter` 或 `akshare_em_rank`，后到的 `akshare_ths` 整行丢弃。还没有东财行的代码仍可用同花顺补缺。妙想（`mx`）不在这组保护里。
 
 ## 接口
 

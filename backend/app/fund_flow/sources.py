@@ -9,6 +9,9 @@
 盘中个股主力净流入反过来：默认先打东财当日排名，失败或行数不足再退回同花顺即时榜。
 深市主板和北交所的整段缺口改为东财数据中心 ``RPT_DMSK_TS_FUNDFLOW`` 分页补一次，走统一限速，不再逐只打历史账单。北交所按代码段过滤。
 逐只的 ``stock_individual_fund_flow`` 和 push2 板块资金流接口仍然不调用。
+
+全市场历史回补见 ``app.fund_flow.backfill``（``python -m app.fund_flow.backfill``）。
+它用同一张数据中心报表按交易日分页，不让同花顺覆盖已经落盘的东财行。
 """
 from __future__ import annotations
 

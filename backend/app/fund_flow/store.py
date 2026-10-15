@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import threading
@@ -15,6 +16,8 @@ from pathlib import Path
 import polars as pl
 
 from app.services.fs_utils import atomic_write_parquet, atomic_write_text
+
+logger = logging.getLogger(__name__)
 
 KINDS = frozenset({
     "stock",
@@ -32,6 +35,17 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # 全市场 A 股大约五千只。少于此数的分区是半次失败留下的样本，不能当成排名。
 FULL_MARKET_MIN = 1000
+
+# 个股日频里这些来源和东财数据中心同一口径。同花顺兜底不能盖掉它们。
+# akshare_ths 的净额经常符号相反、量级差几个数量级。
+EASTMONEY_STOCK_SOURCES = frozenset({
+    "efinance",
+    "eastmoney_sz_main",
+    "eastmoney_bj",
+    "eastmoney_datacenter",
+    "akshare_em_rank",
+})
+THS_STOCK_SOURCE = "akshare_ths"
 
 # 合并主键。后写覆盖先写。
 KEYS: dict[str, list[str]] = {
@@ -273,8 +287,35 @@ def _align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
     return empty_frame(kind)
 
 
+def _drop_ths_clobbering_eastmoney(frame: pl.DataFrame) -> pl.DataFrame:
+    """同一主键已有东财行时，丢掉同花顺行，避免后写把净额盖错。"""
+    if frame.is_empty() or "source" not in frame.columns or "code" not in frame.columns:
+        return frame
+    protected = (
+        frame.filter(pl.col("source").is_in(sorted(EASTMONEY_STOCK_SOURCES)))
+        .select(["code", "trade_date"])
+        .unique()
+    )
+    if protected.is_empty():
+        return frame
+    blocked = (
+        frame.filter(pl.col("source") == THS_STOCK_SOURCE)
+        .select(["code", "trade_date"])
+        .unique()
+        .join(protected, on=["code", "trade_date"], how="inner")
+    )
+    if blocked.is_empty():
+        return frame
+    logger.info("个股资金流跳过 %s 个主键的同花顺行，避免覆盖东财", blocked.height)
+    marked = blocked.with_columns(pl.lit(THS_STOCK_SOURCE).alias("source"))
+    return frame.join(marked, on=["code", "trade_date", "source"], how="anti")
+
+
 def write_rows(data_dir: Path, kind: str, trade_date: str, rows: list[dict]) -> int:
-    """合并写入一个交易日分区。返回该分区合并后的行数。"""
+    """合并写入一个交易日分区。返回该分区合并后的行数。
+
+    个股分区里，``akshare_ths`` 不能覆盖已有的东财或数据中心行。其它来源仍是后写覆盖先写。
+    """
     _check(kind, trade_date)
     rows = prepare_rows(kind, rows)
     if not rows:
@@ -291,6 +332,8 @@ def write_rows(data_dir: Path, kind: str, trade_date: str, rows: list[dict]) -> 
         merged = pl.concat([previous, incoming], how="vertical_relaxed")
     else:
         merged = incoming
+    if kind == "stock":
+        merged = _drop_ths_clobbering_eastmoney(merged)
     keys = [key for key in KEYS[kind] if key in merged.columns]
     merged = merged.unique(subset=keys, keep="last")
     atomic_write_parquet(merged, path)
