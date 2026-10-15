@@ -1114,12 +1114,18 @@ def sync_lhb_backup(
 
 
 def previous_session(day: date, known_days: list[date] | None = None) -> date:
-    """T+1 两融要补的交易日：已知交易日里今天之前的最后一天，否则上一个工作日。"""
+    """T+1 两融要补的交易日：已知交易日里今天之前的最后一天，否则上一个交易日。
+
+    ``known_days`` 为空时不能只跳周末 —— 两融是 **交易日** 口径，长假后
+    （如 10-08 节后首日）前一个工作日是 10-07，那天休市，拿它当交易日会
+    请求到空表并把休市日写进 ``prev`` 分区。这里改走 ``market_confirm``
+    的 fuyao 交易日历（``_prev_open_day``），日历不可用时它自身会退回
+    「跳周末」，与旧行为一致。
+    """
     if known_days:
         earlier = [item for item in known_days if item < day]
         if earlier:
             return max(earlier)
-    cursor = day - timedelta(days=1)
-    while cursor.weekday() >= 5:
-        cursor -= timedelta(days=1)
-    return cursor
+    from app.news.market_confirm import _prev_open_day
+
+    return _prev_open_day(day)

@@ -1394,14 +1394,23 @@ def _prior_levels(symbols: list[str]) -> dict[str, dict]:
         from app.news.service import _repo
         repo = _repo()
         if repo is None:
+            logger.warning("盘前价位不可用: 仓库未就绪, %d 只标的的 60 日新高/新低本轮不判", len(symbols))
             return {}
         frame = repo.get_live_agg()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("盘前价位不可用: %s", exc)
+        logger.warning(
+            "盘前价位读取失败, %d 只标的的 60 日新高/新低本轮不判: %s", len(symbols), exc,
+        )
         return {}
     if frame is None or frame.is_empty() or "symbol" not in frame.columns:
+        logger.warning(
+            "盘前价位为空(表空或缺 symbol 列), %d 只标的的 60 日新高/新低本轮不判", len(symbols),
+        )
         return {}
     if "_high_59d" not in frame.columns or "_low_59d" not in frame.columns:
+        logger.warning(
+            "盘前价位缺 _high_59d/_low_59d 列, %d 只标的的 60 日新高/新低本轮不判", len(symbols),
+        )
         return {}
     import polars as pl
     frame = frame.filter(pl.col("symbol").is_in(symbols))

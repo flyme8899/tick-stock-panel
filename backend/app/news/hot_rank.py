@@ -106,6 +106,22 @@ def archive_hot_rank(
         if policy == _POLICY_FIRST and path.exists():
             continue
         frame = _frame_from_snapshot(snapshot, slot=slot, session_date=session_date, now=now)
+        if frame.is_empty():
+            # 空榜不覆盖已有快照: ``latest`` 档每轮都写, 一次上游异常就会用空表
+            # 抹掉当天的历史榜。第一档仍写空表 —— 那是 ``first`` 的语义
+            # (先到先得, 用空榜占位挡住收盘后的晚到快照), 由 policy 区分。
+            if policy == _POLICY_FIRST:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_parquet(frame, path)
+                written.append(path)
+                logger.warning(
+                    "热点榜 %s 档为空榜, 按 first 语义占位落盘 %s", slot, session_date.isoformat(),
+                )
+                continue
+            logger.warning(
+                "热点榜 %s 档本轮无有效事件, 跳过落盘, 保留已有快照 %s", slot, session_date.isoformat(),
+            )
+            continue
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_parquet(frame, path)
         written.append(path)
@@ -165,7 +181,7 @@ def _frame_from_snapshot(snapshot: dict, *, slot: str, session_date: date, now: 
     trading_day = str(snapshot.get("trading_day") or "")
     as_of = str(snapshot.get("as_of") or "")
     rows = []
-    for index, event in enumerate(events, start=1):
+    for event in events:
         if not isinstance(event, dict):
             continue
         public = public_hot_event(event)
@@ -174,7 +190,10 @@ def _frame_from_snapshot(snapshot: dict, *, slot: str, session_date: date, now: 
         rows.append({
             "session_date": session_date,
             "slot": slot,
-            "rank": index,
+            # 序号在跳过非法项之后按有效行重新编号, 不能直接用 events 的下标 ——
+            # 列表里混进非 dict 时, 下标会留下空洞 (1,2,4,5), 研究侧按 rank 取
+            # 「第 N 名」就会错位。
+            "rank": len(rows) + 1,
             "event_key": str(public.get("key") or ""),
             "title": str(public.get("name") or ""),
             "category": str(public.get("category") or ""),

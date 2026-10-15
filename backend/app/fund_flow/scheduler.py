@@ -40,13 +40,18 @@ _worker_lock = threading.Lock()
 
 
 def tickflow_sync_busy() -> bool:
-    """日 K 管道或分钟同步正在写盘时返回 True。"""
+    """日 K 管道或分钟同步正在写盘时返回 True。
+
+    探测失败时返回 False（按「不忙」处理），但**必须留日志**：静默当成不忙会
+    让资金流在重任务写盘期间抢跑，且事后完全查不到原因。
+    """
     try:
         from app.services.pipeline_jobs import job_store, run_slot_busy
 
         if job_store.active_id() or run_slot_busy():
             return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tickflow_sync_busy 探测 pipeline_jobs 失败, 按不忙处理: %s", exc)
         return False
     try:
         from app.jobs.daily_pipeline import _get_app_state
@@ -56,7 +61,8 @@ def tickflow_sync_busy() -> bool:
         lock = getattr(minute, "_round_lock", None)
         if lock is not None and lock.locked():
             return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tickflow_sync_busy 探测分钟同步锁失败, 按不忙处理: %s", exc)
         return False
     return False
 
@@ -90,6 +96,30 @@ def _recent(kind_state: dict, now: datetime, gap_s: float) -> bool:
 
 def _done_today(kind_state: dict, day: str) -> bool:
     return str(kind_state.get("last_success_date") or "") == day
+
+
+def _intraday_due(kind_state: dict, now: datetime) -> bool:
+    """盘中个股资金流这一轮该不该拉。
+
+    判定依据只有 **成功落盘的时刻**（``last_snapshot`` / ``last_success_at``），
+    不看 ``last_attempt_at``。原因：主循环每 30 秒唤醒一次，而 ``_mark_attempt``
+    每轮都写 ``last_attempt_at``，且旁路线程正常结束后 ``_intraday_running()``
+    立即为假、下一轮就会重新拉起 —— 用 attempt 判间隔会退化成「拉完就再拉」，
+    实际间隔只剩拉取耗时（约 1 分多钟），而注释和页面承诺的是 6 分钟。
+
+    落盘成功的写入点是 ``sync_stock_intraday``（内部写 ``last_snapshot``，
+    见 jobs._write_intraday / sync_stock_intraday 的东财分支）。因此这里读
+    ``last_snapshot``，回退到 ``last_success_at`` 兼容旧状态文件。
+
+    取不到任何成功时刻时（首轮或旧状态）返回 True，保证第一份快照能落盘；
+    失败重试由熔断与 ``last_attempt_at`` 在别处兜底，这里不负责限流失败重试。
+    """
+    stamp = _parse_stamp(
+        kind_state.get("last_snapshot") or kind_state.get("last_success_at")
+    )
+    if stamp is None:
+        return True
+    return (now - stamp).total_seconds() >= STOCK_INTRADAY_GAP_S
 
 
 def due_tasks(
@@ -131,7 +161,7 @@ def due_tasks(
         flags.get("stock_intraday")
         and "akshare" not in breakers_open
         and _in_continuous_clock(clock)
-        and not _recent(kind_state("stock_intraday"), now, STOCK_INTRADAY_GAP_S)
+        and _intraday_due(kind_state("stock_intraday"), now)
     ):
         due.append("stock_intraday")
     if (
@@ -677,6 +707,13 @@ class FundFlowWorker:
                     return
                 if not result.errors:
                     _mark_success(data_dir, "stock_intraday", day)
+                    # 成功时刻单独落一个字段, 供 ``_intraday_due`` 判间隔。
+                    # 不依赖 ``last_attempt_at``(每轮都写), 也不依赖 job 内部的
+                    # ``last_snapshot``(那是快照采集时刻, 语义上属于数据而非调度)。
+                    store.update_kind_state(
+                        data_dir, "stock_intraday",
+                        last_success_at=now.isoformat(timespec="seconds"),
+                    )
                     logger.info(
                         "盘中快照已落盘 gen=%d captured=%s 写入=%s",
                         generation,
@@ -733,6 +770,10 @@ class FundFlowWorker:
             )
             if not result.errors:
                 _mark_success(data_dir, "stock_intraday", day)
+                store.update_kind_state(
+                    data_dir, "stock_intraday",
+                    last_success_at=now.isoformat(timespec="seconds"),
+                )
             return result
         if name == "sector_intraday":
             for kind in ("industry", "concept"):
