@@ -22,6 +22,7 @@ from app.news.service import (
     hot_event_listing,
     hot_messages,
     news_for_symbol,
+    theme_board,
 )
 
 router = APIRouter(prefix="/api/news", tags=["news"])
@@ -163,6 +164,18 @@ def stock_news(
     limit: int = Query(30, ge=1, le=50),
 ):
     return news_for_symbol(symbol, hours=hours, limit=limit)
+
+
+@router.get("/theme-board")
+def theme_board_view(
+    days: int = Query(7, ge=1, le=90),
+    limit: int = Query(400, ge=1, le=2000),
+):
+    """盘后复盘板：星球复盘笔记里的主题表，**只读展示**。
+
+    ``strength`` 为笔记作者手写的强弱判断，原样透传，不是买卖信号。
+    """
+    return theme_board(days=days, limit=limit)
 
 
 @router.get("/health")

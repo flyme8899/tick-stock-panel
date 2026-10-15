@@ -170,6 +170,8 @@ export const QK = {
   newsHealth:           ['news-health'] as const,
   newsPush:             ['news-push'] as const,
   newsMxHot:            ['news-mx-hot'] as const,
+  // 盘后复盘板：只读，按时间窗缓存
+  newsThemeBoard:       (days: number) => ['news-theme-board', days] as const,
   pickerSources:        ['picker-sources'] as const,
 } as const
 

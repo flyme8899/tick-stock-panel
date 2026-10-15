@@ -36,6 +36,7 @@ const Branding = lazy(() => import('./pages/Branding').then(m => ({ default: m.B
 const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })))
 const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regime })))
 const HotEvents = lazy(() => import('./pages/HotEvents').then(m => ({ default: m.HotEvents })))
+const ThemeBoard = lazy(() => import('./pages/ThemeBoard').then(m => ({ default: m.ThemeBoard })))
 const FundFlow = lazy(() => import('./pages/FundFlow').then(m => ({ default: m.FundFlow })))
 const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
@@ -69,6 +70,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/indices',
   '/regime',
   '/hot-events',
+  '/theme-board',
   '/fund-flow',
   '/abnormal',
   '/branding',
@@ -186,6 +188,7 @@ export const router = createBrowserRouter([
       { path: 'indices', element: <Indices /> },
     { path: 'regime', element: <Regime /> },
       { path: 'hot-events', element: <HotEvents /> },
+      { path: 'theme-board', element: <ThemeBoard /> },
       { path: 'fund-flow', element: <FundFlow /> },
       { path: 'abnormal', element: <AbnormalMoves /> },
       { path: 'branding', element: <Branding /> },
