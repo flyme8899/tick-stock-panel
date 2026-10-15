@@ -7,6 +7,7 @@ import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app.config import settings
@@ -21,11 +22,15 @@ from app.news.config import (
 )
 from app.news.etf_flow import (
     MISSING_SOURCE,
+    PAGE_FETCH_TIMEOUT,
+    VISION_HTTP_TIMEOUT,
     VISION_LENGTH_MAX_TOKENS,
+    VISION_TIMEOUT_RETRIES,
     ArticleRef,
     ExtractFailedError,
     _call_vision,
     _fetch,
+    _page_client,
     _public_error,
     apply_trade_date,
     backfill_dates,
@@ -128,7 +133,7 @@ class Client:
             return Resp(self.wechat, url)
         raise AssertionError(url)
 
-    def post(self, url, headers=None, json=None):
+    def post(self, url, headers=None, json=None, timeout=None):
         self.posts.append((url, headers, json))
         return Resp("", url, payload=self.vision)
 
@@ -392,7 +397,7 @@ def test_vision_call_batches_one_image_and_retries_empty_content(news_db):
         def __init__(self):
             self.posts = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.posts.append((url, headers, json))
             return Resp("", url, payload=answers[len(self.posts) - 1])
 
@@ -440,7 +445,7 @@ def test_empty_content_retries_once_then_skips_that_image(news_db):
         def __init__(self):
             self.posts = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.posts.append(json)
             if len(self.posts) <= 2:
                 return Resp("", url, payload=_completion("  "))
@@ -466,7 +471,7 @@ def test_empty_content_on_the_only_image_fails_after_one_retry(news_db):
         def __init__(self):
             self.posts = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.posts.append(json)
             return Resp("", url, payload=_completion(""))
 
@@ -496,7 +501,7 @@ def test_length_cutoff_retries_once_at_higher_max_tokens(news_db):
         def __init__(self):
             self.posts = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.posts.append(json)
             if len(self.posts) == 1:
                 return Resp("", url, payload=_length_cutoff())
@@ -518,7 +523,7 @@ def test_length_cutoff_does_not_retry_past_the_higher_budget(news_db):
         def __init__(self):
             self.posts = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.posts.append(json)
             return Resp("", url, payload=_length_cutoff())
 
@@ -531,12 +536,157 @@ def test_length_cutoff_does_not_retry_past_the_higher_budget(news_db):
     ]
 
 
+def _silence_backoff(monkeypatch) -> list[float]:
+    slept: list[float] = []
+    monkeypatch.setattr("app.news.etf_flow.time.sleep", lambda seconds: slept.append(seconds))
+    return slept
+
+
+def _posted_image(body: dict) -> str:
+    return next(
+        part["image_url"]["url"]
+        for part in body["messages"][0]["content"]
+        if part["type"] == "image_url"
+    )
+
+
+def test_page_client_keeps_fetch_timeout_and_vision_read_is_longer():
+    client = _page_client()
+    try:
+        assert client.timeout == httpx.Timeout(PAGE_FETCH_TIMEOUT)
+        assert client.timeout.read == 60.0
+        assert client.follow_redirects is False
+    finally:
+        client.close()
+    assert VISION_HTTP_TIMEOUT.read == 240.0
+    assert 180.0 <= VISION_HTTP_TIMEOUT.read <= 300.0
+    assert VISION_HTTP_TIMEOUT.connect == 10.0
+    assert VISION_HTTP_TIMEOUT.connect < VISION_HTTP_TIMEOUT.read
+    assert VISION_TIMEOUT_RETRIES == 2
+
+
+def test_vision_read_timeout_retries_then_succeeds(news_db, monkeypatch):
+    slept = _silence_backoff(monkeypatch)
+
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = []
+            self.timeouts = []
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts.append(json)
+            self.timeouts.append(timeout)
+            if len(self.posts) <= VISION_TIMEOUT_RETRIES:
+                raise httpx.ReadTimeout("The read operation timed out")
+            return Resp("", url, payload=_vision())
+
+    client = Seq()
+    extracted = _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
+    assert extracted["overview"]["net_1d"] == 12.5
+    # 第一次读超时两次后成功，正负号确认再成功一次。
+    assert len(client.posts) == VISION_TIMEOUT_RETRIES + 2
+    assert slept == [1.0, 2.0]
+    assert all(timeout is VISION_HTTP_TIMEOUT for timeout in client.timeouts)
+    assert all(timeout.read == 240.0 and timeout.connect == 10.0 for timeout in client.timeouts)
+
+
+def test_vision_timeout_on_one_image_keeps_the_others(news_db, monkeypatch):
+    slept = _silence_backoff(monkeypatch)
+    slow = _data_url("https://nimg.ws.126.net/a.jpg")
+
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts.append(json)
+            assert timeout is VISION_HTTP_TIMEOUT
+            if _posted_image(json) == slow:
+                raise httpx.ReadTimeout("The read operation timed out")
+            return Resp("", url, payload=_vision())
+
+    client = Seq()
+    extracted = _call_vision(
+        client,
+        ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"],
+    )
+    assert extracted["overview"]["net_1d"] == 12.5
+    assert len(client.posts) == VISION_TIMEOUT_RETRIES + 1 + 2
+    assert [_posted_image(body) for body in client.posts[: VISION_TIMEOUT_RETRIES + 1]] == [slow] * (
+        VISION_TIMEOUT_RETRIES + 1
+    )
+    assert _posted_image(client.posts[-1]) == _data_url("https://nimg.ws.126.net/b.jpg")
+    assert slept == [1.0, 2.0]
+
+
+def test_confirm_read_timeout_keeps_the_first_extraction(news_db, monkeypatch):
+    slept = _silence_backoff(monkeypatch)
+
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts.append(json)
+            if len(self.posts) == 1:
+                return Resp("", url, payload=_vision())
+            raise httpx.ReadTimeout("The read operation timed out")
+
+    client = Seq()
+    extracted = _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
+    assert extracted["overview"]["net_1d"] == 12.5
+    assert len(client.posts) == 1 + VISION_TIMEOUT_RETRIES + 1
+    assert slept == [1.0, 2.0]
+
+
+def test_every_image_timing_out_fails_the_round(news_db, monkeypatch):
+    slept = _silence_backoff(monkeypatch)
+
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = 0
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts += 1
+            raise httpx.TimeoutException("The read operation timed out")
+
+    client = Seq()
+    with pytest.raises(ExtractFailedError, match="视觉模型请求失败"):
+        _call_vision(
+            client,
+            ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"],
+        )
+    assert client.posts == 2 * (VISION_TIMEOUT_RETRIES + 1)
+    assert slept == [1.0, 2.0, 1.0, 2.0]
+
+
+def test_vision_connect_error_is_not_retried(news_db, monkeypatch):
+    slept = _silence_backoff(monkeypatch)
+
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = 0
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts += 1
+            raise httpx.ConnectError("connection refused")
+
+    client = Seq()
+    with pytest.raises(ExtractFailedError, match="视觉模型请求失败"):
+        _call_vision(
+            client,
+            ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"],
+        )
+    assert client.posts == 1
+    assert slept == []
+
+
 def test_non_empty_garbage_is_not_retried(news_db):
     class Seq(_ImageDownload):
         def __init__(self):
             self.posts = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.posts.append(json)
             return Resp("", url, payload=_completion("不是表格"))
 
@@ -570,7 +720,7 @@ def test_sign_mismatch_across_retries_clears_only_that_cell(news_db):
         def __init__(self):
             self.posts = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.posts.append(json)
             return Resp("", url, payload=answers[len(self.posts) - 1])
 
@@ -1122,7 +1272,7 @@ class ArchiveClient:
             return Resp(self.wechat_html, url)
         raise AssertionError(url)
 
-    def post(self, url, headers=None, json=None):
+    def post(self, url, headers=None, json=None, timeout=None):
         self.posts.append(url)
         return Resp("", url, payload=_vision())
 

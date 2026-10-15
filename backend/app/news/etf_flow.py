@@ -20,6 +20,10 @@ max_tokens 至少 8192；关掉思考会让表格识别变差。备选 glm-5.3-f
 mimo-v2.6-flash 不改默认。一张图一次请求；空内容再试一次。若这次是因为
 长度截断且正文为空，重试把 max_tokens 提高到 16384，思考仍然打开。
 有两份结果时，正负号不一致的格子留空。
+
+页面和图片下载大约 60 秒超时。视觉请求的读超时单独放到 240 秒，连接超时
+保持较短。读超时再试 2 次。某一张图仍超时就跳过，已经抽出的其他图继续合并；
+正负号确认超时则沿用第一次结果。全部图片都超时才算抽取失败。
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ import json
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
@@ -68,6 +73,22 @@ VISION_BATCH_SIZE = 1
 VISION_EMPTY_RETRIES = 1
 # 总览大表会把 8192 全部用在思考上，finish_reason=length 且 content 为空。
 VISION_LENGTH_MAX_TOKENS = 16384
+# 页面、搜狗和图片下载。视觉模型不走这个超时。
+PAGE_FETCH_TIMEOUT = 60.0
+# 思考打开且 max_tokens>=8192 时，单张表经常超过 60 秒才返回。
+VISION_READ_TIMEOUT = 240.0
+VISION_CONNECT_TIMEOUT = 10.0
+VISION_WRITE_TIMEOUT = 60.0
+VISION_POOL_TIMEOUT = 10.0
+VISION_HTTP_TIMEOUT = httpx.Timeout(
+    connect=VISION_CONNECT_TIMEOUT,
+    read=VISION_READ_TIMEOUT,
+    write=VISION_WRITE_TIMEOUT,
+    pool=VISION_POOL_TIMEOUT,
+)
+# 读超时后再试这么多次。第一次失败等 1 秒，第二次等 2 秒。
+VISION_TIMEOUT_RETRIES = 2
+VISION_TIMEOUT_BACKOFF_SECONDS = 1.0
 MAX_STORED_IMAGES = 12
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_BROAD = 20
@@ -129,6 +150,10 @@ class ArticleMissingError(Exception):
 
 class ExtractFailedError(Exception):
     """稿件已出现，但图片或视觉结果不能入库。"""
+
+
+class VisionRequestTimeoutError(ExtractFailedError):
+    """单张图的视觉请求超时，重试后仍失败。其余图片可以继续。"""
 
 
 class EmptyVisionError(ValueError):
@@ -516,7 +541,7 @@ def backfill_etf_flow(
     if not pending:
         return summary
     own = client is None
-    client = client or httpx.Client(timeout=60.0, follow_redirects=False)
+    client = client or _page_client()
     try:
         refs, netease_error = _netease_refs(client)
         indexed = index_flow_refs(refs)
@@ -1140,7 +1165,7 @@ def collect_etf_flow(
         _mark_ok()
         return _result(found=True)
     own = client is None
-    client = client or httpx.Client(timeout=60.0, follow_redirects=False)
+    client = client or _page_client()
     try:
         return _pull(client, now, root, expect)
     except ArticleMissingError:
@@ -1191,7 +1216,7 @@ def ingest_wechat_url(
     if not vision_api_key():
         raise ExtractFailedError("未配置 VISION_AI_API_KEY")
     own = client is None
-    client = client or httpx.Client(timeout=60.0, follow_redirects=False)
+    client = client or _page_client()
     try:
         html_text, final = _fetch(client, target, allow_hosts={WECHAT_HOST})
         if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
@@ -1355,12 +1380,23 @@ def _call_vision(client, images: list[str]) -> dict:
         raise ExtractFailedError("未配置 VISION_AI_API_KEY")
     parts: list[dict] = []
     saw_empty = False
+    timed_out = False
     for url in usable:
-        parsed, empty = _vision_batch(client, [url], key)
+        try:
+            parsed, empty = _vision_batch(client, [url], key)
+        except VisionRequestTimeoutError as exc:
+            timed_out = True
+            logger.warning(
+                "ETF申赎单张图片视觉请求超时，继续其余图片: %s",
+                _public_error(exc),
+            )
+            continue
         saw_empty = saw_empty or empty
         if parsed is not None:
             parts.append(parsed)
     if not parts:
+        if timed_out:
+            raise ExtractFailedError("视觉模型请求失败")
         if saw_empty:
             raise ExtractFailedError("视觉模型没有返回内容")
         raise ExtractFailedError("视觉模型没有抽出申赎数字")
@@ -1430,25 +1466,46 @@ def _read_vision(
         raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
 
 
+def _page_client() -> httpx.Client:
+    """页面、搜狗和图片下载。视觉 POST 在请求上单独加长读超时。"""
+    return httpx.Client(timeout=PAGE_FETCH_TIMEOUT, follow_redirects=False)
+
+
 def _post_vision(client, body: dict, key: str) -> dict:
-    try:
-        response = client.post(
-            f"{vision_base_url()}/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json=body,
-        )
-        raiser = getattr(response, "raise_for_status", None)
-        if raiser:
-            raiser()
-        payload = response.json()
-    except ExtractFailedError:
-        raise
-    except Exception as exc:
-        logger.warning("ETF申赎视觉模型失败: %s", _public_error(exc))
-        raise ExtractFailedError("视觉模型请求失败") from exc
-    if not isinstance(payload, dict):
-        raise ExtractFailedError("视觉模型没有抽出申赎数字")
-    return payload
+    attempts = VISION_TIMEOUT_RETRIES + 1
+    for attempt in range(attempts):
+        try:
+            response = client.post(
+                f"{vision_base_url()}/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=body,
+                timeout=VISION_HTTP_TIMEOUT,
+            )
+            raiser = getattr(response, "raise_for_status", None)
+            if raiser:
+                raiser()
+            payload = response.json()
+        except ExtractFailedError:
+            raise
+        except httpx.TimeoutException as exc:
+            if attempt + 1 >= attempts:
+                logger.warning("ETF申赎视觉模型失败: %s", _public_error(exc))
+                raise VisionRequestTimeoutError("视觉模型请求失败") from exc
+            logger.warning(
+                "ETF申赎视觉模型超时，稍后重试 (%s/%s): %s",
+                attempt + 1,
+                attempts,
+                _public_error(exc),
+            )
+            time.sleep(VISION_TIMEOUT_BACKOFF_SECONDS * (attempt + 1))
+            continue
+        except Exception as exc:
+            logger.warning("ETF申赎视觉模型失败: %s", _public_error(exc))
+            raise ExtractFailedError("视觉模型请求失败") from exc
+        if not isinstance(payload, dict):
+            raise ExtractFailedError("视觉模型没有抽出申赎数字")
+        return payload
+    raise VisionRequestTimeoutError("视觉模型请求失败")
 
 
 def _missing(now: datetime, root: Path, expect: bool) -> dict:
