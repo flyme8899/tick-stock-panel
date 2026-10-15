@@ -41,6 +41,8 @@
 
 申赎表格保持思考，`max_tokens` 为 8192。低于这个值时预算被思考用完，`content` 为空。deepseek 视觉模型可以用 `thinking.type=disabled` 或 `reasoning_effort=none` 关掉思考，但表格识别会变差，所以这条链路不关。非表格的短视觉请求才关：deepseek 和 mimo 传 `thinking.type=disabled`；glm 传这个字段会 400，只传 `reasoning_effort=low`。每张图单独请求。空内容时同一张图再试一次；若 `finish_reason` 是 `length` 且正文仍为空，这一次把 `max_tokens` 提高到 16384，思考仍然打开。第一次已经抽出数字时，再请求一次核对正负号。同一格两次正负号相反就留空，不猜哪一次对。代码只保留恰好 6 位的数字。
 
+页面和图片下载的超时大约 60 秒。视觉模型这一跳的读超时是 240 秒，连接超时保持较短：思考打开且 `max_tokens` 不少于 8192 时，单次请求经常超过 60 秒。读超时再试 2 次，间隔 1 秒、2 秒。某一张图仍然超时就跳过，其余图继续合并；正负号确认超时则沿用第一次已经抽出的数字。全部图片都超时，这次抽取才失败，下一轮轮询再试。
+
 ```ini
 VISION_AI_API_KEY=
 VISION_AI_BASE_URL=https://tokenhub.tencentmaas.com/v1
