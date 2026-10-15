@@ -155,11 +155,7 @@ _BOARD_LABEL = {
     "bj": "北交所",
 }
 # push2 行情列表在部分云服务器上一直 502。个股资金流改走数据中心，和龙虎榜、两融、PE 同一套。
-_DC_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-_DC_REPORT = "RPT_DMSK_TS_FUNDFLOW"
-_DC_COLUMNS = "SECURITY_CODE,SECURITY_NAME_ABBR,TRADE_DATE,NET_INFLOW,BIGDEAL_NET,SUPERDEAL_NET"
-_DC_PAGE = 500
-_DC_EMPTY = 9201
+# 分页和万元换算在 datacenter.py。全市场历史回补也用那一份。
 # 北交所按代码段过滤后再分页。920 是新段，800000–899999 和 430 是老段。
 # 全市场一天约 12 页，只补北交所时不要把沪深再拉一遍。
 _BJ_CODE_FILTERS = (
@@ -212,12 +208,12 @@ def fetch_board_rank(trade_date: str, board: str, *, get=None) -> list[dict]:
     这三个字段的单位是万元，落盘前换成元。北交所带代码段过滤；深市主板仍按交易日
     拉全市场再在本地筛，避免改掉已经在用的请求。
     """
+    from app.fund_flow.datacenter import BOARD_COLUMNS, fetch_report_rows
     from app.fund_flow.units import BARE_WAN, money_to_yuan
     from app.selection_fields.timeouts import REQUEST_TIMEOUT
 
     if board not in _DC_BOARD_SOURCE:
         raise ValueError(f"数据中心资金流不补这个板块: {board}")
-    label = _BOARD_LABEL.get(board, board)
     filters = _BJ_CODE_FILTERS if board == "bj" else ("",)
     if get is None:
         from app.eastmoney.client import em_get
@@ -226,59 +222,31 @@ def fetch_board_rank(trade_date: str, board: str, *, get=None) -> list[dict]:
     shaped: list[dict] = []
     seen: set[str] = set()
     for extra in filters:
-        page = 1
-        while page <= 20:
-            response = get(
-                _DC_URL,
-                params={
-                    "reportName": _DC_REPORT,
-                    "columns": _DC_COLUMNS,
-                    "pageNumber": str(page),
-                    "pageSize": str(_DC_PAGE),
-                    "sortColumns": "SECURITY_CODE",
-                    "sortTypes": "1",
-                    "source": "WEB",
-                    "client": "WEB",
-                    "filter": f"(TRADE_DATE='{trade_date}'){extra}",
-                },
-                headers={"Referer": "https://data.eastmoney.com/zjlx/detail.html"},
-                timeout=REQUEST_TIMEOUT,
-            )
-            payload = response.json() if hasattr(response, "json") else response
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"{label}资金流返回异常")
-            if not payload.get("success"):
-                if int(payload.get("code") or 0) == _DC_EMPTY:
-                    break
-                raise RuntimeError(str(payload.get("message") or f"{label}资金流失败")[:300])
-            result = payload.get("result") or {}
-            rows = result.get("data") or []
-            if not isinstance(rows, list) or not rows:
-                break
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                code = normalize.code6(str(row.get("SECURITY_CODE") or ""))
-                if store.board_of(code) != board or code in seen:
-                    continue
-                seen.add(code)
-                shaped.append({
-                    "股票代码": code,
-                    "股票简称": row.get("SECURITY_NAME_ABBR") or "",
-                    "今日主力净流入-净额": money_to_yuan(row.get("NET_INFLOW"), bare=BARE_WAN),
-                    "今日大单净流入-净额": money_to_yuan(row.get("BIGDEAL_NET"), bare=BARE_WAN),
-                    "今日超大单净流入-净额": money_to_yuan(row.get("SUPERDEAL_NET"), bare=BARE_WAN),
-                })
-            pages = int(result.get("pages") or 0)
-            if (pages and page >= pages) or len(rows) < _DC_PAGE:
-                break
-            page += 1
+        for row in fetch_report_rows(
+            trade_date,
+            get=get,
+            extra_filter=extra,
+            columns=BOARD_COLUMNS,
+            timeout=REQUEST_TIMEOUT,
+        ):
+            code = normalize.code6(str(row.get("SECURITY_CODE") or ""))
+            if store.board_of(code) != board or code in seen:
+                continue
+            seen.add(code)
+            shaped.append({
+                "股票代码": code,
+                "股票简称": row.get("SECURITY_NAME_ABBR") or "",
+                "今日主力净流入-净额": money_to_yuan(row.get("NET_INFLOW"), bare=BARE_WAN),
+                "今日大单净流入-净额": money_to_yuan(row.get("BIGDEAL_NET"), bare=BARE_WAN),
+                "今日超大单净流入-净额": money_to_yuan(row.get("SUPERDEAL_NET"), bare=BARE_WAN),
+            })
     return normalize.normalize_rank_rows(
         shaped, trade_date=trade_date, source=_DC_BOARD_SOURCE[board], window="today",
     )
 
 
 def _rank_fallback(clients: SourceClients, symbols: list[str], trade_date: str) -> list[dict]:
+    """全市场排名补缺。同花顺优先，但落盘时不能盖掉已有的东财行，见 ``store.write_rows``。"""
     wanted = {code for symbol in symbols if (code := normalize.code6(symbol))}
     if not wanted:
         return []
