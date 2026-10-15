@@ -2330,12 +2330,34 @@ def test_stock_intraday_respects_session_and_gap() -> None:
     assert "stock_intraday" not in scheduler.due_tasks(
         _day(10, 0), trading=True, state=state, flags=_flags(), breakers_open={"akshare"},
     )
-    recent = {"kinds": {"stock_intraday": {"last_attempt_at": _day(10, 0).isoformat()}}}
+    # 间隔看成功落盘，不看 last_attempt_at。空状态或只有尝试记录时仍然该拉。
+    assert "stock_intraday" in scheduler.due_tasks(
+        _day(10, 0), trading=True, state=state, flags=_flags(), breakers_open=set(),
+    )
+    attempted = {"kinds": {"stock_intraday": {"last_attempt_at": _day(10, 0).isoformat()}}}
+    assert "stock_intraday" in scheduler.due_tasks(
+        _day(10, 0) + timedelta(seconds=30),
+        trading=True, state=attempted, flags=_flags(), breakers_open=set(),
+    )
+    recent = {"kinds": {"stock_intraday": {"last_success_at": _day(10, 0).isoformat()}}}
+    assert "stock_intraday" not in scheduler.due_tasks(
+        _day(10, 0) + timedelta(seconds=30),
+        trading=True, state=recent, flags=_flags(), breakers_open=set(),
+    )
     assert "stock_intraday" not in scheduler.due_tasks(
         _day(10, 5), trading=True, state=recent, flags=_flags(), breakers_open=set(),
     )
     assert "stock_intraday" in scheduler.due_tasks(
         _day(10, 6), trading=True, state=recent, flags=_flags(), breakers_open=set(),
+    )
+    snapped = {
+        "kinds": {
+            "stock_intraday": {"last_snapshot": _day(10, 0).strftime("%Y-%m-%dT%H:%M:%S")},
+        },
+    }
+    assert "stock_intraday" not in scheduler.due_tasks(
+        _day(10, 0) + timedelta(seconds=30),
+        trading=True, state=snapped, flags=_flags(), breakers_open=set(),
     )
 
 
