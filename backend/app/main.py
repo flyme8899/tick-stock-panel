@@ -202,6 +202,15 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("depth_service init failed: %s", e)
 
+    # 做T池盘中五档快照(研究旁路线, 只写 data/depth5_intraday, fail-soft)
+    try:
+        from app.services.depth_intraday import DepthIntradayCollector
+        depth_intraday = DepthIntradayCollector(repo.store.data_dir, depth_service)
+        app.state.depth_intraday = depth_intraday
+        depth_intraday.start()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("depth_intraday init failed: %s", e)
+
     # 盘中分钟增量刷新 (Expert 专有): 线程常驻, 开关/时段/能力门控在循环内每轮判断
     try:
         from app.services.minute_refresh import MinuteRefreshService
@@ -479,6 +488,9 @@ async def _application_lifespan(app: FastAPI):
         dsvc = getattr(app.state, "depth_service", None)
         if dsvc:
             dsvc.stop_polling()
+        dintra = getattr(app.state, "depth_intraday", None)
+        if dintra:
+            dintra.stop()
         wbot = getattr(app.state, "wecom_bot_service", None)
         if wbot:
             wbot.stop()
