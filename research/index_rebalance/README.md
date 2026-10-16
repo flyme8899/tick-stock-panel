@@ -47,11 +47,14 @@ research/index_rebalance/
 ## 二、服务器上跑覆盖检查（**任务 1，必须先做**）
 
 ```bash
-# 1) 把检查脚本拷进容器
+# 1) 把脚本**和成员表**一起拷进容器
+#    （脚本要读 out/members.parquet 抽样本；probe/_cache 是 gitignore 的派生物，容器里没有）
 docker compose cp research/index_rebalance/backtest/check_kline_coverage.py app:/tmp/
+docker compose cp research/index_rebalance/out/members.parquet app:/tmp/
 
 # 2) 跑覆盖检查（compose 已设 DATA_DIR=/app/data）
-docker compose exec app python /tmp/check_kline_coverage.py --data-dir /app/data
+docker compose exec app python /tmp/check_kline_coverage.py \
+    --data-dir /app/data --members /tmp/members.parquet
 
 # 3) 若报「目录不存在」，先确认数据在哪
 docker compose exec app sh -c 'ls -d /app/data/* | head -20'
@@ -60,11 +63,22 @@ docker compose exec app sh -c 'ls -d /app/data/* | head -20'
 docker compose exec app sh -c 'ls /app/data/kline_daily | head -3; ls /app/data/kline_daily | tail -3'
 ```
 
+> ⚠️ **不要只拷脚本**。早期版本的脚本从 `probe/_cache/*.lists.json` 读名单，
+> 而那份缓存在 `.gitignore` 里 —— 单独拷进容器会抽不到样本，
+> 出现「抽样 0 个事件 → 判定不通过」的**假失败**。
+> 现已改为读已入库的 `out/members.parquet`。
+
 **判定标准**：能否覆盖 `2020-10-01 ~ 2026-06-30`
 （起点 = 最早事件公告日前约 20 交易日；终点 = 最近生效日后 10 交易日）。
 脚本会抽 10 个「指数×事件」核对纳入股日 K 完整性，**缺数率 >5% 判失败**。
 
-退出码：`0` 通过 / `1` 不通过 / `2` 数据目录不存在。
+抽样点名的时点是 **2021-05-28 / 2021-11-26 / 2024-11-29 / 2026-05-29**。
+任务书原点的 2020-11-27 那条（公告 11514）因沪深300 与中证香港100 名单混排
+**已在样本侧剔除**，成员表里最早的事件是 2021-05-28 ——
+它的 20 交易日前置窗口落在 2021-04，已代表「最早一段」，
+**区间门槛仍按 `2020-10-01` 原样卡，不因缺 2020-11 而放宽**。
+
+退出码：`0` 通过 / `1` 不通过 / `2` 数据目录或成员表缺失。
 
 > ⚠️ 抽样核对时要区分「**真缺数**」与「**股票已退市**」—— 不少调出股已退市，
 > 其日 K 天然不存在，不影响回测（窗口内通常仍有数据）。
@@ -127,9 +141,13 @@ A 股往返实际约 10–15 bp（佣金双边 + 印花税卖出 5 bp + 过户�
 | A | 行情覆盖：任务 1 通过（最早分区 ≤ 2020-10-01） |
 | B | 调入侧：公告后或生效窗**净超额（扣 13bp）> 0 且 t ≥ 1.96**（事件聚类） |
 | C | 调出侧：同窗**净超额 < 0 且 \|t\| ≥ 1.96**，或明确写「无显著负向」 |
-| D | 稳健：至少两个指数方向一致；去掉最大 2 个事件后符号不变 |
+| D1 | 稳健：至少两个指数方向一致 |
+| D2 | 稳健：**去掉\|事件均值\|最大的 2 个事件后符号不变** |
 
 **任一不过 → 结论写「暂停，不做落地」。禁止为通过而放宽窗口或换基准。**
+
+> D2 按**事件级均值**排序（同一 `notice_id` 内先取均值）再剔除，
+> 避免「观测多」被误当成「影响大」；每组事件数 < 3 时判「无法检验」而非放行。
 
 ---
 

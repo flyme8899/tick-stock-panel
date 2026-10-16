@@ -14,10 +14,11 @@
 
 | 门槛 | 状态 | 说明 |
 | --- | --- | --- |
-| **A 行情覆盖** | ⏳ **待生产机确认** | 生产机日 K 最早 **2021-06-01**，正在向前补到 2020-10。补齐前不产出正式结论 |
+| **A 行情覆盖** | ⏳ **待服务器确认** | 生产机日 K 已补到 **2020-06-01**，覆盖研究窗 `2020-10-01~2026-06-30`。**待服务器跑一次覆盖检查确认后**即可跑正式回测 |
 | B 调入侧净超额 > 0 且 t ≥ 1.96 | ⏸ 未判定 | 待 A 通过 |
 | C 调出侧净超额 < 0 且 \|t\| ≥ 1.96 | ⏸ 未判定 | 待 A 通过 |
-| D 稳健性 | ⏸ 未判定 | 待 A 通过 |
+| D1 至少两个指数方向一致 | ⏸ 未判定 | 待 A 通过 |
+| D2 去掉最大 2 个事件后符号不变 | ⏸ 未判定 | 待 A 通过 |
 
 > **本报告不含任何真实数据的超额收益、t 值或成本敏感度结论。**
 > 第四节给出的是**合成数据**的管道验证结果，**不得当作研究发现**。
@@ -51,9 +52,19 @@ research/index_rebalance/
 ### 服务器执行命令
 
 ```bash
+# 脚本**和成员表**一起拷（脚本要读 out/members.parquet 抽样本）
 docker compose cp research/index_rebalance/backtest/check_kline_coverage.py app:/tmp/
-docker compose exec app python /tmp/check_kline_coverage.py --data-dir /app/data
+docker compose cp research/index_rebalance/out/members.parquet app:/tmp/
+docker compose exec app python /tmp/check_kline_coverage.py \
+    --data-dir /app/data --members /tmp/members.parquet
 ```
+
+> **评审修复**：初版脚本从 `probe/_cache/*.lists.json` 读名单，而该缓存在 `.gitignore` 里。
+> 按本报告的命令单独拷脚本进容器时，缓存不存在 → 抽样全部跳过 →
+> `results == []` → 判定**恒为不通过**（假失败）。
+> 已复现该场景确认，并改为读已入库的 `out/members.parquet`（随仓库分发）。
+> 同时把抽样点名的 2020-11-27 那条（公告 11514，已因混排剔除）
+> 换成实际最早事件 2021-05-28 作早期窗口代理。
 
 ---
 

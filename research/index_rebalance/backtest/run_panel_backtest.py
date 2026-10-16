@@ -490,21 +490,64 @@ def judge(summary: pl.DataFrame, valid: pl.DataFrame) -> list[str]:
     out.append(f"C 调出侧(<0 且 |t|≥1.96): {'✅ ' + ', '.join(c_pass) if c_pass else '❌ 无显著负向'}")
 
     # D: 至少两个指数方向一致（同一窗口、同方向符号相同）
-    d_ok = False
-    for window in {r["window"] for r in summary.iter_rows(named=True)}:
-        for direction in ("in", "out"):
-            sub = [r for r in summary.iter_rows(named=True)
-                   if r["window"] == window and r["direction"] == direction]
-            if len(sub) < 2:
-                continue
-            signs = {1 if r["net_after_cost"] > 0 else -1 for r in sub}
-            if len(signs) == 1:
-                d_ok = True
-    out.append(f"D 至少两个指数方向一致: {'✅' if d_ok else '❌'}")
+    d_sign = False
+    d_sign_examples = []
+    pairs = {(r["window"], r["direction"]) for r in summary.iter_rows(named=True)}
+    for window, direction in sorted(pairs):
+        sub = [r for r in summary.iter_rows(named=True)
+               if r["window"] == window and r["direction"] == direction]
+        if len(sub) < 2:
+            continue
+        signs = {1 if r["net_after_cost"] > 0 else -1 for r in sub}
+        if len(signs) == 1:
+            d_sign = True
+            d_sign_examples.append(f"{direction}/{window}")
+    out.append(f"D1 至少两个指数方向一致: {'✅ ' + ', '.join(d_sign_examples) if d_sign else '❌'}")
 
+    # D2: 去掉「绝对值最大的 2 个事件」后，符号不变
+    #      —— 防结论被 1~2 次极端调仓带偏
+    d_drop = drop_top_events_robust(valid)
+    out.append(f"D2 去掉最大 2 个事件后符号不变: {d_drop['text']}")
+
+    d_ok = d_sign and d_drop["ok"]
     passed = bool(b_pass) and d_ok
     out.append(f"结论: {'✅ 通过，可继续' if passed else '⏸ 暂停，不做落地'}")
     return out
+
+
+def drop_top_events_robust(valid: pl.DataFrame) -> dict:
+    """去掉「|净超额| 最大的 2 个事件」后，看各组均值符号是否翻转。
+
+    「最大 2 个事件」按**事件级均值**排序（同一 notice_id 内的股票先取均值），
+    避免样本量大的事件因为观测多而被误判为「影响最大」。
+    """
+    if valid.is_empty():
+        return {"ok": False, "text": "❌ 无有效观测"}
+
+    # 事件级均值：按 (index, direction, window, notice_id) 聚合
+    per_event = (valid.group_by(["index_name", "direction", "window", "notice_id"])
+                 .agg(pl.col("excess").mean().alias("ev_mean")))
+
+    flipped, checked = [], 0
+    for (idx, direction, window), g in per_event.group_by(
+            ["index_name", "direction", "window"], maintain_order=True):
+        if g.height < 3:          # 事件太少，去掉 2 个就没意义了
+            continue
+        checked += 1
+        base = g["ev_mean"].mean()
+        # 去掉 |ev_mean| 最大的 2 个事件
+        keep = g.sort(pl.col("ev_mean").abs(), descending=True).tail(g.height - 2)
+        after = keep["ev_mean"].mean()
+        if base is None or after is None:
+            continue
+        if (base > 0) != (after > 0):
+            flipped.append(f"{idx}/{direction}/{window}")
+
+    if checked == 0:
+        return {"ok": False, "text": "❌ 每组事件数 <3，无法检验"}
+    if flipped:
+        return {"ok": False, "text": f"❌ {len(flipped)} 组符号翻转: {', '.join(flipped[:4])}"}
+    return {"ok": True, "text": f"✅ {checked} 组符号均未翻转"}
 
 
 if __name__ == "__main__":
