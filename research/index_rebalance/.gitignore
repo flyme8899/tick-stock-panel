@@ -1,0 +1,19 @@
+# 研究中间产物 —— 不入库
+#
+# 这些都可以由脚本重新生成，且体积大（附件/详情 JSON/回测明细），
+# 提交进仓库会污染 diff、拖慢 clone。
+
+# probe 阶段的原始缓存：公告详情 JSON、名单附件、解析出的名单
+# 重新生成：python probe/probe_index_rebalance.py --year 2018 --full
+probe/_cache/
+
+# 回测输出（合成与真实）
+# 重新生成：build_samples.py → run_panel_backtest.py
+out/synth/
+out/real/
+out/neg1/
+out/neg2/
+
+# Python 缓存
+__pycache__/
+*.pyc
