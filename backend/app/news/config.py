@@ -42,6 +42,8 @@ _DEFAULT_VISION_BASE = "https://tokenhub.tencentmaas.com/v1"
 _DEFAULT_VISION_MODEL = "deepseek/deepseek-v4-flash-vision-exp"
 # 表格 OCR 不能关思考，预算要留给 reasoning 之后的 JSON。
 VISION_OCR_MAX_TOKENS = 8192
+# glm-5.3-flash 思考默认 max 且不能关。8192 会被思考占满，content 为空。
+VISION_GLM_OCR_MAX_TOKENS = 16384
 # 短任务关掉思考后，正文不跟 reasoning 抢同一段预算。
 VISION_SHORT_MAX_TOKENS = 1024
 _EMAIL_IN_UA = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
@@ -243,12 +245,20 @@ def vision_generation(model: str, *, ocr: bool) -> dict:
     """表格 OCR 保持思考。只有非表格的短任务才按模型尝试关掉思考。
 
     deepseek 视觉模型可以传 thinking.type=disabled，但关掉后表格识别变差。
-    glm-5.3-flash 传这个字段会 400，短任务只用 reasoning_effort=low。
+    glm-5.3-flash 传 thinking.type=disabled 会 400，而且思考不能关，默认
+    reasoning_effort=max。不把力度降到 low 时，申赎表的 max_tokens 会被思考占满，
+    content 为空。temperature 用 1，避免 0 被网关拒绝。
     mimo-v2.6-flash 可以干净关掉思考，识别并不更好，所以不改默认模型。
     """
-    if ocr:
-        return {"max_tokens": VISION_OCR_MAX_TOKENS}
     name = (model or "").lower()
+    if ocr:
+        if "glm-5.3-flash" in name:
+            return {
+                "max_tokens": VISION_GLM_OCR_MAX_TOKENS,
+                "reasoning_effort": "low",
+                "temperature": 1,
+            }
+        return {"max_tokens": VISION_OCR_MAX_TOKENS}
     if "glm-5.3-flash" in name:
         return {"max_tokens": VISION_SHORT_MAX_TOKENS, "reasoning_effort": "low"}
     if "deepseek-v4-flash-vision" in name or "mimo-v2.6-flash" in name:

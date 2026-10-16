@@ -63,7 +63,7 @@ from app.news.service import get_store, health_payload, hot_candidates, reset_st
 
 FIXTURES = Path(__file__).parent / "fixtures" / "etf_flow"
 SATURDAY = datetime(2026, 10, 10, 7, 40, tzinfo=CN_TZ)
-DEADLINE = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
+DEADLINE = datetime(2026, 10, 10, 11, 0, tzinfo=CN_TZ)
 HARD_END = datetime(2026, 10, 10, 15, 0, tzinfo=CN_TZ)
 MONDAY = datetime(2026, 10, 12, 7, 40, tzinfo=CN_TZ)
 SUNDAY = datetime(2026, 10, 11, 8, 0, tzinfo=CN_TZ)
@@ -115,10 +115,12 @@ class Client:
         self.sogou = sogou
         self.wechat = wechat
         self.gets: list[str] = []
+        self.params: list[dict | None] = []
         self.posts: list[tuple] = []
 
     def get(self, url, params=None, headers=None):
         self.gets.append(url)
+        self.params.append(params)
         if url.startswith(("https://nimg.ws.126.net/", "https://mmbiz.qpic.cn/", "https://mmbiz.qlogo.cn/")):
             return Resp("", url, headers={"content-type": "image/jpeg"}, content=url.encode("ascii"))
         if url.startswith("https://www.163.com/dy/media/"):
@@ -327,10 +329,11 @@ def test_vision_payload_embeds_image_and_drops_other_hosts():
     with pytest.raises(ExtractFailedError, match="过大"):
         vision_payload(Big(), ["https://nimg.ws.126.net/a.jpg"], model="glm-5.3-flash")
     assert body["model"] == "glm-5.3-flash"
-    assert body["max_tokens"] >= 8192
+    assert body["max_tokens"] >= 16384
+    assert body["reasoning_effort"] == "low"
+    assert body["temperature"] == 1
     assert "thinking" not in body
     assert "enable_thinking" not in body
-    assert "reasoning_effort" not in body
     assert "deepseek" not in json.dumps(body)
 
 
@@ -344,8 +347,14 @@ def test_short_vision_tasks_disable_thinking_without_touching_ocr():
         body = vision_payload(_ImageDownload(), ["https://nimg.ws.126.net/a.jpg"], model=model)
         assert body["max_tokens"] >= 8192
         assert "thinking" not in body
-        assert "reasoning_effort" not in body
-        assert vision_generation(model, ocr=True) == {"max_tokens": body["max_tokens"]}
+        if "glm-5.3-flash" in model:
+            assert body["reasoning_effort"] == "low"
+            assert body["temperature"] == 1
+            assert vision_generation(model, ocr=True)["max_tokens"] == body["max_tokens"]
+        else:
+            assert "reasoning_effort" not in body
+            assert body["temperature"] == 0
+            assert vision_generation(model, ocr=True) == {"max_tokens": body["max_tokens"]}
     deepseek = vision_generation("deepseek/deepseek-v4-flash-vision-exp", ocr=False)
     assert deepseek["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in deepseek
@@ -456,14 +465,18 @@ def test_empty_content_retries_once_then_skips_that_image(news_db):
         client,
         ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"],
     )
-    assert len(client.posts) == 4
+    # 第一张图主模型两次空内容后，备用模型抽出数字并再核对一次，第二张图仍走主模型。
+    assert len(client.posts) == 6
     assert extracted["overview"]["net_1d"] == 12.5
     assert [body["messages"][0]["content"][1]["image_url"]["url"] for body in client.posts] == [
+        _data_url("https://nimg.ws.126.net/a.jpg"),
+        _data_url("https://nimg.ws.126.net/a.jpg"),
         _data_url("https://nimg.ws.126.net/a.jpg"),
         _data_url("https://nimg.ws.126.net/a.jpg"),
         _data_url("https://nimg.ws.126.net/b.jpg"),
         _data_url("https://nimg.ws.126.net/b.jpg"),
     ]
+    assert client.posts[2]["model"] != client.posts[0]["model"]
 
 
 def test_empty_content_on_the_only_image_fails_after_one_retry(news_db):
@@ -478,11 +491,8 @@ def test_empty_content_on_the_only_image_fails_after_one_retry(news_db):
     client = Seq()
     with pytest.raises(ExtractFailedError, match="没有返回内容"):
         _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
-    assert len(client.posts) == 2
-    assert [body["max_tokens"] for body in client.posts] == [
-        VISION_OCR_MAX_TOKENS,
-        VISION_OCR_MAX_TOKENS,
-    ]
+    assert len(client.posts) == 4
+    assert [body["max_tokens"] for body in client.posts] == [VISION_OCR_MAX_TOKENS] * 4
 
 
 def _length_cutoff() -> dict:
@@ -533,6 +543,8 @@ def test_length_cutoff_does_not_retry_past_the_higher_budget(news_db):
     assert [body["max_tokens"] for body in client.posts] == [
         VISION_OCR_MAX_TOKENS,
         VISION_LENGTH_MAX_TOKENS,
+        VISION_OCR_MAX_TOKENS,
+        VISION_LENGTH_MAX_TOKENS,
     ]
 
 
@@ -548,6 +560,70 @@ def _posted_image(body: dict) -> str:
         for part in body["messages"][0]["content"]
         if part["type"] == "image_url"
     )
+
+
+def test_reasoning_content_json_is_used_when_content_is_empty(news_db):
+    raw = _vision()
+    text = raw["choices"][0]["message"]["content"]
+    raw["choices"][0]["message"]["content"] = ""
+    raw["choices"][0]["message"]["reasoning_content"] = "先看全市场。\n" + text
+
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts.append(json)
+            return Resp("", url, payload=raw)
+
+    extracted = _call_vision(Seq(), ["https://nimg.ws.126.net/a.jpg"])
+    assert extracted["overview"]["net_1d"] == 12.5
+
+
+def test_glm_http_error_falls_back_without_leaking_the_key(news_db, monkeypatch):
+    monkeypatch.setattr(settings, "vision_ai_model", "glm-5.3-flash")
+
+    class Seq(_ImageDownload):
+        def __init__(self):
+            self.posts = []
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts.append(json)
+            if json["model"] == "glm-5.3-flash":
+                request = httpx.Request("POST", url)
+                response = httpx.Response(
+                    400,
+                    request=request,
+                    text='{"error":{"message":"Bearer vision-test-key temperature"}}',
+                )
+                raise httpx.HTTPStatusError("bad", request=request, response=response)
+            return Resp("", url, payload=_vision())
+
+    client = Seq()
+    extracted = _call_vision(client, ["https://nimg.ws.126.net/a.jpg"])
+    assert extracted["overview"]["net_1d"] == 12.5
+    assert client.posts[0]["model"] == "glm-5.3-flash"
+    assert client.posts[0]["reasoning_effort"] == "low"
+    assert client.posts[0]["temperature"] == 1
+    assert "deepseek" in client.posts[1]["model"]
+    assert "vision-test-key" not in json.dumps(client.posts)
+
+    class Both(Seq):
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts.append(json)
+            request = httpx.Request("POST", url)
+            response = httpx.Response(
+                400,
+                request=request,
+                text='{"error":{"message":"vision-test-key rejected"}}',
+            )
+            raise httpx.HTTPStatusError("bad", request=request, response=response)
+
+    failed = Both()
+    with pytest.raises(ExtractFailedError, match=r"HTTP 400") as raised:
+        _call_vision(failed, ["https://nimg.ws.126.net/a.jpg"])
+    assert "vision-test-key" not in str(raised.value)
+    assert len(failed.posts) == 2
 
 
 def test_page_client_keeps_fetch_timeout_and_vision_read_is_longer():
@@ -693,7 +769,8 @@ def test_non_empty_garbage_is_not_retried(news_db):
     client = Seq()
     with pytest.raises(ExtractFailedError, match="没有抽出"):
         _call_vision(client, ["https://nimg.ws.126.net/a.jpg", "https://nimg.ws.126.net/b.jpg"])
-    assert len(client.posts) == 1
+    assert len(client.posts) == 2
+    assert client.posts[0]["model"] != client.posts[1]["model"]
 
 
 def test_sign_mismatch_across_retries_clears_only_that_cell(news_db):
@@ -766,18 +843,20 @@ def test_schedule_includes_saturday_after_friday_and_skips_sunday():
     assert is_check_morning(SUNDAY, False, False) is False
     assert is_check_morning(MONDAY, True, False) is True
     morning = datetime(2026, 10, 10, 8, 0, tzinfo=CN_TZ)
-    assert etf_wait_seconds(morning, pending=True) == 15 * 60
-    late = datetime(2026, 10, 10, 8, 50, tzinfo=CN_TZ)
-    assert etf_wait_seconds(late, pending=True) == int((DEADLINE - late).total_seconds())
-    almost = datetime(2026, 10, 10, 8, 59, 50, tzinfo=CN_TZ)
+    assert etf_wait_seconds(morning, pending=True) == 10 * 60
+    late = datetime(2026, 10, 10, 8, 20, tzinfo=CN_TZ)
+    assert etf_wait_seconds(late, pending=True) == 10 * 60
+    almost = datetime(2026, 10, 10, 8, 29, 50, tzinfo=CN_TZ)
     assert etf_wait_seconds(almost, pending=True) == 30
     early = datetime(2026, 10, 10, 7, 0, tzinfo=CN_TZ)
-    assert etf_wait_seconds(early, pending=False) == 35 * 60
+    assert etf_wait_seconds(early, pending=False) == 30 * 60
     done = datetime(2026, 10, 10, 7, 40, tzinfo=CN_TZ)
-    nxt = datetime(2026, 10, 11, 7, 35, tzinfo=CN_TZ)
+    nxt = datetime(2026, 10, 11, 7, 30, tzinfo=CN_TZ)
     assert etf_wait_seconds(done, pending=False) == int((nxt - done).total_seconds())
-    at_soft = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
-    assert etf_wait_seconds(at_soft, pending=True) == 30 * 60
+    after_discovery = datetime(2026, 10, 10, 8, 50, tzinfo=CN_TZ)
+    assert etf_wait_seconds(after_discovery, pending=True) == 30 * 60
+    nine = datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ)
+    assert etf_wait_seconds(nine, pending=True) == 30 * 60
     afternoon = datetime(2026, 10, 10, 14, 20, tzinfo=CN_TZ)
     assert etf_wait_seconds(afternoon, pending=True) == 30 * 60
     near_end = datetime(2026, 10, 10, 14, 40, tzinfo=CN_TZ)
@@ -801,8 +880,8 @@ def test_weekend_probe_does_not_ask_calendar(monkeypatch):
 def test_sogou_budget_caps_a_day_and_resets(tmp_path):
     path = tmp_path / "budget.json"
     start = datetime(2026, 10, 10, 8, 0, tzinfo=CN_TZ)
-    opened = [sogou_begin(path, start + timedelta(minutes=21 * i)) for i in range(6)]
-    assert opened == [True, True, True, True, False, False]
+    opened = [sogou_begin(path, start + timedelta(minutes=21 * i)) for i in range(9)]
+    assert opened == [True, True, True, True, True, True, True, True, False]
     assert sogou_begin(path, start + timedelta(minutes=10)) is False
     assert sogou_begin(path, datetime(2026, 10, 12, 8, 0, tzinfo=CN_TZ)) is True
 
@@ -837,7 +916,11 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert saved["found"] is True
     assert saved["pending"] is False
     assert len(client.posts) == 4
-    assert all("163.com" in url or url.startswith("https://nimg.ws.126.net/") for url in client.gets)
+    assert any("163.com" in url for url in client.gets)
+    assert any(
+        params and params.get("type") == "2" and "10月9日" in str(params.get("query") or "")
+        for params in client.params
+    )
     images = []
     for url, headers, body in client.posts:
         assert url == "https://tokenhub.tencentmaas.com/v1/chat/completions"
@@ -916,17 +999,22 @@ def test_netease_ingest_feeds_hot_and_dsa_without_text_llm(news_db, monkeypatch)
     assert "etf_flow" in ids
 
 
-def test_sogou_backup_when_netease_has_no_today_article(news_db):
+def test_sogou_title_search_is_primary_when_netease_is_late(news_db):
+    epoch = int(datetime(2026, 10, 10, 7, 32, tzinfo=CN_TZ).timestamp())
     client = Client(
         media=_text("netease_media_stale.html"),
-        sogou=_text("sogou_account.html"),
+        sogou=_sogou_hit("10月9日ETF基金申购和赎回", epoch),
         wechat=_text("wechat_article.html"),
     )
     saved = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
     assert saved["inserted"] == 1
-    assert any(url.startswith("https://weixin.sogou.com/weixin") for url in client.gets)
+    assert any(
+        params and params.get("type") == "2" and "10月9日" in str(params.get("query") or "")
+        for params in client.params
+    )
     assert any(url.startswith("https://mp.weixin.qq.com/") for url in client.gets)
-    assert not any("/dy/article/" in url for url in client.gets)
+    assert not any("163.com" in url for url in client.gets)
+    assert not any(params and params.get("type") == "1" for params in client.params)
     row = (
         get_store()
         ._conn.execute("SELECT source_id, url, media_ids, raw_json FROM news_items")
@@ -949,7 +1037,7 @@ def test_sogou_budget_blocks_backup_before_deadline(news_db):
         json.dumps(
             {
                 "date": "2026-10-10",
-                "count": 4,
+                "count": 8,
                 "last_at": "2026-10-10T07:00:00+08:00",
             }
         ),
@@ -987,10 +1075,21 @@ def test_missing_article_alerts_at_deadline_without_numbers(news_db, monkeypatch
     )
     assert early["pending"] is True
     assert sent == []
+    nine = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert nine["pending"] is True
+    assert sent == []
     soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
     assert soft["found"] is False
     assert soft["pending"] is True
     assert len(sent) == 1
+    assert "11:00" in sent[0][2]
+    assert "09:00" not in sent[0][2]
     assert "暂缺" in sent[0][2]
     assert "仍未采集到" not in sent[0][2]
     assert "http" not in sent[0][2]
@@ -1139,7 +1238,7 @@ def test_sogou_month_day_does_not_land_in_the_future():
     refs = parse_sogou_account(html, now)
     assert len(refs) == 1
     assert refs[0].published_at.date() == date(2025, 12, 31)
-    assert refs[0].published_at.timetz().replace(tzinfo=None) >= datetime(2026, 1, 2, 7, 35).time()
+    assert refs[0].published_at.timetz().replace(tzinfo=None) >= datetime(2026, 1, 2, 7, 30).time()
 
 
 def test_model_trade_date_after_publish_is_dropped_when_title_has_no_day():
@@ -1373,46 +1472,42 @@ def test_backfill_cli_passes_dates_before_floor(news_db, monkeypatch, capsys):
     assert printed["missing"] == []
 
 
-def test_live_sogou_runs_once_per_phase(news_db):
-    client = Client(media=_text("netease_media_stale.html"), sogou="<ul class='news-list2'></ul>")
-    first = _collect(
+def test_discovery_polls_today_title_until_the_sogou_cap(news_db):
+    client = Client(media=_text("netease_media_stale.html"), sogou="<ul></ul>")
+    slots = ((7, 30), (7, 40), (7, 50), (8, 0), (8, 10), (8, 20))
+    for hour, minute in slots:
+        saved = _collect(
+            client,
+            news_db,
+            datetime(2026, 10, 10, hour, minute, tzinfo=CN_TZ),
+            today_trading=False,
+            yesterday_trading=True,
+        )
+        assert saved["pending"] is True
+    queries = [params for params in client.params if params and params.get("type") == "2"]
+    assert len(queries) == 6
+    assert all("10月9日ETF基金申购和赎回" in str(item.get("query") or "") for item in queries)
+    assert not any(params and params.get("type") == "1" for params in client.params)
+    for hour, minute in ((8, 30), (9, 0)):
+        saved = _collect(
+            client,
+            news_db,
+            datetime(2026, 10, 10, hour, minute, tzinfo=CN_TZ),
+            today_trading=False,
+            yesterday_trading=True,
+        )
+        assert saved["pending"] is True
+    late = [params for params in client.params if params and params.get("type") == "2"]
+    assert len(late) == 8
+    blocked = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 8, 0, tzinfo=CN_TZ),
+        datetime(2026, 10, 10, 9, 40, tzinfo=CN_TZ),
         today_trading=False,
         yesterday_trading=True,
     )
-    assert first["pending"] is True
-    morning = [url for url in client.gets if "sogou.com" in url]
-    assert len(morning) == 1
-    second = _collect(
-        client,
-        news_db,
-        datetime(2026, 10, 10, 8, 21, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
-    )
-    assert second["pending"] is True
-    assert [url for url in client.gets if "sogou.com" in url] == morning
-    third = _collect(
-        client,
-        news_db,
-        datetime(2026, 10, 10, 9, 30, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
-    )
-    assert third["pending"] is True
-    afternoon = [url for url in client.gets if "sogou.com" in url]
-    assert len(afternoon) == 2
-    fourth = _collect(
-        client,
-        news_db,
-        datetime(2026, 10, 10, 10, 0, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
-    )
-    assert fourth["pending"] is True
-    assert [url for url in client.gets if "sogou.com" in url] == afternoon
+    assert blocked["pending"] is True
+    assert len([params for params in client.params if params and params.get("type") == "2"]) == 8
     assert any("163.com" in url for url in client.gets)
 
 
@@ -1434,7 +1529,7 @@ def test_soft_miss_then_recovered_notice(news_db, monkeypatch):
     saved = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 10, 30, tzinfo=CN_TZ),
+        datetime(2026, 10, 10, 12, 0, tzinfo=CN_TZ),
         today_trading=False,
         yesterday_trading=True,
     )
@@ -1446,13 +1541,67 @@ def test_soft_miss_then_recovered_notice(news_db, monkeypatch):
     again = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 11, 0, tzinfo=CN_TZ),
+        datetime(2026, 10, 10, 13, 0, tzinfo=CN_TZ),
         today_trading=False,
         yesterday_trading=True,
     )
     assert again["found"] is True
     assert again["inserted"] == 0
     assert len(sent) == 2
+
+
+def test_recovery_when_sogou_clock_is_the_trade_date(news_db, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        settings, "dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test"
+    )
+    monkeypatch.setattr(
+        "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
+    )
+    client = Client(media=_text("netease_media_stale.html"), sogou="<ul></ul>")
+    soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    assert soft["pending"] is True
+    assert len(sent) == 1
+    epoch = int(datetime(2026, 10, 9, 7, 40, tzinfo=CN_TZ).timestamp())
+    client.sogou = _sogou_hit("10月9日ETF基金申购和赎回", epoch)
+    client.wechat = _text("wechat_article.html")
+    saved = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 10, 12, 0, tzinfo=CN_TZ),
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert saved["inserted"] == 1
+    assert len(sent) == 2
+    assert "已补采" in sent[1][2]
+    published = get_store()._conn.execute("SELECT published_at FROM news_items").fetchone()
+    assert published["published_at"].startswith("2026-10-09")
+
+
+def test_backfill_after_alert_sends_recovery(news_db, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        settings, "dingtalk_webhook_url", "https://oapi.dingtalk.com/robot/send?access_token=test"
+    )
+    monkeypatch.setattr(
+        "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
+    )
+    client = Client(media=_text("netease_media_stale.html"), sogou="<ul></ul>")
+    _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    assert len(sent) == 1
+    filler = Client(media=_text("netease_media.html"), article=_text("netease_article.html"))
+    summary = backfill_etf_flow(
+        filler,
+        dates=["2026-10-09"],
+        now=datetime(2026, 10, 10, 12, 0, tzinfo=CN_TZ),
+        data_dir=news_db,
+    )
+    assert summary["inserted"] == 1
+    assert summary["errors"] == []
+    assert len(sent) == 2
+    assert "已补采" in sent[1][2]
+    assert "12.5" not in sent[1][2]
 
 
 def _short_wechat_html(*, published: datetime) -> str:

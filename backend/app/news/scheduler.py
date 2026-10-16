@@ -127,7 +127,7 @@ class NewsScheduler:
                         self._next["dws"] = stamp + interval_seconds("dws", now)
                         self._next["zsxq"] = stamp + interval_seconds("zsxq", now)
                     elif source == "etf_flow":
-                        # 申赎稿在交易日次日发布。pending 时 07:35–09:00 每 15 分钟，之后到 15:00 每 30 分钟。
+                        # 申赎稿在交易日次日早晨发布。07:30–08:30 每 10 分钟，之后到 15:00 每 30 分钟。
                         result = run_due(source) or {}
                         self._next[source] = stamp + etf_wait_seconds(
                             now, pending=bool(result.get("pending")),

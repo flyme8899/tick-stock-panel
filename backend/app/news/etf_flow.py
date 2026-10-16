@@ -1,13 +1,14 @@
 """公众号「ETF领航者」的每日 ETF 申赎。
 
-文章标题像「10月9日ETF基金申购和赎回」，正文是表格图片。优先读网易号
-https://www.163.com/dy/media/T1730214999977.html 。列表里没有当天稿件时，
-才按额度试搜狗微信。这个号从服务器 IP 搜出来经常是空的，所以日内轮询
-每个阶段最多打一次，不把和回补共用的额度在上午用完。不登录微信。
+文章标题像「10月9日ETF基金申购和赎回」，正文是表格图片。标题里的日期是
+交易日，文章在次日早晨约 07:xx 发布。主路径是搜狗微信文章搜索（type=2），
+查询「ETF领航者 + 当天应有的标题」。账号搜索（type=1）从这个服务器 IP
+搜出来是空的，不再用于当天采集。网易号列表经常晚几个小时，只在搜狗没有
+这篇、额度用完或搜狗请求失败时兜底。不登录微信。
 
-发布时刻是交易日的次日早晨（实测周五的稿在周六 07:30 左右），网易号
-可能再晚几个小时。昨天开市时，07:35–09:00 每 15 分钟看一次，09:00 仍缺
-先发「暂缺」，然后每 30 分钟再看到 15:00。15:00 仍缺才发失败提醒。
+昨天开市时，07:30–08:30 每 10 分钟看一次，08:30–15:00 每 30 分钟再看。
+11:00 仍缺先发「暂缺」，15:00 仍缺才发失败提醒。已经发过暂缺或失败、
+后来把对应交易日的稿入库（含回补和原文链接）时，再发一条「已补采」。
 今天开市但昨天休市（例如周一）只补抓列表里还没入库的最新一篇，不把
 「今天没有新稿」报成故障。交易日历不可用时，周一到周五视作开市。
 
@@ -16,10 +17,12 @@ https://www.163.com/dy/media/T1730214999977.html 。列表里没有当天稿件�
 
 表格交给视觉模型。密钥只用 VISION_AI_*，不读取文本模型的 AI_API_KEY。
 默认模型是 deepseek/deepseek-v4-flash-vision-exp。表格 OCR 保持思考，
-max_tokens 至少 8192；关掉思考会让表格识别变差。备选 glm-5.3-flash、
-mimo-v2.6-flash 不改默认。一张图一次请求；空内容再试一次。若这次是因为
-长度截断且正文为空，重试把 max_tokens 提高到 16384，思考仍然打开。
-有两份结果时，正负号不一致的格子留空。
+max_tokens 至少 8192；关掉思考会让表格识别变差。glm-5.3-flash 的思考
+不能关，默认力度是 max，会把预算占满导致 content 为空，所以对它传
+reasoning_effort=low，并把上限提到 16384。空内容再试一次；若是长度截断，
+再把 max_tokens 提高。content 为空但 reasoning_content 里有 JSON 时用那段。
+主模型空内容、解析失败或 HTTP 错误后，换一个备用模型再试。超时和连接失败
+不换模型。有两份结果时，正负号不一致的格子留空。
 
 页面和图片下载大约 60 秒超时。视觉请求的读超时单独放到 240 秒，连接超时
 保持较短。读超时再试 2 次。某一张图仍超时就跳过，已经抽出的其他图继续合并；
@@ -58,21 +61,31 @@ NETEASE_MEDIA_URL = "https://www.163.com/dy/media/T1730214999977.html"
 NETEASE_HOST = "www.163.com"
 SOGOU_SEARCH_URL = "https://weixin.sogou.com/weixin"
 WECHAT_HOST = "mp.weixin.qq.com"
-POLL_START = dt_time(7, 35)
-SOFT_AT = dt_time(9, 0)
+POLL_START = dt_time(7, 30)
+# 公众号大约 07:xx 发布。这个窗口里按标题轮询搜狗，网易号还没索引。
+DISCOVERY_END = dt_time(8, 30)
+SOFT_AT = dt_time(11, 0)
 POLL_END = dt_time(15, 0)
-POLL_EVERY = 15 * 60
+POLL_EVERY = 10 * 60
 POLL_EVERY_LATE = 30 * 60
-SOGOU_DAILY_CAP = 4
-SOGOU_MIN_GAP = timedelta(minutes=20)
-# 日内轮询：09:00 前一次、09:00 后一次。回补不占这个次数，但共用日额度。
-LIVE_SOGOU_PER_PHASE = 1
+SOGOU_DAILY_CAP = 8
+SOGOU_MIN_GAP = timedelta(minutes=8)
+# 发现窗口每次轮询都可以搜。08:30 之后网易号兜底，搜狗只再试两次。回补共用日额度。
+LIVE_DISCOVERY_CAP = 6
+LIVE_LATE_CAP = 2
 MAX_VISION_IMAGES = 6
 # 一张表大约 20 只 ETF。思考占掉 completion 预算，多张图叠在一次请求里会把正文挤空。
 VISION_BATCH_SIZE = 1
 VISION_EMPTY_RETRIES = 1
 # 总览大表会把 8192 全部用在思考上，finish_reason=length 且 content 为空。
 VISION_LENGTH_MAX_TOKENS = 16384
+# glm 第一次已经用 16384。思考仍可能占满，截断后再抬一档。
+VISION_GLM_LENGTH_MAX_TOKENS = 32768
+_FALLBACK_VISION_MODELS = (
+    "deepseek/deepseek-v4-flash-vision-exp",
+    "mimo-v2.6-flash",
+    "glm-5.3-flash",
+)
 # 页面、搜狗和图片下载。视觉模型不走这个超时。
 PAGE_FETCH_TIMEOUT = 60.0
 # 思考打开且 max_tokens>=8192 时，单张表经常超过 60 秒才返回。
@@ -122,9 +135,9 @@ _BROWSER = {
     ),
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
-SOFT_MISSING_TEXT = "09:00 暂缺 ETF领航者当日申赎文章，继续采集到 15:00"
+SOFT_MISSING_TEXT = "11:00 暂缺 ETF领航者当日申赎文章，继续采集到 15:00"
 SOFT_MISSING_ALERT = f"TSP 资讯采集：{SOFT_MISSING_TEXT}。"
-SOFT_EXTRACT_ALERT = "TSP 资讯采集：09:00 暂缺 ETF领航者当日申赎表格，继续采集到 15:00。"
+SOFT_EXTRACT_ALERT = "TSP 资讯采集：11:00 暂缺 ETF领航者当日申赎表格，继续采集到 15:00。"
 MISSING_TEXT = "15:00 仍未采集到 ETF领航者当日申赎文章"
 MISSING_ALERT = f"TSP 资讯采集：{MISSING_TEXT}。"
 EXTRACT_ALERT = "TSP 资讯采集：15:00 仍未完成 ETF领航者当日申赎表格抽取。"
@@ -188,18 +201,18 @@ def _until(now: datetime, target: datetime) -> int:
 
 
 def etf_wait_seconds(now: datetime, *, pending: bool) -> int:
-    """pending 时 07:35–09:00 每 15 分钟，09:00–15:00 每 30 分钟；否则等到下一个 07:35。"""
+    """pending 时 07:30–08:30 每 10 分钟，08:30–15:00 每 30 分钟；否则等到下一个 07:30。"""
     now = now.astimezone(CN_TZ)
     clock = _clock(now)
     start = datetime.combine(now.date(), POLL_START, tzinfo=CN_TZ)
-    soft = datetime.combine(now.date(), SOFT_AT, tzinfo=CN_TZ)
+    discovery = datetime.combine(now.date(), DISCOVERY_END, tzinfo=CN_TZ)
     end = datetime.combine(now.date(), POLL_END, tzinfo=CN_TZ)
     if clock < POLL_START:
         return _until(now, start)
     if pending and clock < POLL_END:
-        if clock < SOFT_AT:
+        if clock < DISCOVERY_END:
             step = POLL_EVERY
-            boundary = soft
+            boundary = discovery
         else:
             step = POLL_EVERY_LATE
             boundary = end
@@ -294,6 +307,15 @@ def apply_trade_date(title: str, published: datetime, extracted: dict) -> dict:
     if parsed is None or parsed > publish_day:
         out["trade_date"] = ""
     return out
+
+
+def flow_title_for(day: date) -> str:
+    return f"{day.month}月{day.day}日ETF基金申购和赎回"
+
+
+def expected_trade_day(now: datetime) -> date:
+    """昨天开市时，今早这篇的标题日期就是昨天。"""
+    return now.astimezone(CN_TZ).date() - timedelta(days=1)
 
 
 def choose_flow_article(
@@ -580,6 +602,7 @@ def backfill_etf_flow(
             inserted += int(saved.get("inserted") or 0)
             duplicate += int(saved.get("duplicate") or 0)
             _remember_backfill(root, status, day, "已入库")
+            _note_stored_recovery(root)
     finally:
         if own:
             client.close()
@@ -598,7 +621,7 @@ def _search_wechat_archive(
     budget = root / "news" / "etf_sogou_budget.json"
     if not sogou_begin(budget, now):
         return None, True
-    title = f"{day.month}月{day.day}日ETF基金申购和赎回"
+    title = flow_title_for(day)
     html_text, _final = _fetch(
         client,
         SOGOU_SEARCH_URL,
@@ -909,10 +932,11 @@ def vision_payload(
             break
     body = {
         "model": model,
-        "temperature": 0,
         "messages": [{"role": "user", "content": content}],
     }
     body.update(vision_generation(model, ocr=True))
+    if "temperature" not in body:
+        body["temperature"] = 0
     if max_tokens is not None:
         body["max_tokens"] = max(int(max_tokens), body["max_tokens"])
     return body
@@ -932,9 +956,27 @@ def _message_text(payload: dict) -> str:
             elif isinstance(block, dict) and isinstance(block.get("text"), str):
                 parts.append(block["text"])
         content = "".join(parts)
-    if not isinstance(content, str) or not content.strip():
-        raise EmptyVisionError("视觉模型没有返回内容")
-    return content
+    if isinstance(content, str) and content.strip():
+        return content
+    # glm 思考占满预算时，JSON 可能只写在 reasoning_content 里。
+    reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+    blob = _json_object_text(reasoning if isinstance(reasoning, str) else "")
+    if blob:
+        return blob
+    raise EmptyVisionError("视觉模型没有返回内容")
+
+
+def _json_object_text(text: str) -> str:
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return ""
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return text[start : end + 1]
 
 
 def _stopped_for_length(payload: dict) -> bool:
@@ -1084,7 +1126,7 @@ def flow_summary(title: str, extracted: dict) -> str:
 
 
 def sogou_begin(path: Path, now: datetime) -> bool:
-    """一次备份算一次。一天最多 4 次，两次至少隔 20 分钟。"""
+    """一次搜索算一次。一天最多 8 次，两次至少隔 8 分钟。"""
     now = now.astimezone(CN_TZ)
     state = _load_budget(path)
     day = now.date().isoformat()
@@ -1111,21 +1153,22 @@ def sogou_begin(path: Path, now: datetime) -> bool:
 
 
 def _consume_live_sogou(root: Path, now: datetime) -> bool:
-    """日内采集少打搜狗。07:35–09:00 一次，09:00 之后一次。
+    """发现窗口里每次轮询都可以搜标题。08:30 之后最多再搜两次。
 
-    这个公众号从服务器 IP 搜出来是空的。15 分钟轮询不能把和回补共用的
-    一天 4 次额度在上午用完。两次仍至少隔 20 分钟。
+    和回补共用一天 8 次、两次至少隔 8 分钟。阶段次数用完不再打搜狗，改看网易号。
     """
     now = now.astimezone(CN_TZ)
     budget = root / "news" / "etf_sogou_budget.json"
-    phase = "live_morning" if _clock(now) < SOFT_AT else "live_afternoon"
+    discovery = _clock(now) < DISCOVERY_END
+    phase = "live_discovery" if discovery else "live_late"
+    cap = LIVE_DISCOVERY_CAP if discovery else LIVE_LATE_CAP
     state = _load_budget(budget)
     if state.get("date") == now.date().isoformat():
         try:
             used = int(state.get(phase) or 0)
         except (TypeError, ValueError):
             used = 0
-        if used >= LIVE_SOGOU_PER_PHASE:
+        if used >= cap:
             return False
     if not sogou_begin(budget, now):
         return False
@@ -1161,8 +1204,9 @@ def collect_etf_flow(
     if not vision_api_key():
         _mark_err("未配置 VISION_AI_API_KEY")
         return _result(skipped=True, error="未配置 VISION_AI_API_KEY")
-    if _published_on(now.date()):
+    if _collection_satisfied(now, expect):
         _mark_ok()
+        _note_stored_recovery(root)
         return _result(found=True)
     own = client is None
     client = client or _page_client()
@@ -1199,7 +1243,9 @@ def collect_etf_flow(
 
 def _pull(client, now: datetime, root: Path, expect: bool) -> dict:
     ref, _reason = _resolve_ref(client, now, root, expect)
-    return _note_recovered(root, now, _ingest_ref(client, ref))
+    result = _ingest_ref(client, ref)
+    _note_stored_recovery(root)
+    return result
 
 
 def ingest_wechat_url(
@@ -1235,7 +1281,8 @@ def ingest_wechat_url(
         page = parse_wechat_article(html_text, resolved, ref)
         result = _store_page(client, page)
         _mark_manual_backfill(root, page)
-        return _note_recovered(root, now, result)
+        _note_stored_recovery(root)
+        return result
     except ExtractFailedError:
         raise
     except Exception as exc:  # 补采失败要带回给命令行和接口
@@ -1319,26 +1366,52 @@ def _store_page(client, page: ArticlePage) -> dict:
 
 
 def _resolve_ref(client, now: datetime, root: Path, expect: bool) -> tuple[ArticleRef, str]:
+    """期待新稿时先按标题搜搜狗，网易号只在搜不到时兜底。"""
+    sogou_error: Exception | None = None
+    if expect:
+        try:
+            found = _search_live_sogou(client, now, root, expected_trade_day(now))
+        except Exception as exc:  # noqa: BLE001 — 搜狗失败改看网易号
+            sogou_error = exc
+            found = None
+        if found is not None:
+            return found, "sogou"
     refs, netease_error = _netease_refs(client)
     chosen, reason = choose_flow_article(refs, day=now.date(), expect=expect)
     if chosen is not None and (reason == "today" or not expect):
         return chosen, reason
-    if not _consume_live_sogou(root, now):
-        if netease_error is not None and chosen is None:
-            raise netease_error
-        raise ArticleMissingError()
-    try:
-        backup = parse_sogou_account(_sogou_html(client), now)
-    except Exception as exc:
-        if netease_error is not None:
-            raise RuntimeError(f"{_public_error(netease_error)}；{_public_error(exc)}") from exc
-        raise
-    backup_chosen, backup_reason = choose_flow_article(backup, day=now.date(), expect=expect)
-    if backup_chosen is not None and (backup_reason == "today" or not expect):
-        return backup_chosen, backup_reason
+    if netease_error is not None and sogou_error is not None:
+        raise RuntimeError(
+            f"{_public_error(netease_error)}；{_public_error(sogou_error)}"
+        ) from sogou_error
+    if sogou_error is not None:
+        raise sogou_error
     if netease_error is not None:
         raise netease_error
     raise ArticleMissingError()
+
+
+def _search_live_sogou(client, now: datetime, root: Path, trade_day: date) -> ArticleRef | None:
+    """按「公众号 + 标题」搜文章。额度用完时返回 None，不当成故障。"""
+    if not _consume_live_sogou(root, now):
+        return None
+    title = flow_title_for(trade_day)
+    html_text, _final = _fetch(
+        client,
+        SOGOU_SEARCH_URL,
+        allow_hosts={"weixin.sogou.com"},
+        params={"type": "2", "query": f"{ACCOUNT} {title}", "ie": "utf8"},
+    )
+    wanted = trade_day.isoformat()
+    matches = [
+        ref
+        for ref in parse_sogou_articles(html_text, now)
+        if trade_date_from_title(ref.title, ref.published_at) == wanted
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda ref: ref.published_at, reverse=True)
+    return matches[0]
 
 
 def _netease_refs(client) -> tuple[list[ArticleRef], Exception | None]:
@@ -1347,16 +1420,6 @@ def _netease_refs(client) -> tuple[list[ArticleRef], Exception | None]:
     except Exception as exc:  # noqa: BLE001 — 主源失败改走搜狗，不在这里结束
         return [], exc
     return parse_netease_media(html_text), None
-
-
-def _sogou_html(client) -> str:
-    html_text, _final = _fetch(
-        client,
-        SOGOU_SEARCH_URL,
-        allow_hosts={"weixin.sogou.com"},
-        params={"type": "1", "query": ACCOUNT, "ie": "utf8"},
-    )
-    return html_text
 
 
 def _load_page(client, ref: ArticleRef) -> ArticlePage:
@@ -1368,7 +1431,19 @@ def _load_page(client, ref: ArticleRef) -> ArticlePage:
     html_text, final = _fetch(client, ref.url, allow_hosts=_WECHAT_FETCH_HOSTS)
     if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
         raise ExtractFailedError("微信文章地址无效")
-    return parse_wechat_article(html_text, resolve_wechat_article_url(html_text, final), ref)
+    page = parse_wechat_article(html_text, resolve_wechat_article_url(html_text, final), ref)
+    # 搜狗时间有时是标题里的交易日。页面上的发布时间才是告警日那天的早晨。
+    clock = wechat_published_at(html_text)
+    if clock is None:
+        return page
+    return ArticlePage(
+        article_id=page.article_id,
+        title=page.title,
+        url=page.url,
+        published_at=clock,
+        images=page.images,
+        channel=page.channel,
+    )
 
 
 def _call_vision(client, images: list[str]) -> dict:
@@ -1406,25 +1481,70 @@ def _call_vision(client, images: list[str]) -> dict:
         raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
 
 
+def vision_model_chain() -> list[str]:
+    """主模型失败时只再试一个备用模型，避免一张表打满三个模型。"""
+    primary = vision_model()
+    chain = [primary] if primary else []
+    for name in _FALLBACK_VISION_MODELS:
+        if name not in chain:
+            chain.append(name)
+            break
+    return chain or [_FALLBACK_VISION_MODELS[0]]
+
+
+def _length_budget(model: str) -> int:
+    if "glm-5.3-flash" in (model or "").lower():
+        return VISION_GLM_LENGTH_MAX_TOKENS
+    return VISION_LENGTH_MAX_TOKENS
+
+
 def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, bool]:
+    """空内容、解析失败或 HTTP 错误时换备用模型。超时和连接失败不换。"""
+    last_error: ExtractFailedError | None = None
+    saw_empty = False
+    for index, model in enumerate(vision_model_chain()):
+        if index:
+            logger.warning("ETF申赎改用备用视觉模型 %s", model.rsplit("/", 1)[-1])
+        try:
+            parsed, empty = _vision_batch_one(client, images, key, model)
+        except VisionRequestTimeoutError:
+            raise
+        except ExtractFailedError as exc:
+            # 连接失败的文案没有 HTTP 状态。换模型还是打同一个网关，不再试。
+            if str(exc) == "视觉模型请求失败":
+                raise
+            last_error = exc
+            continue
+        if parsed is not None:
+            return parsed, empty or saw_empty
+        saw_empty = True
+    if last_error is not None and not saw_empty:
+        raise last_error
+    return None, True
+
+
+def _vision_batch_one(
+    client, images: list[str], key: str, model: str
+) -> tuple[dict | None, bool]:
     """空内容再试一次。第一次已有数字时，再用一次结果核对正负号。"""
-    first, empty, length_stop = _read_vision(client, images, key)
+    first, empty, length_stop = _read_vision(client, images, key, model)
     if first is None:
         if not empty:
             return None, False
+        bumped = _length_budget(model)
         second = None
         for _extra in range(VISION_EMPTY_RETRIES):
             if length_stop:
                 logger.warning(
                     "ETF申赎视觉输出被长度截断且没有正文，提高到 %s 再试一次",
-                    VISION_LENGTH_MAX_TOKENS,
+                    bumped,
                 )
                 second, _again, _stop = _read_vision(
-                    client, images, key, max_tokens=VISION_LENGTH_MAX_TOKENS
+                    client, images, key, model, max_tokens=bumped
                 )
             else:
                 logger.warning("ETF申赎视觉模型返回空内容，重试一次")
-                second, _again, _stop = _read_vision(client, images, key)
+                second, _again, _stop = _read_vision(client, images, key, model)
             if second is not None:
                 break
         if second is None:
@@ -1432,7 +1552,7 @@ def _vision_batch(client, images: list[str], key: str) -> tuple[dict | None, boo
             return None, True
         return second, True
     try:
-        second, confirm_empty, _confirm_stop = _read_vision(client, images, key)
+        second, confirm_empty, _confirm_stop = _read_vision(client, images, key, model)
     except ExtractFailedError as exc:
         logger.warning("ETF申赎正负号确认失败，沿用第一次结果: %s", _public_error(exc))
         return first, empty
@@ -1450,12 +1570,13 @@ def _read_vision(
     client,
     images: list[str],
     key: str,
+    model: str,
     *,
     max_tokens: int | None = None,
 ) -> tuple[dict | None, bool, bool]:
     payload = _post_vision(
         client,
-        vision_payload(client, images, model=vision_model(), max_tokens=max_tokens),
+        vision_payload(client, images, model=model, max_tokens=max_tokens),
         key,
     )
     try:
@@ -1487,6 +1608,10 @@ def _post_vision(client, body: dict, key: str) -> dict:
             payload = response.json()
         except ExtractFailedError:
             raise
+        except httpx.HTTPStatusError as exc:
+            message = _vision_status_message(str(body.get("model") or ""), exc)
+            logger.warning("ETF申赎视觉模型失败: %s", message)
+            raise ExtractFailedError(message) from exc
         except httpx.TimeoutException as exc:
             if attempt + 1 >= attempts:
                 logger.warning("ETF申赎视觉模型失败: %s", _public_error(exc))
@@ -1644,17 +1769,61 @@ def _alert_sent(root: Path, day: date, kind: str) -> bool:
     return _alert_path(root, day, kind).is_file()
 
 
-def _note_recovered(root: Path, now: datetime, result: dict) -> dict:
-    """暂缺或失败之后补进了当天的稿，再发一条不带数字的「已补采」。"""
-    if int(result.get("inserted") or 0) <= 0:
-        return result
-    day = now.astimezone(CN_TZ).date()
-    if not _published_on(day):
-        return result
-    if not (_alert_sent(root, day, "soft") or _alert_sent(root, day, "hard")):
-        return result
-    _alert(root, day, RECOVERED_ALERT, kind="recovered")
-    return result
+def _article_alert_day(title: str, published: datetime) -> date:
+    """告警记在发布日早晨。搜狗若把标题里的交易日当成发布时间，告警日是次日。"""
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=CN_TZ)
+    published_day = published.astimezone(CN_TZ).date()
+    trade = trade_date_from_title(title, published)
+    if not trade:
+        return published_day
+    trade_day = date.fromisoformat(trade)
+    if published_day <= trade_day:
+        return trade_day + timedelta(days=1)
+    return published_day
+
+
+def _note_stored_recovery(root: Path) -> None:
+    """暂缺或失败之后，对应交易日的稿已经入库，就补发一条不带数字的「已补采」。
+
+    回补和原文链接不经过当轮 ``inserted`` 判断。列表时间落在交易日而不是
+    发布日早晨时，仍按标题对上告警文件。
+    """
+    from app.news.service import get_store
+
+    for row in get_store().recent_for_feed(SOURCE, 16):
+        published = parse_time(row["published_at"])
+        if published is None:
+            continue
+        day = _article_alert_day(str(row["title"] or ""), published)
+        if not (_alert_sent(root, day, "soft") or _alert_sent(root, day, "hard")):
+            continue
+        _alert(root, day, RECOVERED_ALERT, kind="recovered")
+
+
+def _collection_satisfied(now: datetime, expect: bool) -> bool:
+    if _published_on(now.date()):
+        return True
+    if not expect:
+        return False
+    return expected_trade_day(now).isoformat() in _stored_flow_dates()
+
+
+def _vision_status_message(model: str, exc: httpx.HTTPStatusError) -> str:
+    code = getattr(getattr(exc, "response", None), "status_code", None)
+    status = f" HTTP {code}" if code else ""
+    response = getattr(exc, "response", None)
+    snippet = ""
+    if response is not None:
+        try:
+            snippet = str(getattr(response, "text", "") or "")
+        except Exception:  # noqa: BLE001 — 错误正文读不到就只留状态码
+            snippet = ""
+    redacted = _public_error(RuntimeError(snippet[:500]))
+    if redacted:
+        logger.warning("ETF申赎视觉模型响应: %s", redacted[:160])
+    label = (model or "视觉模型").rsplit("/", 1)[-1]
+    return f"视觉模型请求失败（{label}{status}）"
 
 
 def _mark_manual_backfill(root: Path, page: ArticlePage) -> None:
