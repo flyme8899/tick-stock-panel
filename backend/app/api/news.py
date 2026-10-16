@@ -1,7 +1,7 @@
 """HTTP：热门候选、单股资讯、来源开关、给 DSA 拉的 feed。"""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -13,6 +13,8 @@ from app.news.config import (
     set_push_prefs,
     set_source_enabled,
 )
+from app.market_time import CN_TZ
+from app.news.archive import MAX_LIMIT as _ARCHIVE_MAX, get_archive
 from app.news.push import send_test
 from app.news.service import (
     event_detail,
@@ -155,6 +157,35 @@ def messages(
         "key": key,
         "items": hot_messages(kind, key, window_hours=window_hours, limit=limit),
     }
+
+
+@router.get("/archive")
+def archive(
+    start: date | None = Query(None, description="起始日（含），北京时间"),
+    end: date | None = Query(None, description="结束日（含），北京时间"),
+    source: str | None = Query(None, pattern="^[a-z0-9_]{1,32}$"),
+    level: str | None = Query(None, max_length=32, description="逗号分隔，如 A,B"),
+    q: str | None = Query(None, min_length=1, max_length=64),
+    limit: int = Query(100, ge=1, le=_ARCHIVE_MAX),
+    offset: int = Query(0, ge=0, le=100_000),
+):
+    """历史资讯归档，只读。不进推送和热点。"""
+    levels = [x.strip() for x in (level or "").split(",") if x.strip()] or None
+    items = get_archive().query(
+        start=datetime.combine(start, time.min, CN_TZ) if start else None,
+        end=datetime.combine(end + timedelta(days=1), time.min, CN_TZ) if end else None,
+        source=source,
+        levels=levels,
+        keyword=q,
+        limit=limit,
+        offset=offset,
+    )
+    return {"items": items, "limit": limit, "offset": offset}
+
+
+@router.get("/archive/stats")
+def archive_stats():
+    return {"sources": get_archive().stats()}
 
 
 @router.get("/stocks/{symbol}")
