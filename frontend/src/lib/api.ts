@@ -2472,7 +2472,20 @@ export interface FundFlowAmountRow {
   change_5d?: number | null
   change_15d?: number | null
   broad?: string | null
+  /** 份额差 × 当日收盘价，单位亿元。复权跳变或中间缺交易日时为空。 */
+  net_inflow_1d?: number | null
+  /** 最近 5 个相邻交易日净流入合计，单位亿元。窗口里有空日则为空。 */
+  net_inflow_5d?: number | null
+  /** 最近 20 个相邻交易日净流入合计，单位亿元。窗口里有空日则为空。 */
+  net_inflow_20d?: number | null
+  /** ETF领航者当日净流入，单位亿元。对不上稿件时为空。 */
   flow_net?: number | null
+  /** ETF领航者 5 日净流入，单位亿元。 */
+  flow_net_5d?: number | null
+  /** ETF领航者 20 日净流入，单位亿元。 */
+  flow_net_20d?: number | null
+  /** 推算的 1 日净流入与领航者相差超过 20%。 */
+  flow_diverged?: boolean
 }
 
 export interface FundFlowStockBlock {

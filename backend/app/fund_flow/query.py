@@ -8,7 +8,7 @@ from pathlib import Path
 
 import polars as pl
 
-from app.fund_flow import factors, normalize, store
+from app.fund_flow import etf_inflow, factors, normalize, store
 from app.fund_flow.scheduler import current_flags, get_worker
 from app.fund_flow.units import percent_points_to_decimal
 from app.market_time import CN_TZ, cn_now, cn_today
@@ -20,10 +20,6 @@ _INTRADAY_FRESH_UNTIL = dt_time(15, 0)
 # 收盘后仍可采用的当天盘中快照的最早取样时刻。14:45 之后基本接近收盘，
 # 拿它当「收盘前快照」尚可接受；更早的（如 13:44）定格在午盘，会误导。
 _STALE_INTRADAY_BEFORE = dt_time(14, 45)
-
-_FLOW_COLUMNS = ("net_flow", "flow_net", "net_inflow", "净流入")
-_CODE_COLUMNS = ("code", "symbol", "基金代码")
-_DATE_COLUMNS = ("trade_date", "date", "日期")
 
 
 def _dir(data_dir: Path | None) -> Path:
@@ -231,13 +227,14 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
         return {"trade_date": None, "etf_flow_linked": False, "items": []}
     frame = _partition(root, "etf_shares", day)
     linked = _etf_flow_map(root, day)
+    inflows = etf_inflow.latest_inflows(root, as_of=day)
     items = []
     for row in frame.to_dicts():
         code = row.get("code")
         if not code:
             continue
-        flow = linked.get(code)
-        items.append({**row, "flow_net": flow, "etf_flow_linked": flow is not None})
+        fields = _etf_money_fields(code, linked, inflows)
+        items.append({**row, **fields, "etf_flow_linked": fields["flow_net"] is not None})
     return {
         "trade_date": day,
         "etf_flow_linked": any(item["etf_flow_linked"] for item in items),
@@ -245,37 +242,30 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
     }
 
 
-def _etf_flow_map(data_dir: Path, trade_date: str) -> dict[str, float]:
-    """ETF领航者落在 data/etf_flow 时，按代码和交易日把净流入接上。对不上就空。"""
-    base = Path(data_dir) / "etf_flow"
-    if not base.exists():
-        return {}
-    frames = []
-    for path in base.glob("**/*.parquet"):
-        try:
-            frames.append(pl.read_parquet(path))
-        except Exception:  # noqa: BLE001
-            continue
-    if not frames:
-        return {}
-    frame = pl.concat(frames, how="diagonal_relaxed")
-    code_col = next((name for name in _CODE_COLUMNS if name in frame.columns), None)
-    flow_col = next((name for name in _FLOW_COLUMNS if name in frame.columns), None)
-    if code_col is None or flow_col is None:
-        return {}
-    date_col = next((name for name in _DATE_COLUMNS if name in frame.columns), None)
-    if date_col is not None:
-        frame = frame.filter(pl.col(date_col).cast(pl.Utf8).str.slice(0, 10) == trade_date)
-    found: dict[str, float] = {}
-    for row in frame.select(code_col, flow_col).iter_rows():
-        code = normalize.code6(str(row[0]))
-        try:
-            value = float(row[1])
-        except (TypeError, ValueError):
-            continue
-        if code:
-            found[code] = value
-    return found
+def _etf_flow_map(data_dir: Path, trade_date: str) -> dict[str, dict[str, float | None]]:
+    """领航者净流入（亿元）。按交易日和代码读 news.sqlite，对不上就空。"""
+    return etf_inflow.navigator_by_code(data_dir, trade_date)
+
+
+def _etf_money_fields(
+    code: str,
+    navigator: dict[str, dict[str, float | None]],
+    inflows: dict[str, dict[str, float | None]],
+) -> dict:
+    """份额推算的净流入和领航者金额都是亿元。缺数留空，不写成 0。"""
+    article = navigator.get(code) or {}
+    computed = inflows.get(code) or {}
+    flow_net = article.get("net_1d")
+    net_1d = computed.get("net_inflow_1d")
+    return {
+        "net_inflow_1d": net_1d,
+        "net_inflow_5d": computed.get("net_inflow_5d"),
+        "net_inflow_20d": computed.get("net_inflow_20d"),
+        "flow_net": flow_net,
+        "flow_net_5d": article.get("net_5d"),
+        "flow_net_20d": article.get("net_20d"),
+        "flow_diverged": etf_inflow.flows_diverged(net_1d, flow_net),
+    }
 
 
 def lhb_backup_payload(data_dir: Path, trade_date: str) -> dict | None:
@@ -792,6 +782,7 @@ def _etf_changes(root: Path) -> dict:
         baselines[window] = _shares_by_code(root, base_day)
     prev_day = baseline_days.get(1)
     linked = _etf_flow_map(root, day)
+    inflows = etf_inflow.latest_inflows(root, as_of=day)
     current = _partition(root, "etf_shares", day)
     broad = []
     others = []
@@ -822,7 +813,7 @@ def _etf_changes(root: Path) -> dict:
             "change_5d": changes[5],
             "change_15d": changes[15],
             "broad": label,
-            "flow_net": linked.get(code),
+            **_etf_money_fields(code, linked, inflows),
         }
         if label:
             broad.append(item)
