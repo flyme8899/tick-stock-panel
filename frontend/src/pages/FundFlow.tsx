@@ -129,6 +129,27 @@ function formatShares(value: number | null | undefined): string {
   return `${sign}${n.toFixed(2)}亿份`
 }
 
+// 份额推算和领航者稿都已经是亿元，不再除 1 亿。
+function formatYiYuan(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${value.toFixed(2)}亿元`
+}
+
+const ETF_INFLOW_FIELDS: { key: 'net_inflow_1d' | 'net_inflow_5d' | 'net_inflow_20d'; label: string }[] = [
+  { key: 'net_inflow_1d', label: '1日' },
+  { key: 'net_inflow_5d', label: '5日' },
+  { key: 'net_inflow_20d', label: '20日' },
+]
+
+function navigatorInflow(row: FundFlowAmountRow): string | null {
+  if (row.flow_net == null && row.flow_net_5d == null && row.flow_net_20d == null) return null
+  const parts = [`领航者净流入 ${formatYiYuan(row.flow_net)}`]
+  if (row.flow_net_5d != null) parts.push(`5日 ${formatYiYuan(row.flow_net_5d)}`)
+  if (row.flow_net_20d != null) parts.push(`20日 ${formatYiYuan(row.flow_net_20d)}`)
+  return parts.join(' · ')
+}
+
 function etfBaselineTitle(
   baselines: Record<string, string | null> | undefined,
   days: number,
@@ -371,6 +392,9 @@ export function FundFlow() {
             >
               {(etf?.items.length ?? 0) === 0 ? <Empty text="还没有 ETF 份额。只有一天时只显示份额，不编造变化。" /> : (
                 <div className="min-w-0">
+                  <p className="mb-2 text-[11px] leading-relaxed text-muted">
+                    右侧是份额变化。净流入 = (当日份额 − 上一份落盘) × 收盘价，单位亿元；5 日 / 20 日是相邻交易日的滚动合计。复权跳变或中间缺交易日时留空。
+                  </p>
                   <div className="mb-1 flex items-baseline justify-between gap-3 text-[11px] text-muted">
                     <span>名称</span>
                     <span className="flex shrink-0 gap-2 sm:gap-3">
@@ -382,37 +406,56 @@ export function FundFlow() {
                     </span>
                   </div>
                   <ul className="space-y-2">
-                    {etf?.items.map(row => (
-                      <li key={row.code} className="min-w-0">
-                        <div className="flex items-baseline justify-between gap-3 text-sm">
-                          <span className="min-w-0 truncate">
-                            {row.name || row.code}
-                            {row.broad ? (
-                              <span className="ml-2 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent">
-                                {row.broad}
-                                {row.broad === '沪深300' || row.broad === '科创50' ? ' · 国家队代理' : ''}
-                              </span>
-                            ) : null}
-                          </span>
-                          <span className="flex shrink-0 gap-2 sm:gap-3">
-                            {ETF_WINDOWS.map(window => (
-                              <span
-                                key={window.label}
-                                className={cn('w-[56px] text-right font-mono text-xs sm:w-[68px]', signedClass(window.value(row)))}
-                                title={etfBaselineTitle(etf?.baselines, window.days)}
-                              >
-                                {formatShares(window.value(row))}
+                    {etf?.items.map(row => {
+                      const navigator = navigatorInflow(row)
+                      return (
+                        <li
+                          key={row.code}
+                          className={cn(
+                            'min-w-0',
+                            row.flow_diverged && 'rounded border border-warning/40 bg-warning/10 px-1.5 py-1',
+                          )}
+                          title={row.flow_diverged ? '推算净流入与领航者相差超过 20%' : undefined}
+                        >
+                          <div className="flex items-baseline justify-between gap-3 text-sm">
+                            <span className="min-w-0 truncate">
+                              {row.name || row.code}
+                              {row.broad ? (
+                                <span className="ml-2 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent">
+                                  {row.broad}
+                                  {row.broad === '沪深300' || row.broad === '科创50' ? ' · 国家队代理' : ''}
+                                </span>
+                              ) : null}
+                            </span>
+                            <span className="flex shrink-0 gap-2 sm:gap-3">
+                              {ETF_WINDOWS.map(window => (
+                                <span
+                                  key={window.label}
+                                  className={cn('w-[56px] text-right font-mono text-xs sm:w-[68px]', signedClass(window.value(row)))}
+                                  title={etfBaselineTitle(etf?.baselines, window.days)}
+                                >
+                                  {formatShares(window.value(row))}
+                                </span>
+                              ))}
+                            </span>
+                          </div>
+                          <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-[11px]">
+                            <span className="text-muted">净流入</span>
+                            {ETF_INFLOW_FIELDS.map(field => (
+                              <span key={field.key} className={cn('font-mono', signedClass(row[field.key]))}>
+                                {field.label} {formatYiYuan(row[field.key])}
                               </span>
                             ))}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 text-[11px] text-muted">
-                          {row.code}
-                          {row.shares != null ? ` · 份额 ${(row.shares / 1e8).toFixed(2)} 亿份` : ''}
-                          {row.flow_net != null ? ` · 领航者净流入 ${yi(row.flow_net)}` : ''}
-                        </div>
-                      </li>
-                    ))}
+                          </div>
+                          <div className={cn('mt-0.5 text-[11px]', row.flow_diverged ? 'text-warning' : 'text-muted')}>
+                            {row.code}
+                            {row.shares != null ? ` · 份额 ${(row.shares / 1e8).toFixed(2)} 亿份` : ''}
+                            {navigator ? ` · ${navigator}` : ''}
+                            {row.flow_diverged ? ' · 与领航者相差超过 20%' : ''}
+                          </div>
+                        </li>
+                      )
+                    })}
                   </ul>
                 </div>
               )}

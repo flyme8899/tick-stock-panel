@@ -24,7 +24,7 @@ HK 服务器上这些入口不可用，调用表里没有它们：
 | 个股盘中主力净流入 | 默认东财 akshare `stock_individual_fund_flow_rank(indicator="今日")`。`今日主力净流入-净额` 以及超大单、大单、中单、小单净额都已是元，正数净流入、负数净流出，不乘万、不改符号。失败、空表或有效行不足 1000 时记日志，改走同花顺 `stock_fund_flow_individual(symbol="即时")` 的「净额」（流入减流出，带「亿」「万」按后缀，否则按元）。`FUND_FLOW_INTRADAY_PRIMARY=ths` 时只走同花顺 | 交易日连续竞价 9:30–11:30、13:00–15:00 每 6 分钟一份快照。午休、收盘后、周末不拉，也不补历史。东财只试一次（分页加 1 秒限流大约要一分多钟，不再做 2/4/8 秒重试）。同花顺仍按 2 秒、4 秒、8 秒退避，最多 3 次重试。两边都走东财共用限流，单次连接 10 秒、读取 30 秒。这次拉取在旁路线程，不挡住同一轮的板块和其它资金任务。空表不覆盖已有快照 |
 | 行业 / 概念资金 | akshare 同花顺，`symbol="即时"` | 交易日 9:30–15:00 每 3 分钟一份盘中快照，60 秒内不重复请求。15:05 之后再写一份收盘快照 |
 | 融资融券 | `stock_margin_sse`、`stock_margin_detail_sse`、深交所对应接口。深市空表（pandas `Length mismatch`）不当成源故障，保留已拿到的沪市，并再试上一交易日的深市 | 次日约 08:30 拉上一交易日。20:00 若那天还没落盘再试一次。融资余额按 akshare 的元入库，页面除以 1 亿显示为亿元。2026-10-09 沪市融资余额 12914.37 亿元，约 1.29 万亿元 |
-| ETF 份额 | 上交所 `fund_etf_scale_sse`；深交所 `fund_scale_daily_szse`（[ETF规模](https://www.szse.cn/market/fund/volume/etf/index.html)，`symbol="ETF"`） | 交易日 16:40。两边的裸数字都是份：上交所接口在 akshare 1.19.1 里已经把万份乘了 10000；深交所列名是「基金规模(份)」，入库不再乘。带「万」「亿」的文本仍按后缀换。`fund_etf_scale_szse` 只有当前快照、没有交易日，不用它回补。深市不走东财，所以不进东财限流器。一边失败时另一边仍落盘，当天记错误并稍后重试。`data/etf_flow` 里已有的 ETF领航者净流入按代码和日期接上，对不上就空着 |
+| ETF 份额 | 上交所 `fund_etf_scale_sse`；深交所 `fund_scale_daily_szse`（[ETF规模](https://www.szse.cn/market/fund/volume/etf/index.html)，`symbol="ETF"`） | 交易日 16:40。两边的裸数字都是份：上交所接口在 akshare 1.19.1 里已经把万份乘了 10000；深交所列名是「基金规模(份)」，入库不再乘。带「万」「亿」的文本仍按后缀换。`fund_etf_scale_szse` 只有当前快照、没有交易日，不用它回补。深市不走东财，所以不进东财限流器。一边失败时另一边仍落盘，当天记错误并稍后重试。净流入（亿元）按 `(当日份额 − 上一份落盘份额) × 当日收盘价 / 1e8` 计算，收盘价读 `kline_etf_daily`。两份落盘之间隔了超过 1 个交易日，或 `adj_factor_etf` 出现拆分级别的因子跳变时，这一日留空。5 日 / 20 日是这些 1 日值按落盘份数滚动相加，中间有空日则合计留空。ETF领航者金额在 `data/news/news.sqlite` 的 `etf_flow` 稿里（`raw_json.extracted` 的 `net_1d` / `net_5d` / `net_20d`，单位已经是亿元），按标题交易日和 6 位代码接上，对不上就空着。推算的 1 日和领航者 1 日相对差超过 20% 时，页面把该行标出来 |
 | 龙虎榜 | 现有 fuyao `data/dragon_tiger` 仍是主源。没有结果时读 akshare `stock_lhb_detail_em` 备份 | 备份在 17:30 之后拉当天 |
 | 南向 | `stock_hsgt_hist_em(symbol="南向资金")` | 16:40。净流入入库，裸数字按亿元 |
 | 北向成交额 | 同一接口，`symbol="北向资金"` | 只在 `FUND_FLOW_NORTHBOUND_TURNOVER` 打开时拉。只存买入加卖出的成交额，不存净流入。北向净流入自 2024-08-16 起没有数据 |
@@ -107,7 +107,7 @@ python -m app.fund_flow.backfill --from 2026-04-01 --to 2026-10-15 --data-dir /a
 | GET | `/api/fund-flow/intraday?symbols=` | 当天最近一份盘中快照。响应和每一行都有 `source`（`akshare_em_rank` 或 `akshare_ths`）。东财行带主力、超大单、大单、中单、小单净额，单位元。`symbols` 为逗号分隔代码，最多 2000 只。开放令牌的 `read:analysis` 可以读 |
 | GET | `/api/fund-flow/sectors?kind=industry\|concept` | 行业或概念排名。有收盘快照用收盘，否则用当天最后一次盘中 |
 | GET | `/api/fund-flow/margin` | 两融汇总，明细默认最多 100 行 |
-| GET | `/api/fund-flow/etf-shares` | ETF 份额，能接上领航者时带 `flow_net` |
+| GET | `/api/fund-flow/etf-shares` | ETF 份额。`net_inflow_1d` / `net_inflow_5d` / `net_inflow_20d` 是份额推算的净流入，单位亿元。能接上领航者时带 `flow_net`（当日）、`flow_net_5d`、`flow_net_20d`，单位同样是亿元。`flow_diverged` 表示 1 日推算和领航者相对差超过 20% |
 | GET | `/api/fund-flow/dsa-context` | 给 DSA 的短摘要。请求头 `X-News-Feed-Token` 与资讯桥相同，不对则 404 |
 
 没有数据时 `items` 为空，不把缺失写成 0。

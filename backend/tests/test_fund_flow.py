@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -705,6 +706,49 @@ def test_hot_and_sector_rank(tmp_path) -> None:
     assert annotated[1]["fund_flow"]["sector_net_inflow_rank"] == 1
 
 
+def _write_navigator(
+    data_dir: Path,
+    trade_date: str,
+    etfs: list[dict],
+    *,
+    source_id: str = "netease:flow-1",
+    extracted_date: str | None = None,
+) -> None:
+    """写一篇 ETF领航者稿。标题月日是交易日，金额单位是亿元。"""
+    from app.news.store import NewsStore
+
+    year, month, day = (int(part) for part in trade_date.split("-"))
+    published = datetime(year, month, day, 8, 0, tzinfo=CN) + timedelta(days=1)
+    news = NewsStore(Path(data_dir) / "news" / "news.sqlite")
+    try:
+        news.insert_item(
+            source="etf_flow",
+            source_id=source_id,
+            published_at=published,
+            author="ETF领航者",
+            title=f"{month}月{day}日ETF基金申购和赎回",
+            clean_text=f"交易日 {trade_date}",
+            raw={
+                "trade_date": extracted_date if extracted_date is not None else trade_date,
+                "extracted": {
+                    "trade_date": extracted_date if extracted_date is not None else trade_date,
+                    "unit": "亿元",
+                    "etfs": etfs,
+                    "broad_index": [],
+                    "categories": [],
+                },
+            },
+            content_hash=source_id,
+            url=f"https://example.com/{source_id}",
+            level="flow",
+            media_ids=[],
+            extra={},
+            mentions=[],
+        )
+    finally:
+        news.close()
+
+
 def test_read_api_and_etf_link(tmp_path, monkeypatch) -> None:
     store.write_rows(tmp_path, "stock", "2026-10-09", [{
         "symbol": "600519.SH", "code": "600519", "trade_date": "2026-10-09",
@@ -719,11 +763,15 @@ def test_read_api_and_etf_link(tmp_path, monkeypatch) -> None:
         "symbol": "510050", "code": "510050", "name": "50ETF",
         "trade_date": "2026-10-09", "shares": 100.0, "source": "akshare",
     }])
+    # 旧的 data/etf_flow parquet 不再读取。领航者金额在 news.sqlite，单位亿元。
     flow_dir = tmp_path / "etf_flow" / "date=2026-10-09"
     flow_dir.mkdir(parents=True)
-    pl.DataFrame({"code": ["510050"], "trade_date": ["2026-10-09"], "net_flow": [7.0]}).write_parquet(
+    pl.DataFrame({"code": ["510050"], "trade_date": ["2026-10-09"], "net_flow": [99.0]}).write_parquet(
         flow_dir / "part.parquet",
     )
+    _write_navigator(tmp_path, "2026-10-09", [{
+        "name": "50ETF", "code": "510050", "net_1d": 7.0, "net_5d": 3.5, "net_20d": 1.25,
+    }])
     monkeypatch.setattr(query, "_dir", lambda data_dir=None: tmp_path)
     app = FastAPI()
     from app.api.fund_flow import router
@@ -739,6 +787,9 @@ def test_read_api_and_etf_link(tmp_path, monkeypatch) -> None:
     etf = client.get("/api/fund-flow/etf-shares")
     assert etf.json()["etf_flow_linked"] is True
     assert etf.json()["items"][0]["flow_net"] == 7.0
+    assert etf.json()["items"][0]["flow_net_5d"] == 3.5
+    assert etf.json()["items"][0]["flow_net_20d"] == 1.25
+    assert etf.json()["items"][0]["net_inflow_1d"] is None
     sectors = client.get("/api/fund-flow/sectors", params={"kind": "industry"})
     assert sectors.status_code == 200
     assert sectors.json()["items"] == []
