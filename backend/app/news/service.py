@@ -15,6 +15,7 @@ import httpx
 
 from app.config import settings
 from app.market_time import CN_TZ, cn_now
+from app.news.archive import LIVE_ARCHIVE_SOURCES, archive_live_items
 from app.news.cleaning import clean_text, content_hash, excerpt
 from app.news.collectors import (
     CLS_URL,
@@ -141,6 +142,10 @@ def reset_store_for_tests(path: Path | None = None) -> NewsStore:
         _STORE = NewsStore(path or (settings.data_dir / "news" / "news.sqlite"))
         _LEXICON = None
         _ASSET_TYPES = None
+        from app.news.archive import reset_archive_for_tests
+
+        # 测试用临时库时，归档也放到同目录，避免写到真实 data/。
+        reset_archive_for_tests(path.parent / "news_archive.sqlite" if path else None)
     from app.news.hot_events import clear_hot_event_cache
     from app.news.hot_snapshot import clear_hot_snapshot_for_tests
 
@@ -200,6 +205,7 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
     inserted = 0
     duplicate = 0
     foreign_llm_used = 0
+    archived: list[dict] = []
     for item in pending:
         ident = (item.source, item.source_id)
         url_key = None
@@ -264,8 +270,21 @@ def ingest_items(items: list[Item], lexicon: Lexicon | None = None) -> dict[str,
         )
         if status == "inserted":
             inserted += 1
+            if item.source in LIVE_ARCHIVE_SOURCES:
+                archived.append({
+                    "source": item.source,
+                    "source_id": item.source_id,
+                    "published_at": item.published_at,
+                    "title": title,
+                    "content": clean,
+                    "level": item.level,
+                    "stock_codes": [s.code for s in item.stocks if s.code],
+                    "url": item.url,
+                })
         else:
             duplicate += 1
+    if archived:
+        archive_live_items(archived)
     if inserted:
         store.apply_retention()
     return {"inserted": inserted, "duplicate": duplicate}
