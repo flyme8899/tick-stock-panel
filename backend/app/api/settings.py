@@ -2035,3 +2035,12 @@ def api_tokens_revoke(token_id: str, request: Request) -> dict:
     if not svc.revoke_token(request.app.state.repo.store.data_dir, token_id):
         raise HTTPException(status_code=404, detail=f"Token '{token_id}' 不存在")
     return {"status": "revoked", "id": token_id}
+
+
+@router.get("/depth-intraday/status")
+def depth_intraday_status(request: Request) -> dict:
+    """做T池盘中五档采集状态(只读): 开关、今日行数、最近错误。"""
+    collector = getattr(request.app.state, "depth_intraday", None)
+    if collector is None:
+        return {"enabled": False, "running": False, "last_error": "未初始化"}
+    return collector.get_status()
