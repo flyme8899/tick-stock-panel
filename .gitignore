@@ -115,3 +115,6 @@ TickFlowStockPanel.app/
 TickFlowStockPanel-macos*.dmg
 TickFlowStockPanel-macos*.zip
 reports/cursor_tickflow_pro_rate_limit_p0.bundle
+
+# ===== 研究数据快照（scripts/export_research_snapshot.py 生成，体积大，不入库）=====
+research/_snapshots/
