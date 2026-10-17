@@ -39,7 +39,9 @@ def data_dir(tmp_path):
         pl.DataFrame({"symbol": ["000001.SZ"], "trade_date": [d], "main_net": [1e6]}).write_parquet(
             p / "part.parquet")
     (root / "instruments").mkdir(parents=True)
-    pl.DataFrame({"symbol": ["000001.SZ", "600000.SH"], "name": ["平安银行", "浦发银行"]}).write_parquet(
+    pl.DataFrame({"symbol": ["000001.SZ", "600000.SH"], "code": ["000001", "600000"],
+                  "name": ["平安银行", "浦发银行"], "list_status": [None, None],
+                  "as_of": [date(2026, 10, 16)] * 2}).write_parquet(
         root / "instruments" / "instruments.parquet")
     (root / "news").mkdir()
     c = sqlite3.connect(root / "news" / "news.sqlite")
@@ -139,7 +141,9 @@ def test_tables_subset(data_dir, tmp_path):
     _run(data_dir, tmp_path / "s", tables=["instruments", "news_archive"])
     d = tmp_path / "s" / "20261017"
     assert sorted(p.name for p in d.iterdir()) == [
-        "MANIFEST.json", "README.md", "instruments.parquet", "news_archive.parquet"]
+        "MANIFEST.json", "README.md", "csv", "instruments.parquet", "news_archive.parquet"]
+    assert sorted(p.name for p in (d / "csv").iterdir()) == [
+        "csv_manifest.json", "csv_manifest.txt", "instruments.csv.gz", "news_archive.csv.gz"]
 
 
 def test_unknown_table_rejected(data_dir, tmp_path):
@@ -152,7 +156,7 @@ def test_refuses_overwrite_without_force(data_dir, tmp_path):
     _run(data_dir, out, tables=["instruments"])
     with pytest.raises(SnapshotError, match="已存在"):
         _run(data_dir, out, tables=["instruments"])
-    _run(data_dir, out, tables=["kline_daily"], force=True)
+    _run(data_dir, out, tables=["kline_daily"], force=True, csv=False)
     assert sorted(p.name for p in (out / "20261017").iterdir()) == [
         "MANIFEST.json", "README.md", "kline_daily.parquet"]
     assert [p.name for p in out.iterdir()] == ["20261017"]
@@ -211,3 +215,86 @@ def test_main_cli_dry_run(data_dir, tmp_path, capsys):
 def test_three_years_before_leap_day():
     assert snap.three_years_before(date(2028, 2, 29)) == date(2025, 2, 28)
     assert snap.three_years_before(date(2026, 10, 17)) == date(2023, 10, 17)
+
+
+# ---------- CSV ----------
+
+def _read_csv(path):
+    import pandas as pd
+
+    return pd.read_csv(path, dtype=str, keep_default_na=False, compression="gzip")
+
+
+def test_csv_written_with_manifest_and_md5(data_dir, tmp_path):
+    out = tmp_path / "s"
+    s = _run(data_dir, out)
+    d = out / "20261017"
+    cm = json.loads((d / "csv" / "csv_manifest.json").read_text(encoding="utf-8"))
+    pm = json.loads((d / "MANIFEST.json").read_text(encoding="utf-8"))
+    ok = {n for n, t in pm["tables"].items() if t["status"] == "ok"}
+    assert set(cm["tables"]) == ok
+    assert set(pm["csv"]["tables"]) == ok and pm == s["manifest"]
+    for name, t in cm["tables"].items():
+        f = d / "csv" / t["file"]
+        assert t["rows"] == pm["tables"][name]["rows"] == len(_read_csv(f)), name
+        assert hashlib.md5(f.read_bytes()).hexdigest() == t["md5"] == pm["csv"]["tables"][name]["md5"]
+    txt = (d / "csv" / "csv_manifest.txt").read_text(encoding="utf-8").splitlines()
+    assert txt[1] == "file\trows\tbytes\tmd5"
+    assert len(txt) == 2 + len(ok)
+    assert "csv/" in (d / "README.md").read_text(encoding="utf-8")
+
+
+def test_csv_keeps_leading_zeros_dates_and_nulls(data_dir, tmp_path):
+    import gzip
+
+    _run(data_dir, tmp_path / "s", tables=["instruments", "kline_daily"])
+    d = tmp_path / "s" / "20261017" / "csv"
+    ins = _read_csv(d / "instruments.csv.gz")
+    assert ins["code"].tolist() == ["000001", "600000"]
+    assert ins["symbol"].tolist() == ["000001.SZ", "600000.SH"]
+    assert ins["as_of"].tolist() == ["2026-10-16"] * 2
+    assert ins["list_status"].tolist() == ["", ""]
+    raw = gzip.decompress((d / "instruments.csv.gz").read_bytes()).decode("utf-8")
+    assert '"000001"' in raw  # 文本字段加引号，Excel 之类也不会吞掉前导零
+    kl = _read_csv(d / "kline_daily.csv.gz")
+    assert kl["symbol"].iloc[0] == "000000.SZ"
+    assert sorted(set(kl["date"])) == ["2026-09-28", "2026-09-29", "2026-09-30"]
+
+
+def test_csv_readable_with_stdlib_only(data_dir, tmp_path):
+    import csv
+    import gzip
+
+    _run(data_dir, tmp_path / "s", tables=["news_archive"])
+    with gzip.open(tmp_path / "s" / "20261017" / "csv" / "news_archive.csv.gz", "rt",
+                   encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 19 and rows[0]["stock_codes"] == '["000001"]'
+
+
+def test_no_csv_flag(data_dir, tmp_path):
+    s = _run(data_dir, tmp_path / "s", tables=["instruments"], csv=False)
+    assert not (tmp_path / "s" / "20261017" / "csv").exists()
+    assert "csv" not in s["manifest"]
+
+
+def test_csv_only_on_existing_snapshot(data_dir, tmp_path):
+    out = tmp_path / "s"
+    _run(data_dir, out, tables=["instruments", "fund_flow_stock"], csv=False)
+    r = snap.csv_only(out_root=out, tag="20261017", now=_now, min_free_gb=0, log=lambda _m: None)
+    assert {n: t["rows"] for n, t in r["tables"].items()} == {"instruments": 2, "fund_flow_stock": 2}
+    with pytest.raises(SnapshotError, match="已存在"):
+        snap.csv_only(out_root=out, tag="20261017", min_free_gb=0, log=lambda _m: None)
+    snap.csv_only(out_root=out, tag="20261017", force=True, min_free_gb=0, log=lambda _m: None)
+    assert not [p for p in (out / "20261017").iterdir() if p.name.startswith(".")]
+    with pytest.raises(SnapshotError, match="快照不存在"):
+        snap.csv_only(out_root=out, tag="nope", min_free_gb=0, log=lambda _m: None)
+
+
+def test_csv_only_cli(data_dir, tmp_path):
+    out = tmp_path / "s"
+    _run(data_dir, out, tables=["instruments"], csv=False)
+    assert snap.main(["--out", str(out), "--tag", "20261017", "--csv-only", "--no-nice",
+                      "--min-free-gb", "0"]) == 0
+    assert (out / "20261017" / "csv" / "instruments.csv.gz").is_file()
+    assert snap.main(["--out", str(out), "--csv-only", "--no-nice"]) == 2
