@@ -2563,6 +2563,27 @@ export interface NewsHotStock {
   direction?: '利好' | '利空' | string
 }
 
+/** 资讯没点名个股时，按申万行业推导出的候选个股。和点名个股分开，不进打分和推送。 */
+export interface NewsHotSectorStock {
+  key: string
+  name: string
+  source: 'sector'
+  /** 推导所用的申万行业或主题名 */
+  sector: string
+  /** industry3 申万三级 / industry1 申万一级 / theme 主题词 */
+  sector_kind: 'industry3' | 'industry1' | 'theme' | string
+  /** 0~1。行业关键词 0.9，一级行业 0.7，主题词 0.4 */
+  confidence: number
+}
+
+export interface NewsHotSectorMapping {
+  name: string
+  kind: 'industry3' | 'industry1' | 'theme' | string
+  confidence: number
+  /** 命中理由，如「行业关键词:光伏」 */
+  why: string
+}
+
 export interface NewsHotConfirmation {
   label: string
   session?: string | null
@@ -2641,6 +2662,11 @@ export interface NewsHotEvent {
   confirmation?: NewsHotConfirmation
   stocks: NewsHotStock[]
   etfs?: NewsHotStock[]
+  /** 板块推导的候选个股。只在 stocks 为空时返回。 */
+  sector_stocks?: NewsHotSectorStock[]
+  sector_mapping?: NewsHotSectorMapping
+  /** direct 资讯点名，sector 板块推导，空串表示都没有。旧快照可能不带。 */
+  stock_source?: 'direct' | 'sector' | ''
   /** 妙想权威稿摘要。没有补全时不返回。 */
   summary?: string
   /** 妙想权威来源。没有补全时不返回。 */

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type NewsCandidate, type NewsHotEvent, type NewsHotStock, type NewsMxHotStatus, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
+import { api, type NewsCandidate, type NewsHotEvent, type NewsHotSectorMapping, type NewsHotSectorStock, type NewsHotStock, type NewsMxHotStatus, type NewsPushStatus, type NewsSourceHealth } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { PageHelpButton } from '@/components/PageHelpButton'
@@ -66,10 +66,12 @@ function StockLinkList({
   stocks,
   onOpen,
   limit,
+  linkClassName,
 }: {
   stocks: Pick<NewsHotStock, 'key' | 'name'>[]
   onOpen: (target: StockPreviewTarget) => void
   limit?: number
+  linkClassName?: string
 }) {
   const shown = limit == null ? stocks : stocks.slice(0, limit)
   if (shown.length === 0) return null
@@ -80,10 +82,67 @@ function StockLinkList({
         // 单用 key 会撞; 带上下标保证唯一。
         <span key={`${stock.key}-${idx}`}>
           {idx > 0 && <span className="text-muted">、</span>}
-          <StockLink stock={stock} onOpen={onOpen} />
+          <StockLink stock={stock} onOpen={onOpen} className={linkClassName} />
         </span>
       ))}
     </>
+  )
+}
+
+const SECTOR_KIND_LABEL: Record<string, string> = {
+  industry3: '申万三级',
+  industry1: '申万一级',
+  theme: '主题',
+}
+
+/** 低于这个置信度（主题词命中，0.4）在页面上加「低置信」标记。 */
+const SECTOR_LOW_CONFIDENCE = 0.5
+
+/**
+ * 板块推导的候选个股：资讯没点名个股时，后端按「事件→申万行业→个股」补的。
+ * 和点名个股分开显示、样式压暗，标「板块推导」和行业名，悬停看置信度和命中理由。
+ * 只在 stocks 为空时调用；有点名个股时不显示。
+ */
+function SectorStockLine({
+  stocks,
+  mapping,
+  onOpen,
+  limit,
+  prefix,
+}: {
+  stocks: NewsHotSectorStock[]
+  mapping?: NewsHotSectorMapping
+  onOpen: (target: StockPreviewTarget) => void
+  limit?: number
+  prefix?: string
+}) {
+  if (stocks.length === 0) return null
+  const name = mapping?.name || stocks[0].sector
+  const kind = mapping?.kind || stocks[0].sector_kind
+  const confidence = mapping?.confidence ?? stocks[0].confidence
+  const low = confidence < SECTOR_LOW_CONFIDENCE
+  const kindLabel = SECTOR_KIND_LABEL[kind] ?? kind
+  const tip = [
+    `板块推导：资讯未点名个股，按${kindLabel}「${name}」推导的候选，仅供参考`,
+    `置信度 ${confidence.toFixed(1)}${low ? '（低：主题词命中）' : ''}`,
+    mapping?.why ? `命中：${mapping.why}` : '',
+    '不参与打分和推送',
+  ].filter(Boolean).join('\n')
+  return (
+    <div data-stock-source="sector" className="mt-1 text-xs text-muted" title={tip}>
+      {prefix}
+      <span className="mr-1 rounded border border-dashed border-border px-1 text-[10px] leading-4">板块推导</span>
+      <span className="mr-1">{name}</span>
+      {low && (
+        <span className="mr-1 rounded bg-amber-500/15 px-1 text-[10px] leading-4 text-amber-700 dark:text-amber-300">低置信</span>
+      )}
+      <StockLinkList
+        stocks={stocks}
+        onOpen={onOpen}
+        limit={limit}
+        linkClassName="text-muted hover:text-secondary"
+      />
+    </div>
   )
 }
 
@@ -452,6 +511,14 @@ export function HotEvents() {
                       />
                     </div>
                   )}
+                  {item.stocks.length === 0 && (
+                    <SectorStockLine
+                      stocks={item.sector_stocks ?? []}
+                      mapping={item.sector_mapping}
+                      onOpen={openStock}
+                      limit={4}
+                    />
+                  )}
                   <div className="mt-1 text-xs text-muted">
                     提及 {item.mentions} · 来源 {item.source_count}
                     {item.first_seen ? ` · 首见 ${item.first_seen}` : ''}
@@ -542,6 +609,16 @@ export function HotEvents() {
                   相关个股：
                   <StockLinkList stocks={eventDetail.data?.stocks ?? pickedEvent.stocks} onOpen={openStock} />
                 </p>
+              )}
+              {(eventDetail.data?.stocks ?? pickedEvent.stocks).length === 0 && (
+                <div className="mb-2">
+                  <SectorStockLine
+                    stocks={(eventDetail.data?.event ?? pickedEvent).sector_stocks ?? []}
+                    mapping={(eventDetail.data?.event ?? pickedEvent).sector_mapping}
+                    onOpen={openStock}
+                    prefix="相关个股："
+                  />
+                </div>
               )}
               {(eventDetail.data?.etfs ?? pickedEvent.etfs ?? []).length > 0 && (
                 <p className="mb-2 text-xs text-muted">
