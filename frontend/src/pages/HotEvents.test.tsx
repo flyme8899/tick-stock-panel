@@ -301,3 +301,104 @@ it('sends an industry board to the industry column', async () => {
   expect(new URLSearchParams(loc.split('?')[1]).get('focus')).toBe('industry')
   expect(new URLSearchParams(loc.split('?')[1]).get('sector')).toBe('银行')
 })
+
+const sectorEvents = {
+  candidates: [],
+  events: [
+    {
+      ...hotEvent,
+      key: 'evt-sector-theme',
+      name: '特朗普宣布暂缓对俄新一轮制裁',
+      concepts: [],
+      stocks: [],
+      etfs: [],
+      sector_stocks: [
+        { key: '600150.SH', name: '中国船舶', source: 'sector', sector: '国防军工', sector_kind: 'theme', confidence: 0.4 },
+        { key: '302132.SZ', name: '中航成飞', source: 'sector', sector: '国防军工', sector_kind: 'theme', confidence: 0.4 },
+      ],
+      sector_mapping: { name: '国防军工', kind: 'theme', confidence: 0.4, why: '主题词:制裁' },
+      stock_source: 'sector',
+    },
+    {
+      ...hotEvent,
+      key: 'evt-sector-ind',
+      name: '美国光伏电池双反终裁',
+      concepts: [],
+      stocks: [],
+      etfs: [],
+      sector_stocks: [
+        { key: '300274.SZ', name: '阳光电源', source: 'sector', sector: '光伏', sector_kind: 'industry3', confidence: 0.9 },
+      ],
+      sector_mapping: { name: '光伏', kind: 'industry3', confidence: 0.9, why: '行业关键词:光伏' },
+      stock_source: 'sector',
+    },
+    {
+      // 有点名个股时即使带了 sector_stocks 也不显示板块推导。
+      ...hotEvent,
+      key: 'evt-direct',
+      name: '点名个股的事件',
+      sector_stocks: [
+        { key: '601012.SH', name: '隆基绿能', source: 'sector', sector: '光伏', sector_kind: 'industry3', confidence: 0.9 },
+      ],
+      stock_source: 'direct',
+    },
+  ],
+  hint: null,
+  fallback: false,
+  status: 'ready',
+}
+
+function eventCard(name: string) {
+  const card = [...host.querySelectorAll('li')].find(el => el.textContent?.includes(name))
+  if (!card) throw new Error(`missing event card ${name}`)
+  return card
+}
+
+it('shows sector-derived stocks muted and labelled when an event names no stock', async () => {
+  client.setQueryData(QK.newsHot('event'), sectorEvents)
+  render()
+  await settle()
+
+  const theme = eventCard('暂缓对俄').querySelector('[data-stock-source="sector"]')
+  expect(theme).toBeTruthy()
+  expect(theme!.textContent).toContain('板块推导')
+  expect(theme!.textContent).toContain('国防军工')
+  expect(theme!.textContent).toContain('低置信')
+  expect(theme!.textContent).toContain('中国船舶')
+  expect(theme!.getAttribute('title')).toContain('置信度 0.4')
+  expect(theme!.getAttribute('title')).toContain('主题词:制裁')
+  // 推导个股压暗，不用点名个股的强调色。
+  const link = [...theme!.querySelectorAll('button')].find(el => el.textContent === '中国船舶')!
+  expect(link.className).toContain('text-muted')
+
+  const ind = eventCard('光伏电池双反').querySelector('[data-stock-source="sector"]')
+  expect(ind!.textContent).toContain('光伏')
+  expect(ind!.textContent).not.toContain('低置信')
+  expect(ind!.getAttribute('title')).toContain('申万三级')
+
+  // 有点名个股的事件照旧，只显示点名个股。
+  const direct = eventCard('点名个股的事件')
+  expect(direct.querySelector('[data-stock-source="sector"]')).toBeNull()
+  expect(direct.textContent).toContain('汇川技术')
+  expect(direct.textContent).not.toContain('隆基绿能')
+
+  // 推导个股照样能点开预览。
+  await act(async () => link.click())
+  await waitFor(() => host.querySelector('[data-preview]') != null, 'stock preview')
+  expect(host.querySelector('[data-preview]')?.getAttribute('data-preview')).toBe('600150.SH')
+})
+
+it('shows sector-derived stocks in the opened event detail', async () => {
+  client.setQueryData(QK.newsHot('event'), sectorEvents)
+  const event = sectorEvents.events[1]
+  client.setQueryData(QK.newsMessages('event', event.key), { kind: 'event', key: event.key, event, stocks: [], etfs: [], items: [] })
+  render()
+  await settle()
+
+  await clickContaining('光伏电池双反')
+  await waitFor(() => host.textContent?.includes('相关个股：') ?? false, 'event detail sector stocks')
+  const lines = [...host.querySelectorAll('[data-stock-source="sector"]')].filter(el => el.textContent?.includes('相关个股：'))
+  expect(lines).toHaveLength(1)
+  expect(lines[0].textContent).toContain('板块推导')
+  expect(lines[0].textContent).toContain('阳光电源')
+})
