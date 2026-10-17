@@ -22,6 +22,18 @@ from app.news.service import backfill_mentions, collect_inbox, get_lexicon, run_
 
 logger = logging.getLogger(__name__)
 
+# 东财 7×24 只写归档库，不在 SOURCE_ORDER 里，不进资讯页、热点和推送。
+EM724_POLL_SECONDS = 60
+
+
+def _em724_collect() -> dict:
+    from app.news.em724_archive import collect
+
+    return collect()
+
+
+_EM724_REAL = _em724_collect
+
 
 def outbound_paused(source: str) -> bool:
     """格隆汇默认打开。测试进程不因此请求 gelonghui.com。"""
@@ -141,6 +153,7 @@ class NewsScheduler:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("资讯轮询 %s 失败: %s", source, exc)
                     self._next[source] = stamp + 120
+            self._run_em724(stamp)
             if int(stamp) % 3600 < 30:
                 try:
                     backfill_mentions(get_lexicon())
@@ -152,6 +165,21 @@ class NewsScheduler:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("钉钉推送失败: %s", exc)
             self._stop.wait(15)
+
+    def _run_em724(self, stamp: float) -> None:
+        # 测试进程不请求东财，除非测试替换了采集函数。
+        if os.environ.get("PYTEST_CURRENT_TEST") and globals()["_em724_collect"] is _EM724_REAL:
+            return
+        if stamp < self._next.get("em724_archive", 0):
+            return
+        try:
+            result = _em724_collect() or {}
+            if result.get("inserted"):
+                logger.info("东财7×24归档 %s", result)
+            self._next["em724_archive"] = stamp + EM724_POLL_SECONDS
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("东财7×24归档失败: %s", exc)
+            self._next["em724_archive"] = stamp + 120
 
     def _hot_loop(self) -> None:
         from app.news.hot_snapshot import refresh_hot_events_sync
