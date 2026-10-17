@@ -111,8 +111,12 @@ def test_observe_uses_raw_close_and_skips_when_disabled(tmp_path: Path, monkeypa
 
 
 def test_chart_merges_local_lines_with_report_levels(tmp_path: Path, monkeypatch):
+    # load_dsa_levels 不注入时钟，chart_levels 用北京时间墙钟，超过 STALE_AFTER
+    #（5 个自然日）的线会被丢掉。模块级 NOW 钉在 2026-10-09，套件晚于 10-14 跑时
+    # 本地线已过期，合并结果只剩报告价（buy 50 / stop 80），并不是本地覆盖被改掉。
+    fresh = datetime.now(CN).replace(microsecond=0)
     path = tmp_path / "lines.json"
-    sniper.register(_payload(), now=NOW, path=path)
+    sniper.register(_payload(analyzed_at=fresh.isoformat(timespec="seconds")), now=fresh, path=path)
     monkeypatch.setattr(sniper, "lines_path", lambda: path)
     monkeypatch.setattr("app.custom.dsa.proxy.enabled", lambda: True)
 
@@ -132,7 +136,7 @@ def test_chart_merges_local_lines_with_report_levels(tmp_path: Path, monkeypatch
     levels = {row["kind"]: row["price"] for row in load_dsa_levels("600519.SH")}
     assert levels == {"buy": 100, "stop": 90, "target": 120, "support": 70, "resistance": 140}
 
-    # 现价 110: 只有 ±20%(88~132) 内的留下 —— support 70 / resistance 140 被剔除, buy 100 留下
+    # 现价 110: 偏离超过 25% 的丢掉 —— support 70 / resistance 140 被剔除, 本地 100/90/120 留下
     kept_band = {row["kind"]: row["price"] for row in load_dsa_levels("600519.SH", reference=110.0)}
     assert kept_band == {"buy": 100, "stop": 90, "target": 120}
     assert 140 not in kept_band.values()
