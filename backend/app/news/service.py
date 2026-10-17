@@ -530,6 +530,7 @@ def public_hot_event(event: dict) -> dict:
             "why": str(mapping_info.get("why") or ""),
         }
     payload["stock_source"] = "direct" if stocks else ("sector" if sector_stocks else "")
+    payload["a_share_relevance"] = a_share_relevance(payload)
     subtitle_source = str(event.get("subtitle_source") or "")
     if payload["subtitle"] and subtitle_source in {"model", "fallback"}:
         payload["subtitle_source"] = subtitle_source
@@ -540,6 +541,57 @@ def public_hot_event(event: dict) -> dict:
     if mx_sources:
         payload["sources"] = mx_sources
     return payload
+
+
+# A 股相关度只用于展示分组，不进 score / _score_event，也不改推送和 DSA 读到的顺序。
+A_SHARE_RELEVANCE = ("高", "中", "无")
+REFERENCE_GROUP = "海外/宏观参考"
+# 板块推导到三级行业（0.90）或一级行业名（0.70）才算「中」。只靠主题词（0.40，
+# 如「美联储」→ 银行按市值取前几只）推出来的不算，那正是对不上 A 股的海外宏观事件。
+_RELEVANCE_SECTOR_MIN = 0.70
+_IMPORTANCE_RANK = {"重大": 0, "重要": 1, "一般": 2, "琐碎": 3}
+_RELEVANCE_RANK = {"高": 0, "中": 1, "无": 2}
+
+
+def a_share_relevance(event: dict) -> str:
+    """出口事件的 A 股相关度：高 = 资讯点名个股；中 = 有概念、ETF，或板块推导到行业；无 = 都没有。"""
+    if event.get("stocks"):
+        return "高"
+    if event.get("concepts") or event.get("etfs"):
+        return "中"
+    mapping = event.get("sector_mapping") if isinstance(event.get("sector_mapping"), dict) else {}
+    confidence = _float_value(mapping.get("confidence"))
+    if not mapping:
+        confidence = max(
+            (_float_value(item.get("confidence")) for item in event.get("sector_stocks") or [] if isinstance(item, dict)),
+            default=0.0,
+        )
+    if event.get("sector_stocks") and confidence >= _RELEVANCE_SECTOR_MIN - 1e-9:
+        return "中"
+    return "无"
+
+
+def group_hot_events(events: list[dict]) -> tuple[list[dict], list[dict]]:
+    """页面展示分组：(主列表, 海外/宏观参考)。
+
+    主列表按重要性分档，同一档里 A 股相关度高的在前，同档同相关度保持原名次（展示分序）。
+    相关度为「无」的事件放进参考组，组内保持原名次。不改任何分数。
+    """
+    main: list[tuple[int, int, int, dict]] = []
+    reference: list[dict] = []
+    for index, event in enumerate(events):
+        level = str(event.get("a_share_relevance") or a_share_relevance(event))
+        if level == "无":
+            reference.append({**event, "a_share_relevance": level, "display_group": "reference"})
+            continue
+        main.append((
+            _IMPORTANCE_RANK.get(str(event.get("importance") or ""), 2),
+            _RELEVANCE_RANK.get(level, 2),
+            index,
+            {**event, "a_share_relevance": level, "display_group": "main"},
+        ))
+    main.sort(key=lambda row: row[:3])
+    return [row[3] for row in main], reference
 
 
 def _float_value(value, default: float = 0.0) -> float:
@@ -689,8 +741,12 @@ def _public_score_part(value) -> float:
         return 0.0
 
 
-def hot_event_listing(now: datetime | None = None, *, limit: int = 20) -> dict:
-    """热门事件页的主列表。请求不传 now 时只读快照；传入 now 时按该时点现算，供对照测试。"""
+def hot_event_listing(now: datetime | None = None, *, limit: int = 20, grouped: bool = False) -> dict:
+    """热门事件页的主列表。请求不传 now 时只读快照；传入 now 时按该时点现算，供对照测试。
+
+    ``grouped`` 只给页面用：events 换成按 A 股相关度分组后的主列表，另给
+    reference_events（海外/宏观参考）。推送、DSA 仍按原名次读，不传这个参数。
+    """
     if now is None:
         from app.news.hot_snapshot import read_served_snapshot
 
@@ -698,14 +754,21 @@ def hot_event_listing(now: datetime | None = None, *, limit: int = 20) -> dict:
     else:
         snapshot = top_hot_events(now)
     events = [public_hot_event(item) for item in snapshot.get("events") or [] if isinstance(item, dict)]
+    size = max(1, min(limit, 50))
+    reference: list[dict] | None = None
+    if grouped:
+        events, reference = group_hot_events(events)
     payload = {
-        "events": events[: max(1, min(limit, 50))],
+        "events": events[:size],
         "as_of": snapshot.get("as_of"),
         "trading_day": snapshot.get("trading_day"),
         "fallback": bool(snapshot.get("fallback")),
         "hint": snapshot.get("hint"),
         "updated_at": snapshot.get("updated_at"),
     }
+    if reference is not None:
+        payload["reference_events"] = reference[:size]
+        payload["reference_group"] = REFERENCE_GROUP
     if now is None:
         payload["computed_at"] = snapshot.get("computed_at")
         payload["status"] = snapshot.get("status")

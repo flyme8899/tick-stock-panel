@@ -72,8 +72,10 @@ def hot(
         "candidates": [],
     }
     if kind in {"all", "event"}:
-        listing = hot_event_listing(limit=limit)
+        listing = hot_event_listing(limit=limit, grouped=True)
         payload["events"] = listing["events"]
+        payload["reference_events"] = listing.get("reference_events", [])
+        payload["reference_group"] = listing.get("reference_group")
         payload["as_of"] = listing["as_of"]
         payload["trading_day"] = listing["trading_day"]
         payload["fallback"] = listing["fallback"]

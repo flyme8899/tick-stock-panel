@@ -54,7 +54,8 @@
 概率低、不会、未、否认、暂不先于这些利空词：全面严格制裁概率低不是利空。
 下调准备金、下调利率、取消限购、缓和冲突是利好。
 只有标题写明利好某个名字（例如利好下游电池）时，那个受益方才标利好；没有这些词时仍默认利好。
-联储、加息、降息归海外市场/央行，对伊、战事归地缘政治，点名公司的提价归公司重大事项。
+联储、外国央行归海外市场/央行；加息、降息要同时写明海外主体（美国、欧洲、日本……）才算海外，
+国内的降息、银行下调利率归国内政策/宏观。对伊、战事归地缘政治，点名公司的提价归公司重大事项。
 模型不能把这些已经对上的分类改回科技与产业。
 同一时间窗里，财政部、国务院这类国内政策主体即使一个写发布、一个写出台，也并成一件事。
 """
@@ -191,7 +192,10 @@ _TITLE_CACHE_VERSION = 22
 #     重要性/映射/新鲜度/热度决胜。展示分本就是这些子项的单调函数，子项留在
 #     键里只制造「名次受子项影响」的错觉。补验后补一次重排（issue #53 残留
 #     倒挂）。同分事件的名次可能与 v8 不同，push 按名次判新进，升版本。
-HOT_RULES_VERSION = 9
+# v10: 「重要」不再只凭分类给（_is_important 要本类动作词或个股映射，2026-10-18）；
+#      加息/降息单独出现不再归海外市场/央行。线上快照规则「重要」291→137 条，
+#      降档事件档位分 90→40，名次变动，升版本让部署后第一轮只建基线不比较。
+HOT_RULES_VERSION = 10
 _RESEARCH_SOURCES = frozenset({"dws", "zsxq", "ima"})
 # 公司公告、交易所。sec 是公告原文；标题前缀里的交易所同样算这一档。
 _FILING_SOURCES = frozenset({"sec"})
@@ -263,21 +267,35 @@ CATEGORY_NAMES = (
 )
 _CATEGORY_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("地缘政治", ("制裁", "关税", "冲突", "战争", "战事", "对伊", "伊朗", "停火", "出口管制", "配额", "地缘")),
-    ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "联储", "加息", "降息", "美股", "纳指", "标普", "欧股", "日经")),
-    ("国内政策/宏观", ("出台", "补贴", "降准", "国务院", "发改委", "工信部", "证监会", "财政部", "国资委", "央行", "宏观", "政策")),
+    # 加息、降息不在这里：国内也会降息、下调利率。它们要和海外主体同时出现才算海外，见 _central_bank_cue。
+    ("海外市场/央行", ("美联储", "欧央行", "日本央行", "英央行", "联储", "美股", "纳指", "标普", "道指", "欧股", "日经", "美债")),
+    ("国内政策/宏观", ("出台", "补贴", "降准", "降息", "加息", "LPR", "国务院", "发改委", "工信部", "证监会", "财政部", "国资委", "央行", "宏观", "政策")),
     ("大宗商品/期货价格异动", ("碳酸锂", "原油", "期货", "黄金", "铜价", "铁矿", "煤炭", "稀土", "豆粕", "螺纹", "报价", "橡胶")),
     ("公司重大事项", ("收购", "回购", "上市", "立案", "停产", "召回", "签约", "签署", "签订", "中标", "停牌", "退市")),
     ("科技与产业", ("发布", "订单", "追加", "获批", "涨价", "降价", "提价", "上调", "下调", "量产", "芯片", "模型")),
 )
 # 纽约联储不包含「美联储」四个字。有央行主体时，关税评论仍是海外市场，不落到科技与产业。
-_CENTRAL_BANK_CUES = ("美联储", "欧央行", "日本央行", "英央行", "联储", "加息", "降息")
+# 只放外国央行主体。加息、降息单独出现不算：「央行降息」「多家银行降息」是国内新闻。
+_CENTRAL_BANK_CUES = (
+    "美联储", "欧央行", "欧洲央行", "日本央行", "日央行", "英央行", "英国央行", "加拿大央行",
+    "瑞士央行", "联储", "鲍威尔", "拉加德",
+)
+# 带「联储」二字的国内机构名，先抹掉再判海外。
+_DOMESTIC_FED_LOOKALIKES = ("联储证券",)
+_RATE_MOVES = ("加息", "降息")
+# 加息、降息和这些海外主体同时出现，才算海外央行。
+_OVERSEAS_RATE_MARKERS = (
+    "美国", "美元", "欧洲", "欧元区", "日本", "英国", "澳洲", "澳大利亚", "澳联储", "加拿大",
+    "新西兰", "瑞士", "瑞典", "挪威", "韩国", "印度", "巴西", "土耳其", "俄罗斯", "墨西哥",
+    "南非", "印尼", "海外", "全球央行", "外国央行", "鲍威尔", "拉加德", "植田",
+)
 _ACTION_CATEGORY = {
     "出台": "国内政策/宏观",
     "定调": "国内政策/宏观",
     "补贴": "国内政策/宏观",
     "降准": "国内政策/宏观",
-    "加息": "海外市场/央行",
-    "降息": "海外市场/央行",
+    "加息": "国内政策/宏观",
+    "降息": "国内政策/宏观",
     "制裁": "地缘政治",
     "收紧": "地缘政治",
     "报价": "大宗商品/期货价格异动",
@@ -406,6 +424,18 @@ _TITLE_PRIORITY_EXTRA = 20
 _IMPORTANT_CATEGORIES = frozenset({
     "国内政策/宏观", "海外市场/央行", "地缘政治", "公司重大事项",
 })
+# 分类本身不再直接给「重要」：落在上面四类里，还得有本类的动作词，或已经映射到个股。
+# 线上 2026-10-18 快照里规则判出的「重要」有 77% 只靠分类，「重要」占到 55.7%。
+# 「增长」「新增」「上市」「发布」这类宽动词不算，它们几乎每条稿都有。
+_IMPORTANT_CATEGORY_ACTS: dict[str, tuple[str, ...]] = {
+    "公司重大事项": (
+        "收购", "并购", "重组", "回购", "增持", "减持", "立案", "停产", "召回",
+        "签约", "签署", "签订", "中标", "停牌", "退市",
+    ),
+    "国内政策/宏观": ("出台", "印发", "定调", "降准", "降息", "补贴"),
+    "海外市场/央行": ("加息", "降息", "缩表", "扩表"),
+    "地缘政治": ("制裁", "出口管制", "关税", "配额", "停火", "开战", "军事打击", "空袭"),
+}
 _LEAD_SUFFIXES = ("宣布", "称", "表示", "指出", "消息", "传闻", "公司", "披露")
 _STOP = frozenset({
     "公司", "市场", "今日", "表示", "消息", "记者", "财经", "股份", "有限",
@@ -1692,7 +1722,7 @@ def _rule_importance(event: dict) -> str:
     text = _event_text(event)
     if _is_major(text):
         label = "重大"
-    elif _is_important(text, str(event.get("category") or "")):
+    elif _is_important(text, str(event.get("category") or ""), mapped=_has_stock_mapping(event)):
         label = "重要"
     else:
         label = "一般"
@@ -1739,10 +1769,16 @@ def _is_major(text: str) -> bool:
     return any(name in text for name in _LEADERS) and any(act in text for act in _LEADER_ACTS)
 
 
-def _is_important(text: str, category: str) -> bool:
+def _is_important(text: str, category: str, *, mapped: bool = False) -> bool:
+    """重要：明确的重要动作或提价；或者落在重要分类里，同时有本类动作词或个股映射。
+
+    只凭分类不给「重要」。``mapped`` 是事件已经映射到个股（资讯点名）。
+    """
     if any(act in text for act in _IMPORTANT_ACTS) or _price_hike_text(text):
         return True
-    if category in _IMPORTANT_CATEGORIES:
+    if category in _IMPORTANT_CATEGORIES and (
+        mapped or any(act in text for act in _IMPORTANT_CATEGORY_ACTS.get(category, ()))
+    ):
         return True
     return any(name in text for name in _LEADERS) and any(verb in text for verb in _PRICE_VERBS)
 
@@ -1884,11 +1920,17 @@ def _expand_topic_rows(row: dict) -> list[dict]:
 
 
 def _drop_minor(event: dict) -> bool:
-    """没有映射、只有一条来源的寻常小事不进榜。重大和重要事件留下。"""
+    """没有映射、只有一条来源的寻常小事不进榜。重大和重要事件留下。
+
+    落在重要分类（政策、海外、地缘、公司事项）里的「一般」也留下：分类不再直接给
+    「重要」，只是降档，不让它们从列表里消失（进不进榜和改档前一致）。
+    """
     label = str(event.get("importance") or "")
     if label == "琐碎":
         return True
     if label != "一般":
+        return False
+    if str(event.get("category") or "") in _IMPORTANT_CATEGORIES:
         return False
     if float(event["breakdown"]["mapping"]) > 0:
         return False
@@ -2946,15 +2988,36 @@ def _relevance(title: str, lead: str, action: str, concepts: list[str], stocks: 
     return score
 
 
+def _central_bank_cue(text: str) -> bool:
+    """外国央行主体，或加息/降息同时写明海外主体。「央行降息」「银行下调利率」不算。"""
+    blob = text or ""
+    for name in _DOMESTIC_FED_LOOKALIKES:
+        blob = blob.replace(name, "")
+    if any(cue in blob for cue in _CENTRAL_BANK_CUES):
+        return True
+    return any(move in blob for move in _RATE_MOVES) and any(
+        marker in blob for marker in _OVERSEAS_RATE_MARKERS
+    )
+
+
+def _category_cue_hit(name: str, cues: tuple[str, ...], text: str) -> bool:
+    blob = text or ""
+    if name == "海外市场/央行":
+        for lookalike in _DOMESTIC_FED_LOOKALIKES:
+            blob = blob.replace(lookalike, "")
+        return _central_bank_cue(blob) or any(cue in blob for cue in cues)
+    return any(cue in blob for cue in cues)
+
+
 def _category_for(text: str, action: str) -> str:
     blob = text or ""
     # 联储评论里的关税仍是海外市场。关税单独出现时仍按地缘政治。
-    if any(cue in blob for cue in _CENTRAL_BANK_CUES):
+    if _central_bank_cue(blob):
         return "海外市场/央行"
     for name, cues in _CATEGORY_CUES:
         if name == "科技与产业":
             continue
-        if any(cue in blob for cue in cues):
+        if _category_cue_hit(name, cues, blob):
             return name
     # 点名公司的提价是公司事项。行业涨价没有公司名，仍走科技与产业。
     if _company_price_hike(blob):
@@ -2969,7 +3032,7 @@ def _category_locked(text: str, action: str) -> bool:
     """实体知识已经定类时，模型不能改回科技与产业。"""
     blob = text or ""
     ruled = _category_for(blob, action)
-    if ruled == "海外市场/央行" and any(cue in blob for cue in _CENTRAL_BANK_CUES):
+    if ruled == "海外市场/央行" and _central_bank_cue(blob):
         return True
     if ruled == "公司重大事项" and _company_price_hike(blob):
         return True
@@ -2988,7 +3051,7 @@ def _category_allowed(category: str, text: str, action: str) -> bool:
         return False
     for name, cues in _CATEGORY_CUES:
         if name == category:
-            return any(cue in (text or "") for cue in cues)
+            return _category_cue_hit(name, cues, text or "")
     return False
 
 

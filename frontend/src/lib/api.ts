@@ -2667,6 +2667,10 @@ export interface NewsHotEvent {
   sector_mapping?: NewsHotSectorMapping
   /** direct 资讯点名，sector 板块推导，空串表示都没有。旧快照可能不带。 */
   stock_source?: 'direct' | 'sector' | ''
+  /** A 股相关度：高 资讯点名个股；中 有概念、ETF 或行业映射；无 都没有。只用于展示分组。 */
+  a_share_relevance?: '高' | '中' | '无'
+  /** main 主列表；reference 海外/宏观参考。 */
+  display_group?: 'main' | 'reference'
   /** 妙想权威稿摘要。没有补全时不返回。 */
   summary?: string
   /** 妙想权威来源。没有补全时不返回。 */
@@ -2696,6 +2700,9 @@ export interface NewsHotResponse {
   baseline_days: number
   candidates: NewsCandidate[]
   events?: NewsHotEvent[]
+  /** A 股相关度为「无」的事件，页面单独放在「海外/宏观参考」。 */
+  reference_events?: NewsHotEvent[]
+  reference_group?: string | null
   hint?: string | null
   fallback?: boolean
   as_of?: string | null
