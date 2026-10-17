@@ -270,6 +270,9 @@ export function HotEvents() {
   const candidates = hot.data?.candidates ?? []
   const events = (hot.data?.events ?? []).filter(item => category === '全部' || item.category === category)
     .filter(item => !redOnly || (item.red_count ?? 0) > 0)
+  const referenceEvents = (hot.data?.reference_events ?? []).filter(item => category === '全部' || item.category === category)
+    .filter(item => !redOnly || (item.red_count ?? 0) > 0)
+  const referenceTitle = hot.data?.reference_group || '海外/宏观参考'
   const eventItems = (eventDetail.data?.items ?? []).filter(item => !redOnly || item.red)
   const messageItems = (messages.data?.items ?? []).filter(item => !redOnly || item.red)
 
@@ -332,6 +335,119 @@ export function HotEvents() {
     />
   )
 
+  // 主列表和「海外/宏观参考」共用同一张卡片。
+  const renderEventCard = (item: NewsHotEvent) => (
+    <li
+      key={item.key}
+      className={cn(
+        'rounded-md border px-3 py-2',
+        pickedEvent?.key === item.key ? 'border-accent' : 'border-border',
+      )}
+    >
+      {/* 卡片不再是整块按钮：里面要塞映射个股的可点链接，按钮套按钮是非法嵌套。
+          折叠/展开仍然保留在原处，只是改成独立的按钮。 */}
+      <button
+        type="button"
+        title={item.headline || item.name}
+        className="w-full text-left"
+        aria-expanded={!!openTitles[item.key]}
+        onClick={() => {
+          setPickedEvent(item)
+          setOpenTitles(current => ({
+            ...current,
+            [item.key]: pickedEvent?.key === item.key ? !current[item.key] : true,
+          }))
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <span className="min-w-0">
+            <span className={cn(
+              'block break-words font-medium',
+              openTitles[item.key] ? '' : 'line-clamp-2',
+            )}>
+              {item.name}
+              {(item.red_count ?? 0) > 0 && (
+                <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
+              )}
+            </span>
+            {item.subtitle && (
+              <span className="mt-0.5 block text-xs text-muted">{item.subtitle}</span>
+            )}
+            {item.summary && (
+              <span className="mt-0.5 block line-clamp-2 text-xs text-secondary">{item.summary}</span>
+            )}
+          </span>
+          <span className="shrink-0 text-xs text-muted">热度 {item.heat}</span>
+        </div>
+        <div className="mt-1 flex flex-wrap gap-1">
+          {item.importance && (
+            <span className={cn(
+              'rounded px-1 text-[10px] leading-4',
+              item.importance === '重大' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
+            )}>{item.importance}</span>
+          )}
+          {item.a_share_relevance && (
+            <span
+              className={cn(
+                'rounded px-1 text-[10px] leading-4',
+                item.a_share_relevance === '高' ? 'bg-accent/10 text-accent' : 'bg-elevated text-muted',
+              )}
+              title="A 股相关度：高 = 资讯点名个股；中 = 有概念、ETF 或行业映射；无 = 都没有。只影响展示分组，不改分数。"
+            >
+              A股相关 {item.a_share_relevance}
+            </span>
+          )}
+          {item.confirmation && (
+            <span className={cn(
+              'rounded px-1 text-[10px] leading-4',
+              item.confirmation.pending || item.confirmation.label === '待开盘验证'
+                ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                : item.confirmation.strength === '强'
+                  ? 'bg-accent/15 text-accent'
+                  : 'bg-elevated text-secondary',
+            )}>
+              {confirmBadge(item.confirmation)}
+            </span>
+          )}
+          {item.category && (
+            <span className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{item.category}</span>
+          )}
+          {item.direction && (
+            <span className={cn(
+              'rounded px-1 text-[10px] leading-4',
+              item.direction === '利空' ? 'bg-bear/10 text-bear' : 'bg-bull/10 text-bull',
+            )}>{item.direction}</span>
+          )}
+          {item.concepts.map(tag => (
+            <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
+          ))}
+        </div>
+      </button>
+      {([...item.stocks, ...(item.etfs ?? [])]).length > 0 && (
+        <div className="mt-1 text-xs text-secondary">
+          {item.direction || '映射'}{' '}
+          <StockLinkList
+            stocks={[...item.stocks, ...(item.etfs ?? [])]}
+            onOpen={openStock}
+            limit={4}
+          />
+        </div>
+      )}
+      {item.stocks.length === 0 && (
+        <SectorStockLine
+          stocks={item.sector_stocks ?? []}
+          mapping={item.sector_mapping}
+          onOpen={openStock}
+          limit={4}
+        />
+      )}
+      <div className="mt-1 text-xs text-muted">
+        提及 {item.mentions} · 来源 {item.source_count}
+        {item.first_seen ? ` · 首见 ${item.first_seen}` : ''}
+      </div>
+    </li>
+  )
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
@@ -365,7 +481,7 @@ export function HotEvents() {
 
           {hot.isLoading && <p className="text-sm text-muted">加载中…</p>}
           {hot.isError && <p className="text-sm text-danger">热门候选加载失败</p>}
-          {hot.isSuccess && tab === 'event' && events.length === 0 && (
+          {hot.isSuccess && tab === 'event' && events.length === 0 && referenceEvents.length === 0 && (
             <p className="text-sm text-muted">
               {hot.data?.status === 'computing'
                 ? '正在计算热门事件，请稍候。'
@@ -417,7 +533,7 @@ export function HotEvents() {
             </div>
           )}
 
-          {tab === 'event' && hot.data?.hint && events.length > 0 && (
+          {tab === 'event' && hot.data?.hint && events.length + referenceEvents.length > 0 && (
             <p className={cn('mb-2 text-xs', hot.data.fallback ? 'text-amber-600 dark:text-amber-400' : 'text-muted')}>
               {hot.data.hint}
             </p>
@@ -425,107 +541,18 @@ export function HotEvents() {
 
           {tab === 'event' && (
             <ul className="space-y-2">
-              {events.map(item => (
-                <li
-                  key={item.key}
-                  className={cn(
-                    'rounded-md border px-3 py-2',
-                    pickedEvent?.key === item.key ? 'border-accent' : 'border-border',
-                  )}
-                >
-                  {/* 卡片不再是整块按钮：里面要塞映射个股的可点链接，按钮套按钮是非法嵌套。
-                      折叠/展开仍然保留在原处，只是改成独立的按钮。 */}
-                  <button
-                    type="button"
-                    title={item.headline || item.name}
-                    className="w-full text-left"
-                    aria-expanded={!!openTitles[item.key]}
-                    onClick={() => {
-                      setPickedEvent(item)
-                      setOpenTitles(current => ({
-                        ...current,
-                        [item.key]: pickedEvent?.key === item.key ? !current[item.key] : true,
-                      }))
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <span className="min-w-0">
-                        <span className={cn(
-                          'block break-words font-medium',
-                          openTitles[item.key] ? '' : 'line-clamp-2',
-                        )}>
-                          {item.name}
-                          {(item.red_count ?? 0) > 0 && (
-                            <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
-                          )}
-                        </span>
-                        {item.subtitle && (
-                          <span className="mt-0.5 block text-xs text-muted">{item.subtitle}</span>
-                        )}
-                        {item.summary && (
-                          <span className="mt-0.5 block line-clamp-2 text-xs text-secondary">{item.summary}</span>
-                        )}
-                      </span>
-                      <span className="shrink-0 text-xs text-muted">热度 {item.heat}</span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {item.importance && (
-                        <span className={cn(
-                          'rounded px-1 text-[10px] leading-4',
-                          item.importance === '重大' ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary',
-                        )}>{item.importance}</span>
-                      )}
-                      {item.confirmation && (
-                        <span className={cn(
-                          'rounded px-1 text-[10px] leading-4',
-                          item.confirmation.pending || item.confirmation.label === '待开盘验证'
-                            ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
-                            : item.confirmation.strength === '强'
-                              ? 'bg-accent/15 text-accent'
-                              : 'bg-elevated text-secondary',
-                        )}>
-                          {confirmBadge(item.confirmation)}
-                        </span>
-                      )}
-                      {item.category && (
-                        <span className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{item.category}</span>
-                      )}
-                      {item.direction && (
-                        <span className={cn(
-                          'rounded px-1 text-[10px] leading-4',
-                          item.direction === '利空' ? 'bg-bear/10 text-bear' : 'bg-bull/10 text-bull',
-                        )}>{item.direction}</span>
-                      )}
-                      {item.concepts.map(tag => (
-                        <span key={tag} className="rounded bg-accent/10 px-1 text-[10px] leading-4 text-accent">{tag}</span>
-                      ))}
-                    </div>
-                  </button>
-                  {([...item.stocks, ...(item.etfs ?? [])]).length > 0 && (
-                    <div className="mt-1 text-xs text-secondary">
-                      {item.direction || '映射'}{' '}
-                      <StockLinkList
-                        stocks={[...item.stocks, ...(item.etfs ?? [])]}
-                        onOpen={openStock}
-                        limit={4}
-                      />
-                    </div>
-                  )}
-                  {item.stocks.length === 0 && (
-                    <SectorStockLine
-                      stocks={item.sector_stocks ?? []}
-                      mapping={item.sector_mapping}
-                      onOpen={openStock}
-                      limit={4}
-                    />
-                  )}
-                  <div className="mt-1 text-xs text-muted">
-                    提及 {item.mentions} · 来源 {item.source_count}
-                    {item.first_seen ? ` · 首见 ${item.first_seen}` : ''}
-                  </div>
-                </li>
-              ))}
+              {events.map(renderEventCard)}
             </ul>
+          )}
+
+          {tab === 'event' && referenceEvents.length > 0 && (
+            <section className="mt-4" aria-label={referenceTitle}>
+              <h3 className="mb-1 text-sm font-medium text-secondary">{referenceTitle}</h3>
+              <p className="mb-2 text-xs text-muted">没有对上 A 股个股、概念或行业的海外和宏观事件，放在这里只作参考。</p>
+              <ul className="space-y-2">
+                {referenceEvents.map(renderEventCard)}
+              </ul>
+            </section>
           )}
 
           {tab !== 'event' && (

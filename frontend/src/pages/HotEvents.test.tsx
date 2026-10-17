@@ -33,6 +33,25 @@ const hotEvent = {
   ],
   etfs: [{ key: '512480.SH', name: '半导体ETF', mentions: 1, direction: '利好' }],
   sources: [],
+  a_share_relevance: '高',
+}
+
+const referenceEvent = {
+  key: 'evt-ref',
+  name: '美联储宣布降息25个基点',
+  heat: 40,
+  category: '海外市场/央行',
+  importance: '重大',
+  direction: '利好',
+  red_count: 0,
+  mentions: 2,
+  source_count: 2,
+  first_seen: '02:00',
+  concepts: [],
+  stocks: [],
+  etfs: [],
+  sources: [],
+  a_share_relevance: '无',
 }
 
 vi.mock('@/lib/api', () => ({
@@ -63,6 +82,8 @@ vi.mock('@/lib/api', () => ({
         },
       ],
       events: [hotEvent],
+      reference_events: [referenceEvent],
+      reference_group: '海外/宏观参考',
       hint: null,
       fallback: false,
       status: 'ready',
@@ -401,4 +422,18 @@ it('shows sector-derived stocks in the opened event detail', async () => {
   expect(lines).toHaveLength(1)
   expect(lines[0].textContent).toContain('板块推导')
   expect(lines[0].textContent).toContain('阳光电源')
+})
+
+it('puts events without A-share relevance into the 海外/宏观参考 group after the main list', async () => {
+  render()
+  await waitFor(() => host.textContent?.includes('美联储宣布降息25个基点') ?? false, 'reference event')
+
+  const section = host.querySelector('section[aria-label="海外/宏观参考"]')
+  expect(section).toBeTruthy()
+  expect(section!.textContent).toContain('美联储宣布降息25个基点')
+  expect(section!.textContent).not.toContain('某某产业政策落地')
+  expect(section!.textContent).toContain('A股相关 无')
+  const text = host.textContent ?? ''
+  expect(text.indexOf('某某产业政策落地')).toBeLessThan(text.indexOf('海外/宏观参考'))
+  expect(text).toContain('A股相关 高')
 })
