@@ -11,11 +11,16 @@
 - 补出来的个股单独放在 ``sector_stocks``，不写进 ``mentioned_stocks``：不进打分、
   不进推送，只给页面和研究区分「点名」与「板块推导」。
 - 本地行情读不到时不补（不给按代码顺序乱排的结果）。
+- 外国机构名里的行业词不算（「古巴国际商业银行」「法国农业信贷银行」不映射到 A 股银行）：
+  国家 / 地区前缀 + 机构后缀，或已知外企名，先从文本里抹掉再匹配三级行业和一级行业名。
+- 宏观 / 主题词指向国防军工时，正文里还得有军事 / 国防词（军工、导弹、军演等）。
+  只有「制裁」「俄罗斯」这类地缘词不映射到军工。
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from functools import lru_cache
 from pathlib import Path
@@ -62,15 +67,53 @@ def _static_tables() -> dict:
         "l1_kw": l1_kw,
         "macro": {word: tuple(targets) for word, targets in kw["macro"].items()},
         "theme": {word: tuple(targets) for word, targets in kw["theme"].items()},
+        "foreign_re": _foreign_entity_re(kw.get("foreign_entity") or {}),
+        "military_targets": frozenset((kw.get("military_gate") or {}).get("targets") or ()),
+        "military_words": tuple((kw.get("military_gate") or {}).get("require") or ()),
     }
+
+
+# 外国机构名中间不该出现的字：标点和「将 / 对 / 与」这类连接词，出现就说明不是一个名字。
+_ENTITY_BODY = r"[^\s，。、；：:,.!?！？“”\"'（）()《》·\-—对将与和的及在把向从为被让给称或宣表说拟已再要会]"
+
+
+def _foreign_entity_re(table: dict) -> re.Pattern | None:
+    countries = sorted(table.get("countries") or (), key=len, reverse=True)
+    suffixes = sorted(table.get("suffixes") or (), key=len, reverse=True)
+    names = sorted(table.get("names") or (), key=len, reverse=True)
+    parts: list[str] = []
+    if countries and suffixes:
+        parts.append(
+            "(?:" + "|".join(map(re.escape, countries)) + ")"
+            + _ENTITY_BODY + "{0,4}?"
+            + "(?:" + "|".join(map(re.escape, suffixes)) + ")"
+        )
+    if names:
+        parts.append("(?:" + "|".join(map(re.escape, names)) + ")")
+    return re.compile("|".join(parts)) if parts else None
+
+
+def _mask_foreign_entities(text: str) -> str:
+    """把外国机构名换成空格，里面的行业词（银行、钢铁、汽车……）就不会被匹配。"""
+    pattern = _static_tables()["foreign_re"]
+    if pattern is None:
+        return text
+    return pattern.sub(lambda m: " " * len(m.group(0)), text)
+
+
+def _military_ok(text: str) -> bool:
+    return any(word in text for word in _static_tables()["military_words"])
 
 
 def find_sectors(text: str) -> list[dict]:
     """文本命中的板块，按置信度降序。每层只取最长 / 最先命中的一项，避免叠加。"""
     tables = _static_tables()
     hits: list[dict] = []
+    # 三级行业词和一级行业名在抹掉外国机构名的文本上匹配；宏观 / 主题词仍看原文
+    # （「俄罗斯天然气工业公司」里的「俄罗斯」仍算地缘信号）。
+    local = _mask_foreign_entities(text)
     for word, codes in tables["industry_kw"]:
-        if word in text:
+        if word in local:
             if len(codes) == 1:
                 name = tables["industries"].get(codes[0], {}).get("name", codes[0]).split("-")[-1]
             else:
@@ -81,23 +124,34 @@ def find_sectors(text: str) -> list[dict]:
             })
             break
     for name in tables["l1_kw"]:
-        if name in text:
+        if name in local:
             hits.append({
                 "kind": "industry1", "codes": (), "name": name,
                 "confidence": CONF_INDUSTRY1, "why": f"一级行业:{name}", "macro": False,
             })
             break
+    military = _military_ok(text)
     for table, macro in ((tables["macro"], True), (tables["theme"], False)):
-        found = next((word for word in table if word in text), None)
-        if found is None:
-            continue
-        for name in table[found]:
-            if name in tables["l1_members"]:
-                hits.append({
+        # 按词表顺序取第一个还有可用目标的词：「制裁伊朗」里「制裁」被军工门槛拦下后，
+        # 仍由「伊朗」映射到石油石化。
+        layer: list[dict] = []
+        for word, targets in table.items():
+            if word not in text:
+                continue
+            for name in targets:
+                if name not in tables["l1_members"]:
+                    continue
+                if name in tables["military_targets"] and not military:
+                    continue
+                layer.append({
                     "kind": "theme", "codes": (), "name": name,
-                    "confidence": CONF_THEME, "why": f"主题词:{found}", "macro": macro,
+                    "confidence": CONF_THEME, "why": f"主题词:{word}", "macro": macro,
                 })
-        break
+            if layer:
+                break
+        if layer:
+            hits.extend(layer)
+            break
     return hits
 
 
