@@ -966,6 +966,11 @@ def _compute(now: datetime, store: NewsStore, *, blocked: bool = True) -> dict:
     if latest > now:
         logger.info("热门事件簇内时间晚于计算时刻 %s", latest.isoformat(timespec="seconds"))
     _log_suspect_event_pairs(kept)
+    # 没点名个股的事件按「事件→申万行业→个股」补候选，单独放 sector_stocks。
+    # 放在打分、排序、过滤之后：不进 mapping 分、不改名次，推送也不读这个字段。
+    from app.news.sector_map import attach_sector_stocks
+    filled = attach_sector_stocks(kept)
+    logger.info("热门事件板块补个股 %d/%d 条", filled, len(kept))
     return {
         "as_of": chosen.isoformat(),
         "trading_day": (chosen if not fallback else trading).isoformat(),

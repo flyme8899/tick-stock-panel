@@ -41,6 +41,11 @@ _SCHEMA: dict[str, pl.DataType] = {
     "concepts": pl.List(pl.Utf8),
     "stocks": pl.List(pl.Utf8),
     "etfs": pl.List(pl.Utf8),
+    # 没点名个股时按申万行业补的候选（不在 stocks 里）。旧分区没有这几列，读取时为空。
+    "sector_stocks": pl.List(pl.Utf8),
+    "sector_name": pl.Utf8,
+    "sector_kind": pl.Utf8,
+    "sector_confidence": pl.Float64,
     "score": pl.Float64,
     "breakdown_importance": pl.Float64,
     "breakdown_confirmation": pl.Float64,
@@ -187,6 +192,7 @@ def _frame_from_snapshot(snapshot: dict, *, slot: str, session_date: date, now: 
         public = public_hot_event(event)
         confirmation = public.get("confirmation") if isinstance(public.get("confirmation"), dict) else {}
         breakdown = public.get("breakdown") if isinstance(public.get("breakdown"), dict) else {}
+        sector = public.get("sector_mapping") if isinstance(public.get("sector_mapping"), dict) else {}
         rows.append({
             "session_date": session_date,
             "slot": slot,
@@ -200,6 +206,10 @@ def _frame_from_snapshot(snapshot: dict, *, slot: str, session_date: date, now: 
             "concepts": [str(item) for item in (public.get("concepts") or []) if str(item).strip()],
             "stocks": [str(item.get("key") or "") for item in (public.get("stocks") or []) if isinstance(item, dict) and item.get("key")],
             "etfs": [str(item.get("key") or "") for item in (public.get("etfs") or []) if isinstance(item, dict) and item.get("key")],
+            "sector_stocks": [str(item.get("key") or "") for item in (public.get("sector_stocks") or []) if isinstance(item, dict) and item.get("key")],
+            "sector_name": str(sector.get("name") or ""),
+            "sector_kind": str(sector.get("kind") or ""),
+            "sector_confidence": _float_or_none(sector.get("confidence")),
             "score": _float_or_none(public.get("score")),
             "breakdown_importance": _float_or_none(breakdown.get("importance")),
             "breakdown_confirmation": _float_or_none(breakdown.get("confirmation")),
