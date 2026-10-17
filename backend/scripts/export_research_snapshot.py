@@ -127,6 +127,9 @@ TABLES: tuple[TableSpec, ...] = (
               "TickFlow 现金流量表，全量", date_filtered=False),
     TableSpec("financials_shares", "file", "financials/shares/part.parquet",
               "TickFlow 历史股本，全量", date_filtered=False),
+    TableSpec("hot_event_rank", "partitioned", "news/hot_event_rank",
+              "热点事件榜按日快照（preopen/postclose/nextday 各档，slot 列区分；"
+              "nextday 分区日是目标开市日，可能先于当天写入），全部历史", date_filtered=False),
 )
 TABLE_BY_NAME = {t.name: t for t in TABLES}
 
@@ -386,8 +389,27 @@ CSV_FORMAT = ("gzip 压缩 CSV，UTF-8（无 BOM），逗号分隔，首行表�
               "文本字段一律加双引号（代码保留前导零）；空值为空字段")
 
 
+def _is_string_list(t) -> bool:
+    import pyarrow as pa
+
+    return ((pa.types.is_list(t) or pa.types.is_large_list(t))
+            and (pa.types.is_string(t.value_type) or pa.types.is_large_string(t.value_type)))
+
+
+def _list_to_json_text(col):
+    """文本列表转 JSON 数组文本，如 ["000001.SZ","600000.SH"]；空值留空，空列表写 []。"""
+    import pyarrow as pa
+
+    return pa.array(
+        [None if v is None else json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+         for v in col.to_pylist()],
+        type=pa.string(),
+    )
+
+
 def _csv_ready(batch):
-    """把 CSV 写不了或写出来不直观的类型转成文本：时间戳转 ISO 文本，空类型转字符串。"""
+    """把 CSV 写不了或写出来不直观的类型转成文本：时间戳转 ISO 文本，空类型转字符串，
+    文本列表转 JSON 数组文本。其它嵌套类型仍然报错。"""
     import pyarrow as pa
     import pyarrow.compute as pc
 
@@ -400,6 +422,8 @@ def _csv_ready(batch):
             col = col.cast(pa.string())
         elif pa.types.is_dictionary(t):
             col = col.cast(t.value_type)
+        elif _is_string_list(t):
+            col = _list_to_json_text(col)
         elif pa.types.is_nested(t):
             raise SnapshotError(f"字段 {fld.name} 是嵌套类型 {t}，CSV 无法表示")
         cols.append(col)

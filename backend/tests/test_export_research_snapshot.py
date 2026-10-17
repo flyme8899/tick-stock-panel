@@ -330,3 +330,65 @@ def test_financial_tables_exported_all_periods(data_dir, tmp_path):
 
 def test_minute_kline_not_in_snapshot():
     assert not [t for t in snap.TABLES if "minute" in t.name or "minute" in t.path]
+
+
+# ---------- 热点事件榜 ----------
+
+def _rank(day: str, slot: str, n: int, sector: bool = True) -> pl.DataFrame:
+    df = pl.DataFrame({
+        "session_date": [date.fromisoformat(day)] * n,
+        "slot": [slot] * n,
+        "rank": list(range(1, n + 1)),
+        "event_key": [f"{slot}-{i}" for i in range(n)],
+        "title": [f"事件{i}" for i in range(n)],
+        "concepts": [["算力", "光模块"]] + [[] for _ in range(n - 1)],
+        "stocks": [["000001.SZ", "600000.SH"]] + [[] for _ in range(n - 1)],
+        "score": [100.0 - i for i in range(n)],
+        "importance": ["重要"] * n,
+    }, schema_overrides={"concepts": pl.List(pl.Utf8), "stocks": pl.List(pl.Utf8)})
+    if sector:
+        df = df.with_columns(pl.lit("银行").alias("sector_name"),
+                             pl.Series("sector_stocks", [["601398.SH"]] * n, dtype=pl.List(pl.Utf8)))
+    return df
+
+
+def test_hot_event_rank_all_slots_full_history_with_csv(data_dir, tmp_path):
+    root = data_dir / "news" / "hot_event_rank"
+    # 早期分区没有 sector_* 列；nextday 分区是「未来」开市日，也要导出（不受日期范围截取）
+    for day, slot, n, sector in [("2026-09-01", "preopen", 2, False), ("2026-09-01", "postclose", 1, False),
+                                 ("2026-09-29", "preopen", 3, True), ("2026-09-29", "nextday", 3, True),
+                                 ("2026-10-19", "nextday", 2, True)]:
+        (root / f"date={day}").mkdir(parents=True, exist_ok=True)
+        _rank(day, slot, n, sector).write_parquet(root / f"date={day}" / f"{slot}.parquet")
+    s = _run(data_dir, tmp_path / "s", tables=["hot_event_rank"])
+    t = s["manifest"]["tables"]["hot_event_rank"]
+    assert t["status"] == "ok" and t["rows"] == 11
+    assert (t["date_min"], t["date_max"]) == ("2026-09-01", "2026-10-19")
+    d = tmp_path / "s" / "20261017"
+    pq_df = pl.read_parquet(d / "hot_event_rank.parquet")
+    assert pq_df.schema["stocks"] == pl.List(pl.Utf8)  # parquet 里保持列表
+    assert sorted(set(pq_df["slot"])) == ["nextday", "postclose", "preopen"]
+    assert pq_df.filter(pl.col("session_date") == date(2026, 9, 1))["sector_name"].null_count() == 3
+    rows = _read_csv(d / "csv" / "hot_event_rank.csv.gz")
+    assert len(rows) == 11
+    top = rows[(rows["session_date"] == "2026-09-29") & (rows["slot"] == "preopen") & (rows["rank"] == "1")]
+    assert top["stocks"].tolist() == ['["000001.SZ","600000.SH"]']
+    assert top["concepts"].tolist() == ['["算力","光模块"]']
+    assert json.loads(top["sector_stocks"].iloc[0]) == ["601398.SH"]
+    other = rows[(rows["session_date"] == "2026-09-29") & (rows["rank"] == "2")]
+    assert set(other["stocks"]) == {"[]"}
+    early = rows[rows["session_date"] == "2026-09-01"]
+    assert set(early["sector_stocks"]) == {""}  # 早期分区没有该列 → 空值
+
+
+def test_csv_list_to_json_text_and_other_nested_rejected():
+    import pyarrow as pa
+
+    batch = pa.RecordBatch.from_pydict({
+        "codes": pa.array([["000001.SZ"], [], None], type=pa.large_list(pa.large_string())),
+    })
+    out = snap._csv_ready(batch)
+    assert out.column(0).to_pylist() == ['["000001.SZ"]', "[]", None]
+    bad = pa.RecordBatch.from_pydict({"x": pa.array([[1, 2]], type=pa.list_(pa.int64()))})
+    with pytest.raises(SnapshotError):
+        snap._csv_ready(bad)

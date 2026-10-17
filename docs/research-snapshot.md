@@ -64,8 +64,19 @@ nice -n 19 ionice -c3 docker compose run --rm --no-deps -T \
 | industry_ths / concept_ths | data/ext_data 同花顺行业、概念 | 否（当前快照） |
 | financial_forecast / financial_express / financial_report | data/financials/em_forecast、em_express、em_report（东财业绩预告、快报、报表，按报告期分区） | 否（全部报告期） |
 | financials_metrics / income / balance_sheet / cash_flow / shares | data/financials/*/part.parquet（TickFlow 财务表） | 否（全量） |
+| hot_event_rank | data/news/hot_event_rank/date=*/{preopen,postclose,nextday}.parquet（热点事件榜按日快照，slot 列区分档位） | 否（全部历史） |
 
 分钟 K 线（data/kline_minute）体积大，暂不进快照。
+
+hot_event_rank 说明：
+
+- `session_date` 是分区日，`slot` 是档位。preopen = 当天 09:15 前最后一版；postclose = 当天 15:05 后第一版；
+  nextday = 以下一开市日为分区日、从前一交易日 15:00 起滚动覆盖到该日 09:15 的那一档。所以 09:15 之后
+  nextday 与同日 preopen 内容相同（只差 slot），是设计如此；研究里取一天一版时用 preopen 即可，nextday
+  分区可能出现「未来日期」（例如周五收盘后就有下周一的 nextday）。
+- 列表列 concepts / stocks / etfs / sector_stocks 在 CSV 里写成 JSON 数组文本（如 `["000001.SZ"]`），
+  空列表写 `[]`，空值留空；parquet 里保持列表类型。
+- 早期分区没有 sector_* 列，合并后为空值。
 
 源数据不存在的表会在清单里标为 `missing` 并跳过。
 
