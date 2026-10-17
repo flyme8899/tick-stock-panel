@@ -298,3 +298,35 @@ def test_csv_only_cli(data_dir, tmp_path):
                       "--min-free-gb", "0"]) == 0
     assert (out / "20261017" / "csv" / "instruments.csv.gz").is_file()
     assert snap.main(["--out", str(out), "--csv-only", "--no-nice"]) == 2
+
+
+# ---------- 财务表 ----------
+
+def test_financial_tables_exported_all_periods(data_dir, tmp_path):
+    for period, codes in [("2018-03-31", ["000001"]), ("2026-06-30", ["000001", "000002"])]:
+        p = data_dir / "financials" / "em_report" / f"report_period={period}"
+        p.mkdir(parents=True)
+        pl.DataFrame({"code": codes, "report_period": [period] * len(codes),
+                      "announce_date": ["2026-08-15"] * len(codes)}).write_parquet(p / "part.parquet")
+    # 不是 report_period= 的目录不算
+    (data_dir / "financials" / "em_report" / "date=2026-01-01").mkdir()
+    (data_dir / "financials" / "metrics").mkdir(parents=True)
+    pl.DataFrame({"symbol": ["000001.SZ"], "period_end": ["2026-06-30"],
+                  "announce_date": ["2026-08-15"], "bps": [1.0]}).write_parquet(
+        data_dir / "financials" / "metrics" / "part.parquet")
+    names = ["financial_report", "financial_forecast", "financials_metrics"]
+    s = _run(data_dir, tmp_path / "s", tables=names)  # 日期范围 9/28~9/30 不截财务表
+    t = s["manifest"]["tables"]
+    assert t["financial_report"]["rows"] == 3
+    assert (t["financial_report"]["date_min"], t["financial_report"]["date_max"]) == (
+        "2018-03-31", "2026-06-30")
+    assert t["financial_forecast"]["status"] == "missing"
+    assert t["financials_metrics"]["rows"] == 1
+    d = tmp_path / "s" / "20261017"
+    rep = _read_csv(d / "csv" / "financial_report.csv.gz")
+    assert sorted(rep["code"]) == ["000001", "000001", "000002"]
+    assert set(rep["report_period"]) == {"2018-03-31", "2026-06-30"}
+
+
+def test_minute_kline_not_in_snapshot():
+    assert not [t for t in snap.TABLES if "minute" in t.name or "minute" in t.path]

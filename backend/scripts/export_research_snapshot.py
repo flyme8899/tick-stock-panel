@@ -50,7 +50,7 @@ from pathlib import Path
 
 CN_TZ = timezone(timedelta(hours=8))
 GB = 1024**3
-_PART_RE = re.compile(r"^date=(\d{4}-\d{2}-\d{2})$")
+_PART_RE = re.compile(r"^(date|report_period)=(\d{4}-\d{2}-\d{2})$")
 # SQLite 文本（按 UTF-8 字节计）经 zstd 压缩后通常只剩 1/3 左右，按 1/2 估算留余量。
 _SQLITE_TEXT_RATIO = 0.5
 # Parquet 源已是压缩格式，重写为 zstd 后一般不会更大；留 20% 余量。
@@ -64,6 +64,7 @@ class TableSpec:
     path: str  # 相对 data_dir
     desc: str
     date_filtered: bool = True
+    part_key: str = "date"  # 分区目录名前缀：date=YYYY-MM-DD 或 report_period=YYYY-MM-DD
     # sqlite 专用
     table: str = ""
     columns: tuple[str, ...] = ()
@@ -107,6 +108,25 @@ TABLES: tuple[TableSpec, ...] = (
               "同花顺行业归属（当前快照）", date_filtered=False),
     TableSpec("concept_ths", "file", "ext_data/ext_gn_ths/part.parquet",
               "同花顺概念归属（当前快照）", date_filtered=False),
+    TableSpec("financial_forecast", "partitioned", "financials/em_forecast",
+              "业绩预告（东财，按报告期分区，含公告日；一份预告按指标拆多行），全部报告期",
+              date_filtered=False, part_key="report_period"),
+    TableSpec("financial_express", "partitioned", "financials/em_express",
+              "业绩快报（东财，库内当前版本，正式报告发布后可能被改写），全部报告期",
+              date_filtered=False, part_key="report_period"),
+    TableSpec("financial_report", "partitioned", "financials/em_report",
+              "业绩报表（东财，含公告日与更新日），全部报告期",
+              date_filtered=False, part_key="report_period"),
+    TableSpec("financials_metrics", "file", "financials/metrics/part.parquet",
+              "TickFlow 核心财务指标（symbol+period_end，含 announce_date），全量", date_filtered=False),
+    TableSpec("financials_income", "file", "financials/income/part.parquet",
+              "TickFlow 利润表，全量", date_filtered=False),
+    TableSpec("financials_balance_sheet", "file", "financials/balance_sheet/part.parquet",
+              "TickFlow 资产负债表，全量", date_filtered=False),
+    TableSpec("financials_cash_flow", "file", "financials/cash_flow/part.parquet",
+              "TickFlow 现金流量表，全量", date_filtered=False),
+    TableSpec("financials_shares", "file", "financials/shares/part.parquet",
+              "TickFlow 历史股本，全量", date_filtered=False),
 )
 TABLE_BY_NAME = {t.name: t for t in TABLES}
 
@@ -142,15 +162,16 @@ def _date_bounds(start: date, end: date) -> tuple[str, str]:
     return start.isoformat(), (end + timedelta(days=1)).isoformat()
 
 
-def _partitions(root: Path, start: date | None, end: date | None) -> list[tuple[str, Path]]:
+def _partitions(root: Path, start: date | None, end: date | None,
+                key: str = "date") -> list[tuple[str, Path]]:
     out = []
     if not root.is_dir():
         return out
     for child in root.iterdir():
         m = _PART_RE.match(child.name)
-        if not m or not child.is_dir():
+        if not m or not child.is_dir() or m.group(1) != key:
             continue
-        d = m.group(1)
+        d = m.group(2)
         if start and d < start.isoformat():
             continue
         if end and d > end.isoformat():
@@ -179,7 +200,7 @@ def plan_table(spec: TableSpec, data_dir: Path, start: date, end: date) -> Plan:
     plan = Plan(spec=spec, source=str(src))
     if spec.kind == "partitioned":
         parts = _partitions(src, start if spec.date_filtered else None,
-                            end if spec.date_filtered else None)
+                            end if spec.date_filtered else None, spec.part_key)
         if not parts:
             plan.status = "missing"
             return plan
@@ -559,7 +580,7 @@ def render_readme(manifest: dict) -> str:
         f"- 生成时间：{manifest['created_at']}（北京时间）",
         f"- 代码版本：{manifest['git_commit']}",
         f"- 日期范围：{manifest['params']['start']} ~ {manifest['params']['end']}"
-        "（只作用于按日分区的表和资讯表；列表/行业/复权因子为全量或当前快照）",
+        "（只作用于按日分区的表和资讯表；列表/行业/复权因子/财务表为全量或当前快照，财务表的日期范围是报告期）",
         f"- 来源：{manifest['source']['data_dir']}（只读导出）",
         "",
         "本目录只读。研究脚本只读这里的文件，不连生产库。校验见 MANIFEST.json 的 sha256。",
@@ -639,13 +660,13 @@ def run(
     after = free - est
     fits = after >= min_free_gb * GB
 
-    log(f"{'表':<18}{'行数':>12}  {'日期范围':<23}{'预估大小':>10}")
+    log(f"{'表':<26}{'行数':>12}  {'日期范围':<23}{'预估大小':>10}")
     for p in plans:
         if p.status != "ok":
-            log(f"{p.spec.name:<18}{'-':>12}  {'(源不存在，跳过)':<23}")
+            log(f"{p.spec.name:<26}{'-':>12}  {'(源不存在，跳过)':<23}")
             continue
         rng = f"{p.date_min}~{p.date_max}" if p.date_min else "-"
-        log(f"{p.spec.name:<18}{p.rows:>12,}  {rng:<23}{_fmt_gb(p.est_bytes):>10}")
+        log(f"{p.spec.name:<26}{p.rows:>12,}  {rng:<23}{_fmt_gb(p.est_bytes):>10}")
     log(f"预估合计 {_fmt_gb(est)}；当前剩余 {_fmt_gb(free)}；导出后约剩 {_fmt_gb(after)}"
         f"（门槛 {min_free_gb:g}G）→ {'可以导出' if fits else '空间不足'}")
 
@@ -756,7 +777,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list_tables:
         for t in TABLES:
-            print(f"{t.name:<18}{t.desc}")
+            print(f"{t.name:<26}{t.desc}")
         return 0
     if not args.no_nice:
         pr = lower_priority()
