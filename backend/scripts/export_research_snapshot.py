@@ -21,6 +21,12 @@
     --force                    目录已存在时覆盖（默认拒绝）
     --min-free-gb 5            导出后剩余空间低于此值则不导出
     --no-nice                  不自动降低进程 CPU/IO 优先级
+    --no-csv                   不额外生成 CSV（默认生成，见下）
+    --csv-only                 不重新导出，只给已有快照 <tag> 补生成 CSV
+
+默认同时在快照目录下生成 csv/：每张表一个 <表名>.csv.gz（UTF-8、带表头、日期 YYYY-MM-DD、
+文本字段一律加引号，股票/基金代码保留前导零），外加 csv_manifest.json / csv_manifest.txt
+（行数、md5）。给装不了 pyarrow/polars 的环境用，标准库 csv + gzip 就能读。
 
 脚本启动时会自己 ``nice 19`` + ``ionice idle``，外层的 nice/ionice 只是双保险。
 数据逐个分区/逐批读取后流式写出，内存只占一个批次。先写到临时目录，全部成功后才改名，
@@ -299,6 +305,14 @@ def _iter_sqlite(plan: Plan, start: date, end: date, chunk_rows: int) -> Iterato
         conn.close()
 
 
+def _md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -342,6 +356,137 @@ def export_table(plan: Plan, out_dir: Path, start: date, end: date, chunk_rows: 
         "sha256": _sha256(target),
         "columns": {f.name: str(f.type) for f in schema},
     }
+
+
+# ---------- CSV ----------
+
+CSV_DIR = "csv"
+CSV_FORMAT = ("gzip 压缩 CSV，UTF-8（无 BOM），逗号分隔，首行表头；日期 YYYY-MM-DD；"
+              "文本字段一律加双引号（代码保留前导零）；空值为空字段")
+
+
+def _csv_ready(batch):
+    """把 CSV 写不了或写出来不直观的类型转成文本：时间戳转 ISO 文本，空类型转字符串。"""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    cols, fields = [], []
+    for fld, col in zip(batch.schema, batch.columns, strict=True):
+        t = fld.type
+        if pa.types.is_timestamp(t):
+            col = pc.strftime(col, format="%Y-%m-%dT%H:%M:%S")
+        elif pa.types.is_null(t):
+            col = col.cast(pa.string())
+        elif pa.types.is_dictionary(t):
+            col = col.cast(t.value_type)
+        elif pa.types.is_nested(t):
+            raise SnapshotError(f"字段 {fld.name} 是嵌套类型 {t}，CSV 无法表示")
+        cols.append(col)
+        fields.append(pa.field(fld.name, col.type))
+    return pa.RecordBatch.from_arrays(cols, schema=pa.schema(fields))
+
+
+def write_csv_table(parquet_path: Path, csv_path: Path, batch_rows: int = 200_000) -> dict:
+    """流式把一个 parquet 写成 csv.gz，返回行数、大小、md5。内存只占一个批次。"""
+    import pyarrow as pa
+    import pyarrow.csv as pacsv
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(parquet_path)
+    rows = 0
+    writer = None
+    sink = pa.CompressedOutputStream(str(csv_path), "gzip")
+    try:
+        for batch in pf.iter_batches(batch_size=batch_rows):
+            batch = _csv_ready(batch)
+            if writer is None:
+                writer = pacsv.CSVWriter(sink, batch.schema,
+                                         write_options=pacsv.WriteOptions(quoting_style="needed"))
+            writer.write_batch(batch)
+            rows += batch.num_rows
+        if writer is None:  # 空表也写表头
+            empty = _csv_ready(pa.RecordBatch.from_pylist([], schema=pf.schema_arrow))
+            writer = pacsv.CSVWriter(sink, empty.schema,
+                                     write_options=pacsv.WriteOptions(quoting_style="needed"))
+        writer.close()
+    finally:
+        sink.close()
+    expected = pf.metadata.num_rows
+    if rows != expected:
+        raise SnapshotError(f"{csv_path.name} 写出 {rows} 行，parquet 有 {expected} 行")
+    return {
+        "file": csv_path.name,
+        "rows": rows,
+        "bytes": csv_path.stat().st_size,
+        "md5": _md5(csv_path),
+        "columns": {f.name: str(f.type) for f in pf.schema_arrow},
+    }
+
+
+def export_csv(snapshot_dir: Path, csv_dir: Path, *, snapshot: str, created: datetime,
+               batch_rows: int = 200_000, log: Callable[[str], None] = print) -> dict:
+    """把 snapshot_dir 下 MANIFEST 里状态 ok 的表逐张写成 csv_dir/<表>.csv.gz，并写 csv 清单。"""
+    manifest = json.loads((snapshot_dir / "MANIFEST.json").read_text(encoding="utf-8"))
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    tables = {}
+    for name, t in manifest["tables"].items():
+        if t.get("status") != "ok":
+            continue
+        log(f"CSV {name} ...")
+        info = write_csv_table(snapshot_dir / t["file"], csv_dir / f"{name}.csv.gz", batch_rows)
+        if info["rows"] != t["rows"]:
+            raise SnapshotError(f"{name} CSV {info['rows']} 行，与 MANIFEST 的 {t['rows']} 行不一致")
+        tables[name] = info
+    csv_manifest = {
+        "snapshot": snapshot,
+        "created_at": created.isoformat(timespec="seconds"),
+        "timezone": "Asia/Shanghai",
+        "format": CSV_FORMAT,
+        "git_commit": manifest.get("git_commit"),
+        "params": manifest.get("params"),
+        "tables": tables,
+        "total_bytes": sum(t["bytes"] for t in tables.values()),
+    }
+    (csv_dir / "csv_manifest.json").write_text(
+        json.dumps(csv_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    lines = [f"# 快照 {snapshot} CSV 清单；{CSV_FORMAT}", "file\trows\tbytes\tmd5"]
+    lines += [f"{t['file']}\t{t['rows']}\t{t['bytes']}\t{t['md5']}" for t in tables.values()]
+    (csv_dir / "csv_manifest.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return csv_manifest
+
+
+def csv_only(*, out_root: Path, tag: str, force: bool = False, batch_rows: int = 200_000,
+             now: Callable[[], datetime] = lambda: datetime.now(CN_TZ),
+             min_free_gb: float = 5.0, log: Callable[[str], None] = print) -> dict:
+    """给已有快照补生成 csv/。先写临时目录，成功后再改名；已有 csv/ 需 --force。"""
+    snap_dir = out_root / tag
+    if not (snap_dir / "MANIFEST.json").is_file():
+        raise SnapshotError(f"快照不存在或缺 MANIFEST.json：{snap_dir}")
+    target = snap_dir / CSV_DIR
+    if target.exists() and not force:
+        raise SnapshotError(f"CSV 目录已存在：{target}（确认覆盖请加 --force）")
+    manifest = json.loads((snap_dir / "MANIFEST.json").read_text(encoding="utf-8"))
+    est = int(manifest.get("total_bytes", 0) * 2)  # csv.gz 一般不超过 parquet 的 2 倍
+    free = shutil.disk_usage(snap_dir).free
+    if free - est < min_free_gb * GB:
+        raise SnapshotError(f"空间不足：预估 {_fmt_gb(est)}，剩 {_fmt_gb(free)}，门槛 {min_free_gb:g}G")
+    tmp = snap_dir / f".tmp-csv-{os.getpid()}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        result = export_csv(snap_dir, tmp, snapshot=tag, created=now(),
+                            batch_rows=batch_rows, log=log)
+        old = None
+        if target.exists():
+            old = snap_dir / f".old-csv-{os.getpid()}"
+            target.rename(old)
+        tmp.rename(target)
+        if old is not None:
+            shutil.rmtree(old, ignore_errors=True)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    log(f"完成：{target}，合计 {_fmt_gb(result['total_bytes'])}")
+    return result
 
 
 # ---------- 辅助 ----------
@@ -439,6 +584,9 @@ def render_readme(manifest: dict) -> str:
         f"kl = pl.read_parquet('research/_snapshots/{manifest['snapshot']}/kline_daily.parquet')",
         "```",
         "",
+        "没有 pyarrow/polars 的环境可读 csv/ 下的 <表名>.csv.gz（如有），"
+        "例如 `pandas.read_csv(path, dtype=str)`，行数和 md5 见 csv/csv_manifest.json。",
+        "",
         "口径提醒：K 线不复权，需要时用 adj_factor 自行复权；资讯 published_at 为 +08:00 ISO 文本；"
         "股票列表、行业、概念是导出当天的状态，回测有幸存者偏差，请在报告里说明。",
         "",
@@ -461,6 +609,7 @@ def run(
     min_free_gb: float = 5.0,
     chunk_rows: int = 200_000,
     commit: str = "",
+    csv: bool = True,
     now: Callable[[], datetime] = lambda: datetime.now(CN_TZ),
     log: Callable[[str], None] = print,
 ) -> dict:
@@ -481,6 +630,8 @@ def run(
 
     plans = [plan_table(TABLE_BY_NAME[n], data_dir, start, end) for n in names]
     est = sum(p.est_bytes for p in plans if p.status == "ok")
+    if csv:  # csv.gz 一般不超过 parquet 的 2 倍
+        est *= 3
     probe = out_root if out_root.exists() else out_root.parent
     if not probe.exists():
         raise SnapshotError(f"输出目录的上级不存在：{probe}（请用 --out 指定已挂载的目录）")
@@ -549,6 +700,18 @@ def run(
         }
         (tmp / "MANIFEST.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if csv:
+            cm = export_csv(tmp, tmp / CSV_DIR, snapshot=tag, created=created,
+                            batch_rows=chunk_rows, log=log)
+            manifest["csv"] = {
+                "dir": CSV_DIR,
+                "manifest": f"{CSV_DIR}/csv_manifest.json",
+                "total_bytes": cm["total_bytes"],
+                "tables": {n: {"file": f"{CSV_DIR}/{t['file']}", "rows": t["rows"], "md5": t["md5"]}
+                           for n, t in cm["tables"].items()},
+            }
+        (tmp / "MANIFEST.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         (tmp / "README.md").write_text(render_readme(manifest), encoding="utf-8")
         old = None
         if target.exists():
@@ -585,6 +748,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--chunk-rows", type=int, default=200_000)
     ap.add_argument("--git-commit", default="")
     ap.add_argument("--no-nice", action="store_true")
+    ap.add_argument("--csv", action=argparse.BooleanOptionalAction, default=True,
+                    help="同时生成 csv/ 下的 csv.gz 和 csv 清单（默认开，--no-csv 关闭）")
+    ap.add_argument("--csv-only", action="store_true",
+                    help="不重新导出，只给已有快照 --tag 补生成 csv/（已有 csv/ 需 --force）")
     args = ap.parse_args(argv)
 
     if args.list_tables:
@@ -600,13 +767,19 @@ def main(argv: list[str] | None = None) -> int:
     start = args.start or three_years_before(end)
     tables = [s.strip() for s in args.tables.split(",") if s.strip()] or None
     try:
+        if args.csv_only:
+            if not args.tag:
+                raise SnapshotError("--csv-only 需要用 --tag 指定已有快照")
+            csv_only(out_root=args.out or default_out_dir(), tag=args.tag, force=args.force,
+                     batch_rows=max(1000, args.chunk_rows), min_free_gb=args.min_free_gb)
+            return 0
         run(
             data_dir=args.data_dir or default_data_dir(),
             out_root=args.out or default_out_dir(),
             tag=args.tag or today.strftime("%Y%m%d"),
             start=start, end=end, tables=tables, dry_run=args.dry_run,
             force=args.force, min_free_gb=args.min_free_gb,
-            chunk_rows=max(1000, args.chunk_rows), commit=args.git_commit,
+            chunk_rows=max(1000, args.chunk_rows), commit=args.git_commit, csv=args.csv,
         )
     except SnapshotError as e:
         print(f"失败：{e}", file=sys.stderr)

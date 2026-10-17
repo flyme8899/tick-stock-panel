@@ -31,6 +31,8 @@ nice -n 19 ionice -c3 docker compose run --rm --no-deps -T \
 | `--dry-run` | 只统计行数、日期范围和预估大小，不写文件 |
 | `--force` | 同名快照已存在时覆盖（默认拒绝） |
 | `--min-free-gb` | 导出后剩余空间低于该值（默认 5G）则放弃 |
+| `--csv` / `--no-csv` | 是否同时生成 `csv/`（默认生成） |
+| `--csv-only` | 不重新导出，只给已有快照 `--tag` 补生成 `csv/`（已有则需 `--force`） |
 
 ## 安全与资源
 
@@ -62,3 +64,25 @@ nice -n 19 ionice -c3 docker compose run --rm --no-deps -T \
 | industry_ths / concept_ths | data/ext_data 同花顺行业、概念 | 否（当前快照） |
 
 源数据不存在的表会在清单里标为 `missing` 并跳过。
+
+## CSV 版本（给装不了 pyarrow/polars 的环境）
+
+默认同时生成 `csv/`：
+
+- 每张表一个 `<表名>.csv.gz`：UTF-8（无 BOM）、逗号分隔、首行表头；日期 `YYYY-MM-DD`；
+  文本字段一律加双引号，股票/基金代码保留前导零；空值为空字段。
+- `csv_manifest.json` / `csv_manifest.txt`：每个文件的行数、字节数、md5。生成时逐表核对行数与 parquet 一致，不一致直接报错。
+- 主 `MANIFEST.json` 的 `csv` 字段也记录了每个 CSV 的行数和 md5。
+
+读取（只需标准库或 pandas）：
+
+```python
+import pandas as pd
+df = pd.read_csv("csv/kline_daily.csv.gz", dtype=str, keep_default_na=False)  # 代码不丢前导零
+
+import csv, gzip
+with gzip.open("csv/news_archive.csv.gz", "rt", encoding="utf-8", newline="") as fh:
+    rows = list(csv.DictReader(fh))
+```
+
+浮点数按最短往返精度写出，可能出现 `9.15e+10` 或 `-245802239.99999997` 这样的写法，按浮点解析即可。
