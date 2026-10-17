@@ -62,6 +62,10 @@ nice -n 19 ionice -c3 docker compose run --rm --no-deps -T \
 | news_archive | data/news_archive.sqlite（东财 7×24、财联社） | 是 |
 | instruments / instruments_etf / instruments_index | 股票、ETF、指数列表 | 否（当前快照） |
 | industry_ths / concept_ths | data/ext_data 同花顺行业、概念 | 否（当前快照） |
+| financial_forecast / financial_express / financial_report | data/financials/em_forecast、em_express、em_report（东财业绩预告、快报、报表，按报告期分区） | 否（全部报告期） |
+| financials_metrics / income / balance_sheet / cash_flow / shares | data/financials/*/part.parquet（TickFlow 财务表） | 否（全量） |
+
+分钟 K 线（data/kline_minute）体积大，暂不进快照。
 
 源数据不存在的表会在清单里标为 `missing` 并跳过。
 

@@ -1457,6 +1457,15 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
     except Exception as e:  # noqa: BLE001
         logger.warning("auction-scan scheduler job not registered: %s", e)
 
+    # 业绩预告 / 快报 / 报表（东财）：工作日 18:40 增量最近 2 个报告期。
+    # EARNINGS_SYNC_ENABLED=0 可关；测试进程里 run_daily 直接返回，不出网。
+    try:
+        from app.services.earnings_sync import register_job as register_earnings
+
+        register_earnings(scheduler)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("earnings scheduler job not registered: %s", e)
+
     scheduler.start()
     logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",
                 inst_sched["hour"], inst_sched["minute"], sched["hour"], sched["minute"],
