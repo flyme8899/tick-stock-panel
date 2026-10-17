@@ -113,6 +113,68 @@ def test_text_without_sector_keywords_maps_nothing():
     assert map_text("美国SEC批准KPI合约", ranking=_ranking({"601398.SH": 1.0})) == (None, [])
 
 
+def _names(text: str) -> list[str]:
+    return [hit["name"] for hit in find_sectors(text)]
+
+
+@pytest.mark.parametrize("text", [
+    "美国将古巴国际商业银行列入制裁名单",
+    "法国农业信贷银行三季度净利同比增长",
+    "德国工业银行宣布裁员",
+    "汇丰银行下调全年指引",
+    "丰田汽车宣布在美召回",
+    "美国钢铁被收购",
+])
+def test_industry_words_inside_foreign_institution_names_are_ignored(text):
+    names = _names(text)
+    assert "银行" not in names and "汽车" not in names and "钢铁" not in names, names
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("中国银行下调存款利率", "银行"),
+    ("今日银行板块大涨", "银行"),
+    ("公积金降息对商业银行净息差的直接冲击较小", "银行"),
+    ("美股盘前，存储芯片股普跌", "存储"),
+    ("美国国际贸易委员会作出晶体硅光伏电池双反产业损害终裁", "光伏"),
+])
+def test_domestic_and_industry_mentions_still_map(text, expected):
+    assert _names(text)[0] == expected
+
+
+def test_foreign_entity_mask_does_not_swallow_verbs():
+    # 「宣布制裁」不是机构名的一部分：只抹掉「伊朗石油」，伊朗仍映射石油石化。
+    assert sector_map._mask_foreign_entities("美国宣布制裁伊朗石油出口").startswith("美国宣布制裁")
+    assert _names("美国宣布制裁伊朗石油出口") == ["石油石化"]
+
+
+@pytest.mark.parametrize("text", [
+    "特朗普宣布暂缓实施新一轮对俄制裁",
+    "特朗普豁免《格雷厄姆法案》中多项对俄制裁、限制措施及关税",
+    "欧盟通过第20轮制裁方案",
+])
+def test_sanctions_alone_do_not_map_to_defense(text):
+    assert "国防军工" not in _names(text)
+
+
+def test_geopolitical_words_need_military_terms_for_defense():
+    # 只有「俄罗斯」：只留石油石化。
+    assert _names("泽连斯基：俄罗斯已将放松制裁的信号视为继续袭击的许可") == ["石油石化"]
+    # 有军事词才映射军工，置信度语义不变（主题词 0.4）。
+    hits = find_sectors("美国宣布对俄制裁并扩大对乌克兰武器援助")
+    assert hits[0]["name"] == "国防军工"
+    assert hits[0]["confidence"] == pytest.approx(sector_map.CONF_THEME)
+    assert _names("台海附近举行联合军演")[0] == "国防军工"
+    assert _names("军工板块午后拉升")[0] == "国防军工"
+
+
+def test_military_gate_and_foreign_tables_are_consistent():
+    keywords = json.loads((DATA / "sector_keywords.json").read_text(encoding="utf-8"))
+    assert set(keywords["military_gate"]["targets"]) <= set(SW["l1"].values())
+    assert keywords["military_gate"]["require"]
+    # 单字国名（「日」「加」）会把「今日银行」「增加银行」误当外国机构，不收。
+    assert all(len(name) >= 2 for name in keywords["foreign_entity"]["countries"])
+
+
 def _write_market(data_dir: Path, amount: dict[str, float], close: float = 10.0) -> None:
     day = data_dir / "kline_daily" / "date=2026-10-16"
     day.mkdir(parents=True)
