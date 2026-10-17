@@ -517,6 +517,19 @@ def public_hot_event(event: dict) -> dict:
         "etfs": etfs,
         "limit_reason": _public_limit_reason(event.get("limit_reason")),
     }
+    # 板块推导的候选个股和点名个股分开给：stocks 只有资讯里点名的（推送、验证只看它），
+    # sector_stocks 是没有点名时按申万行业补的，带来源和置信度，页面需要标成「板块推导」。
+    sector_stocks = _public_sector_stocks(event.get("sector_stocks"))
+    if sector_stocks:
+        payload["sector_stocks"] = sector_stocks
+        mapping_info = event.get("sector_mapping") if isinstance(event.get("sector_mapping"), dict) else {}
+        payload["sector_mapping"] = {
+            "name": str(mapping_info.get("name") or sector_stocks[0]["sector"]),
+            "kind": str(mapping_info.get("kind") or sector_stocks[0]["sector_kind"]),
+            "confidence": _float_value(mapping_info.get("confidence"), sector_stocks[0]["confidence"]),
+            "why": str(mapping_info.get("why") or ""),
+        }
+    payload["stock_source"] = "direct" if stocks else ("sector" if sector_stocks else "")
     subtitle_source = str(event.get("subtitle_source") or "")
     if payload["subtitle"] and subtitle_source in {"model", "fallback"}:
         payload["subtitle_source"] = subtitle_source
@@ -527,6 +540,34 @@ def public_hot_event(event: dict) -> dict:
     if mx_sources:
         payload["sources"] = mx_sources
     return payload
+
+
+def _float_value(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number == number else default
+
+
+def _public_sector_stocks(raw) -> list[dict]:
+    """板块推导个股的出口字段。缺字段的旧快照照样能读。"""
+    rows: list[dict] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        rows.append({
+            "key": key,
+            "name": str(item.get("name") or key),
+            "source": "sector",
+            "sector": str(item.get("sector") or ""),
+            "sector_kind": str(item.get("sector_kind") or ""),
+            "confidence": round(_float_value(item.get("confidence")), 4),
+        })
+    return rows
 
 
 def _http_url(value) -> str:
