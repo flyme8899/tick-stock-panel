@@ -52,6 +52,7 @@ import {
   saveColumnConfig,
   buildExtColumnsParam,
 } from '@/lib/watchlist-columns'
+import { getBoardType as sharedGetBoardType } from '@/lib/board'
 
 // ===== 板块标识（筛选/卡片用） =====
 // 注: boardTag（创/科/北 标签）已移至共享 @/components/stock-table/primitives
@@ -63,13 +64,9 @@ type BoardType = typeof BOARDS[number]
 const ETF_BOARD = 'ETF'
 const BOARD_OPTIONS = [...BOARDS, ETF_BOARD]
 
+// 板块判定统一走 @/lib/board (创业板 300/301/302, 科创板 688/689)
 function getBoardType(symbol: string): BoardType | null {
-  if (/^(300|301)/.test(symbol)) return '创业板'
-  if (/^688/.test(symbol))       return '科创板'
-  if (/\.BJ$/.test(symbol))      return '北交所'
-  if (/^60[0135]/.test(symbol))  return '沪主板'
-  if (/^00[012]/.test(symbol))   return '深主板'
-  return null
+  return sharedGetBoardType(symbol)
 }
 
 // ===== 换手率分档色（卡片/表格用） =====

@@ -575,3 +575,8 @@ def test_timed_out_task_does_not_start_another(monkeypatch, tmp_path) -> None:
     assert worker.run_once(now) is None
     assert len(calls) == 1
     blocked.set()
+
+
+def test_market_of_chinext_302_is_szse():
+    assert parse.market_of("302132") == "szse"
+    assert parse.market_of("689009") == "sse"
