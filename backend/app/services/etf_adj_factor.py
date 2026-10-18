@@ -377,6 +377,7 @@ def collect_etf_events(
     remote_prices: bool = False,
     sleep_s: float = 0.05,
     close_batch: int = _CLOSE_BATCH,
+    price_floor: date | None = None,
 ) -> tuple[pl.DataFrame, list[str], list[str]]:
     """拉取并计算事件，不写盘。返回 (事件表, 成功标的, 失败标的)。
 
@@ -384,6 +385,9 @@ def collect_etf_events(
     默认不请求腾讯。``fetch_prices`` 或 ``remote_prices=True`` 才会补拉，
     补拉抛错或仍然缺价同样算失败，不能把登记日或丢掉的现金分红写成成功。
     本地收盘按 ``close_batch`` 只标的分批读入，用完即丢。
+
+    ``price_floor`` 是本地日 K 起点。定时同步传入它：只为起点当天及之后的事件
+    要价。更早的事件沿用已存储的行，没有存过就跳过，不因此让整只代码失败。
     """
     if not symbols:
         return _empty_factors(), [], []
@@ -412,8 +416,13 @@ def collect_etf_events(
 
     frames: list[pl.DataFrame] = []
     replaced: list[str] = []
+    stored = _read_store(_store_path(data_dir)) if price_floor is not None else None
     for batch in _chunks(parsed, close_batch):
-        needing = [(symbol, actions) for symbol, actions in batch if actions]
+        priced = [
+            (symbol, [action for action in actions if _reaches_price_floor(action, price_floor)])
+            for symbol, actions in batch
+        ]
+        needing = [(symbol, actions) for symbol, actions in priced if actions]
         local: dict[str, dict[date, float]] = {}
         if needing:
             windows = [_price_window(actions) for _, actions in needing]
@@ -423,12 +432,15 @@ def collect_etf_events(
                 start=min(window[0] for window in windows),
                 end=max(window[1] for window in windows),
             )
-        for symbol, actions in batch:
+        for symbol, actions in priced:
             try:
                 closes = _closes_for_actions(
                     symbol, actions, local.get(symbol, {}), price_fn,
                 )
-                frames.append(rows_frame(factor_rows(symbol, actions, closes)))
+                rows = factor_rows(symbol, actions, closes)
+                if price_floor is not None and stored is not None:
+                    rows = _with_preserved_rows(stored, symbol, price_floor, rows)
+                frames.append(rows_frame(rows))
                 replaced.append(symbol)
             except Exception as exc:  # noqa: BLE001
                 failed.append(symbol)
@@ -483,11 +495,15 @@ def scheduled_sync(
 
     距上次全量不足 ``interval_days`` 个自然日时，只重试上次失败的代码。
     没有待重试的代码就直接跳过：不拉新浪，也不把日 K 收盘读进内存。
+    ``all.parquet`` 不在时无视间隔，立刻全量，避免清数据后空等一周。
+    只为本地日 K 起点及之后的事件要价；更早的事件保留已存行。
     全量或重试结束后把失败代码记下来，成功的代码从重试名单去掉。
     """
     day = today or _today()
     state = _read_state(data_dir)
-    full = _full_sync_due(state, day, interval_days)
+    full = _full_sync_due(
+        state, day, interval_days, store_missing=not _store_path(data_dir).is_file(),
+    )
     universe = list(dict.fromkeys(symbols))
     if full:
         chosen = universe
@@ -503,9 +519,13 @@ def scheduled_sync(
     incoming, replaced, failed = collect_etf_events(
         chosen, data_dir, on_chunk_done,
         fetch_text=fetch_text, remote_prices=False, sleep_s=sleep_s,
-        close_batch=close_batch,
+        close_batch=close_batch, price_floor=local_kline_start(data_dir),
     )
     outcome = _commit_events(data_dir, incoming, replaced, failed)
+    # 一次全量如果没有任何事件，也要留下空表。否则「文件不在就全量」会每天重扫。
+    # 清理把文件删掉之后，这里的空表也不在，下一次仍然全量。
+    if full and not _store_path(data_dir).is_file():
+        write_planned(_store_path(data_dir), _empty_factors())
     _write_state(data_dir, {
         "last_full_date": day.isoformat() if full else state.get("last_full_date"),
         "retry": outcome.failed,
@@ -583,6 +603,42 @@ def _commit_events(
     )
 
 
+def _reaches_price_floor(action: EtfCorporateAction, floor: date | None) -> bool:
+    """事件的登记日或之后 10 天可能落在本地日 K 里时，才要求价格。"""
+    if floor is None:
+        return True
+    horizon = action.record_date + timedelta(days=_HINT_DAYS)
+    if action.hints:
+        horizon = max(horizon, max(action.hints))
+    return horizon >= floor
+
+
+def _with_preserved_rows(
+    stored: pl.DataFrame,
+    symbol: str,
+    floor: date,
+    rows: list[dict],
+) -> list[dict]:
+    """起点之前的已存行原样留下。同一天以新算出来的事件为准。没存过的早年事件不补。"""
+    if stored.is_empty() or "symbol" not in stored.columns:
+        return rows
+    kept = stored.filter((pl.col("symbol") == symbol) & (pl.col("trade_date") < floor))
+    merged = {
+        row["trade_date"]: {
+            "symbol": symbol,
+            "trade_date": row["trade_date"],
+            "ex_factor": row["ex_factor"],
+            "dividend": row.get("dividend"),
+            "prev_close": row.get("prev_close"),
+        }
+        for row in kept.iter_rows(named=True)
+        if row.get("ex_factor") is not None
+    }
+    for row in rows:
+        merged[row["trade_date"]] = row
+    return [merged[day] for day in sorted(merged)]
+
+
 def _price_window(actions: list[EtfCorporateAction]) -> tuple[date, date]:
     start = min(action.record_date for action in actions) - timedelta(days=20)
     end = max(action.record_date for action in actions) + timedelta(days=_HINT_DAYS + 5)
@@ -599,6 +655,32 @@ def _today() -> date:
     from app.market_time import cn_today
 
     return cn_today()
+
+
+def clear_sync_state(data_dir: Path) -> None:
+    """删掉定时同步水位。数据页清 parquet 时必须调用，否则会空等最多 7 天。"""
+    path = _state_path(data_dir)
+    path.unlink(missing_ok=True)
+    path.with_suffix(".json.tmp").unlink(missing_ok=True)
+
+
+def local_kline_start(data_dir: Path) -> date | None:
+    """本地 ETF 日 K 最早分区日。没有分区时返回 None，定时同步退回「每个事件都要价」。"""
+    root = Path(data_dir) / "kline_etf_daily"
+    if not root.is_dir():
+        return None
+    found: list[date] = []
+    for path in root.glob("date=*"):
+        text = path.name.removeprefix("date=")[:10]
+        try:
+            found.append(date.fromisoformat(text))
+        except ValueError:
+            continue
+    return min(found) if found else None
+
+
+def _store_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "adj_factor_etf" / "all.parquet"
 
 
 def _state_path(data_dir: Path) -> Path:
@@ -625,7 +707,15 @@ def _write_state(data_dir: Path, state: dict) -> None:
     tmp.replace(path)
 
 
-def _full_sync_due(state: dict, today: date, interval_days: int) -> bool:
+def _full_sync_due(
+    state: dict,
+    today: date,
+    interval_days: int,
+    *,
+    store_missing: bool = False,
+) -> bool:
+    if store_missing:
+        return True
     raw = state.get("last_full_date")
     if not raw:
         return True
