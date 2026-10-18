@@ -73,7 +73,7 @@ def market_of(code: str, trade_market: object = "") -> str:
         return "sse"
     if "北" in text:
         return "bj"
-    if code.startswith(("000", "001", "002", "003", "300", "301")):
+    if code.startswith(("000", "001", "002", "003", "300", "301", "302")):
         return "szse"
     if code.startswith(("6", "688", "689")):
         return "sse"

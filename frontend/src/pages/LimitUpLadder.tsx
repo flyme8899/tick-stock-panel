@@ -10,6 +10,7 @@ import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPct, priceColorClass } from '@/lib/format'
+import { isChiNext, isStar } from '@/lib/board'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { ErrorState } from '@/components/ErrorState'
@@ -142,8 +143,8 @@ function fmtSealAmount(v: number): string {
 // ===== 板块标识 =====
 
 function boardTag(symbol: string): { label: string; cls: string } | null {
-  if (/^(300|301)/.test(symbol)) return { label: '创', cls: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
-  if (/^688/.test(symbol))       return { label: '科', cls: 'text-cyan-400 bg-cyan-400/12 border-cyan-400/25' }
+  if (isChiNext(symbol))         return { label: '创', cls: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
+  if (isStar(symbol))            return { label: '科', cls: 'text-cyan-400 bg-cyan-400/12 border-cyan-400/25' }
   if (/\.BJ$/.test(symbol))      return { label: '北', cls: 'text-purple-400 bg-purple-400/12 border-purple-400/25' }
   return null
 }
@@ -717,11 +718,11 @@ function matchFilter(stock: LimitLadderStock, key: FilterKey): boolean {
     case 'failed':
       return stock.status === 'failed'
     case 'main':
-      return !/^(300|301|688)/.test(s) && !/\.BJ$/.test(s) && !n.includes('ST')
+      return !isChiNext(s) && !isStar(s) && !/\.BJ$/.test(s) && !n.includes('ST')
     case 'chinext':
-      return /^(300|301)/.test(s)
+      return isChiNext(s)
     case 'star':
-      return /^688/.test(s)
+      return isStar(s)
     case 'bj':
       return /\.BJ$/.test(s)
     case 'st':

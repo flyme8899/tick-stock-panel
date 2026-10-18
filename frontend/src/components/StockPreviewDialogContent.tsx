@@ -5,6 +5,7 @@ import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2,
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
+import { isChiNext, isStar } from '@/lib/board'
 import { monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { fmtPct, fmtSignedFlow, flowClock, intradayNetTitle, intradayNetLabel, priceColorClass, cnDateFromUtc } from '@/lib/format'
@@ -68,8 +69,8 @@ function loadIntradayDays(): number {
 }
 
 function boardTag(symbol: string): { label: string; color: string } | null {
-  if (/^(300|301)/.test(symbol)) return { label: '创', color: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
-  if (/^688/.test(symbol))       return { label: '科', color: 'text-purple-400 bg-purple-400/12 border-purple-400/25' }
+  if (isChiNext(symbol))         return { label: '创', color: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
+  if (isStar(symbol))            return { label: '科', color: 'text-purple-400 bg-purple-400/12 border-purple-400/25' }
   if (/^[48]/.test(symbol))      return { label: '北', color: 'text-cyan-400 bg-cyan-400/12 border-cyan-400/25' }
   return null
 }
