@@ -7,8 +7,9 @@
 
 先把现有 ``all.parquet`` 复制到 ``backup/adj_factor_etf/``（与因子目录并列，
 避免 ``adj_factor_etf/**/*.parquet`` 把旧因子再并进净流入和 DuckDB 视图），
-再按标的整表替换。内容没变化时不备份、不写。拉取失败的标的保留旧行。
-重复执行是幂等的。
+再按标的整表替换。``--symbols`` 只重跑列出的代码，其余不动。
+手动重建会在本地收盘不够时补拉腾讯日 K；腾讯失败或新浪 ``data`` 为空则保留旧行。
+内容没变化时不备份、不写。重复执行是幂等的。
 """
 from __future__ import annotations
 
@@ -72,7 +73,8 @@ def rebuild(
         return summary
     incoming, replaced, failed = collect_etf_events(
         chosen, data_dir,
-        fetch_text=fetch_text, fetch_prices=fetch_prices, sleep_s=sleep_s,
+        fetch_text=fetch_text, fetch_prices=fetch_prices,
+        remote_prices=fetch_prices is None, sleep_s=sleep_s,
     )
     summary["replaced"] = len(replaced)
     summary["failed"] = failed

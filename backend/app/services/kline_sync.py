@@ -617,8 +617,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     ETF 不走这条行情因子。TickFlow / stock-sdk 给的是累计后复权或带漂移的
     前复权比值，写进单次事件 ``ex_factor`` 后，分红日会被当成拆分、折算日
     对不上价格跳空。ETF 改为新浪累计分红和份额因子还原单次事件，见
-    ``etf_adj_factor.sync_etf_events``。增量窗口对 ETF 无效：旧的幻影行
-    必须整标的替换才能删掉。
+    ``etf_adj_factor.sync_etf_events``。缺价或远端失败的标的保留旧行，
+    不把登记日或丢掉的现金分红写成成功。这里默认不请求腾讯。
 
     股票支持增量: 传 start_time/end_time 只拉取该时间范围内的新除权事件。
     返回 (写入行数, 受影响的 symbol 列表) — 供 enriched 局部重算使用。

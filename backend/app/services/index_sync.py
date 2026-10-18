@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import gc
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 
@@ -328,6 +328,27 @@ def sync_etf_adj_factor(
         end_time=end_time,
         on_chunk_done=on_chunk_done,
         asset_type="etf",
+    )
+
+
+def sync_etf_adj_factor_if_due(
+    symbols: list[str],
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    on_chunk_done=None,
+    today: date | None = None,
+):
+    """盘后管道入口。全量最多每 7 天一次，期间只重试失败代码，不请求腾讯。
+
+    ``capset`` 保留调用签名。ETF 因子不看 TickFlow 能力。
+    """
+    from app.services.etf_adj_factor import scheduled_sync
+
+    return scheduled_sync(
+        symbols,
+        repo.store.data_dir,
+        today=today,
+        on_chunk_done=on_chunk_done,
     )
 
 
