@@ -209,6 +209,9 @@ class Settings(BaseSettings):
     vision_ai_api_key: str = ""
     vision_ai_base_url: str = "https://tokenhub.tencentmaas.com/v1"
     vision_ai_model: str = "deepseek/deepseek-v4-flash-vision-exp"
+    # 微信申赎稿的 DeepSeek Fetch 兜底。开关默认关；密钥只给这个兜底用。
+    etf_flow_fetch_fallback: str = ""
+    deepseek_api_key: str = ""
     # 钉钉推送默认全关。总开关和每一类都要打开才会发。
     news_push_enabled: str = ""
     news_push_hot_enabled: str = ""

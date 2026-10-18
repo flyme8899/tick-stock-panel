@@ -27,6 +27,11 @@ reasoning_effort=low，并把上限提到 16384。空内容再试一次；若是
 页面和图片下载大约 60 秒超时。视觉请求的读超时单独放到 240 秒，连接超时
 保持较短。读超时再试 2 次。某一张图仍超时就跳过，已经抽出的其他图继续合并；
 正负号确认超时则沿用第一次结果。全部图片都超时才算抽取失败。
+
+微信稿还有一层 DeepSeek Fetch 兜底（``ETF_FLOW_FETCH_FALLBACK=true`` 且配置了
+``DEEPSEEK_API_KEY``）：原文页抓不到、页里没有表格图片、或视觉抽取失败时，把
+清洗过的长链交给 DeepSeek，解析它识别出的表格。网易号没有微信长链，不走兜底。
+兜底结果通常缺全市场和宽基，``raw_json`` 里 ``via`` 记为 ``deepseek_fetch``。
 """
 
 from __future__ import annotations
@@ -52,6 +57,14 @@ from app.news.collectors import Item, parse_time
 from app.news.config import vision_api_key, vision_base_url, vision_generation, vision_model
 from app.news.extract import StructuredStock
 from app.news.host_collector import send_dingtalk
+from app.news.mp_fetch import (
+    FetchFallbackError,
+    deepseek_api_key,
+    fallback_ready,
+    fetch_article,
+    parse_flow_markdown,
+    sanitize_wechat_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +121,8 @@ MAX_BROAD = 20
 MAX_CATEGORY = 30
 MAX_ETF = 80
 _RAW_BUDGET = 18_000
+# DeepSeek fetch 兜底至少要解析出这么多行（分类 + ETF）才入库。
+FETCH_MIN_ROWS = 10
 
 _FLOW_TITLE = re.compile(r"(\d{1,2})月(\d{1,2})日ETF基金申购和赎回")
 _DOCID = re.compile(r"^[0-9A-Za-z]{8,24}$")
@@ -689,8 +704,15 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="直接采集一篇 mp.weixin.qq.com 文章，支持 /s/ 短链",
     )
+    parser.add_argument(
+        "--fetch-check",
+        default="",
+        help="只走 DeepSeek Fetch 兜底解析一篇微信长链并打印结果，不入库",
+    )
     args = parser.parse_args(argv)
     root = _cli_data_dir(args.data_dir)
+    if args.fetch_check.strip():
+        return _fetch_check(args.fetch_check, root)
     if args.url.strip():
         if args.dates.strip() or args.since.strip() or args.until.strip() or args.retry_missing:
             print("--url 不要和回补日期一起用。")
@@ -1314,8 +1336,124 @@ def _ingest_ref(client, ref: ArticleRef) -> dict:
     if ref.channel == "netease" and ref.article_id and _known(f"netease:{ref.article_id}"):
         _mark_ok()
         return _result(found=True)
-    page = _load_page(client, ref)
+    try:
+        page = _load_page(client, ref)
+    except Exception as exc:
+        # 标题不对说明拿到的不是申赎稿，不能拿列表标题去兜底。
+        page = None if "标题" in str(exc) else _fallback_page(ref, exc)
+        if page is None:
+            raise
     return _store_page(client, page)
+
+
+def _fallback_page(ref: ArticleRef, exc: BaseException) -> ArticlePage | None:
+    """微信原文页打不开时，用列表里的长链和标题拼一页，图片留空，交给兜底。"""
+    if ref.channel != "wechat" or not fallback_ready():
+        return None
+    url = sanitize_wechat_url(ref.url)
+    article_id = wechat_article_id(url) if url else ""
+    if not article_id or not _FLOW_TITLE.search(_plain(ref.title)):
+        return None
+    logger.warning("ETF领航者微信原文页打不开，改走 DeepSeek fetch: %s", _public_error(exc))
+    return ArticlePage(
+        article_id=article_id,
+        title=ref.title,
+        url=url,
+        published_at=ref.published_at,
+        images=[],
+        channel="wechat",
+    )
+
+
+def _extract_page(client, page: ArticlePage) -> tuple[dict, str]:
+    """先走视觉模型。没有图片或视觉失败时，微信稿再试 DeepSeek fetch。"""
+    try:
+        if not page.images:
+            raise ExtractFailedError("文章没有可抽取的表格图片")
+        extracted = _call_vision(client, page.images)
+        return apply_trade_date(page.title, page.published_at, extracted), "vision"
+    except ExtractFailedError as exc:
+        fallback = _fetch_fallback(client, page, reason=_public_error(exc))
+        if fallback is None:
+            raise
+        return fallback, "deepseek_fetch"
+
+
+def _fetch_fallback(client, page: ArticlePage, *, reason: str = "") -> dict | None:
+    """DeepSeek fetch 兜底。没开、不是微信稿或结果太少时返回 None，由调用方报原错。"""
+    if page.channel != "wechat" or not fallback_ready():
+        return None
+    logger.warning("ETF领航者改用 DeepSeek fetch 兜底，原因: %s", reason or "无")
+    try:
+        fetched = fetch_article(page.url, client)
+    except FetchFallbackError as exc:
+        logger.warning("ETF领航者 DeepSeek fetch 没有拿到正文: %s", _public_error(exc))
+        return None
+    fetched_title = _plain(fetched.get("title") or "")
+    if (
+        fetched_title
+        and _plain(page.title)
+        and _FLOW_TITLE.search(fetched_title)
+        and trade_date_from_title(fetched_title, page.published_at)
+        != trade_date_from_title(page.title, page.published_at)
+    ):
+        logger.warning("ETF领航者 DeepSeek fetch 标题和原稿交易日不一致，丢弃")
+        return None
+    try:
+        extracted = normalize_flow(parse_flow_markdown(fetched.get("content") or ""))
+    except (ValueError, KeyError, TypeError):
+        logger.warning("ETF领航者 DeepSeek fetch 正文没有解析出申赎表")
+        return None
+    rows = len(extracted.get("etfs") or []) + len(extracted.get("categories") or [])
+    if rows < FETCH_MIN_ROWS:
+        logger.warning("ETF领航者 DeepSeek fetch 只解析出 %s 行，太少，丢弃", rows)
+        return None
+    logger.info(
+        "ETF领航者 DeepSeek fetch 兜底解析出分类 %s 行、ETF %s 行",
+        len(extracted.get("categories") or []),
+        len(extracted.get("etfs") or []),
+    )
+    return apply_trade_date(page.title, page.published_at, extracted)
+
+
+def _fetch_check(url: str, root: Path) -> int:
+    """命令行自检：清洗链接后只走兜底解析，打印行数和结果，不写库。"""
+    target = sanitize_wechat_url(url)
+    if not target:
+        print("只接受带 __biz/mid/idx/sn 的 mp.weixin.qq.com 长链")
+        return 2
+    if not deepseek_api_key():
+        print("未配置 DEEPSEEK_API_KEY")
+        return 1
+    client = _page_client()
+    try:
+        fetched = fetch_article(target, client, data_dir=root)
+    except FetchFallbackError as exc:
+        print(_public_error(exc))
+        return 1
+    finally:
+        client.close()
+    title = fetched.get("title") or ""
+    try:
+        extracted = normalize_flow(parse_flow_markdown(fetched.get("content") or ""))
+    except ValueError as exc:
+        print(_public_error(exc))
+        return 1
+    extracted = apply_trade_date(title, _cn_now(), extracted)
+    print(
+        json.dumps(
+            {
+                "article_id": wechat_article_id(target),
+                "title": title,
+                "trade_date": extracted.get("trade_date") or "",
+                "categories": len(extracted.get("categories") or []),
+                "etfs": len(extracted.get("etfs") or []),
+                "extracted": extracted,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
 
 
 def _store_page(client, page: ArticlePage) -> dict:
@@ -1323,9 +1461,7 @@ def _store_page(client, page: ArticlePage) -> dict:
     if _known(source_id):
         _mark_ok()
         return _result(found=True)
-    if not page.images:
-        raise ExtractFailedError("文章没有可抽取的表格图片")
-    extracted = apply_trade_date(page.title, page.published_at, _call_vision(client, page.images))
+    extracted, via = _extract_page(client, page)
     stocks, sectors = flow_mentions(extracted)
     images = page.images[:MAX_STORED_IMAGES]
     raw = _fit_raw(
@@ -1334,6 +1470,7 @@ def _store_page(client, page: ArticlePage) -> dict:
             "channel": page.channel,
             "trade_date": extracted.get("trade_date") or "",
             "images": images,
+            "via": via,
             "extracted": extracted,
         }
     )
@@ -1921,9 +2058,9 @@ def _load_budget(path: Path) -> dict:
 
 def _public_error(exc: BaseException) -> str:
     text = str(exc).replace("\n", " ")
-    key = vision_api_key()
-    if key and len(key) >= 6:
-        text = text.replace(key, "***")
+    for key in (vision_api_key(), deepseek_api_key()):
+        if key and len(key) >= 6:
+            text = text.replace(key, "***")
     text = re.sub(r"Bearer\s+\S+", "Bearer ***", text)
     text = re.sub(r"(?i)(access_token=)[^&\s\"']+", r"\1***", text)
     text = re.sub(r"(?i)([?&]sign=)[^&\s\"']+", r"\1***", text)
