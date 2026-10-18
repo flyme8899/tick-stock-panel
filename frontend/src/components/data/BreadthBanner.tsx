@@ -14,7 +14,16 @@ import { QK } from '@/lib/queryKeys'
  *   - 中档(mid): 弱提示(灰色细条), 只说明当前中性, 不劝动作
  *   - 高档(high)/无数据/窗口不足: 不渲染
  * 文案限定「大盘/中盘宽度」—— 研究中证1000 上前后段方向不一致, 不做全市场universal 声明。
+ *
+ * 档位确认中：当天档位照常显示。confirm_days 为 1 或 2 时在档位旁加注
+ * 「档位确认中（第 n/3 天）」；null（未切换、已满 3 个交易日、或切回原档位）不加注。
+ * 这只是展示，不改档位、不改建议仓位、不触发推送。标注不用涨红跌绿。
  */
+function breadthConfirmLabel(days: number | null | undefined): string | null {
+  if (days == null || days <= 0 || days >= 3) return null
+  return `档位确认中（第 ${days}/3 天）`
+}
+
 export function BreadthBanner() {
   const { data } = useQuery({
     queryKey: QK.regimeBreadth(1),
@@ -33,6 +42,7 @@ export function BreadthBanner() {
   const vText = typeof v === 'number' ? v.toFixed(3) : '—'
   const source = data?.threshold_source ?? ''
   const note = data?.note ?? '研究备注 · 非交易信号'
+  const confirmText = breadthConfirmLabel(data?.confirm_days)
 
   if (bucket === 'low') {
     return (
@@ -40,6 +50,7 @@ export function BreadthBanner() {
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
         <div className="min-w-0 flex-1 text-secondary">
           <span className="font-medium text-foreground">市场宽度转弱</span>
+          {confirmText ? <span className="ml-1 font-medium text-foreground">{confirmText}</span> : null}
           <span className="ml-1">(大盘/中盘 20 日涨跌家数比处低档: {vText}, 截至 {asOf}),</span>
           <span className="ml-1">建议降低总仓位(参考约三成)。</span>
           <span className="ml-1 text-muted">
@@ -57,6 +68,7 @@ export function BreadthBanner() {
       <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
       <div className="min-w-0 flex-1 text-muted">
         <span>市场宽度中性</span>
+        {confirmText ? <span className="ml-1 font-medium text-foreground">{confirmText}</span> : null}
         <span className="ml-1">(大盘/中盘 20 日涨跌家数比: {vText}, 截至 {asOf})。</span>
         <span className="ml-1">仅风控提示, 非买卖信号。{note}</span>
       </div>

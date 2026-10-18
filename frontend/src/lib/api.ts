@@ -3644,7 +3644,8 @@ export const api = {
   regimeCoverage: () => request<RegimeCoverage>('/api/regime/coverage'),
   // 市场宽度(R3) 风控提醒 — 只读, 非交易信号(见 NOTES.md)
   regimeBreadth: (days = 60) => request<RegimeBreadth>(`/api/regime/breadth?days=${days}`),
-  regimeBreadthLatest: () => request<{ latest: RegimeBreadthPoint | null; note: string; threshold_source: string }>('/api/regime/breadth/latest'),
+  // confirm_days：新档位确认中的已持续交易日（1 或 2）。不在确认期为 null，横幅不加标注。
+  regimeBreadthLatest: () => request<{ latest: RegimeBreadthPoint | null; note: string; threshold_source: string; confirm_days: number | null }>('/api/regime/breadth/latest'),
   regimeRecompute: (start?: string, end?: string) => {
     const params = new URLSearchParams()
     if (start) params.set('start', start)

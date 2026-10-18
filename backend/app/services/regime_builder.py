@@ -174,6 +174,8 @@ BREADTH_THRESHOLD_SOURCE = "研究前段(≤2026-04-01)分位 · 冻结"  # 展�
 
 # 档位 → 中文文案键(前端按 bucket 取文案; 后端也回一个 note)
 BREADTH_LABELS = {"low": "低档(宽度转弱)", "mid": "中档(中性)", "high": "高档(宽度健康)"}
+# 新档位连续满这么多个交易日才算确认。未满时横幅只加展示标注，不改档位本身。
+BREADTH_CONFIRM_DAYS = 3
 
 
 def classify_breadth(v_breadth: float | None) -> str | None:
@@ -232,20 +234,84 @@ def compute_breadth_series(rows: list[dict], window: int = BREADTH_WINDOW) -> li
     return out
 
 
+def breadth_confirm_days(buckets: list[str | None]) -> int | None:
+    """由已分类的 breadth 档位序列给出「档位确认中」已持续的交易日数。
+
+    纯展示。不改 classify_breadth、bucket 或 suggested_pos，也不产生推送。
+    入参是按交易日升序、已经 classify_breadth 过的档位（来自已存储的 regime 时序）。
+    bucket 为 None 的窗口不足日跳过：不计入天数，也不把前后档位拆开。
+
+    规则:
+    - 首个有效档位当作原档位，不进入确认期。
+    - 当天档位与原档位不同，且这个新档位连续天数 n < 3 时，返回 n（1 或 2）。
+    - 新档位连续满 3 个交易日，当天起成为新的原档位，返回 None（去掉标注）。
+    - 确认期内切回原档位，返回 None（去掉标注）。
+    - 确认期内改切到第三档时，第三档从第 1 天重计；原档位保持不变，
+      之后若回到原档位仍然去掉标注。
+
+    不在确认期时返回 None，而不是 0。None 表示横幅不加标注，避免和「第 0 天」混淆。
+    """
+    reference: str | None = None
+    pending: str | None = None
+    pending_days = 0
+
+    for bucket in buckets:
+        if bucket is None:
+            continue
+        if reference is None and pending is None:
+            reference = bucket
+            continue
+        if pending is None:
+            if bucket != reference:
+                pending = bucket
+                pending_days = 1
+            continue
+        if bucket == pending:
+            pending_days += 1
+            if pending_days >= BREADTH_CONFIRM_DAYS:
+                reference = pending
+                pending = None
+                pending_days = 0
+            continue
+        if bucket == reference:
+            pending = None
+            pending_days = 0
+            continue
+        pending = bucket
+        pending_days = 1
+
+    if pending is not None and 0 < pending_days < BREADTH_CONFIRM_DAYS:
+        return pending_days
+    return None
+
+
 def compute_breadth_latest(data_dir: Path, days: int = 60) -> dict:
     """读取 regime 时序, 返回最近 `days` 天的 v_breadth 序列 + 最新一日结果。
 
     供只读 API 使用。regime 行按日期升序, 计算窗口自然回看 20 日, 不需要额外拉数据。
+    confirm_days 用截断前的全量档位计算（横幅接口 days=1 也必须能看到前序交易日）。
+    该字段只给 /breadth/latest 展示；时序接口会丢掉它，避免改动原响应。
     """
+    def empty() -> dict:
+        # 每次新建。时序接口会 pop confirm_days 并写入 note，不能共用同一对象。
+        return {
+            "latest": None,
+            "series": [],
+            "threshold_source": BREADTH_THRESHOLD_SOURCE,
+            "confirm_days": None,
+        }
+
     df = load_regime_history(data_dir)
     if df.is_empty():
-        return {"latest": None, "series": [], "threshold_source": BREADTH_THRESHOLD_SOURCE}
+        return empty()
     cols = [c for c in ["date", "up_count", "down_count"] if c in df.columns]
     if "date" not in cols:
-        return {"latest": None, "series": [], "threshold_source": BREADTH_THRESHOLD_SOURCE}
+        return empty()
     df = df.sort("date")
     rows = df.select(cols).to_dicts()
     series = compute_breadth_series(rows)
+    # 确认天数看完整历史档位，不能用下面截断后的 tail。
+    confirm_days = breadth_confirm_days([rec["bucket"] for rec in series])
     # 只回最近 days 天(计算已在全序上完成, 避免截断破坏窗口)
     tail = series[-days:] if days and days > 0 else series
     latest = None
@@ -259,6 +325,7 @@ def compute_breadth_latest(data_dir: Path, days: int = 60) -> dict:
             {**rec, "date": (str(rec["date"]) if rec["date"] is not None else None)} for rec in tail
         ],
         "threshold_source": BREADTH_THRESHOLD_SOURCE,
+        "confirm_days": confirm_days,
     }
 
 

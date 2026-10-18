@@ -71,3 +71,54 @@ it('无数据/窗口不足(bucket=null): 不渲染', async () => {
   await render()
   expect(container.textContent).toBe('')
 })
+
+it('首日切换: 仍显示当天低档, 旁边加注第 1/3 天', async () => {
+  latestMock.mockResolvedValue({
+    ...baseResp({ date: '2026-04-10', v_breadth: 1.4, bucket: 'low', suggested_pos: 0.3 }),
+    confirm_days: 1,
+  })
+  await render()
+  expect(container.textContent).toContain('市场宽度转弱')
+  expect(container.textContent).toContain('建议降低总仓位')
+  expect(container.textContent).toContain('档位确认中（第 1/3 天）')
+})
+
+it('第 2/3 天: 中档照常显示, 加注第 2/3 天, 不改劝仓文案', async () => {
+  latestMock.mockResolvedValue({
+    ...baseResp({ date: '2026-04-11', v_breadth: 1.6, bucket: 'mid', suggested_pos: 0.6 }),
+    confirm_days: 2,
+  })
+  await render()
+  expect(container.textContent).toContain('市场宽度中性')
+  expect(container.textContent).toContain('档位确认中（第 2/3 天）')
+  expect(container.textContent).not.toContain('建议降低总仓位')
+})
+
+it('满 3 天后: confirm_days 为 null, 去掉标注, 当天档位仍在', async () => {
+  latestMock.mockResolvedValue({
+    ...baseResp({ date: '2026-04-12', v_breadth: 1.4, bucket: 'low', suggested_pos: 0.3 }),
+    confirm_days: null,
+  })
+  await render()
+  expect(container.textContent).toContain('市场宽度转弱')
+  expect(container.textContent).not.toContain('档位确认中')
+})
+
+it('切回原档位: confirm_days 为 null, 不加标注', async () => {
+  latestMock.mockResolvedValue({
+    ...baseResp({ date: '2026-04-12', v_breadth: 1.6, bucket: 'mid', suggested_pos: 0.6 }),
+    confirm_days: null,
+  })
+  await render()
+  expect(container.textContent).toContain('市场宽度中性')
+  expect(container.textContent).not.toContain('档位确认中')
+})
+
+it('高档即使处于确认天数也不渲染横幅', async () => {
+  latestMock.mockResolvedValue({
+    ...baseResp({ date: '2026-04-10', v_breadth: 1.8, bucket: 'high', suggested_pos: 1.0 }),
+    confirm_days: 1,
+  })
+  await render()
+  expect(container.textContent).toBe('')
+})
