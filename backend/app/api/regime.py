@@ -138,6 +138,8 @@ def regime_breadth(
     时点: t 日收盘后可算 → t+1 生效, 调用方按 t 日收盘价解读。
     """
     result = regime_builder.compute_breadth_latest(_data_dir(request), days=days)
+    # 确认天数只加在轻量横幅接口上，时序响应保持原字段。
+    result.pop("confirm_days", None)
     result["note"] = "研究备注 · 非交易信号"
     result["thresholds"] = {
         "q1": regime_builder.BREADTH_THRESHOLDS[0],
@@ -149,12 +151,19 @@ def regime_breadth(
 
 @router.get("/breadth/latest")
 def regime_breadth_latest(request: Request):
-    """最新一日的市场宽度档位(轻量, 供横幅卡片)。"""
+    """最新一日的市场宽度档位(轻量, 供横幅卡片)。
+
+    原有 latest / note / threshold_source 不变。新增 confirm_days：
+    新档位连续未满 3 个交易日时为已持续天数（1 或 2）；不在确认期时为 null
+    （档位未变、已连续满 3 日，或确认期内切回原档位）。null 不是 0。
+    latest.bucket 与 suggested_pos 仍是当天档位，本字段只给横幅加标注。
+    """
     result = regime_builder.compute_breadth_latest(_data_dir(request), days=1)
     return {
         "latest": result["latest"],
         "note": "研究备注 · 非交易信号",
         "threshold_source": result["threshold_source"],
+        "confirm_days": result.get("confirm_days"),
     }
 
 
