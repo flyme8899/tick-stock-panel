@@ -607,15 +607,22 @@ def run_now(
                 if etf_symbols:
                     try:
                         emit("sync_index", 88, "同步 ETF 除权因子…")
-                        # 全历史重写。一年窗口和「从上次事件日续拉」会把折算日
-                        # 留在窗口外，合并写入也删不掉幻影事件。
-                        _, affected_etfs = index_sync.sync_etf_adj_factor(
+                        # 全量最多每周一次，且不打腾讯、不把全部收盘读进内存。
+                        # 缺价或新浪空表的代码保留旧行，次日只重试这些代码。
+                        outcome = index_sync.sync_etf_adj_factor_if_due(
                             etf_symbols,
                             repo,
                             capset,
                         )
-                        etf_adj_symbols = len(affected_etfs)
-                        emit("sync_index", 88, f"ETF 除权因子完成,{etf_adj_symbols} 只")
+                        if outcome.skipped:
+                            emit("sync_index", 88, "ETF 除权因子本周已同步, 跳过")
+                        else:
+                            etf_adj_symbols = len(outcome.affected)
+                            emit(
+                                "sync_index", 88,
+                                f"ETF 除权因子完成,{etf_adj_symbols} 只"
+                                + (f", {len(outcome.failed)} 只保留旧值" if outcome.failed else ""),
+                            )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("ETF adj_factor skipped: %s", e)
                         stage_errors.append(f"ETF adj_factor: {e}")

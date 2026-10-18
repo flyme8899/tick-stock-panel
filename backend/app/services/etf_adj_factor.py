@@ -41,6 +41,11 @@ _SHARE_MOVE = 0.02
 # 原始价比和理论因子的相对误差。小于它才把除权日从登记日挪走。
 _DATE_MATCH = 0.03
 _FACTOR_EPS = 1e-9
+# 本地收盘一次只放进内存的标的数。全市场大约一千多只，不能一次读成 dict。
+_CLOSE_BATCH = 32
+# 盘后管道全量拉新浪的间隔。中间只重试上次失败的代码，并且不打腾讯。
+_FULL_INTERVAL_DAYS = 7
+_STATE_NAME = "sync_state.json"
 _JSON_OBJECT = re.compile(r"\{.*\}", re.S)
 
 # 与 kline_sync.ADJ_DETAIL_COLS 对齐。bonus/allot 对 ETF 折算没有对应口径，留空。
@@ -57,6 +62,16 @@ FACTOR_COLUMNS = (
 
 FetchText = Callable[[str], str]
 FetchPrices = Callable[[str, date, date], dict[date, float]]
+
+
+@dataclass(frozen=True)
+class EtfAdjSyncOutcome:
+    """一次写入的结果。``skipped`` 为真表示未出网、未读收盘。"""
+
+    rows: int
+    affected: list[str]
+    failed: list[str]
+    skipped: bool
 
 
 @dataclass(frozen=True)
@@ -269,8 +284,18 @@ def rows_frame(rows: list[dict]) -> pl.DataFrame:
     return _align_factors(frame)
 
 
-def load_local_closes(data_dir: Path, symbols: list[str]) -> dict[str, dict[date, float]]:
-    """本地 ETF 日 K 的原始收盘价。没有目录或读失败时返回空，不把缺价写成 0。"""
+def load_local_closes(
+    data_dir: Path,
+    symbols: list[str],
+    *,
+    start: date | None = None,
+    end: date | None = None,
+) -> dict[str, dict[date, float]]:
+    """本地 ETF 日 K 的原始收盘价。没有目录或读失败时返回空，不把缺价写成 0。
+
+    ``start`` / ``end`` 把扫描限制在事件窗口内。调用方应按小批量传入 ``symbols``，
+    避免一次把全部 ETF 的收盘价放进 Python dict。
+    """
     root = Path(data_dir) / "kline_etf_daily"
     if not symbols or not root.is_dir():
         return {}
@@ -278,12 +303,16 @@ def load_local_closes(data_dir: Path, symbols: list[str]) -> dict[str, dict[date
     if not paths:
         return {}
     try:
-        frame = (
+        lazy = (
             pl.scan_parquet([path.as_posix() for path in paths])
             .select("symbol", "date", "close")
             .filter(pl.col("symbol").is_in(symbols))
-            .collect()
         )
+        if start is not None:
+            lazy = lazy.filter(pl.col("date") >= start)
+        if end is not None:
+            lazy = lazy.filter(pl.col("date") <= end)
+        frame = lazy.collect()
     except (OSError, pl.exceptions.PolarsError) as exc:
         logger.warning("读取本地 ETF 日K收盘失败: %s", exc)
         return {}
@@ -345,23 +374,34 @@ def collect_etf_events(
     *,
     fetch_text: FetchText | None = None,
     fetch_prices: FetchPrices | None = None,
+    remote_prices: bool = False,
     sleep_s: float = 0.05,
+    close_batch: int = _CLOSE_BATCH,
 ) -> tuple[pl.DataFrame, list[str], list[str]]:
-    """拉取并计算事件，不写盘。返回 (事件表, 成功标的, 失败标的)。"""
+    """拉取并计算事件，不写盘。返回 (事件表, 成功标的, 失败标的)。
+
+    新浪 ``data`` 为空、或原始收盘不足以定价时，该标的算失败，调用方必须保留旧行。
+    默认不请求腾讯。``fetch_prices`` 或 ``remote_prices=True`` 才会补拉，
+    补拉抛错或仍然缺价同样算失败，不能把登记日或丢掉的现金分红写成成功。
+    本地收盘按 ``close_batch`` 只标的分批读入，用完即丢。
+    """
     if not symbols:
         return _empty_factors(), [], []
     text_fn = fetch_text or fetch_sina_text
-    price_fn = fetch_tencent_range if fetch_prices is None else fetch_prices
-    local = load_local_closes(data_dir, symbols)
-    frames: list[pl.DataFrame] = []
-    replaced: list[str] = []
+    if fetch_prices is not None:
+        price_fn: FetchPrices | None = fetch_prices
+    elif remote_prices:
+        price_fn = fetch_tencent_range
+    else:
+        price_fn = None
+    parsed: list[tuple[str, list[EtfCorporateAction]]] = []
     failed: list[str] = []
     for index, symbol in enumerate(symbols):
         try:
-            actions = corporate_actions(parse_sina_hfq_payload(text_fn(symbol)))
-            closes = _closes_for_actions(symbol, actions, local.get(symbol, {}), price_fn)
-            frames.append(rows_frame(factor_rows(symbol, actions, closes)))
-            replaced.append(symbol)
+            rows = parse_sina_hfq_payload(text_fn(symbol))
+            if not rows:
+                raise ValueError("sina hfq.js data 为空, 保留旧因子")
+            parsed.append((symbol, corporate_actions(rows)))
         except Exception as exc:  # noqa: BLE001
             failed.append(symbol)
             logger.warning("ETF 除权因子 %s 拉取失败, 保留旧值: %s", symbol, exc)
@@ -369,6 +409,31 @@ def collect_etf_events(
             time.sleep(sleep_s)
         if on_chunk_done:
             on_chunk_done(index + 1, len(symbols))
+
+    frames: list[pl.DataFrame] = []
+    replaced: list[str] = []
+    for batch in _chunks(parsed, close_batch):
+        needing = [(symbol, actions) for symbol, actions in batch if actions]
+        local: dict[str, dict[date, float]] = {}
+        if needing:
+            windows = [_price_window(actions) for _, actions in needing]
+            local = load_local_closes(
+                data_dir,
+                [symbol for symbol, _ in needing],
+                start=min(window[0] for window in windows),
+                end=max(window[1] for window in windows),
+            )
+        for symbol, actions in batch:
+            try:
+                closes = _closes_for_actions(
+                    symbol, actions, local.get(symbol, {}), price_fn,
+                )
+                frames.append(rows_frame(factor_rows(symbol, actions, closes)))
+                replaced.append(symbol)
+            except Exception as exc:  # noqa: BLE001
+                failed.append(symbol)
+                logger.warning("ETF 除权因子 %s 定价失败, 保留旧值: %s", symbol, exc)
+        del local
     if not frames:
         incoming = _empty_factors()
     elif len(frames) == 1:
@@ -385,29 +450,67 @@ def sync_etf_events(
     *,
     fetch_text: FetchText | None = None,
     fetch_prices: FetchPrices | None = None,
+    remote_prices: bool = False,
     sleep_s: float = 0.05,
+    close_batch: int = _CLOSE_BATCH,
 ) -> tuple[int, list[str]]:
     """拉新浪全历史并替换这些标的的 ``adj_factor_etf``。
 
-    返回 (新表行数, 因子发生变化的 symbol)。拉取失败的标的保留旧行。
-    全部失败时不写文件。``sleep_s`` 只加在请求之间。
+    返回 (新表行数, 因子发生变化的 symbol)。拉取或定价失败的标的保留旧行。
+    全部失败时不写文件。默认不请求腾讯。``sleep_s`` 只加在请求之间。
     """
     incoming, replaced, failed = collect_etf_events(
         symbols, data_dir, on_chunk_done,
-        fetch_text=fetch_text, fetch_prices=fetch_prices, sleep_s=sleep_s,
+        fetch_text=fetch_text, fetch_prices=fetch_prices,
+        remote_prices=remote_prices, sleep_s=sleep_s, close_batch=close_batch,
     )
-    if not replaced:
-        return 0, []
-    path = Path(data_dir) / "adj_factor_etf" / "all.parquet"
-    merged, affected = plan_replace(path, incoming, replaced)
-    if merged is None:
-        return _read_store(path).height, []
-    written = write_planned(path, merged)
-    logger.info(
-        "ETF 除权因子已替换: %d 只变化, %d 只失败保留, 表共 %d 行",
-        len(affected), len(failed), written,
+    outcome = _commit_events(data_dir, incoming, replaced, failed)
+    return outcome.rows, outcome.affected
+
+
+def scheduled_sync(
+    symbols: list[str],
+    data_dir: Path,
+    *,
+    today: date | None = None,
+    interval_days: int = _FULL_INTERVAL_DAYS,
+    on_chunk_done: Callable[[int, int], None] | None = None,
+    fetch_text: FetchText | None = None,
+    sleep_s: float = 0.05,
+    close_batch: int = _CLOSE_BATCH,
+) -> EtfAdjSyncOutcome:
+    """盘后管道用的轻量同步。不请求腾讯。
+
+    距上次全量不足 ``interval_days`` 个自然日时，只重试上次失败的代码。
+    没有待重试的代码就直接跳过：不拉新浪，也不把日 K 收盘读进内存。
+    全量或重试结束后把失败代码记下来，成功的代码从重试名单去掉。
+    """
+    day = today or _today()
+    state = _read_state(data_dir)
+    full = _full_sync_due(state, day, interval_days)
+    universe = list(dict.fromkeys(symbols))
+    if full:
+        chosen = universe
+    else:
+        known = set(universe)
+        retry = state.get("retry")
+        if not isinstance(retry, list):
+            retry = []
+        chosen = [symbol for symbol in retry if symbol in known]
+    if not chosen:
+        logger.info("ETF 除权因子本周已全量同步, 跳过")
+        return EtfAdjSyncOutcome(rows=0, affected=[], failed=[], skipped=True)
+    incoming, replaced, failed = collect_etf_events(
+        chosen, data_dir, on_chunk_done,
+        fetch_text=fetch_text, remote_prices=False, sleep_s=sleep_s,
+        close_batch=close_batch,
     )
-    return written, affected
+    outcome = _commit_events(data_dir, incoming, replaced, failed)
+    _write_state(data_dir, {
+        "last_full_date": day.isoformat() if full else state.get("last_full_date"),
+        "retry": outcome.failed,
+    })
+    return outcome
 
 
 def fetch_sina_text(symbol: str, timeout: float = 20) -> str:
@@ -457,6 +560,82 @@ def discover_etf_symbols(data_dir: Path) -> list[str]:
     return sorted(found)
 
 
+def _commit_events(
+    data_dir: Path,
+    incoming: pl.DataFrame,
+    replaced: list[str],
+    failed: list[str],
+) -> EtfAdjSyncOutcome:
+    if not replaced:
+        return EtfAdjSyncOutcome(rows=0, affected=[], failed=list(failed), skipped=False)
+    path = Path(data_dir) / "adj_factor_etf" / "all.parquet"
+    merged, affected = plan_replace(path, incoming, replaced)
+    if merged is None:
+        rows = _read_store(path).height
+        return EtfAdjSyncOutcome(rows=rows, affected=[], failed=list(failed), skipped=False)
+    written = write_planned(path, merged)
+    logger.info(
+        "ETF 除权因子已替换: %d 只变化, %d 只失败保留, 表共 %d 行",
+        len(affected), len(failed), written,
+    )
+    return EtfAdjSyncOutcome(
+        rows=written, affected=affected, failed=list(failed), skipped=False,
+    )
+
+
+def _price_window(actions: list[EtfCorporateAction]) -> tuple[date, date]:
+    start = min(action.record_date for action in actions) - timedelta(days=20)
+    end = max(action.record_date for action in actions) + timedelta(days=_HINT_DAYS + 5)
+    return start, end
+
+
+def _chunks(items: list, size: int):
+    step = max(1, size)
+    for index in range(0, len(items), step):
+        yield items[index:index + step]
+
+
+def _today() -> date:
+    from app.market_time import cn_today
+
+    return cn_today()
+
+
+def _state_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "adj_factor_etf" / _STATE_NAME
+
+
+def _read_state(data_dir: Path) -> dict:
+    path = _state_path(data_dir)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("ETF 除权同步状态不可读, 下次按全量处理: %s", exc)
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_state(data_dir: Path, state: dict) -> None:
+    path = _state_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _full_sync_due(state: dict, today: date, interval_days: int) -> bool:
+    raw = state.get("last_full_date")
+    if not raw:
+        return True
+    try:
+        last = date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return True
+    return (today - last).days >= interval_days
+
+
 def _freeze_action(raw: dict) -> EtfCorporateAction:
     return EtfCorporateAction(
         record_date=raw["record_date"],
@@ -481,24 +660,26 @@ def _closes_for_actions(
     local: dict[date, float],
     fetch_prices: FetchPrices | None,
 ) -> dict[date, float]:
+    """补齐定价所需的原始收盘。缺价或远端失败时抛错，调用方保留旧行。"""
     closes = dict(local)
-    if not actions or fetch_prices is None:
+    if not actions or not any(_needs_prices(action, closes) for action in actions):
         return closes
+    if fetch_prices is None:
+        raise RuntimeError(f"{symbol} 缺少能对上除权日的原始收盘, 保留旧因子")
     missing = [action for action in actions if _needs_prices(action, closes)]
-    if not missing:
-        return closes
     start = min(action.record_date for action in missing) - timedelta(days=20)
     end = max(action.record_date for action in missing) + timedelta(days=_HINT_DAYS + 5)
     try:
         fetched = fetch_prices(symbol, start, end)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("ETF %s 补拉原始收盘失败, 除权日可能停在新浪登记日: %s", symbol, exc)
-        return closes
+    except Exception as exc:
+        raise RuntimeError(f"{symbol} 补拉原始收盘失败, 保留旧因子") from exc
     # 本地日K优先。远端只补缺日，避免另一套收盘把已经对齐的除权日挪走。
     for day, price in fetched.items():
         if day in closes or not price or price <= 0:
             continue
         closes[day] = float(price)
+    if any(_needs_prices(action, closes) for action in actions):
+        raise RuntimeError(f"{symbol} 补拉原始收盘后仍无法定价, 保留旧因子")
     return closes
 
 

@@ -131,6 +131,9 @@ RUN .venv/bin/python -c "import pathlib; from efinance.config import DATA_DIR; p
 # (<root>/backend/app/) 推导的, 容器内会错算到 /。这里用环境变量显式指定
 # 三个关键路径, 确保 static / tiers / data 都指向容器内正确位置。
 COPY backend/app ./app
+# ETF 除权因子重建命令。容器内（工作目录 /app）：
+#   uv run --no-sync python -m scripts.rebuild_etf_adj_factor --symbols 510500.SH,512100.SH
+COPY backend/scripts ./scripts
 # stock-sdk 插件依赖: 从 stocksdk-builder 拷入。
 # INCLUDE_STOCKSDK=0(默认) 时, stocksdk-builder 产出空目录,此处拷入空目录,
 # 即最终镜像不含 stock-sdk 依赖,插件默认不可用。

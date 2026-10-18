@@ -1,6 +1,7 @@
 """ETF 单次除权因子：份额折算、现金分红、幻影行删除和可重复重建。"""
 from __future__ import annotations
 
+import urllib.error
 from datetime import date
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pytest
 
 from app.fund_flow import etf_inflow
 from app.services import etf_adj_factor as etf_adj
-from scripts.rebuild_etf_adj_factor import rebuild
+from scripts.rebuild_etf_adj_factor import _parse_symbols, rebuild
 
 SINA_510500 = """
 var sh510500hfq={"total":5,"data":[
@@ -249,3 +250,169 @@ def test_cumulative_factor_nulls_inflow_but_real_dividend_does_not(tmp_path):
     assert _inflow(5.513 / (5.513 - 0.087)) == pytest.approx(2.0)
     assert _inflow(0.3210812570337 / 0.28032483) is None
     assert _inflow(0.36555) is None
+
+
+def _seed_factor(root: Path, symbol: str, day: date, factor: float) -> Path:
+    path = root / "adj_factor_etf" / "all.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": [symbol],
+        "trade_date": [day],
+        "ex_factor": [factor],
+    }).write_parquet(path)
+    return path
+
+
+def test_tencent_http_501_keeps_the_old_row(tmp_path):
+    path = _seed_factor(tmp_path, "510500.SH", date(2024, 5, 17), 1.5)
+
+    def fetch_prices(symbol, start, end):
+        raise urllib.error.HTTPError(
+            "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+            501, "Not Implemented", hdrs=None, fp=None,
+        )
+
+    summary = rebuild(
+        tmp_path, ["510500.SH"], sleep_s=0,
+        fetch_text=lambda symbol: SINA_510500,
+        fetch_prices=fetch_prices,
+    )
+    assert summary["written"] is False
+    assert summary["failed"] == ["510500.SH"]
+    assert summary["affected"] == []
+    stored = pl.read_parquet(path)
+    assert stored.height == 1
+    assert stored["ex_factor"][0] == 1.5
+    assert stored["trade_date"][0] == date(2024, 5, 17)
+
+
+def test_tencent_empty_bars_do_not_drop_the_dividend(tmp_path):
+    path = _seed_factor(tmp_path, "510500.SH", date(2024, 5, 17), 1.016)
+    summary = rebuild(
+        tmp_path, ["510500.SH"], sleep_s=0,
+        fetch_text=lambda symbol: SINA_510500,
+        fetch_prices=lambda symbol, start, end: {},
+    )
+    assert summary["written"] is False
+    assert "510500.SH" in summary["failed"]
+    assert pl.read_parquet(path)["ex_factor"][0] == 1.016
+
+
+def test_empty_sina_data_does_not_delete_existing_rows(tmp_path):
+    path = _seed_factor(tmp_path, "159915.SZ", date(2024, 1, 2), 1.5)
+    summary = rebuild(
+        tmp_path, ["159915.SZ"], sleep_s=0,
+        fetch_text=lambda symbol: 'var x={"total":0,"data":[]}',
+        fetch_prices=lambda symbol, start, end: {},
+    )
+    assert summary["written"] is False
+    assert summary["failed"] == ["159915.SZ"]
+    stored = pl.read_parquet(path)
+    assert stored["symbol"][0] == "159915.SZ"
+    assert stored["ex_factor"][0] == 1.5
+
+
+def test_rebuild_symbols_only_touches_the_requested_codes(tmp_path):
+    path = tmp_path / "adj_factor_etf" / "all.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["510500.SH", "159915.SZ"],
+        "trade_date": [date(2020, 1, 2), date(2024, 1, 2)],
+        "ex_factor": [1.8, 1.5],
+    }).write_parquet(path)
+    seen: list[str] = []
+
+    def fetch_text(symbol):
+        seen.append(symbol)
+        return SINA_EMPTY
+
+    summary = rebuild(
+        tmp_path, _parse_symbols("510500.SH, 512100.SH"), sleep_s=0,
+        fetch_text=fetch_text, fetch_prices=lambda *args, **kwargs: {},
+    )
+    assert seen == ["510500.SH", "512100.SH"]
+    assert summary["symbols"] == 2
+    stored = pl.read_parquet(path)
+    assert stored["symbol"].to_list() == ["159915.SZ"]
+    assert stored["ex_factor"][0] == 1.5
+
+
+def test_scheduled_sync_runs_full_weekly_and_retries_failures_only(tmp_path, monkeypatch):
+    calls: list[str] = []
+
+    def fetch_text(symbol):
+        calls.append(symbol)
+        if symbol == "588000.SH":
+            return 'var x={"data":[]}'
+        return SINA_EMPTY
+
+    def _tencent_forbidden(*_args, **_kwargs):
+        raise AssertionError("盘后同步不应请求腾讯")
+
+    monkeypatch.setattr(etf_adj, "fetch_tencent_range", _tencent_forbidden)
+    symbols = ["510500.SH", "588000.SH"]
+    first = etf_adj.scheduled_sync(
+        symbols, tmp_path, today=date(2026, 10, 18), fetch_text=fetch_text, sleep_s=0,
+    )
+    assert first.skipped is False
+    assert calls == symbols
+    assert first.failed == ["588000.SH"]
+
+    calls.clear()
+    second = etf_adj.scheduled_sync(
+        symbols, tmp_path, today=date(2026, 10, 19), fetch_text=fetch_text, sleep_s=0,
+    )
+    assert second.skipped is False
+    assert calls == ["588000.SH"]
+
+    calls.clear()
+
+    def fetch_ok(symbol):
+        calls.append(symbol)
+        return SINA_EMPTY
+
+    rested = etf_adj.scheduled_sync(
+        symbols, tmp_path, today=date(2026, 10, 20), fetch_text=fetch_ok, sleep_s=0,
+    )
+    assert calls == ["588000.SH"]
+    assert rested.failed == []
+
+    calls.clear()
+    skipped = etf_adj.scheduled_sync(
+        symbols, tmp_path, today=date(2026, 10, 21),
+        fetch_text=lambda symbol: (_ for _ in ()).throw(AssertionError(symbol)),
+        sleep_s=0,
+    )
+    assert skipped.skipped is True
+    assert calls == []
+
+    calls.clear()
+    again = etf_adj.scheduled_sync(
+        symbols, tmp_path, today=date(2026, 10, 25), fetch_text=fetch_text, sleep_s=0,
+    )
+    assert again.skipped is False
+    assert calls == symbols
+
+
+def test_local_closes_load_in_bounded_batches(tmp_path, monkeypatch):
+    seen: list[list[str]] = []
+
+    def load(data_dir, symbols, start=None, end=None):
+        assert start is not None and end is not None and start <= end
+        seen.append(list(symbols))
+        return {
+            symbol: {date(2022, 9, 2): 0.982, date(2022, 9, 5): 2.713}
+            for symbol in symbols
+        }
+
+    monkeypatch.setattr(etf_adj, "load_local_closes", load)
+    symbols = [f"51210{index}.SH" for index in range(5)]
+    incoming, replaced, failed = etf_adj.collect_etf_events(
+        symbols, tmp_path, fetch_text=lambda symbol: SINA_512100,
+        remote_prices=False, sleep_s=0, close_batch=2,
+    )
+    assert failed == []
+    assert replaced == symbols
+    assert incoming.height == 5
+    assert seen and all(len(batch) <= 2 for batch in seen)
+    assert [symbol for batch in seen for symbol in batch] == symbols

@@ -141,11 +141,19 @@ def test_sync_adj_factor_etf_uses_sina_not_tickflow(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr("app.services.etf_adj_factor.fetch_sina_text", _text)
-    # 前收 10，现金 0.2 → 10/9.8。不把 TickFlow 的累计因子写进来。
-    monkeypatch.setattr(
-        "app.services.etf_adj_factor.fetch_tencent_range",
-        lambda symbol, start, end: {date(2026, 3, 2): 10.0},
-    )
+    # 前收在本地日K。管道同步不打腾讯。现金 0.2 → 10/9.8。
+    part = tmp_path / "kline_etf_daily" / "date=2026-03-02"
+    part.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": [ETF],
+        "date": [date(2026, 3, 2)],
+        "close": [10.0],
+    }).write_parquet(part / "part.parquet")
+
+    def _tencent_forbidden(*_args, **_kwargs):
+        raise AssertionError("ETF 因子同步不应请求腾讯")
+
+    monkeypatch.setattr("app.services.etf_adj_factor.fetch_tencent_range", _tencent_forbidden)
 
     written, affected = kline_sync.sync_adj_factor(
         [ETF], repo, _capset(), asset_type="etf",
