@@ -55,6 +55,21 @@ VISION_AI_BASE_URL=https://tokenhub.tencentmaas.com/v1
 VISION_AI_MODEL=deepseek/deepseek-v4-flash-vision-exp
 ```
 
+### DeepSeek Fetch 兜底
+
+微信稿的原文页打不开、页里没有表格图片，或视觉抽取失败时，可以改走 DeepSeek Fetch：把清洗过的长链（只留 `__biz`、`mid`、`idx`、`sn`，去掉粘在 `sn` 后面的杂字）`POST` 到 `https://api.deepseek.com/v1/tools/fetch`。返回的 `content` 是 markdown，表格图片已被识别成文字，`| . - #` 等字符带反斜杠转义，先还原再解析。同一篇文章有时是 markdown 表格，有时一格一行，两种都认。只收严格的数字；格数和表头对不上的行整行丢掉，水印（如「公众号：E-55领航者」）不会被读成数字。分类表常拆成「名称 + 当日」和「当日 + 5 日 + 20 日」两张，按当日数值逐行对齐，对不上的只留当日。
+
+DeepSeek 通常不识别全市场和宽基那几张图，所以兜底结果多半只有分类和行业 ETF，全市场一栏为空。`raw_json.via` 记为 `deepseek_fetch`（正常路径是 `vision`）。解析出的分类加 ETF 少于 10 行、或返回标题的交易日和原稿不一致时丢弃，仍报原来的错。网易号没有微信长链，不走兜底。
+
+单次 60 秒超时。超时、连接失败、5xx 或正文过短时再试 1 次，重试改用 `__biz` 不编码的写法，因为 DeepSeek 会按地址缓存识别失败的空结果。4xx 不重试。每次请求约 0.005 元，按北京时间日期记在 `data/news/deepseek_fetch_usage.json`（`requests`、`ok`、`failed`），日志也打出当日次数。密钥只从 `DEEPSEEK_API_KEY` 读，不进日志和健康检查。
+
+```ini
+ETF_FLOW_FETCH_FALLBACK=true
+DEEPSEEK_API_KEY=
+```
+
+只看兜底能解析出什么、不写库：`python scripts/etf_flow_backfill.py --data-dir ./data --fetch-check '<微信长链>'`。
+
 没填 `VISION_AI_API_KEY` 时来源保持未配置，页面上不能打开。数字按图中印刷保存，单位写在 `unit`（常见是亿元），净申购为正、净赎回为负，程序不再做单位换算。全市场、宽基、分类和单只 ETF 的当日 / 5 日 / 20 日净申购放在 `raw_json`。图片地址记在 `media_ids`。同一篇文章用网易 docid 或微信 `sn` 去重。
 
 热门事件只收当日净申购绝对值最大的 8 只有代码 ETF，以及最多 6 个宽基或分类名称。DSA 情报源名称是「ETF领航者」，feed 的 `source=etf_flow`。
