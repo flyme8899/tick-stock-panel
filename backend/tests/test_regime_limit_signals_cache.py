@@ -89,9 +89,11 @@ def test_run_regime_batch_falls_back_when_cache_lacks_signal_columns(tmp_path, m
         "consecutive_limit_ups": [1, 0],
     })
 
+    class _Store:
+        data_dir = tmp_path
+
     class _FakeRepo:
-        class store:
-            data_dir = tmp_path
+        store = _Store
 
         def get_enriched_range(self, start, end):
             return cache
@@ -128,9 +130,11 @@ def test_run_regime_batch_uses_cache_when_signal_columns_present(tmp_path, monke
         "consecutive_limit_ups": [1, 0],
     })
 
+    class _Store:
+        data_dir = tmp_path
+
     class _FakeRepo:
-        class store:
-            data_dir = tmp_path
+        store = _Store
 
         def get_enriched_range(self, start, end):
             return cache
