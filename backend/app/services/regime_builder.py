@@ -574,6 +574,9 @@ def _load_index_pct(repo, start: date, end: date, symbol: str = "000001.SH") -> 
         return {}
 
 
+_REGIME_SIGNAL_COLUMNS = ("signal_limit_up", "signal_limit_down", "signal_broken_limit_up")
+
+
 def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
     """批算 [start, end] 的环境时序。
 
@@ -604,6 +607,16 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
     # enriched 多日数据(优先缓存)。慢路径在每批内部完成过滤和日级聚合,
     # 避免把所有批次的个股明细同时保留到最终 group_by。
     df = repo.get_enriched_range(start, end)
+    if df is not None and not df.is_empty():
+        missing_signals = [c for c in _REGIME_SIGNAL_COLUMNS if c not in df.columns]
+        if missing_signals:
+            # 内存缓存缺涨跌停信号列 (例如维表未加载时预热): 直接聚合会把
+            # 涨停/跌停/炸板数静默算成 0, 改走慢路径按维表现算。
+            logger.warning(
+                "regime batch: enriched cache lacks %s [%s~%s], fallback to scan",
+                missing_signals, start, end,
+            )
+            df = None
     if df is None or df.is_empty():
         logger.info("regime batch: enriched cache miss [%s~%s], fallback to scan", start, end)
         result = _scan_enriched_fallback(
