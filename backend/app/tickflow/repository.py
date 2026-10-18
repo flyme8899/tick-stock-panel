@@ -625,7 +625,10 @@ class KlineRepository:
                 df_hist = guarded_collect(lf.select(read_cols), priority="background")
                 logger.info("enriched refresh step done: collect history rows=%d (%.2fs)", len(df_hist), time.perf_counter() - step)
                 if not df_hist.is_empty():
-                    instruments = self._instruments_cache if self._instruments_cache is not None else pl.DataFrame()
+                    # 必须走 get_instruments() 懒加载: 独立进程/clear_cache() 之后
+                    # _instruments_cache 为 None, 直接读字段会拿到空表, compute_limit_signals
+                    # 被静默跳过, 历史缓存缺 signal_limit_up/down 列 (regime 涨跌停数算成 0)。
+                    instruments = self.get_instruments()
 
                     # 分批计算并关联元数据, 保留完整历史, 限制宽表临时副本。
                     step = time.perf_counter()
