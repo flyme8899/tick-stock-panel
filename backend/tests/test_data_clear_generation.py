@@ -53,6 +53,23 @@ def _stub_clear_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(data_api, "invalidate_data_cache", lambda _table=None: None)
 
 
+def test_clear_data_resets_etf_adj_sync_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_clear_side_effects(monkeypatch)
+    repo = _RepoStub(tmp_path)
+    parquet = tmp_path / "adj_factor_etf" / "all.parquet"
+    _write_parquet_placeholder(parquet)
+    state = tmp_path / "adj_factor_etf" / "sync_state.json"
+    state.write_text('{"last_full_date": "2026-10-18", "retry": ["510500.SH"]}', encoding="utf-8")
+    tmp = tmp_path / "adj_factor_etf" / "sync_state.json.tmp"
+    tmp.write_text("{}", encoding="utf-8")
+
+    data_api.clear_data(_request(repo))
+
+    assert not parquet.exists()
+    assert not state.exists()
+    assert not tmp.exists()
+
+
 def test_clear_data_bumps_enriched_generations_and_invalidates_panel_cache(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -394,6 +394,108 @@ def test_scheduled_sync_runs_full_weekly_and_retries_failures_only(tmp_path, mon
     assert calls == symbols
 
 
+def _write_etf_close(root: Path, day: str, symbol: str, close: float) -> None:
+    part = root / "kline_etf_daily" / f"date={day}"
+    part.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": [symbol],
+        "date": [date.fromisoformat(day)],
+        "close": [close],
+    }).write_parquet(part / "part.parquet")
+
+
+def test_scheduled_sync_prices_only_events_on_or_after_local_kline_start(tmp_path):
+    """2015 年的折算早于本地日 K（2021-06-01），不能让 510500 永远留在重试名单。"""
+    for day, close in (
+        ("2021-06-01", 1.0),
+        ("2022-08-25", 7.236),
+        ("2022-08-26", 7.220),
+        ("2022-08-29", 6.300),
+        ("2024-05-16", 5.513),
+        ("2024-05-17", 5.504),
+    ):
+        _write_etf_close(tmp_path, day, "510500.SH", close)
+    _seed_factor(tmp_path, "510500.SH", date(2015, 4, 15), 0.28032483)
+
+    def fetch_text(symbol):
+        assert symbol == "510500.SH"
+        return SINA_510500
+
+    first = etf_adj.scheduled_sync(
+        ["510500.SH"], tmp_path, today=date(2026, 10, 18),
+        fetch_text=fetch_text, sleep_s=0,
+    )
+    assert first.failed == []
+    stored = pl.read_parquet(tmp_path / "adj_factor_etf" / "all.parquet").sort("trade_date")
+    by_day = {row["trade_date"]: row["ex_factor"] for row in stored.iter_rows(named=True)}
+    assert by_day[date(2015, 4, 15)] == pytest.approx(0.28032483)
+    assert date(2022, 8, 26) not in by_day
+    assert by_day[date(2022, 8, 29)] == pytest.approx(0.3210812570337 / 0.28032483)
+    assert by_day[date(2024, 5, 17)] == pytest.approx(5.513 / (5.513 - 0.087))
+
+    def _no_network(symbol):
+        raise AssertionError(symbol)
+
+    skipped = etf_adj.scheduled_sync(
+        ["510500.SH"], tmp_path, today=date(2026, 10, 19),
+        fetch_text=_no_network, sleep_s=0,
+    )
+    assert skipped.skipped is True
+
+
+def test_unstored_event_before_local_start_is_skipped(tmp_path):
+    for day, close in (
+        ("2021-06-01", 1.0),
+        ("2024-05-16", 5.513),
+        ("2024-05-17", 5.504),
+        ("2022-08-25", 7.236),
+        ("2022-08-26", 7.220),
+        ("2022-08-29", 6.300),
+    ):
+        _write_etf_close(tmp_path, day, "510500.SH", close)
+    outcome = etf_adj.scheduled_sync(
+        ["510500.SH"], tmp_path, today=date(2026, 10, 18),
+        fetch_text=lambda symbol: SINA_510500, sleep_s=0,
+    )
+    assert outcome.failed == []
+    days = pl.read_parquet(tmp_path / "adj_factor_etf" / "all.parquet")["trade_date"].to_list()
+    assert date(2015, 4, 15) not in days
+    assert date(2024, 5, 17) in days
+
+
+def test_without_price_floor_an_early_event_still_fails_the_symbol(tmp_path):
+    for day, close in (
+        ("2022-08-25", 7.236),
+        ("2022-08-26", 7.220),
+        ("2022-08-29", 6.300),
+        ("2024-05-16", 5.513),
+        ("2024-05-17", 5.504),
+    ):
+        _write_etf_close(tmp_path, day, "510500.SH", close)
+    _incoming, replaced, failed = etf_adj.collect_etf_events(
+        ["510500.SH"], tmp_path, fetch_text=lambda symbol: SINA_510500,
+        remote_prices=False, sleep_s=0,
+    )
+    assert replaced == []
+    assert failed == ["510500.SH"]
+
+
+def test_missing_factor_file_forces_full_sync_inside_the_week(tmp_path):
+    etf_adj._write_state(tmp_path, {"last_full_date": "2026-10-20", "retry": []})
+    calls: list[str] = []
+
+    def fetch_text(symbol):
+        calls.append(symbol)
+        return SINA_EMPTY
+
+    outcome = etf_adj.scheduled_sync(
+        ["510300.SH", "510050.SH"], tmp_path, today=date(2026, 10, 21),
+        fetch_text=fetch_text, sleep_s=0,
+    )
+    assert outcome.skipped is False
+    assert calls == ["510300.SH", "510050.SH"]
+
+
 def test_local_closes_load_in_bounded_batches(tmp_path, monkeypatch):
     seen: list[list[str]] = []
 

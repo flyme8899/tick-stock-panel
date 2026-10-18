@@ -654,6 +654,10 @@ def clear_data(request: Request):
                     shutil.rmtree(child, ignore_errors=True)
             if publication is not None:
                 publication.commit()
+            if sub == "adj_factor_etf":
+                # 只删 parquet 会留下 sync_state.json，下一次管道会以为本周已同步。
+                from app.services.etf_adj_factor import clear_sync_state
+                clear_sync_state(data_dir)
         except BaseException:
             if publication is not None:
                 publication.abandon()
