@@ -315,7 +315,11 @@ def sync_etf_adj_factor(
     end_time: datetime | None = None,
     on_chunk_done=None,
 ) -> tuple[int, list[str]]:
-    """同步 ETF 复权因子；失败由调用方降级为 warning。"""
+    """重写 ETF 单次除权因子。失败由调用方降级为 warning。
+
+    ``capset`` / ``start_time`` / ``end_time`` 保留调用签名。下游对 ETF
+    改走新浪全历史，不看 TickFlow 能力，也不按上次事件日截断。
+    """
     return kline_sync.sync_adj_factor(
         symbols,
         repo,

@@ -612,15 +612,27 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     end_time: datetime | None = None,
                     on_chunk_done: Callable[[int, int], None] | None = None,
                     asset_type: str = "stock") -> tuple[int, list[str]]:
-    """同步除权因子(Starter+)。SDK 接口:`tf.klines.ex_factors(symbols=...)`。
+    """同步除权因子(Starter+)。股票走 SDK ``tf.klines.ex_factors``。
 
-    支持增量: 传 start_time/end_time 只拉取该时间范围内的新除权事件。
+    ETF 不走这条行情因子。TickFlow / stock-sdk 给的是累计后复权或带漂移的
+    前复权比值，写进单次事件 ``ex_factor`` 后，分红日会被当成拆分、折算日
+    对不上价格跳空。ETF 改为新浪累计分红和份额因子还原单次事件，见
+    ``etf_adj_factor.sync_etf_events``。增量窗口对 ETF 无效：旧的幻影行
+    必须整标的替换才能删掉。
+
+    股票支持增量: 传 start_time/end_time 只拉取该时间范围内的新除权事件。
     返回 (写入行数, 受影响的 symbol 列表) — 供 enriched 局部重算使用。
     受影响 = 因子新增或值变化 (ex_factor diff) 的标的; 仅事件明细列
     (dividend 等) 回填不改变复权价, 不计入受影响列表。
     """
     if not symbols:
         return 0, []
+    if asset_type == "etf":
+        from app.services.etf_adj_factor import sync_etf_events
+
+        return sync_etf_events(
+            symbols, repo.store.data_dir, on_chunk_done=on_chunk_done,
+        )
 
     provider_name = preferences.get_adj_factor_provider()
     if provider_name != "tickflow":
@@ -635,21 +647,12 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                 on_chunk_done=on_chunk_done,
             )
             if new_data.is_empty():
-                # 扶摇等自定义源对 ETF 直接空返回, 与「该 ETF 无除权」无法区分;
-                # 有 TickFlow 除权能力时回退, 否则 ETF 日K永远不复权。
-                if asset_type == "etf":
-                    logger.info(
-                        "custom adj_factor provider %s returned no ETF rows, falling back to TickFlow",
-                        provider_name,
-                    )
-                else:
-                    return 0, []
-            else:
-                factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
-                added, affected = _merge_adj_factor_store(
-                    repo.store.data_dir / factor_dir / "all.parquet", new_data
-                )
-                return added, affected
+                return 0, []
+            factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
+            added, affected = _merge_adj_factor_store(
+                repo.store.data_dir / factor_dir / "all.parquet", new_data
+            )
+            return added, affected
         # 自定义源未配置 adj_factor → 回退 TickFlow
 
     if not capset.has(Cap.ADJ_FACTOR):

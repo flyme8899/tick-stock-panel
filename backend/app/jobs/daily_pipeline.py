@@ -604,21 +604,15 @@ def run_now(
                 etf_inst = repo.get_etf_instruments()
                 if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
                     etf_symbols = sorted(set(etf_inst["symbol"].to_list()))
-                if etf_symbols and capset.has(Cap.ADJ_FACTOR):
+                if etf_symbols:
                     try:
                         emit("sync_index", 88, "同步 ETF 除权因子…")
-                        from datetime import datetime, timedelta
-                        adj_end = datetime.now()
-                        adj_path = repo.store.data_dir / "adj_factor_etf" / "all.parquet"
-                        # 首次无文件时与 ETF 日K 默认一年窗口对齐, 不要只拉 30 天。
-                        history_start = adj_end - timedelta(days=365)
-                        adj_start = index_sync.etf_adj_factor_window_start(adj_path, history_start)
+                        # 全历史重写。一年窗口和「从上次事件日续拉」会把折算日
+                        # 留在窗口外，合并写入也删不掉幻影事件。
                         _, affected_etfs = index_sync.sync_etf_adj_factor(
                             etf_symbols,
                             repo,
                             capset,
-                            start_time=adj_start,
-                            end_time=adj_end,
                         )
                         etf_adj_symbols = len(affected_etfs)
                         emit("sync_index", 88, f"ETF 除权因子完成,{etf_adj_symbols} 只")
