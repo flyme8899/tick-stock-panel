@@ -118,51 +118,41 @@ def test_etf_adj_window_with_file_continues_from_last_event(tmp_path):
     assert got == datetime(2026, 1, 15, 0, 0)
 
 
-def test_sync_adj_factor_etf_custom_empty_falls_back_to_tickflow(tmp_path, monkeypatch):
-    """扶摇等自定义源对 ETF 空返回时, 有 TickFlow 除权能力则回退, 不能当成无事件。"""
+def test_sync_adj_factor_etf_uses_sina_not_tickflow(tmp_path, monkeypatch):
+    """ETF 因子不回退 TickFlow。空的自定义源也不再被当成这段逻辑的入口。"""
     repo = KlineRepository(DataStore(tmp_path))
-    empty = pl.DataFrame(
-        schema={
-            "symbol": pl.String,
-            "trade_date": pl.Date,
-            "ex_factor": pl.Float64,
-        }
-    )
-
-    class _EmptyETF:
-        def get_adj_factors(
-            self, symbols, start_time, end_time, asset_type="stock", on_chunk_done=None
-        ):
-            assert asset_type == "etf"
-            return empty
-
-    monkeypatch.setattr(kline_sync.preferences, "get_adj_factor_provider", lambda: "fuyao")
-    from app.data_providers import custom as custom_sources
-
-    monkeypatch.setattr(
-        custom_sources,
-        "provider_has_dataset",
-        lambda name, dataset: name == "fuyao" and dataset == "adj_factor",
-    )
-    monkeypatch.setattr(custom_sources, "get_provider", lambda name: _EmptyETF())
+    called = {"tickflow": 0}
 
     class _Klines:
         def ex_factors(self, symbols, **kwargs):
+            called["tickflow"] += 1
             return {ETF: [{"trade_date": EX, "ex_factor": EX_FACTOR}]}
 
+    monkeypatch.setattr(kline_sync, "get_client", lambda: SimpleNamespace(klines=_Klines()))
+    monkeypatch.setattr(kline_sync.preferences, "get_adj_factor_provider", lambda: "fuyao")
+
+    def _text(symbol):
+        assert symbol == ETF
+        return (
+            'var sh588200hfq={"total":2,"data":['
+            '{"d":"2026-03-03","f":"1","s":"1","u":"0.200000"},'
+            '{"d":"1900-01-01","f":"1","s":"1","u":"0"}'
+            "]}"
+        )
+
+    monkeypatch.setattr("app.services.etf_adj_factor.fetch_sina_text", _text)
+    # 前收 10，现金 0.2 → 10/9.8。不把 TickFlow 的累计因子写进来。
     monkeypatch.setattr(
-        kline_sync,
-        "get_client",
-        lambda: SimpleNamespace(klines=_Klines()),
+        "app.services.etf_adj_factor.fetch_tencent_range",
+        lambda symbol, start, end: {date(2026, 3, 2): 10.0},
     )
 
     written, affected = kline_sync.sync_adj_factor(
-        [ETF],
-        repo,
-        _capset(),
-        asset_type="etf",
+        [ETF], repo, _capset(), asset_type="etf",
     )
-    assert written == 1
+    assert called["tickflow"] == 0
     assert affected == [ETF]
+    assert written == 1
     stored = pl.read_parquet(tmp_path / "adj_factor_etf" / "all.parquet")
-    assert stored["ex_factor"][0] == pytest.approx(EX_FACTOR)
+    assert stored["trade_date"][0] == EX
+    assert stored["ex_factor"][0] == pytest.approx(10.0 / 9.8)
