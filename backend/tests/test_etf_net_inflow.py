@@ -116,6 +116,19 @@ def test_step_inflow_skips_gap_split_and_missing_price() -> None:
     assert etf_inflow.step_inflow_yi(2e8, None, 2.0, adjacent=True, split=False) is None
     assert etf_inflow.step_inflow_yi(2e8, 1e8, 0.0, adjacent=True, split=False) is None
     assert etf_inflow.step_inflow_yi(2e8, 1e8, float("nan"), adjacent=True, split=False) is None
+    # 缺口里即使带了折算因子也不补金额。
+    assert etf_inflow.step_inflow_yi(3e8, 1e8, 2.0, adjacent=False, split=False, factor=2.0) is None
+    assert etf_inflow.step_inflow_yi(3e8, 1e8, 2.0, adjacent=True, split=False, factor=0.0) is None
+
+
+def test_record_day_factor_keeps_real_creation_for_split_and_reverse() -> None:
+    # 2 倍拆分：登记日份额已翻倍，另有 1 亿份折算后的真实申购。价格仍是折算前的 2 元。
+    # (3e8 − 1e8×2) × 2 / 2 / 1e8 = 1 亿元。不还原则是 (3e8−1e8)×2/1e8 = 4 亿元。
+    assert etf_inflow.step_inflow_yi(3e8, 1e8, 2.0, adjacent=True, split=False, factor=2.0) == pytest.approx(1.0)
+    # 4 合 1：没有真实申赎时金额是 0，不是巨额赎回。
+    assert etf_inflow.step_inflow_yi(0.5e8, 2e8, 1.0, adjacent=True, split=False, factor=0.25) == pytest.approx(0.0)
+    # 缩股后再申购 0.1 亿份（折算后）。折算前价格 1 元，相当于折算后 4 元。
+    assert etf_inflow.step_inflow_yi(0.6e8, 2e8, 1.0, adjacent=True, split=False, factor=0.25) == pytest.approx(0.4)
 
 
 def test_rolling_sum_requires_a_complete_window() -> None:
@@ -171,16 +184,23 @@ def test_five_and_twenty_day_sums_use_each_days_close(tmp_path) -> None:
     assert row["change_15d"] == pytest.approx(15e8)
 
 
-def test_split_on_trade_date_nulls_inflow_but_keeps_share_change(tmp_path) -> None:
-    prev, current = _iso(DAY0), _iso(DAY1)
-    _write_shares(tmp_path, prev, [("510300", 10e8)])
-    _write_shares(tmp_path, current, [("510300", 20e8)])
-    _write_close(tmp_path, current, {"510300": 1.0})
-    _mark_trading(tmp_path, prev)
-    _write_factor(tmp_path, "510300", current, 2.0)
+def test_split_on_ex_date_keeps_real_flow_and_raw_share_change(tmp_path) -> None:
+    # 周五登记、周一除权。份额在周五已经 ×2，价格要到周一才减半。因子记在周一。
+    record, ex = _iso(DAY0), _iso(DAY1)
+    _write_shares(tmp_path, "2026-10-08", [("510300", 10e8)])
+    _write_shares(tmp_path, record, [("510300", 20e8)])
+    _write_shares(tmp_path, ex, [("510300", 21e8)])
+    _write_close(tmp_path, record, {"510300": 2.0})
+    _write_close(tmp_path, ex, {"510300": 1.0})
+    _mark_trading(tmp_path, "2026-10-08")
+    _write_factor(tmp_path, "510300", ex, 2.0)
+    # 登记日：份额差仍是原始跳变，金额按因子还原成 0，不再是 (20−10)×2 = 20 亿元。
+    record_row = etf_inflow.latest_inflows(tmp_path, as_of=record)["510300"]
+    assert record_row["net_inflow_1d"] == pytest.approx(0.0)
+    # 除权日不再置空。真实申购 1 亿份 × 1 元 = 1 亿元。份额差保持原始份数。
     row = _board_row(tmp_path, "510300")
-    assert row["share_change"] == pytest.approx(10e8)
-    assert row["net_inflow_1d"] is None
+    assert row["share_change"] == pytest.approx(1e8)
+    assert row["net_inflow_1d"] == pytest.approx(1.0)
 
 
 def test_small_dividend_factor_does_not_null_inflow(tmp_path) -> None:
@@ -268,16 +288,205 @@ def test_code_missing_on_previous_partition_does_not_reuse_older_shares(tmp_path
     assert _board_row(tmp_path, "510300")["net_inflow_1d"] is None
 
 
-def test_split_inside_window_nulls_the_rolling_sum_only(tmp_path) -> None:
-    days = [(date(2026, 9, 1) + timedelta(days=offset)).isoformat() for offset in range(8)]
+def test_split_inside_window_adjusts_record_day_and_keeps_sums(tmp_path) -> None:
+    # 只标工作日。除权日是 9 月 7 日（周一），登记日是前一个交易日 9 月 4 日（周五），
+    # 中间隔着周末。登记日份额已经 ×2、收盘价仍是 2 元；除权日价格 1 元。
+    days: list[date] = []
+    cursor = date(2026, 9, 1)
+    while len(days) < 8:
+        if cursor.weekday() < 5:
+            days.append(cursor)
+        cursor += timedelta(days=1)
+    shares = [10e8, 11e8, 12e8, 24e8, 25e8, 26e8, 27e8, 28e8]
     for index, day in enumerate(days):
-        _write_shares(tmp_path, day, [("510300", 10e8 + index * 1e8)])
-        _write_close(tmp_path, day, {"510300": 1.0})
-    _write_factor(tmp_path, "510300", days[3], 2.0)
+        iso = day.isoformat()
+        _write_shares(tmp_path, iso, [("510300", shares[index])])
+        _mark_trading(tmp_path, iso)
+        if index:
+            _write_close(tmp_path, iso, {"510300": 2.0 if index == 3 else 1.0})
+    assert days[3].isoformat() == "2026-09-04"
+    assert days[4].isoformat() == "2026-09-07"
+    _write_factor(tmp_path, "510300", days[4].isoformat(), 2.0)
+    record = etf_inflow.latest_inflows(tmp_path, as_of=days[3].isoformat())["510300"]
+    ex = etf_inflow.latest_inflows(tmp_path, as_of=days[4].isoformat())["510300"]
+    # 不还原时登记日是 (24−12)×2 = 24 亿元。还原后没有额外申赎，是 0。
+    assert record["net_inflow_1d"] == pytest.approx(0.0)
+    assert ex["net_inflow_1d"] == pytest.approx(1.0)
     row = _board_row(tmp_path, "510300")
     assert row["net_inflow_1d"] == pytest.approx(1.0)
-    assert row["net_inflow_5d"] is None
+    # 最近 5 步：登记日 0 + 除权日 1 + 之后三天各 1。窗口不再因为除权日留空而整段作废。
+    assert row["net_inflow_5d"] == pytest.approx(4.0)
     assert row["net_inflow_20d"] is None
+
+
+# 交易所份额（深市为份，沪市公告为万份，这里已换成份）和腾讯原始收盘。
+# 除权日来自新浪 hfq.js 的价格跳空日；登记日是它的前一个交易日。
+# naive 是旧算法在登记日打出来的假申购，用来确认样本没配错。
+_CONVERSIONS = [
+    {
+        "code": "159246",
+        "factor": 2.0,
+        "prev": ("2026-02-11", 1_614_827_803),
+        "record": ("2026-02-12", 3_219_655_606, 2.159),
+        "ex": ("2026-02-13", 3_227_655_606, 1.059),
+        "record_yi": -0.10795,
+        "ex_yi": 0.08472,
+        "naive_yi": 34.64823226877,
+    },
+    {
+        "code": "159327",
+        # 周五登记、周一除权。自然日减一天会落到周日，还原不到周五的份额跳变。
+        "factor": 3.0,
+        "prev": ("2026-07-16", 688_524_697),
+        "record": ("2026-07-17", 1_984_574_091, 3.348),
+        "ex": ("2026-07-20", 1_954_574_091, 1.052),
+        "record_yi": -0.90396,
+        "ex_yi": -0.3156,
+        "naive_yi": 43.39173371112,
+    },
+    {
+        "code": "159220",
+        "factor": 2.0,
+        "prev": ("2025-11-06", 262_784_763),
+        "record": ("2025-11-07", 531_569_526, 1.240),
+        "ex": ("2025-11-10", 537_569_526, 0.627),
+        "record_yi": 0.0372,
+        "ex_yi": 0.03762,
+        "naive_yi": 3.3329310612,
+    },
+    {
+        "code": "159537",
+        # 登记日残差是 2800 万份折算后的真实申购，不能被还原成 0。
+        "factor": 2.0,
+        "prev": ("2026-06-24", 53_642_602),
+        "record": ("2026-06-25", 135_285_204, 2.404),
+        "ex": ("2026-06-26", 140_285_204, 1.180),
+        "record_yi": 0.33656,
+        "ex_yi": 0.059,
+        "naive_yi": 1.96268815208,
+    },
+    {
+        "code": "588200",
+        "factor": 3.0,
+        "prev": ("2026-07-17", 14_841_894_800),
+        "record": ("2026-07-20", 45_929_684_300, 3.539),
+        "ex": ("2026-07-21", 44_075_684_300, 1.349),
+        "record_yi": 16.562518820333,
+        "ex_yi": -25.01046,
+        "naive_yi": 1100.196870405,
+    },
+    {
+        # 512200 在 2024-08-09 缩股，份额因子 0.35806260。登记日价格仍是缩股前的。
+        "code": "512200",
+        "factor": 0.35806260,
+        "prev": ("2024-08-08", 9_800_876_000),
+        "record": ("2024-08-09", 3_505_597_900, 0.441),
+        "ex": ("2024-08-12", 3_498_347_900, 1.191),
+        "record_yi": -0.0459304069004,
+        "ex_yi": -0.0863475,
+        "naive_yi": -27.762176421,
+    },
+]
+
+
+def _seed_conversion(root: Path, case: dict) -> None:
+    code = case["code"]
+    prev_day, prev_shares = case["prev"]
+    record_day, record_shares, record_close = case["record"]
+    ex_day, ex_shares, ex_close = case["ex"]
+    _write_shares(root, prev_day, [(code, prev_shares)])
+    _write_shares(root, record_day, [(code, record_shares)])
+    _write_shares(root, ex_day, [(code, ex_shares)])
+    _mark_trading(root, prev_day)
+    _write_close(root, record_day, {code: record_close})
+    _write_close(root, ex_day, {code: ex_close})
+    _write_factor(root, code, ex_day, case["factor"])
+
+
+@pytest.mark.parametrize("case", _CONVERSIONS, ids=[item["code"] for item in _CONVERSIONS])
+def test_conversion_record_day_keeps_real_flow_and_ex_day_is_kept(tmp_path, case) -> None:
+    _seed_conversion(tmp_path, case)
+    code = case["code"]
+    record_day, record_shares, record_close = case["record"]
+    _prev_day, prev_shares = case["prev"]
+    naive = (record_shares - prev_shares) * record_close / 1e8
+    assert naive == pytest.approx(case["naive_yi"])
+    record = etf_inflow.latest_inflows(tmp_path, as_of=record_day)[code]
+    ex = etf_inflow.latest_inflows(tmp_path, as_of=case["ex"][0])[code]
+    assert record["net_inflow_1d"] == pytest.approx(case["record_yi"])
+    assert ex["net_inflow_1d"] == pytest.approx(case["ex_yi"])
+    # 除权日份额差仍是原始份数，不因金额还原被改写。
+    assert _board_row(tmp_path, code)["share_change"] == pytest.approx(case["ex"][1] - record_shares)
+
+
+def test_159537_five_and_twenty_day_sums_include_record_and_ex_days(tmp_path) -> None:
+    code = "159537"
+    days = [
+        "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05",
+        "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12",
+        "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19",
+        "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26",
+        "2026-06-29", "2026-06-30",
+    ]
+    observed = {
+        "2026-06-23": (55_642_602, 1.0),
+        "2026-06-24": (53_642_602, 2.258),
+        "2026-06-25": (135_285_204, 2.404),
+        "2026-06-26": (140_285_204, 1.180),
+        "2026-06-29": (150_285_204, 1.221),
+        "2026-06-30": (150_285_204, 1.258),
+    }
+    flat = 55_642_602
+    for day in days:
+        shares, close = observed.get(day, (flat, 1.0))
+        _write_shares(tmp_path, day, [(code, shares)])
+        _write_close(tmp_path, day, {code: close})
+    _write_factor(tmp_path, code, "2026-06-26", 2.0)
+    # 06-27、06-28 是周末，不能标成交易日，否则周一会被当成隔了缺口。
+    assert not (tmp_path / "kline_etf_daily" / "date=2026-06-27").exists()
+    latest = etf_inflow.latest_inflows(tmp_path)[code]
+    # 5 日 = 24 日 −0.04516 + 登记日 0.33656 + 除权日 0.059 + 29 日 0.1221 + 30 日 0。
+    assert latest["net_inflow_1d"] == pytest.approx(0.0)
+    assert latest["net_inflow_5d"] == pytest.approx(0.4725)
+    assert latest["net_inflow_20d"] == pytest.approx(0.4725)
+    record = etf_inflow.latest_inflows(tmp_path, as_of="2026-06-25")[code]
+    ex = etf_inflow.latest_inflows(tmp_path, as_of="2026-06-26")[code]
+    assert record["net_inflow_1d"] == pytest.approx(0.33656)
+    assert record["net_inflow_5d"] == pytest.approx(0.2914)
+    assert ex["net_inflow_1d"] == pytest.approx(0.059)
+    assert ex["net_inflow_5d"] == pytest.approx(0.3504)
+    assert _board_row(tmp_path, code)["net_inflow_20d"] == pytest.approx(0.4725)
+
+
+def test_split_plus_cash_restores_with_share_ratio_not_price_factor(tmp_path) -> None:
+    # 同日折算加现金分红时，还原用份额因子，不用价格因子。
+    # 数字来自 159922：份额因子 2.5、现金 0.1292、前收 6.159。
+    # 价格因子 = 前收 / (前收 / 2.5 − 现金)。日期只是一组周五登记、周一除权。
+    code = "159922"
+    ratio = 2.5
+    cash = 0.1292
+    prev_px = 6.159
+    ex_factor = prev_px / (prev_px / ratio - cash)
+    prev_day, record_day, ex_day = "2026-07-16", "2026-07-17", "2026-07-20"
+    created = 10_000_000  # 折算后的真实申购
+    _write_shares(tmp_path, prev_day, [(code, 100_000_000)])
+    _write_shares(tmp_path, record_day, [(code, 100_000_000 * ratio + created)])
+    _write_shares(tmp_path, ex_day, [(code, 100_000_000 * ratio + created)])
+    _mark_trading(tmp_path, prev_day)
+    _write_close(tmp_path, record_day, {code: prev_px})
+    _write_close(tmp_path, ex_day, {code: prev_px / ratio - cash})
+    path = tmp_path / "adj_factor_etf" / "all.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": [f"{code}.SZ"],
+        "trade_date": [date.fromisoformat(ex_day)],
+        "ex_factor": [ex_factor],
+        "dividend": [cash],
+        "prev_close": [prev_px],
+    }).write_parquet(path)
+    inflow = etf_inflow.latest_inflows(tmp_path, as_of=record_day)[code]["net_inflow_1d"]
+    assert inflow == pytest.approx(created * prev_px / ratio / 1e8)
+    assert inflow == pytest.approx(0.24636)
 
 
 def test_navigator_map_uses_title_date_and_ignores_parquet(tmp_path) -> None:

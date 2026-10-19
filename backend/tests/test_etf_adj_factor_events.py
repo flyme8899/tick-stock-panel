@@ -220,8 +220,12 @@ def test_remote_closes_fill_gaps_and_keep_local_prices(tmp_path):
     assert stored["ex_factor"][0] == pytest.approx(0.36555)
 
 
-def test_cumulative_factor_nulls_inflow_but_real_dividend_does_not(tmp_path):
-    """线上把累计因子写在分红日时，|f-1|>=0.05 会把申赎留空。单次分红因子不会。"""
+def test_ex_date_factor_does_not_blank_that_days_flow(tmp_path):
+    """大因子记在除权日时，不再把除权日当天的申赎留空。
+
+    折算还原落在前一个交易日。这一步的两份落盘都在除权日一侧，份额没有再跳，
+    金额按普通份额差计算。单次分红因子偏离 1 不到拆分阈值，同样不改金额。
+    """
     from app.fund_flow import query, store
 
     prev, current = "2026-05-15", "2026-05-18"
@@ -246,10 +250,10 @@ def test_cumulative_factor_nulls_inflow_but_real_dividend_does_not(tmp_path):
         rows = query.board(tmp_path)["etf_shares"]["items"]
         return next(row for row in rows if row["code"] == "510500")["net_inflow_1d"]
 
-    assert _inflow(1.08) is None
+    assert _inflow(1.08) == pytest.approx(2.0)
     assert _inflow(5.513 / (5.513 - 0.087)) == pytest.approx(2.0)
-    assert _inflow(0.3210812570337 / 0.28032483) is None
-    assert _inflow(0.36555) is None
+    assert _inflow(0.3210812570337 / 0.28032483) == pytest.approx(2.0)
+    assert _inflow(0.36555) == pytest.approx(2.0)
 
 
 def _seed_factor(root: Path, symbol: str, day: date, factor: float) -> Path:

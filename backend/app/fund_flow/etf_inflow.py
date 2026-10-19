@@ -4,8 +4,11 @@
 ``data/news/news.sqlite`` 的 ``etf_flow`` 按交易日和代码接上，不再读
 已经不存在的 ``data/etf_flow`` parquet。
 
-1 日用上一份份额落盘做前值。两份落盘之间如果隔了超过 1 个交易日，或者
-复权因子出现拆分级别的跳变，这一日留空，不把缺口或拆分写成申赎金额。
+1 日用上一份份额落盘做前值。两份落盘之间如果隔了超过 1 个交易日，这一日
+留空，不把缺口写成申赎金额。份额折算的 ``ex_factor`` 记在除权日 E，但交易所
+份额在登记日 R（E 的前一个交易日，按交易日历而不是自然日）已经是折算后的
+数量，当天收盘价仍是折算前的。R 用份额因子 f 还原真实申赎；E 的份额和价格
+都在折算后，按普通份额差计算，不再留空。
 5 日 / 20 日是这些 1 日值的滚动合计，窗口按份额落盘份数往后数，和份额
 变化用的「前 N 份落盘」同一套锚点。窗口里有任何一天算不出，合计就留空。
 """
@@ -14,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from bisect import bisect_left
 from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
@@ -25,9 +29,10 @@ from app.market_time import CN_TZ
 
 # 5 日、20 日与领航者稿的 net_5d / net_20d 对齐。1 日是滚动的基本步长。
 INFLOW_WINDOWS = (1, 5, 20)
-# 拆分会让份额和价格一起跳。事件因子偏离 1 达到这个幅度就不当成申赎。
-# 现金分红的因子贴近 1，不在这里剔除。
+# 份额折算的因子偏离 1 达到这个幅度，才在登记日还原。现金分红的份额因子
+# 是 1，价格因子贴近 1，不在这里还原。
 _SPLIT_FACTOR_GAP = 0.05
+_CASH_EPS = 1e-6
 _DIVERGE_RATIO = 0.20
 _FLOW_KEYS = ("net_1d", "net_5d", "net_20d")
 _ISO_DAY = 10
@@ -40,19 +45,29 @@ def step_inflow_yi(
     *,
     adjacent: bool,
     split: bool,
+    factor: float | None = None,
 ) -> float | None:
     """(份额_T − 份额_prev) × 收盘价_T / 1e8。单位亿元。
 
-    ``adjacent`` 为假表示两份落盘之间隔了超过 1 个交易日。``split`` 为真表示
-    这一步跨过拆分。两种情况都留空，不用 0 填充。
+    ``adjacent`` 为假表示两份落盘之间隔了超过 1 个交易日，留空。
+    ``factor`` 是登记日的份额折算因子（新份额 / 旧份额）。这一天份额已经
+    折算、收盘价还没有，真实申赎是
+    (份额_T − 份额_prev × f) × 收盘价_T / f。和
+    (份额_T / f − 份额_prev) × 收盘价_T 相同。f > 1 是拆分，f < 1 是缩股。
+    ``split`` 仍表示调用方要求这一步留空，登记日还原不走这条路径。
     """
     if not adjacent or split:
         return None
     shares_now = _finite(shares_t)
     shares_then = _finite(shares_prev)
     price = _finite(close_t)
+    ratio = _finite(factor) if factor is not None else None
     if shares_now is None or shares_then is None or price is None or price <= 0:
         return None
+    if ratio is not None:
+        if ratio <= 0:
+            return None
+        return (shares_now - shares_then * ratio) * price / ratio / 1e8
     return (shares_now - shares_then) * price / 1e8
 
 
@@ -104,26 +119,30 @@ def latest_inflows(
     shares = {day: _share_map(data_dir, day) for day in window}
     closes = {day: _close_map(data_dir, day) for day in window[1:]}
     events = _split_events(data_dir)
+    # 因子记在除权日，还原落在前一个交易日。日历用全量日 K，不限于份额窗口，
+    # 这样回看登记日时除权日已经在日历里，也能找到 R。
+    adjustments = _registration_adjustments(events, calendar)
     codes = list(shares.get(window[-1], {}))
     if not codes:
         return {}
-    steps_meta: list[tuple[str, str, bool, set[str]]] = []
+    steps_meta: list[tuple[str, str, bool]] = []
     for prev, current in pairwise(window):
         prev_i = index.get(prev)
         cur_i = index.get(current)
         adjacent = prev_i is not None and cur_i is not None and (cur_i - prev_i) == 1
-        split_codes = _codes_with_split(events, prev, current) if adjacent else set()
-        steps_meta.append((prev, current, adjacent, split_codes))
+        steps_meta.append((prev, current, adjacent))
     found: dict[str, dict[str, float | None]] = {}
     for code in codes:
         series: list[float | None] = []
-        for prev, current, adjacent, split_codes in steps_meta:
+        code_factors = adjustments.get(code, {})
+        for prev, current, adjacent in steps_meta:
             series.append(step_inflow_yi(
                 shares.get(current, {}).get(code),
                 shares.get(prev, {}).get(code),
                 closes.get(current, {}).get(code),
                 adjacent=adjacent,
-                split=code in split_codes,
+                split=False,
+                factor=code_factors.get(current) if adjacent else None,
             ))
         values = {
             "net_inflow_1d": rolling_inflow(series, 1),
@@ -306,7 +325,11 @@ def _close_map(data_dir: Path, day: str) -> dict[str, float]:
 
 
 def _split_events(data_dir: Path) -> dict[str, list[tuple[str, float]]]:
-    """``adj_factor_etf`` 里的除权事件。因子是单次事件比值，不是累积值。"""
+    """``adj_factor_etf`` 里达到折算幅度的份额因子，键是除权日。
+
+    纯折算时份额因子就是 ``ex_factor``。同一天还有现金分红时，价格因子不等于
+    份额因子，用前收和分红还原新份额 / 旧份额。同一除权日重复出现时保留最后一行。
+    """
     base = Path(data_dir) / "adj_factor_etf"
     if not base.is_dir():
         return {}
@@ -324,33 +347,70 @@ def _split_events(data_dir: Path) -> dict[str, list[tuple[str, float]]]:
     date_col = next((name for name in ("trade_date", "date") if name in frame.columns), None)
     if symbol_col is None or date_col is None:
         return {}
-    grouped: dict[str, list[tuple[str, float]]] = {}
-    for symbol, raw_day, factor in frame.select(symbol_col, date_col, "ex_factor").iter_rows():
-        code = _code(symbol)
-        day = _iso_day(raw_day)
-        value = _finite(factor)
-        if code and day and value is not None:
-            grouped.setdefault(code, []).append((day, value))
-    for rows in grouped.values():
-        rows.sort(key=lambda item: item[0])
-    return grouped
+    columns = [symbol_col, date_col, "ex_factor"]
+    has_dividend = "dividend" in frame.columns
+    has_prev = "prev_close" in frame.columns
+    if has_dividend:
+        columns.append("dividend")
+    if has_prev:
+        columns.append("prev_close")
+    grouped: dict[str, dict[str, float]] = {}
+    for row in frame.select(columns).iter_rows(named=True):
+        code = _code(row[symbol_col])
+        day = _iso_day(row[date_col])
+        value = _conversion_factor(
+            row["ex_factor"],
+            row["dividend"] if has_dividend else None,
+            row["prev_close"] if has_prev else None,
+        )
+        if code and day and value is not None and abs(value - 1.0) >= _SPLIT_FACTOR_GAP:
+            grouped.setdefault(code, {})[day] = value
+    return {
+        code: sorted(days.items())
+        for code, days in grouped.items()
+    }
 
 
-def _codes_with_split(
+def _conversion_factor(ex_factor: object, dividend: object, prev_close: object) -> float | None:
+    """份额折算比。没有现金分红时就是 ``ex_factor``。"""
+    factor = _finite(ex_factor)
+    if factor is None or factor <= 0:
+        return None
+    cash = _finite(dividend)
+    prev = _finite(prev_close)
+    if cash is None or cash <= _CASH_EPS or prev is None or prev <= 0:
+        return factor
+    base = prev / factor + cash
+    if base <= 0:
+        return factor
+    return prev / base
+
+
+def _previous_trading_day(calendar: list[str], day: str) -> str | None:
+    """``day`` 之前的最近一个交易日。``day`` 本身不在日历里时同样往前找。"""
+    if not calendar:
+        return None
+    pos = bisect_left(calendar, day)
+    if pos == 0:
+        return None
+    return calendar[pos - 1]
+
+
+def _registration_adjustments(
     events: dict[str, list[tuple[str, float]]],
-    prev: str,
-    current: str,
-) -> set[str]:
-    found: set[str] = set()
+    calendar: list[str],
+) -> dict[str, dict[str, float]]:
+    """除权日 E → 登记日 R 上的份额因子。R 是 E 的前一个交易日。
+
+    自然日减一天会把周五的登记日错到周日，周末后的除权日就还原不到份额跳变。
+    """
+    found: dict[str, dict[str, float]] = {}
     for code, rows in events.items():
-        for day, factor in rows:
-            if day <= prev:
+        for ex_day, factor in rows:
+            record = _previous_trading_day(calendar, ex_day)
+            if record is None or factor <= 0:
                 continue
-            if day > current:
-                break
-            if abs(factor - 1.0) >= _SPLIT_FACTOR_GAP:
-                found.add(code)
-                break
+            found.setdefault(code, {})[record] = factor
     return found
 
 
