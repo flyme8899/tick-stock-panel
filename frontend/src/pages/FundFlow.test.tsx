@@ -38,6 +38,7 @@ const board: FundFlowBoard = {
       {
         code: '588000',
         name: '科创50ETF',
+        broad: '科创50',
         shares: 3e8,
         change_1d: 1e8,
         net_inflow_1d: -2,
@@ -137,4 +138,13 @@ it('aligns 1/5/20 share changes with net inflow and flags a diverged navigator r
   expect(diverged?.getAttribute('title')).toBe('推算净流入与领航者相差超过 20%')
   expect(aligned?.className).not.toContain('border-warning')
   expect(aligned?.textContent).not.toContain('相差超过 20%')
+
+  const nameNode = diverged?.querySelector('[data-etf-name]')
+  expect(nameNode?.getAttribute('title')).toBe('沪深300ETF')
+  expect(nameNode?.querySelector('[data-etf-code]')?.textContent).toBe('510300')
+  expect(nameNode?.querySelector('[data-etf-code]')?.className).toContain('text-muted')
+  expect(host.querySelector('[data-etf-group="沪深300"]')?.textContent).toContain('国家队代理')
+  expect(host.querySelector('[data-etf-group="科创50"]')?.textContent).toContain('国家队代理')
+  expect(host.querySelector('[data-etf-list]')?.className).toContain('max-h-80')
+  expect(host.querySelector('[data-etf-list]')?.className).toContain('overflow-y-auto')
 })

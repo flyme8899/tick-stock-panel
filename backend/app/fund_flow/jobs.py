@@ -10,7 +10,7 @@ from pathlib import Path
 
 import polars as pl
 
-from app.fund_flow import config, normalize, store
+from app.fund_flow import config, etf_meta, normalize, store
 from app.fund_flow.circuit import CircuitBreaker, CircuitOpenError, call_with_retry
 from app.fund_flow.sources import NORTHBOUND_SYMBOL, SOUTHBOUND_SYMBOL, SourceClients
 
@@ -992,6 +992,11 @@ def sync_etf_shares(
     rows.extend(szse)
     if rows:
         result.wrote = store.write_rows(data_dir, "etf_shares", trade_date, rows)
+    # 名称参考表和份额分开写。失败留下错误以便重试，但不清掉上一版，也不回滚份额。
+    try:
+        result.errors.extend(etf_meta.refresh(data_dir))
+    except Exception as exc:  # noqa: BLE001
+        result.errors.append(f"etf_meta: {exc}")
     store.update_kind_state(
         data_dir, "etf_shares",
         last_error=result.errors[-1] if result.errors else None,

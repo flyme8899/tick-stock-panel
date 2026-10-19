@@ -8,7 +8,7 @@ from pathlib import Path
 
 import polars as pl
 
-from app.fund_flow import etf_inflow, factors, normalize, store
+from app.fund_flow import etf_inflow, etf_meta, factors, normalize, store
 from app.fund_flow.scheduler import current_flags, get_worker
 from app.fund_flow.units import percent_points_to_decimal
 from app.market_time import CN_TZ, cn_now, cn_today
@@ -229,14 +229,18 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
     linked = _etf_flow_map(root, day)
     inflows = etf_inflow.latest_inflows(root, as_of=day)
     _, baselines = _window_baselines(root, day)
+    meta = etf_meta.load_index(root)
     items = []
     for row in frame.iter_rows(named=True):
         code = row.get("code")
         if not code:
             continue
         fields = _etf_money_fields(code, linked, inflows)
+        presented = _etf_presented(code, row.get("name"), meta.get(code))
         items.append({
             **{key: _json_ready(value) for key, value in row.items()},
+            "name": presented["name"],
+            "short_name": presented["short_name"],
             **fields,
             **_share_change_fields(code, row.get("shares"), baselines),
             "etf_flow_linked": fields["flow_net"] is not None,
@@ -486,27 +490,69 @@ def _empty_stock(day: str | None, *, partial: bool = False, note: str | None = N
     }
 
 
-_BROAD_HS300 = frozenset({"510300", "510310", "510330", "159919"})
-_BROAD_KC50 = frozenset({"588000", "588080", "588050"})
-_BROAD_CYB = frozenset({"159915"})
+# 沪市只认跟踪指数代码。短简称「科创50E」不是科创50（它跟踪科创成长）。
+_SSE_BROAD_INDEX = {
+    "000300": "沪深300",
+    "000688": "科创50",
+    "399006": "创业板",
+}
+# 深市没有指数代码，按扩位名严格匹配。风格切片不是宽基。
+_STYLE_NAME = re.compile(r"成长|价值|增强|红利|ESG", re.IGNORECASE)
 # 「创业板ETF」「创业板50ETF」是宽基。主题名（创业板成长ETF）对不上。
 _CYB_NAME = re.compile(r"创业板(?:50)?ETF|创业板指")
+# 上交所份额接口的短简称，例如 588020「科创50E」。后面多一个字母就不是科创50。
+_KC50_ABBR = re.compile(r"^科创50[A-Za-z]$")
+# 份额接口给沪市代码加的当日状态前缀，不是名称的一部分。
+_SSE_STATUS_PREFIX = re.compile(r"^(?:XD|XR|DR|UC|N)")
 _BOARD_SECTOR_LIMIT = 12
 _BOARD_HISTORY = 40
 _BOARD_ETF_OTHERS = 12
 
 
-def _broad_label(code: str | None, name: str | None) -> str | None:
-    """宽基名单。沪深300 / 科创50 在页面上标国家队代理，创业板只标指数名。"""
-    text = name or ""
+def _broad_label(
+    code: str | None,
+    name: str | None,
+    index_code: str | None = None,
+) -> str | None:
+    """宽基名单。沪深300 / 科创50 在页面上标国家队代理，创业板只标指数名。
+
+    沪市代码一旦有跟踪指数，只看指数代码，不再用名称子串。深市和还没有
+    指数代码的沪市按名称匹配，并排除成长、价值、增强、红利、ESG。
+    """
     code6 = normalize.code6(code or "") or ""
-    if "科创50" in text or code6 in _BROAD_KC50:
-        return "科创50"
-    if "沪深300" in text or code6 in _BROAD_HS300:
+    index = (index_code or "").strip()
+    if code6.startswith("5") and index:
+        return _SSE_BROAD_INDEX.get(index)
+    text = (name or "").strip()
+    if not text or _STYLE_NAME.search(text):
+        return None
+    if "沪深300" in text:
         return "沪深300"
-    if code6 in _BROAD_CYB or _CYB_NAME.search(text):
+    if "科创50" in text and _KC50_ABBR.fullmatch(text) is None:
+        return "科创50"
+    if _CYB_NAME.search(text):
         return "创业板"
     return None
+
+
+def _etf_presented(code: str, stored_name: object, meta: dict | None) -> dict:
+    """查询输出的名称。不改份额分区里的原文。"""
+    stored = str(stored_name).strip() if stored_name else ""
+    info = meta or {}
+    full = str(info.get("full_name") or "").strip()
+    short = str(info.get("short_name") or "").strip()
+    if full:
+        name = full
+    elif stored and code.startswith("5"):
+        stripped = _SSE_STATUS_PREFIX.sub("", stored, count=1)
+        name = stripped or stored
+    else:
+        name = stored
+    return {
+        "name": name or None,
+        "short_name": short or None,
+        "index_code": str(info.get("index_code") or "").strip(),
+    }
 
 
 def board(data_dir: Path | None = None) -> dict:
@@ -826,6 +872,7 @@ def _etf_changes(root: Path) -> dict:
     prev_day = baseline_days.get(1)
     linked = _etf_flow_map(root, day)
     inflows = etf_inflow.latest_inflows(root, as_of=day)
+    meta = etf_meta.load_index(root)
     current = _partition(root, "etf_shares", day)
     broad = []
     others = []
@@ -835,14 +882,16 @@ def _etf_changes(root: Path) -> dict:
         code = row.get("code")
         if not code:
             continue
-        label = _broad_label(code, row.get("name"))
+        presented = _etf_presented(code, row.get("name"), meta.get(code))
+        label = _broad_label(code, presented["name"], presented["index_code"])
         shares = row.get("shares")
         changes = _share_change_fields(code, shares, baselines)
         # 1 日变化与 share_change 同源，独立成字段便于前端统一按窗口渲染。
         change = changes["change_1d"]
         item = {
             "code": code,
-            "name": row.get("name"),
+            "name": presented["name"],
+            "short_name": presented["short_name"],
             "shares": shares,
             "prev_shares": baselines[1].get(code),
             "share_change": change,
