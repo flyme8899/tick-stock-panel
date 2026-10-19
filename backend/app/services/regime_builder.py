@@ -534,10 +534,13 @@ def _compute_batch(repo, enriched_dir, instruments, historical_shares,
     # (compute_limit_signals 文档虽提及但函数体未实际使用, 已验证可安全省去 → 省内存)
     df = compute_indicators(df, needed={"change_pct", "ma20"})
     if instruments is not None and not instruments.is_empty():
+        from app.services.st_history_sync import load_st_history
+
         df = compute_limit_signals(
             df, instruments,
             needed={"signal_limit_up", "signal_limit_down", "signal_broken_limit_up"},
             historical_shares=historical_shares,
+            st_history=load_st_history(getattr(getattr(repo, "store", None), "data_dir", None)),
         )
     # 晋级率需要昨日连板数: 在裁掉 warmup 之前先按 symbol 平移,
     # 保证每批首日的 _prev_consec 来自 warmup 的最后一个交易日而非 null。

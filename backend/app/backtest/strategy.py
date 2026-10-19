@@ -505,9 +505,24 @@ def _basic_filter_dependencies(config: dict) -> set[str]:
         dependencies.add("total_shares")
     if any(config.get(key) is not None for key in ("float_cap_min", "float_cap_max")):
         dependencies.add("float_shares")
-    if config.get("exclude_st"):
-        dependencies.add("name")
+    # exclude_st 在矩阵路径按 st_history 的 [start_date, end_date) 判断,
+    # 不把 instruments 的当前 name 当作依赖。name 仍由 instrument_columns
+    # 固定加载, 供区间表缺失时回退, 以及实盘 _basic_filter_expr。
+    # exclude_new_days 用 instruments.listing_date (stock_basic.list_date),
+    # 由矩阵构建期直接读取, 不是 enriched 存储列。
+    if config.get("exclude_st") or _configured_exclude_new_days(config) > 0:
+        dependencies.add("symbol")
     return dependencies
+
+
+def _configured_exclude_new_days(config: dict) -> int:
+    raw = config.get("exclude_new_days")
+    if raw is None:
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
 
 
 _SHARE_CAP_FILTER_KEYS = (

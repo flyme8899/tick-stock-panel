@@ -236,10 +236,13 @@ class ScreenerService:
         # 计算涨跌停信号 (需要 instruments; 涨停为股票专有, ETF 跳过)
         instruments = self.repo.get_instruments_asset(self.asset_type)
         if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
+            from app.services.st_history_sync import load_st_history
+
             df_full = compute_limit_signals(
                 df_full,
                 instruments,
                 historical_shares=self.repo.get_historical_shares(),
+                st_history=load_st_history(self.repo.store.data_dir),
             )
 
         # 只保留目标日期
@@ -322,10 +325,13 @@ class ScreenerService:
 
         instruments = self.repo.get_instruments_asset(self.asset_type)
         if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
+            from app.services.st_history_sync import load_st_history
+
             df_full = compute_limit_signals(
                 df_full,
                 instruments,
                 historical_shares=self.repo.get_historical_shares(),
+                st_history=load_st_history(self.repo.store.data_dir),
             )
 
         if instruments is not None and not instruments.is_empty():

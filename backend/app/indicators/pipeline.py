@@ -36,7 +36,6 @@ from app.price_limits import (
     no_limit_window_days,
     no_limit_window_margin_days,
     parse_listing_date,
-    polars_is_risk_warning_name,
     polars_limit_price,
     polars_price_limit_pct,
 )
@@ -129,8 +128,10 @@ def enriched_recompute_columns(available) -> list[str]:
 # consecutive_limit_ups / consecutive_limit_downs。
 # 1 = 旧口径, 把前复权昨收直接当作原始参考价。
 # 2 = 除权日用前复权昨收 / 当日复权因子, 回到交易所原始价尺度。
-LIMIT_FORMULA_VERSION = 2
+# 3 = 主板 ST 的 5% 限幅按 st_history 区间, 不再用当前名称。
+LIMIT_FORMULA_VERSION = 3
 _LIMIT_FORMULA_STAMP = ".limit_formula_version"
+_ST_HISTORY_STAMP = ".st_history_fingerprint"
 
 
 def limit_formula_stamp_path(data_dir: Path) -> Path:
@@ -145,14 +146,44 @@ def read_limit_formula_version(data_dir: Path) -> int:
         return 0
 
 
+def st_history_stamp_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "kline_daily_enriched" / _ST_HISTORY_STAMP
+
+
+def read_st_history_stamp(data_dir: Path) -> str:
+    try:
+        return st_history_stamp_path(data_dir).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def limit_formula_needs_rebuild(data_dir: Path) -> bool:
-    return read_limit_formula_version(data_dir) < LIMIT_FORMULA_VERSION
+    if read_limit_formula_version(data_dir) < LIMIT_FORMULA_VERSION:
+        return True
+    from app.services.st_history_sync import st_history_fingerprint
+
+    # 回补出 st_history 后, 已落盘的连板数仍是按当前名称算的, 需要重算。
+    return read_st_history_stamp(data_dir) != st_history_fingerprint(data_dir)
+
+
+def _history_for(data_dir: Path | None) -> pl.DataFrame | None:
+    if data_dir is None:
+        return None
+    from app.services.st_history_sync import load_st_history
+
+    return load_st_history(data_dir)
 
 
 def write_limit_formula_version(data_dir: Path) -> None:
     path = limit_formula_stamp_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{LIMIT_FORMULA_VERSION}\n", encoding="utf-8")
+    from app.services.st_history_sync import st_history_fingerprint
+
+    st_history_stamp_path(data_dir).write_text(
+        st_history_fingerprint(data_dir) + "\n",
+        encoding="utf-8",
+    )
 
 
 # ================================================================
@@ -843,6 +874,7 @@ def compute_limit_signals(
     instruments: pl.DataFrame,
     needed: set[str] | None = None,
     historical_shares: pl.DataFrame | None = None,
+    st_history: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """计算涨跌停相关信号。
 
@@ -891,21 +923,14 @@ def compute_limit_signals(
         )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
 
-    if need_price_limits and "name" in instruments.columns:
-        st_flag = (
-            instruments
-            .select(
-                "symbol",
-                polars_is_risk_warning_name(pl.col("name")).alias("_is_st"),
-            )
-            .unique(subset=["symbol"])
-        )
-        inst_subset = inst_subset.join(st_flag, on="symbol", how="left")
-
     if need_price_limits:
         inst_subset = _attach_no_limit_window(inst_subset)
 
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
+    if need_price_limits:
+        from app.services.st_history_sync import attach_is_st_column
+
+        df = attach_is_st_column(df, instruments, st_history)
 
     if "turnover_rate" in want:
         df = apply_historical_float_shares(df, historical_shares, today=cn_today())
@@ -1152,6 +1177,7 @@ def compute_all(
     df: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    st_history: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """从 OHLCV 计算全套指标 + 信号。一站式调用。
 
@@ -1160,7 +1186,12 @@ def compute_all(
     df = compute_indicators(df)
     df = compute_signals(df)
     if instruments is not None and not instruments.is_empty():
-        df = compute_limit_signals(df, instruments, historical_shares=historical_shares)
+        df = compute_limit_signals(
+            df,
+            instruments,
+            historical_shares=historical_shares,
+            st_history=st_history,
+        )
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -1202,6 +1233,7 @@ def compute_enriched(
     factors: pl.DataFrame | None = None,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    st_history: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """对原始日 K 应用前复权 + 全量计算指标 + 信号, 产出完整 enriched (含全部指标列)。
 
@@ -1237,6 +1269,7 @@ def compute_enriched(
         df,
         instruments=instruments,
         historical_shares=historical_shares,
+        st_history=st_history,
     )
 
     return df
@@ -1618,7 +1651,12 @@ def compute_enriched_history_window(
                 if historical_shares is not None and not historical_shares.is_empty()
                 else historical_shares
             )
-            part = compute_limit_signals(part, inst_batch, historical_shares=shares_batch)
+            part = compute_limit_signals(
+                part,
+                inst_batch,
+                historical_shares=shares_batch,
+                st_history=_history_for(data_dir),
+            )
             if include_instrument_metadata:
                 inst_cols = [c for c in ("name", "total_shares", "float_shares")
                              if c in inst_batch.columns and c not in part.columns]
@@ -1638,6 +1676,7 @@ def _compute_storage_batches(
     factors: pl.DataFrame,
     instruments: pl.DataFrame,
     historical_shares: pl.DataFrame,
+    st_history: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """保留完整标的历史输入, 单批计算宽表后仅累积落盘窄表。"""
     from app.services import preferences
@@ -1657,6 +1696,7 @@ def _compute_storage_batches(
                          if not instruments.is_empty() else instruments),
             historical_shares=(historical_shares.filter(pl.col("symbol").is_in(batch))
                                if not historical_shares.is_empty() else historical_shares),
+            st_history=st_history,
         )
         # 下一批开始前释放宽表; 分区发布仍在所有计算批次成功之后。
         if not part.is_empty():
@@ -1706,10 +1746,11 @@ def run_pipeline(data_dir: Path | None = None,
     enriched_existed = enriched_base.exists() and any(enriched_base.glob("date=*"))
     # 日常增量只补 enriched 里还没有的日期分区 (以及调用方点名的除权个股)。
     # 已有分区不会因为涨跌停公式变化而重写, 所以版本戳落后时这次调用改走全量。
+    st_history = _history_for(d)
     formula_upgrade = enriched_existed and limit_formula_needs_rebuild(d)
     if formula_upgrade:
         logger.warning(
-            "涨跌停公式版本 %s < %s, 已有 enriched 分区改为全量重建",
+            "涨跌停公式或 ST 区间变化 (version %s/%s), 已有 enriched 分区改为全量重建",
             read_limit_formula_version(d),
             LIMIT_FORMULA_VERSION,
         )
@@ -1780,6 +1821,7 @@ def run_pipeline(data_dir: Path | None = None,
                 factors=factors,
                 instruments=instruments,
                 historical_shares=historical_shares,
+                st_history=st_history,
             )
 
             # 只保留新日期的行
@@ -1823,6 +1865,7 @@ def run_pipeline(data_dir: Path | None = None,
                     factors=factors_sym,
                     instruments=inst_sym,
                     historical_shares=shares_sym,
+                    st_history=st_history,
                 )
                 for date_df in enriched_sym.partition_by("date"):
                     dt = date_df["date"][0]
@@ -1935,6 +1978,7 @@ def run_pipeline(data_dir: Path | None = None,
                 factors=batch_factors,
                 instruments=batch_inst,
                 historical_shares=batch_shares,
+                st_history=st_history,
             )
 
             if not enriched.is_empty():
@@ -2096,6 +2140,9 @@ def compute_enriched_today(
     today_ohlcv: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     elapsed_minutes: float | None = None,
+    *,
+    data_dir: Path | None = None,
+    st_history: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """用昨天的递推状态 + 今天的 OHLCV 增量计算今天的 enriched 数据。
 
@@ -2438,7 +2485,9 @@ def compute_enriched_today(
 
     # ---- 涨跌停 + 换手率 + 炸板 + 连板 ----
     if instruments is not None and not instruments.is_empty():
-        df = _compute_limit_signals_today(df, instruments)
+        if st_history is None and data_dir is not None:
+            st_history = _history_for(data_dir)
+        df = _compute_limit_signals_today(df, instruments, st_history=st_history)
 
     # ---- 清理内部列 ----
     drop_cols = [
@@ -2493,7 +2542,11 @@ def compute_enriched_today(
     return df
 
 
-def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.DataFrame:
+def _compute_limit_signals_today(
+    df: pl.DataFrame,
+    instruments: pl.DataFrame,
+    st_history: pl.DataFrame | None = None,
+) -> pl.DataFrame:
     """盘中增量版的涨跌停/换手率/炸板/连板计算。"""
     inst_cols = ["symbol"]
     for c in ["float_shares", "limit_up", "limit_down", "listing_date"]:
@@ -2504,20 +2557,13 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
             pl.col("as_of").cast(pl.Date, strict=False).alias("_instrument_as_of")
         )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
-    if "name" in instruments.columns:
-        st_flag = (
-            instruments
-            .select(
-                "symbol",
-                polars_is_risk_warning_name(pl.col("name")).alias("_is_st"),
-            )
-            .unique(subset=["symbol"])
-        )
-        inst_subset = inst_subset.join(st_flag, on="symbol", how="left")
 
     inst_subset = _attach_no_limit_window(inst_subset)
 
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
+    from app.services.st_history_sync import attach_is_st_column
+
+    df = attach_is_st_column(df, instruments, st_history)
 
     # 换手率: API 有则直接用, 无则从 float_shares 计算
     if "turnover_rate" not in df.columns:

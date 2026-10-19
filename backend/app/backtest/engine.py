@@ -641,6 +641,8 @@ class BacktestEngine:
             df = compute_indicators(df, needed=set(feature_plan.indicator_columns))
             df = compute_signals(df, needed=set(feature_plan.signal_columns))
         if not instruments.is_empty():
+            from app.services.st_history_sync import load_st_history
+
             df = compute_limit_signals(
                 df,
                 instruments,
@@ -651,6 +653,9 @@ class BacktestEngine:
                     self.repo.get_historical_shares()
                     if asset_type == "stock" and self.repo is not None
                     else None
+                ),
+                st_history=load_st_history(
+                    self.repo.store.data_dir if self.repo is not None else None
                 ),
             )
             join_cols = ["symbol"] if "symbol" in instruments.columns else []
@@ -845,7 +850,13 @@ class BacktestEngine:
         # 按 asset_type 取维表: ETF 回测须用 ETF 维表, 否则名称 JOIN 失败(全 null)、
         # 涨停信号算在错误的 instruments 上。
         instruments = self.repo.get_instruments_asset(asset_type)
-        df = compute_all(df, instruments=instruments)
+        from app.services.st_history_sync import load_st_history
+
+        df = compute_all(
+            df,
+            instruments=instruments,
+            st_history=load_st_history(self.repo.store.data_dir),
+        )
         if not instruments.is_empty() and "name" not in df.columns:
             inst_cols = [c for c in ["symbol", "name"] if c in instruments.columns]
             if len(inst_cols) == 2:

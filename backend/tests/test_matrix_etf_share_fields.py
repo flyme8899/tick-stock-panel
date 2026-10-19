@@ -198,7 +198,7 @@ def test_etf_turnover_rate_degrades_to_nan_without_float_shares(tmp_path):
     }
     seen = np.ones(shape, dtype=bool)
     # 修复前: 抛 "matrix turnover_rate requires float_shares"
-    names, _limits = _populate_matrix_derived_arrays(
+    names, _limits, *_rest = _populate_matrix_derived_arrays(
         ["510300.SH", "510500.SH"],
         arrays,
         fields,
@@ -245,7 +245,7 @@ def test_stock_turnover_rate_still_derived_when_float_shares_present(tmp_path):
         "close": np.array([[4.0, 6.0], [4.2, 6.3]], dtype=np.float32),
     }
     seen = np.ones(shape, dtype=bool)
-    _names, _limits = _populate_matrix_derived_arrays(
+    _names, _limits, *_rest = _populate_matrix_derived_arrays(
         ["510300.SH", "510500.SH"],
         arrays,
         fields,
