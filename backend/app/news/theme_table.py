@@ -1,33 +1,33 @@
-"""知识星球复盘笔记里的**主题表**解析（只读、纯函数）。
+"""知识星球复盘笔记里的主题解析（只读、纯函数）。
 
-星球帖子的正文（``news_items.clean_text``）里常有 Markdown 表格形式的「主题表」，
-形如::
+两条来源，互为补充：
 
-    | 主题 | 强弱 | 日期 |
-    | --- | --- | --- |
-    | 算力租赁 | 强 | 2026-10-14 |
-    | 固态电池 | 弱转强 | 2026-10-15 |
+1. **Markdown 表格**。正文里如果有表头含「主题 / 题材 / 板块 / …」的表，按列抽取。
+   这是原有路径，列识别和容错行为保持不变。
+2. **散文复盘笔记**。真实帖子通常不写这种表，常见写法是：
 
-本模块把这些表格抽成结构化行，供**盘后复盘板**只读展示。
+   - 标题 ``复盘笔记：人形机器人/低空经济``，用 ``/``、``、`` 等把主题列出来；
+   - 正文分成「一、重磅财经信息 / 二、大盘表现 / 三、强势板块和个股分析」，
+     第三段里主题名单独成一行，下面跟 ``①②`` 要点。
+
+「涨停板复盘」「雁阵图」多为图片帖，正文几乎为空，本模块不处理。
 
 设计边界（有意为之）
 --------------------
 
-- **只解析，不算强弱**：``强弱`` 是笔记作者手写的判断，本模块**原样透传字符串**，
-  不做任何打分、排序、映射或再解释。没有该列就留空。
+- **只解析，不算强弱**：表格里的 ``强弱`` 原样透传。散文没有这一列，留空。
+  不做打分、排序、映射或再解释。
 - **不是信号源**：输出仅用于展示。本模块不产生买卖建议、不写任何存储、不触发推送。
   调用方也不得把它接成买点/做T 入口。
-- **容错优先**：表格千奇百怪（对齐行写法不同、列名同义、单元格含 ``|`` 转义）。
-  解析不了就跳过那一行/那一块，不抛异常 —— 宁可少抽几条，不能因为一条怪表格
-  让整个复盘板打不开。
+- **容错优先**：解析不了就跳过那一行/那一块，不抛异常。
 - 纯函数、无 I/O、无第三方依赖，可直接单测。
 
-列的识别
---------
+表格列的识别
+------------
 
 按表头文字**宽松匹配**（去空白、去全角空格后做包含判断）：
 
-    主题   <- 主题 / 题材 / 板块 / 方向 / 概念 / 主线
+    主题   <- 主题 / 题材 / 板块 / 方向 / 概念 / 主线 / 赛道
     强弱   <- 强弱 / 强度 / 力度（也接受 表现 / 状态）
     日期   <- 日期 / 时间 / 交易日（缺省时回退到帖子发布时间）
 
@@ -47,6 +47,7 @@ __all__ = [
     "is_separator_row",
     "looks_like_table",
     "parse_theme_tables",
+    "redundant_theme_names",
     "split_table_cells",
     "theme_rows_from_text",
 ]
@@ -64,12 +65,19 @@ _ESCAPED_PIPE = "\x00PIPE\x00"
 
 @dataclass(frozen=True)
 class ThemeRow:
-    """一条主题表记录。``strength`` 原样保留作者写法，不做解释。"""
+    """一条主题记录。``strength`` 原样保留作者写法，不做解释。
+
+    ``source_kind`` 标记抽取来源：``table`` 表格、``prose`` 散文、
+    ``mixed`` 同一主题两边都抽到了。散文没有强弱列时 ``strength`` 为空。
+    ``summary`` 是强势板块段落里紧随该主题的 ``①`` 要点摘录，没有则为空。
+    """
 
     theme: str
     strength: str = ""
     day: str = ""
     source_day: str = ""
+    summary: str = ""
+    source_kind: str = "table"
 
     @property
     def display_day(self) -> str:
@@ -182,18 +190,74 @@ def parse_theme_tables(text: str, *, source_day: str = "") -> list[ThemeRow]:
     return rows
 
 
+#: 散文主题名：短到能单独成行。「低空经济（eVTOL）」是 11 字，仍算名字。
+#: 12 字及以上更像一句行情描述（如「早盘韩国股市存储芯片反弹」），不再当主题。
+_THEME_MIN_LEN = 2
+_THEME_MAX_LEN = 11
+#: ① 要点只带前若干字，复盘板不是全文阅读器。
+_SUMMARY_LIMIT = 80
+
+_SECTION_LINE = re.compile(r"^([一二三四五六七八九十]{1,3})[、.．]\s*(.+?)\s*$")
+_POINT_MARK = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]\s*")
+_LIST_MARK = re.compile(
+    r"^(?:\d{1,2}|[（(][0-9一二三四五六七八九十]{1,3}[)）])[、.．]\s*",
+)
+_TITLE_LEAD = re.compile(r"(?:【|\[)?复盘笔记(?:】|\])?\s*[:：]\s*(.+)$")
+_TITLE_SPLIT = re.compile(r"[/／、|｜]+")
+_DATE_TOKEN = re.compile(
+    r"^(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?"
+    r"|\d{1,2}月\d{1,2}日"
+    r"|\d{4}[-/.]\d{1,2}[-/.]\d{1,2})$",
+)
+_BAD_CHARS = re.compile(r"[。！？；;：:!?,，、]")
+_HAS_WORD = re.compile(r"[\u4e00-\u9fffA-Za-z]")
+#: 库里的标题会被截成「人形机器...」「P...」。这种片段不是主题名。
+_TRUNCATED_END = re.compile(r"(?:\.{2,}|…+|⋯+|．{2,})\s*$")
+#: 时间词和行情动词。板块名里通常没有这些字；「早盘…反弹」这类句子靠它们挡下。
+_CLAUSE_MARKERS = (
+    "早盘", "午盘", "午后", "尾盘", "盘中", "盘前", "隔夜",
+    "今日", "昨日", "今天", "昨天", "今早", "昨晚",
+    "反弹", "上涨", "下跌", "大涨", "大跌", "拉升", "跳水",
+    "走强", "走弱", "回落", "冲高", "低开", "高开", "放量", "缩量",
+    "涨停", "跌停", "翻红", "翻绿", "走高", "走低", "回暖", "下挫",
+    "飙升", "杀跌", "暴涨", "暴跌", "领涨", "领跌", "收涨", "收跌",
+)
+_NOT_THEMES = frozenset({
+    "强势板块",
+    "强势板块和个股分析",
+    "强势板块及个股分析",
+    "大盘表现",
+    "重磅财经信息",
+    "风险提示",
+    "免责声明",
+    "个股分析",
+    "复盘笔记",
+    "涨停板复盘",
+    "雁阵图",
+    "以上",
+    "小结",
+    "总结",
+    "备注",
+    "说明",
+    "文字",
+})
+
+
 def theme_rows_from_text(
     text: str,
     *,
     published_at: str = "",
     title: str = "",
 ) -> list[ThemeRow]:
-    """便捷入口：从帖子正文抽主题表，用 ``published_at`` 兜底日期。
+    """从一篇帖子抽主题。表格优先，散文补表格里没有的主题和要点摘要。
 
-    ``title`` 只用于极少数「表头写在标题里」的情况，当前不参与解析，
-    保留参数是为了调用方不必分两处取数。
+    同一篇里同名主题合成一行：表格保留强弱，散文补上 ``①`` 摘要。
+    ``published_at`` 只在行内没有日期时兜底。
     """
-    return parse_theme_tables(text, source_day=_day_of(published_at))
+    source_day = _day_of(published_at)
+    table_rows = parse_theme_tables(text, source_day=source_day)
+    prose_rows = _parse_prose_themes(text, title=title, source_day=source_day)
+    return _collapse_contained_rows(_merge_post_rows(table_rows, prose_rows))
 
 
 def _day_of(stamp: str) -> str:
@@ -204,3 +268,227 @@ def _day_of(stamp: str) -> str:
         return datetime.fromisoformat(str(stamp).strip()).date().isoformat()
     except ValueError:
         return _clean_day(stamp)
+
+
+def _clean_candidate(raw: str) -> str:
+    text = (raw or "").replace("\u3000", "").strip().strip("*#").strip()
+    return re.sub(r"[：:]+$", "", text).strip()
+
+
+def _theme_segments(name: str) -> list[str]:
+    """``影视/传媒`` 拆成 ``["影视", "传媒"]``。没有分隔符时就是它自己。"""
+    parts = [part.strip() for part in _TITLE_SPLIT.split(name) if part.strip()]
+    return parts or ([name] if name else [])
+
+
+def _looks_like_clause(text: str) -> bool:
+    """行情句子，不是板块名。过长，或带时间词 / 涨跌动词。"""
+    if len(text) > _THEME_MAX_LEN:
+        return True
+    return any(marker in text for marker in _CLAUSE_MARKERS)
+
+
+def _theme_name_ok(name: str) -> bool:
+    """单独成行的短主题名。节标题、要点行、截断碎片、日期和句子都排除。"""
+    text = name.strip()
+    if not text or re.search(r"\s", text):
+        return False
+    if _TRUNCATED_END.search(text):
+        return False
+    if not (_THEME_MIN_LEN <= len(text) <= _THEME_MAX_LEN):
+        return False
+    if text in _NOT_THEMES or _looks_like_clause(text):
+        return False
+    if _SECTION_LINE.match(text) or _POINT_MARK.match(text) or _LIST_MARK.match(text):
+        return False
+    if _BAD_CHARS.search(text) or _DATE_TOKEN.match(text):
+        return False
+    return _HAS_WORD.search(text) is not None
+
+
+def redundant_theme_names(names: list[str]) -> set[str]:
+    """短名如果是同组里某个 ``A/B`` 的一段，就把它视为重复。
+
+    「影视」对「影视/传媒」、「AI传媒」对「AI传媒/AI应用」属于这种关系。
+    「半导体」和「半导体设备」没有分隔符，两边都留。
+    """
+    compounds = {
+        name: set(_theme_segments(name))
+        for name in names
+        if len(_theme_segments(name)) > 1
+    }
+    drop: set[str] = set()
+    for name in names:
+        if any(name != compound and name in parts for compound, parts in compounds.items()):
+            drop.add(name)
+    return drop
+
+
+def _summarize_points(points: list[str]) -> str:
+    text = "；".join(point for point in points if point)
+    if len(text) <= _SUMMARY_LIMIT:
+        return text
+    return text[: _SUMMARY_LIMIT - 1].rstrip() + "…"
+
+
+def _themes_from_title(title: str) -> list[str]:
+    """``复盘笔记：A/B/C``。只按斜杠和顿号切开，不把逗号句子拆成主题。"""
+    if not title or "复盘笔记" not in title:
+        return []
+    match = _TITLE_LEAD.search(title.strip())
+    if not match:
+        return []
+    tail = match.group(1).strip()
+    tail = re.sub(r"\s*[（(]\s*\d{4}[-/.年].*?[)）]\s*$", "", tail).strip()
+    return [_clean_candidate(part) for part in _TITLE_SPLIT.split(tail) if part.strip()]
+
+
+def _strong_section_ranges(lines: list[str]) -> list[tuple[int, int]]:
+    headers: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        match = _SECTION_LINE.match(line.strip())
+        if match:
+            headers.append((index, match.group(2).replace(" ", "").replace("\u3000", "")))
+    ranges: list[tuple[int, int]] = []
+    for pos, (start, heading) in enumerate(headers):
+        if "强势板块" not in heading:
+            continue
+        end = headers[pos + 1][0] if pos + 1 < len(headers) else len(lines)
+        ranges.append((start + 1, end))
+    return ranges
+
+
+def _point_text(raw: str) -> str:
+    text = _POINT_MARK.sub("", raw, count=1)
+    return _LIST_MARK.sub("", text, count=1).strip()
+
+
+def _themes_from_sections(text: str) -> list[tuple[str, str]]:
+    """只扫「强势板块」这一段。段外的短行、节标题和 ① 行都不是主题。"""
+    if not text or "强势板块" not in text:
+        return []
+    lines = text.splitlines()
+    found: list[tuple[str, str]] = []
+    for start, end in _strong_section_ranges(lines):
+        current = ""
+        points: list[str] = []
+
+        def flush() -> None:
+            nonlocal current, points
+            if current:
+                found.append((current, _summarize_points(points)))
+            current = ""
+            points = []
+
+        for line in lines[start:end]:
+            raw = line.strip()
+            if not raw:
+                continue
+            if _POINT_MARK.match(raw) or _LIST_MARK.match(raw):
+                if current:
+                    point = _point_text(raw)
+                    if point:
+                        points.append(point)
+                continue
+            candidate = _clean_candidate(raw)
+            if _theme_name_ok(candidate):
+                flush()
+                current = candidate
+        flush()
+    return found
+
+
+def _parse_prose_themes(text: str, *, title: str, source_day: str) -> list[ThemeRow]:
+    by_name: dict[str, ThemeRow] = {}
+    order: list[str] = []
+
+    def put(theme: str, summary: str) -> None:
+        name = theme.strip()
+        if not _theme_name_ok(name):
+            return
+        prev = by_name.get(name)
+        if prev is None:
+            by_name[name] = ThemeRow(
+                theme=name,
+                strength="",
+                day="",
+                source_day=source_day,
+                summary=summary,
+                source_kind="prose",
+            )
+            order.append(name)
+            return
+        if summary and not prev.summary:
+            by_name[name] = ThemeRow(
+                theme=name,
+                strength="",
+                day="",
+                source_day=source_day,
+                summary=summary,
+                source_kind="prose",
+            )
+
+    for name in _themes_from_title(title):
+        put(name, "")
+    for name, summary in _themes_from_sections(text):
+        put(name, summary)
+    return [by_name[name] for name in order]
+
+
+def _merge_post_rows(table_rows: list[ThemeRow], prose_rows: list[ThemeRow]) -> list[ThemeRow]:
+    """同一篇内同名主题合成一行。表格的强弱保留，散文只补摘要。"""
+    merged: list[ThemeRow] = []
+    index: dict[str, int] = {}
+    for row in table_rows:
+        index[row.theme] = len(merged)
+        merged.append(row)
+    for row in prose_rows:
+        pos = index.get(row.theme)
+        if pos is None:
+            index[row.theme] = len(merged)
+            merged.append(row)
+            continue
+        current = merged[pos]
+        summary = current.summary or row.summary
+        kind = current.source_kind
+        if row.source_kind and row.source_kind != kind:
+            kind = "mixed"
+        if summary == current.summary and kind == current.source_kind:
+            continue
+        merged[pos] = ThemeRow(
+            theme=current.theme,
+            strength=current.strength,
+            day=current.day,
+            source_day=current.source_day or row.source_day,
+            summary=summary,
+            source_kind=kind,
+        )
+    return merged
+
+
+def _collapse_contained_rows(rows: list[ThemeRow]) -> list[ThemeRow]:
+    """同一篇里丢掉被复合主题盖住的短名，摘要留给复合主题。"""
+    drop = redundant_theme_names([row.theme for row in rows])
+    if not drop:
+        return rows
+    kept = [row for row in rows if row.theme not in drop]
+    summaries = {row.theme: row.summary for row in rows if row.theme in drop and row.summary}
+    if not summaries:
+        return kept
+    collapsed: list[ThemeRow] = []
+    for row in kept:
+        parts = _theme_segments(row.theme)
+        extra = [summaries[part] for part in parts if part in summaries and part != row.theme]
+        if not extra or row.summary:
+            collapsed.append(row)
+            continue
+        summary = _summarize_points([row.summary, *extra] if row.summary else extra)
+        collapsed.append(ThemeRow(
+            theme=row.theme,
+            strength=row.strength,
+            day=row.day,
+            source_day=row.source_day,
+            summary=summary,
+            source_kind=row.source_kind,
+        ))
+    return collapsed

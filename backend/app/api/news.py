@@ -204,9 +204,9 @@ def theme_board_view(
     days: int = Query(7, ge=1, le=90),
     limit: int = Query(400, ge=1, le=2000),
 ):
-    """盘后复盘板：星球复盘笔记里的主题表，**只读展示**。
+    """盘后复盘板：星球复盘笔记里的主题，**只读展示**。
 
-    ``strength`` 为笔记作者手写的强弱判断，原样透传，不是买卖信号。
+    表格和散文复盘笔记都会解析。``strength`` 为笔记原文，没有则留空，不是买卖信号。
     """
     return theme_board(days=days, limit=limit)
 

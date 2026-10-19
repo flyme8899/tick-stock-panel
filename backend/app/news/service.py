@@ -90,7 +90,7 @@ from app.news.extract import (
 )
 from app.news.scoring import Candidate, MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
-from app.news.theme_table import theme_rows_from_text
+from app.news.theme_table import redundant_theme_names, theme_rows_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -1815,18 +1815,185 @@ def _sector_names(repo) -> list[str]:
     return names
 
 
+_THEME_MERGE_SUMMARY = 160
+_THEME_MERGE_STRENGTH = 40
+
+
+def _unique_texts(values: list[str]) -> list[str]:
+    found: list[str] = []
+    for value in values:
+        text = (value or "").strip()
+        if text and text not in found:
+            found.append(text)
+    return found
+
+
+def _append_piece(current: str, extra: str, *, sep: str, limit: int) -> str:
+    text = (extra or "").strip()
+    if not text:
+        return current
+    parts = [part for part in (current or "").split(sep) if part]
+    if text not in parts:
+        parts.append(text)
+    joined = sep.join(parts)
+    if len(joined) <= limit:
+        return joined
+    return joined[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _merge_source_kind(left: str, right: str) -> str:
+    if not left:
+        return right
+    if not right or left == right:
+        return left
+    return "mixed"
+
+
+def _dedupe_theme_items(items: list[dict]) -> list[dict]:
+    """同一天、同一主题只留一行。来源用顿号接上，强弱和摘要只补不改写。"""
+    merged: dict[tuple[str, str], dict] = {}
+    order: list[tuple[str, str]] = []
+    for item in items:
+        key = (item.get("day") or "", item.get("theme") or "")
+        current = merged.get(key)
+        if current is None:
+            row = dict(item)
+            row["_sources"] = [item.get("source") or ""]
+            row["_titles"] = [item.get("title") or ""]
+            row["_urls"] = [item.get("url") or ""]
+            merged[key] = row
+            order.append(key)
+            continue
+        current["_sources"].append(item.get("source") or "")
+        current["_titles"].append(item.get("title") or "")
+        current["_urls"].append(item.get("url") or "")
+        current["strength"] = _append_piece(
+            current.get("strength") or "",
+            item.get("strength") or "",
+            sep="；",
+            limit=_THEME_MERGE_STRENGTH,
+        )
+        current["summary"] = _append_piece(
+            current.get("summary") or "",
+            item.get("summary") or "",
+            sep="；",
+            limit=_THEME_MERGE_SUMMARY,
+        )
+        current["source_kind"] = _merge_source_kind(
+            current.get("source_kind") or "",
+            item.get("source_kind") or "",
+        )
+        published = item.get("published_at") or ""
+        if published > (current.get("published_at") or ""):
+            current["published_at"] = published
+    result: list[dict] = []
+    for key in order:
+        row = merged[key]
+        sources = _unique_texts(row.pop("_sources"))
+        titles = _unique_texts(row.pop("_titles"))
+        urls = _unique_texts(row.pop("_urls"))
+        row["source"] = "、".join(sources)
+        row["title"] = "；".join(titles)[:120]
+        # 多篇来源时不把链接指到其中一篇，避免看起来像单帖结论。
+        row["url"] = urls[0] if len(urls) == 1 else ""
+        result.append(row)
+    return result
+
+
+def _fold_contained_themes(items: list[dict]) -> list[dict]:
+    """同一天里，短名被 ``A/B`` 盖住时并进复合主题，不另占一行。"""
+    by_day: dict[str, list[dict]] = {}
+    day_order: list[str] = []
+    for item in items:
+        day = item.get("day") or ""
+        if day not in by_day:
+            day_order.append(day)
+            by_day[day] = []
+        by_day[day].append(item)
+    folded: list[dict] = []
+    for day in day_order:
+        folded.extend(_fold_theme_day(by_day[day]))
+    return folded
+
+
+def _fold_theme_day(group: list[dict]) -> list[dict]:
+    drop = redundant_theme_names([item.get("theme") or "" for item in group])
+    if not drop:
+        return group
+    keepers = {item["theme"]: item for item in group if item.get("theme") not in drop}
+    rescued: set[str] = set()
+    for item in group:
+        theme = item.get("theme") or ""
+        if theme not in drop:
+            continue
+        host_name = _longest_compound(theme, list(keepers))
+        if not host_name:
+            rescued.add(theme)
+            continue
+        _merge_theme_view(keepers[host_name], item)
+    return [
+        item for item in group
+        if item.get("theme") not in drop or item.get("theme") in rescued
+    ]
+
+
+def _longest_compound(theme: str, names: list[str]) -> str:
+    matches = [
+        name for name in names
+        if theme != name and theme in _theme_parts(name)
+    ]
+    if not matches:
+        return ""
+    matches.sort(key=len, reverse=True)
+    return matches[0]
+
+
+def _theme_parts(name: str) -> list[str]:
+    return [part for part in re.split(r"[/／、|｜]+", name) if part]
+
+
+def _merge_theme_view(keeper: dict, extra: dict) -> None:
+    keeper["source"] = _append_piece(
+        keeper.get("source") or "", extra.get("source") or "", sep="、", limit=240,
+    )
+    keeper["title"] = _append_piece(
+        keeper.get("title") or "", extra.get("title") or "", sep="；", limit=120,
+    )
+    keeper["summary"] = _append_piece(
+        keeper.get("summary") or "",
+        extra.get("summary") or "",
+        sep="；",
+        limit=_THEME_MERGE_SUMMARY,
+    )
+    keeper["strength"] = _append_piece(
+        keeper.get("strength") or "",
+        extra.get("strength") or "",
+        sep="；",
+        limit=_THEME_MERGE_STRENGTH,
+    )
+    keeper["source_kind"] = _merge_source_kind(
+        keeper.get("source_kind") or "", extra.get("source_kind") or "",
+    )
+    urls = _unique_texts([keeper.get("url") or "", extra.get("url") or ""])
+    keeper["url"] = urls[0] if len(urls) == 1 else ""
+    published = extra.get("published_at") or ""
+    if published > (keeper.get("published_at") or ""):
+        keeper["published_at"] = published
+
+
 def theme_board(*, days: int = 7, limit: int = 400) -> dict:
-    """盘后复盘板：把星球复盘笔记里的主题表汇总起来，**只读展示**。
+    """盘后复盘板：汇总星球复盘笔记里的主题，**只读展示**。
 
     用途限定（有意为之，勿扩）：
 
-    - 这是**复盘**用的只读视图，回答「这几天笔记里都提了哪些主题、作者怎么看强弱」。
-    - ``strength`` 是笔记作者手写的判断，**原样透传**，服务端不做打分、不算排名、
-      不映射成任何方向。前端也不得据此生成买点/做T 提示。
-    - 不做去重合并：同一主题在不同帖子里出现多次就列多条，保留上下文与原文日期，
-      汇总是前端的事（避免在服务端引入「哪个更新」这类口径）。
+    - 这是**复盘**用的只读视图，回答「这几天笔记里都提了哪些主题」。
+    - ``strength`` 是笔记作者手写的判断，**原样透传**。散文没有这一列就留空。
+      服务端不做打分、不算排名、不映射成任何方向，也不得接进买点/做T。
+    - 同一天、同一主题只留一行，来源合并。短名若是同日 ``A/B`` 的一段，并进复合主题。
+      不同日期仍各留一行。
 
-    只读：只调 ``store.zsxq_posts``（一条 SELECT），不写库、不发网络请求。
+    只读：只调 ``store.zsxq_posts``（一条 SELECT）。查询先按日期窗口和复盘候选
+    过滤，再套 ``limit``，不写库、不发网络请求。``posts`` 是窗口内候选篇数。
     """
     span = max(1, min(int(days), 90))
     cap = max(1, min(int(limit), 2000))
@@ -1835,21 +2002,31 @@ def theme_board(*, days: int = 7, limit: int = 400) -> dict:
         rows = get_store().zsxq_posts(start, cap)
     except Exception as exc:  # noqa: BLE001 - 复盘板读不到不该让页面 500
         logger.warning("复盘板读取星球帖子失败: %s", exc)
-        return {"days": span, "posts": 0, "rows": [], "error": str(exc)[:200]}
+        return {
+            "days": span,
+            "posts": 0,
+            "posts_with_table": 0,
+            "posts_parsed": 0,
+            "rows": [],
+            "error": str(exc)[:200],
+        }
 
     items: list[dict] = []
     posts_with_table = 0
+    posts_parsed = 0
     for row in rows:
         text = row["clean_text"] or ""
-        if "|" not in text:
+        title = str(row["title"] or "")
+        # 表格、复盘笔记标题、强势板块段落之外没有可解析的主题。
+        if "|" not in text and "复盘笔记" not in title and "强势板块" not in text:
             continue
         published = str(row["published_at"] or "")
-        found = theme_rows_from_text(
-            text, published_at=published, title=str(row["title"] or ""),
-        )
+        found = theme_rows_from_text(text, published_at=published, title=title)
         if not found:
             continue
-        posts_with_table += 1
+        posts_parsed += 1
+        if any(entry.source_kind in {"table", "mixed"} for entry in found):
+            posts_with_table += 1
         source = _zsxq_label(row)
         for entry in found:
             items.append({
@@ -1858,15 +2035,19 @@ def theme_board(*, days: int = 7, limit: int = 400) -> dict:
                 "day": entry.display_day,
                 "published_at": published,
                 "source": source,
-                "title": str(row["title"] or "")[:120],
+                "title": title[:120],
                 "url": _zsxq_url(row),
+                "summary": entry.summary,
+                "source_kind": entry.source_kind,
             })
 
+    items = _fold_contained_themes(_dedupe_theme_items(items))
     items.sort(key=lambda item: (item["day"] or "", item["published_at"] or ""), reverse=True)
     return {
         "days": span,
         "posts": len(rows),
         "posts_with_table": posts_with_table,
+        "posts_parsed": posts_parsed,
         "rows": items,
         "note": "只读复盘视图；强弱为笔记原文，非买卖信号",
     }

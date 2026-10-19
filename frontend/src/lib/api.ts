@@ -2771,12 +2771,20 @@ export interface NewsThemeRow {
   source: string
   title: string
   url: string
+  /** 强势板块段落里 ① 要点的摘录。散文没有要点时为空。 */
+  summary: string
+  /** table 表格 / prose 笔记 / mixed 同一主题两边都有。 */
+  source_kind: 'table' | 'prose' | 'mixed' | string
 }
 
 export interface NewsThemeBoard {
   days: number
+  /** 所选时间窗内的复盘候选篇数（标题含复盘笔记、正文含强势板块或 Markdown 表）。 */
   posts: number
+  /** 含 Markdown 主题表的帖子数。散文帖子不计入。 */
   posts_with_table: number
+  /** 抽出至少一条主题的帖子数（表格或散文）。 */
+  posts_parsed: number
   rows: NewsThemeRow[]
   note: string
   error?: string
@@ -4909,7 +4917,7 @@ export const api = {
 
   newsHealth: () => request<NewsHealth>('/api/news/health'),
 
-  /** 盘后复盘板：星球复盘笔记里的主题表，只读。 */
+  /** 盘后复盘板：星球复盘笔记里的主题，只读。不接入信号。 */
   newsThemeBoard: (days = 7, limit = 400) =>
     request<NewsThemeBoard>(`/api/news/theme-board?days=${days}&limit=${limit}`),
 

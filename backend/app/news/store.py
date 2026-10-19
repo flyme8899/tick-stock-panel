@@ -415,13 +415,24 @@ class NewsStore:
         return enriched
 
     def zsxq_posts(self, start: datetime, limit: int) -> list[sqlite3.Row]:
-        """知识星球帖子（按发布时间倒序）。只读，供盘后复盘板抽主题表用。"""
+        """日期窗口内的复盘候选，按发布时间倒序。只读。
+
+        先按窗口和候选条件过滤，再 ``LIMIT``。一天的星球帖子有一千多篇，
+        若先取最近 N 篇再在 Python 里筛，3/7/30 天会看到同一批帖子。
+        候选是：标题含「复盘笔记」、正文含「强势板块」，或正文里有 Markdown 竖线。
+        """
         with self._lock:
             return list(self._conn.execute(
                 """
                 SELECT id, source_id, published_at, author, title, clean_text, url, raw_json
                 FROM news_items
-                WHERE source = 'zsxq' AND published_at >= ?
+                WHERE source = 'zsxq'
+                  AND published_at >= ?
+                  AND (
+                        instr(ifnull(title, ''), '复盘笔记') > 0
+                     OR instr(ifnull(clean_text, ''), '强势板块') > 0
+                     OR instr(ifnull(clean_text, ''), '|') > 0
+                  )
                 ORDER BY published_at DESC
                 LIMIT ?
                 """,
