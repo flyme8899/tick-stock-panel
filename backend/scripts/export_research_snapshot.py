@@ -43,9 +43,10 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Callable, Iterator
+from bisect import bisect_right
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 CN_TZ = timezone(timedelta(hours=8))
@@ -86,7 +87,9 @@ TABLES: tuple[TableSpec, ...] = (
     TableSpec(
         "etf_shares", "partitioned", "fund_flow/etf_shares",
         "ETF 份额（日度）。ingested_at 是首次写入时刻（Asia/Shanghai）；"
-        "更早分区没有该列，导出后为空，不是补写的可见时间",
+        "更早分区没有该列，导出后为空，不是补写的可见时间。"
+        "source_mode 只在导出时派生、不写回原表："
+        "ingested_at 为空为 backfill，早于下一交易日 09:30（北京时间）为 daily，否则为 late",
     ),
     TableSpec("etf_flow_news", "sqlite", "news/news.sqlite",
               "ETF领航者申赎文章（news.sqlite 中 source=etf_flow，不受 45 天清理）",
@@ -349,7 +352,129 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def export_table(plan: Plan, out_dir: Path, start: date, end: date, chunk_rows: int) -> dict:
+# 下一交易日开盘。早于这一刻才算 daily；09:30 整点已经能用到的数据不算「开盘前可见」。
+_NEXT_OPEN = time(9, 30)
+
+
+def share_trading_days(data_dir: Path) -> list[date]:
+    """ETF 份额回补用的交易日历。导出不再自己扫一套分区。"""
+    from app.fund_flow.jobs import local_trading_days
+
+    return local_trading_days(data_dir)
+
+
+def _next_weekday(day: date) -> date:
+    cursor = day + timedelta(days=1)
+    while cursor.weekday() >= 5:
+        cursor += timedelta(days=1)
+    return cursor
+
+
+def _next_trading_day(days: tuple[date, ...], day: date) -> date:
+    """``days`` 必须已升序去重。没有更晚的分区日时退回下一个工作日。"""
+    pos = bisect_right(days, day)
+    if pos < len(days):
+        return days[pos]
+    return _next_weekday(day)
+
+
+def next_trading_day_after(calendar: Sequence[date], day: date) -> date:
+    """``day`` 之后的下一个交易日。
+
+    ``calendar`` 是 ``jobs.local_trading_days``（本地 ``kline_daily`` 分区）。
+    取严格晚于 ``day`` 的第一个分区日，周末和中间没有日 K 的休市日自然被跨过。
+    日历在 ``day`` 之后还没有日 K 时，不能把之后的工作日都当成休市，否则最近
+    一个交易日没有下一档；这时退回下一个工作日。真正的开市日只可能更晚。
+    """
+    return _next_trading_day(tuple(sorted(set(calendar))), day)
+
+
+def _missing_ingested_at(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _parse_trade_day(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        text = value.strip()[:10]
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_ingested_at(value: object) -> datetime | None:
+    """解析入库时刻，统一到北京时间。无时区的墙钟按北京时间，不看服务器时区。"""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=CN_TZ)
+        return value.astimezone(CN_TZ)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=CN_TZ)
+    return None
+
+
+def _source_mode(trade_date: object, ingested_at: object, trading_days: tuple[date, ...]) -> str:
+    """只看 ingested_at 和交易日历。文件修改时间不是入库时刻，这里不读。"""
+    if _missing_ingested_at(ingested_at):
+        return "backfill"
+    moment = _parse_ingested_at(ingested_at)
+    day = _parse_trade_day(trade_date)
+    if moment is None or day is None:
+        return "late"
+    nxt = _next_trading_day(trading_days, day)
+    cutoff = datetime.combine(nxt, _NEXT_OPEN, tzinfo=CN_TZ)
+    if moment < cutoff:
+        return "daily"
+    return "late"
+
+
+def etf_share_source_mode(trade_date: object, ingested_at: object, calendar: Sequence[date]) -> str:
+    """导出列 ``source_mode``：``backfill`` / ``daily`` / ``late``。"""
+    return _source_mode(trade_date, ingested_at, tuple(sorted(set(calendar))))
+
+
+def _with_share_source_mode(schema, chunks, trading_days: list[date]):
+    """给 etf_shares 的导出块追加 source_mode。不改源文件的 schema。"""
+    import pyarrow as pa
+
+    if "source_mode" in schema.names:
+        schema = schema.remove(schema.get_field_index("source_mode"))
+    schema = schema.append(pa.field("source_mode", pa.string()))
+    days = tuple(sorted(set(trading_days)))
+
+    def _gen():
+        for chunk in chunks:
+            if "source_mode" in chunk.column_names:
+                chunk = chunk.drop(["source_mode"])
+            n = chunk.num_rows
+            trades = (chunk.column("trade_date").to_pylist()
+                      if "trade_date" in chunk.column_names else [None] * n)
+            ingested = (chunk.column("ingested_at").to_pylist()
+                        if "ingested_at" in chunk.column_names else [None] * n)
+            modes = [
+                _source_mode(day, stamp, days)
+                for day, stamp in zip(trades, ingested, strict=True)
+            ]
+            yield chunk.append_column("source_mode", pa.array(modes, type=pa.string()))
+
+    return schema, _gen()
+
+
+def export_table(plan: Plan, out_dir: Path, start: date, end: date, chunk_rows: int,
+                 trading_days: list[date] | None = None) -> dict:
     import pyarrow.parquet as pq
 
     spec = plan.spec
@@ -359,6 +484,8 @@ def export_table(plan: Plan, out_dir: Path, start: date, end: date, chunk_rows: 
     else:
         schema = _unified_schema(plan.files)
         chunks = _iter_parquet(plan, schema, chunk_rows)
+    if spec.name == "etf_shares":
+        schema, chunks = _with_share_source_mode(schema, chunks, trading_days or [])
     target = out_dir / f"{spec.name}.parquet"
     rows = 0
     dmin = dmax = None
@@ -730,6 +857,9 @@ def run(
         shutil.rmtree(tmp)
     tmp.mkdir()
     created = now()
+    trading_days: list[date] = []
+    if any(p.spec.name == "etf_shares" and p.status == "ok" for p in plans):
+        trading_days = share_trading_days(data_dir)
     try:
         results = {}
         for p in plans:
@@ -737,7 +867,7 @@ def run(
                      "kind": p.spec.kind, "date_filtered": p.spec.date_filtered}
             if p.status == "ok":
                 log(f"导出 {p.spec.name} ...")
-                entry.update(export_table(p, tmp, start, end, chunk_rows))
+                entry.update(export_table(p, tmp, start, end, chunk_rows, trading_days))
                 entry["source_files"] = len(p.files)
                 if p.spec.where:
                     entry["filter"] = p.spec.where

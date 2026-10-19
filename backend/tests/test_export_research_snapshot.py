@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 import polars as pl
 import pytest
@@ -109,6 +110,7 @@ def test_export_writes_manifest_and_files(data_dir, tmp_path):
     assert kl["rows"] == 9 and kl["source_files"] == 3
     df = pl.read_parquet(d / "kline_daily.parquet")
     assert df.height == 9
+    assert "source_mode" not in df.columns
     # 分区间字段不一致：volume 统一为浮点，缺 amount 的分区补空
     assert df.schema["volume"] == pl.Float64
     assert df["amount"].null_count() == 5
@@ -392,3 +394,155 @@ def test_csv_list_to_json_text_and_other_nested_rejected():
     bad = pa.RecordBatch.from_pydict({"x": pa.array([[1, 2]], type=pa.list_(pa.int64()))})
     with pytest.raises(SnapshotError):
         snap._csv_ready(bad)
+
+
+# ---------- ETF 份额 source_mode（只在导出时派生） ----------
+
+# 2026-09-30 之后到 2026-10-09 之前是休市；2026-10-09 是周五，下一交易日是 2026-10-12。
+_SHARE_CALENDAR = [
+    date(2026, 9, 30), date(2026, 10, 9), date(2026, 10, 12), date(2026, 10, 13),
+    date(2026, 10, 14), date(2026, 10, 15), date(2026, 10, 16),
+]
+
+
+def _bj(y, m, d, hh, mm, ss=0):
+    return datetime(y, m, d, hh, mm, ss, tzinfo=CN_TZ)
+
+
+@pytest.mark.parametrize(("trade_date", "ingested", "expected"), [
+    ("2026-10-12", None, "backfill"),
+    ("2026-10-13", "", "backfill"),
+    ("2026-10-14", "   ", "backfill"),
+    ("2026-10-15", None, "backfill"),
+    ("2026-10-16", None, "backfill"),
+    ("2026-10-09", _bj(2026, 10, 9, 16, 40), "daily"),
+    ("2026-10-09", _bj(2026, 10, 10, 8, 0), "daily"),  # 周五数据，周六入库，仍早于周一 09:30
+    ("2026-10-09", _bj(2026, 10, 12, 9, 29, 59), "daily"),
+    ("2026-10-09", _bj(2026, 10, 12, 9, 30), "late"),
+    ("2026-10-09", _bj(2026, 10, 12, 16, 42), "late"),
+    ("2026-10-09", datetime(2026, 10, 12, 1, 29, tzinfo=UTC), "daily"),
+    ("2026-10-09", datetime(2026, 10, 12, 1, 30, tzinfo=UTC), "late"),
+    ("2026-10-09", datetime(2026, 10, 12, 9, 30), "late"),  # 无时区墙钟按北京时间
+    ("2026-09-30", _bj(2026, 10, 8, 23, 0), "daily"),  # 休市跨到 10-09 09:30 之前
+    ("2026-09-30", _bj(2026, 10, 9, 9, 30), "late"),
+    ("not-a-date", _bj(2026, 10, 9, 16, 40), "late"),
+    ("2026-10-09", "not-a-time", "late"),
+])
+def test_etf_share_source_mode_empty_daily_late_and_spans(trade_date, ingested, expected):
+    assert snap.etf_share_source_mode(trade_date, ingested, _SHARE_CALENDAR) == expected
+
+
+def test_next_trading_day_uses_calendar_then_weekday_after_the_end():
+    assert snap.next_trading_day_after(_SHARE_CALENDAR, date(2026, 10, 9)) == date(2026, 10, 12)
+    assert snap.next_trading_day_after(_SHARE_CALENDAR, date(2026, 9, 30)) == date(2026, 10, 9)
+    assert snap.next_trading_day_after([], date(2026, 10, 9)) == date(2026, 10, 12)
+    # 日历停在周五：同一天 16:40 仍早于下一个工作日 09:30；那个工作日 09:30 起算 late。
+    only = [date(2026, 10, 16)]
+    assert snap.next_trading_day_after(only, date(2026, 10, 16)) == date(2026, 10, 19)
+    assert snap.etf_share_source_mode("2026-10-16", _bj(2026, 10, 16, 16, 40), only) == "daily"
+    assert snap.etf_share_source_mode("2026-10-16", _bj(2026, 10, 19, 9, 30), only) == "late"
+
+
+def _write_share(root, day: str, frame: pl.DataFrame):
+    path = root / "fund_flow" / "etf_shares" / f"date={day}"
+    path.mkdir(parents=True)
+    target = path / "part.parquet"
+    frame.write_parquet(target)
+    # 改成「像当日 16:40 采集」的修改时间。导出必须忽略它。
+    year, month, day_num = (int(part) for part in day.split("-"))
+    stamp = _bj(year, month, day_num, 16, 40).timestamp()
+    os.utime(target, (stamp, stamp))
+    return target
+
+
+def test_etf_shares_export_derives_source_mode_without_changing_table(tmp_path):
+    import pyarrow.parquet as pq
+
+    root = tmp_path / "data"
+    root.mkdir()
+    for day in (d.isoformat() for d in _SHARE_CALENDAR):
+        (root / "kline_daily" / f"date={day}").mkdir(parents=True, exist_ok=True)
+    kline = root / "kline_daily" / "date=2026-10-09" / "part.parquet"
+    pl.DataFrame({"symbol": ["000001.SZ"], "close": [1.0]}).write_parquet(kline)
+
+    stamp_type = pl.Datetime(time_unit="us", time_zone="Asia/Shanghai")
+    holiday = pl.DataFrame({
+        "symbol": ["510300", "510310"],
+        "code": ["510300", "510310"],
+        "name": ["沪深300", "沪深300B"],
+        "trade_date": ["2026-09-30", "2026-09-30"],
+        "shares": [1.0, 2.0],
+        "source": ["akshare", "akshare"],
+        "ingested_at": [_bj(2026, 10, 8, 23, 0), _bj(2026, 10, 9, 9, 30)],
+        "updated_at": [None, None],
+    }, schema_overrides={"ingested_at": stamp_type, "updated_at": stamp_type})
+    weekend = pl.DataFrame({
+        "symbol": ["510500", "510510", "510520", "510530"],
+        "code": ["510500", "510510", "510520", "510530"],
+        "name": ["中证500"] * 4,
+        "trade_date": ["2026-10-09"] * 4,
+        "shares": [1.0, 2.0, 3.0, 4.0],
+        "source": ["akshare"] * 4,
+        "ingested_at": [
+            _bj(2026, 10, 9, 16, 40), _bj(2026, 10, 10, 8, 0),
+            _bj(2026, 10, 12, 9, 29, 59), _bj(2026, 10, 12, 9, 30),
+        ],
+        "updated_at": [None, None, None, None],
+    }, schema_overrides={"ingested_at": stamp_type, "updated_at": stamp_type})
+    null_stamp = pl.DataFrame({
+        "symbol": ["510150"],
+        "code": ["510150"],
+        "name": ["空入库时刻"],
+        "trade_date": ["2026-10-15"],
+        "shares": [1.0],
+        "source": ["akshare"],
+        "ingested_at": [None],
+        "updated_at": [_bj(2026, 10, 16, 16, 40)],
+    }, schema_overrides={"ingested_at": stamp_type, "updated_at": stamp_type})
+
+    sources = [
+        _write_share(root, "2026-09-30", holiday),
+        _write_share(root, "2026-10-09", weekend),
+        _write_share(root, "2026-10-15", null_stamp),
+    ]
+    for day, code in [("2026-10-12", "510120"), ("2026-10-13", "510130"),
+                      ("2026-10-14", "510140"), ("2026-10-16", "510160")]:
+        sources.append(_write_share(root, day, pl.DataFrame({
+            "symbol": [code], "code": [code], "name": [code],
+            "trade_date": [day], "shares": [1.0], "source": ["akshare"],
+        })))
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in sources}
+
+    out = tmp_path / "snaps"
+    summary = _run(root, out, tables=["etf_shares", "kline_daily"],
+                   start=date(2026, 9, 1), end=date(2026, 10, 31), chunk_rows=2)
+    assert {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in sources} == before
+    for path in sources:
+        names = pq.read_schema(path).names
+        assert "source_mode" not in names
+    legacy = root / "fund_flow" / "etf_shares" / "date=2026-10-12" / "part.parquet"
+    assert "ingested_at" not in pq.read_schema(legacy).names
+
+    exported = pl.read_parquet(out / "20261017" / "etf_shares.parquet")
+    assert exported.height == 11
+    assert summary["manifest"]["tables"]["etf_shares"]["columns"]["source_mode"] == "string"
+    modes = {
+        (row["trade_date"], row["code"]): row["source_mode"]
+        for row in exported.select("trade_date", "code", "source_mode").iter_rows(named=True)
+    }
+    assert modes[("2026-09-30", "510300")] == "daily"
+    assert modes[("2026-09-30", "510310")] == "late"
+    assert modes[("2026-10-09", "510500")] == "daily"
+    assert modes[("2026-10-09", "510510")] == "daily"
+    assert modes[("2026-10-09", "510520")] == "daily"
+    assert modes[("2026-10-09", "510530")] == "late"
+    for day, code in [("2026-10-12", "510120"), ("2026-10-13", "510130"),
+                      ("2026-10-14", "510140"), ("2026-10-15", "510150"),
+                      ("2026-10-16", "510160")]:
+        assert modes[(day, code)] == "backfill"
+    kline_df = pl.read_parquet(out / "20261017" / "kline_daily.parquet")
+    assert "source_mode" not in kline_df.columns
+
+    csv_rows = _read_csv(out / "20261017" / "csv" / "etf_shares.csv.gz")
+    csv_modes = {(row["trade_date"], row["code"]): row["source_mode"] for _, row in csv_rows.iterrows()}
+    assert csv_modes == modes

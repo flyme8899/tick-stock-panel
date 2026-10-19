@@ -70,6 +70,8 @@ nice -n 19 ionice -c3 docker compose run --rm --no-deps -T \
 
 etf_shares 的 `ingested_at` 是该行首次写入生产库的时刻（Asia/Shanghai），`updated_at` 是份额、名称、代码或来源后来发生变化的时刻。此功能上线前已经落盘、且之后没有再写过的分区没有这两列，导出后为空。空值不是「当天已经可见」，也不能用导出时间或文件修改时间填上。重写后业务列没变的历史行同样留空；业务列变了则只有 `updated_at`。CSV 里这个时刻带数字偏移（如 `2026-10-09T16:40:00+0800`），parquet 里保留时区。
 
+导出时另加一列 `source_mode`，只存在于快照里的 parquet 和 CSV，不写回 `data/fund_flow/etf_shares`，也不改表结构。交易日历与份额回补相同，是本地 `kline_daily` 的 `date=` 分区。`ingested_at` 缺列或为空记 `backfill`。有入库时刻、且早于数据日的下一交易日北京时间 09:30，记 `daily`；等于或晚于该时刻记 `late`。下一交易日是日历里严格晚于数据日的第一个交易日，周末和中间没有日 K 的休市日都会跨过去。日历在数据日之后还没有日 K 时，退回下一个工作日：休市只会把真正的开市日再推晚，同一天收盘后写入的时刻仍然早于那个工作日 09:30。文件修改时间不参与判断。已经导出的快照要带上这列，需要重新跑导出；`--csv-only` 只按已有 parquet 转 CSV，不会补算。
+
 hot_event_rank 说明：
 
 - `session_date` 是分区日，`slot` 是档位。preopen = 当天 09:15 前最后一版；postclose = 当天 15:05 后第一版；
