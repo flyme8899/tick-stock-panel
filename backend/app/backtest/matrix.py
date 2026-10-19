@@ -54,7 +54,9 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 5
+# 6: total_shares 从「当前股本广播」改为按交易日的股本矩阵。
+# 旧缓存里的一维向量不能再当历史股本用。
+_DIRECT_MATRIX_LOADER_VERSION = 6
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -857,6 +859,9 @@ def _load_market_data_matrix_from_parquet_once(
     )
     normalized_symbols = _normalize_symbol_request(symbols)
     instrument_fingerprint = _instrument_fingerprint(instruments).hex()
+    if "total_shares" in requested_fields or "total_shares" in build_fields:
+        # 财务股本文件更新后, 按日总股本矩阵必须重算。
+        instrument_fingerprint += ":" + _share_history_fingerprint(root)
 
     dataset = _open_matrix_parquet_dataset(root, skip=skip)
     _validate_matrix_dataset_schema(dataset)
@@ -1042,6 +1047,12 @@ def _resolve_matrix_storage_fields(
         and name in instrument_columns
         and name not in parquet_fields
     }
+    # 总股本随增发/送转变化。留在 vector_fields 会把 instruments 的当前股本
+    # 广播到每个交易日, 市值过滤就带上了未来股本。改成整段时间轴上的矩阵,
+    # 由 _instrument_axis_values 按公告日向前填充。
+    if "total_shares" in vector_fields:
+        vector_fields.remove("total_shares")
+        matrix_fields.add("total_shares")
     if "raw_close" in wanted_fields:
         matrix_fields.add("raw_close")
     if "turnover_rate" in wanted_fields:
@@ -1111,6 +1122,9 @@ def _build_market_data_matrix_from_dataset(
         cancel_event=cancel_event,
     )
     _raise_if_matrix_cancelled(cancel_event)
+    share_history = (
+        _load_matrix_share_history(root) if "total_shares" in wanted_fields else None
+    )
     names, latest_limits = _populate_matrix_derived_arrays(
         actual_symbols,
         arrays,
@@ -1120,6 +1134,8 @@ def _build_market_data_matrix_from_dataset(
         seen,
         parquet_fields=parquet_fields,
         vector_fields=vector_fields,
+        trading_dates=actual_dates,
+        share_history=share_history,
     )
     if "price_limit_pct" in fields:
         write_numpy_price_limit_matrix(
@@ -1280,6 +1296,9 @@ def _build_market_data_matrix_cache_from_dataset(
         timing_ms["scan"] = round((time.perf_counter() - stage_started) * 1000, 1)
         stage_started = time.perf_counter()
         _mask_unseen_staging_core(arrays, fields, parquet_fields, seen)
+        share_history = (
+            _load_matrix_share_history(root) if "total_shares" in wanted_fields else None
+        )
         names, latest_limits = _populate_matrix_derived_arrays(
             actual_symbols,
             arrays,
@@ -1289,6 +1308,8 @@ def _build_market_data_matrix_cache_from_dataset(
             seen,
             parquet_fields=parquet_fields,
             vector_fields=vector_fields,
+            trading_dates=actual_dates,
+            share_history=share_history,
         )
         _mask_unseen_staging_fields(fields, seen)
         _raise_if_matrix_cancelled(cancel_event)
@@ -1555,17 +1576,33 @@ def _populate_matrix_derived_arrays(
     *,
     parquet_fields: list[str],
     vector_fields: list[str],
+    trading_dates: Sequence[date] | None = None,
+    share_history: pl.DataFrame | None = None,
 ) -> tuple[list[str], Mapping[str, np.ndarray]]:
     instrument_wanted = set(wanted_fields)
     if "turnover_rate" in wanted_fields and "turnover_rate" not in fields:
         instrument_wanted.add("float_shares")
+    share_out = fields.get("total_shares")
+    if (
+        share_out is None
+        or share_out.ndim != 2
+        or share_out.shape != seen.shape
+    ):
+        share_out = None
     names, instrument_fields, latest_limits = _instrument_axis_values(
         actual_symbols,
         instrument_wanted,
         instruments,
         time_count=seen.shape[0],
+        trading_dates=trading_dates,
+        share_history=share_history,
+        total_shares_out=share_out,
     )
     for name, values in instrument_fields.items():
+        # 按日总股本直接写进预分配矩阵, 避免再复制一整块 time × asset。
+        if values is fields.get(name):
+            _mask_unseen_staging_fields({name: values}, seen)
+            continue
         if name in parquet_fields:
             continue
         if name not in fields:
@@ -2264,12 +2301,167 @@ def _arrow_numeric(value_type: pa.DataType) -> bool:
     )
 
 
+def _share_history_path(parquet_root: Path) -> Path:
+    return Path(parquet_root).parent / "financials" / "shares" / "part.parquet"
+
+
+def _share_history_fingerprint(parquet_root: Path) -> str:
+    path = _share_history_path(parquet_root)
+    try:
+        stat = path.stat()
+    except OSError:
+        return "missing"
+    return f"{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def _load_matrix_share_history(parquet_root: Path) -> pl.DataFrame | None:
+    """读取财务股本里按日总股本要用的列。未同步时返回 None, 不告警。"""
+    path = _share_history_path(parquet_root)
+    if not path.exists():
+        return None
+    try:
+        schema_names = set(pl.scan_parquet(path).collect_schema().names())
+        if not {"symbol", "period_end", "total_shares"} <= schema_names:
+            logger.warning("matrix share history missing total_shares columns: %s", path)
+            return None
+        columns = ["symbol", "period_end", "total_shares"]
+        if "announce_date" in schema_names:
+            columns.append("announce_date")
+        return pl.read_parquet(path, columns=columns)
+    except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
+        logger.warning("matrix share history unreadable %s: %s", path, exc)
+        return None
+
+
+def _share_date_expr(column: str, schema: Mapping[str, pl.DataType]) -> pl.Expr:
+    dtype = schema[column]
+    if dtype in (pl.Utf8, pl.String):
+        return pl.col(column).str.slice(0, 10).str.to_date(strict=False)
+    if isinstance(dtype, pl.Datetime):
+        return pl.col(column).dt.date()
+    return pl.col(column).cast(pl.Date, strict=False)
+
+
+def _total_share_events(history: pl.DataFrame, symbols: Sequence[str]) -> pl.DataFrame | None:
+    """按可用日压缩成每个 (symbol, 可用日) 的最后一条总股本。
+
+    可用日是 period_end 与 announce_date 中较晚的那个: 报告期还没结束,
+    或者公告还没发布, 这条股本都不能进当天的回测。公告日列整列缺失,
+    或单行公告日为空时, 只能退到报告期。
+    """
+    if history.is_empty() or not {"symbol", "period_end", "total_shares"} <= set(history.columns):
+        return None
+    schema = history.schema
+    period = _share_date_expr("period_end", schema)
+    if "announce_date" in history.columns:
+        available = pl.max_horizontal(
+            _share_date_expr("period_end", schema),
+            _share_date_expr("announce_date", schema),
+        )
+    else:
+        available = period
+    events = (
+        history.select(
+            pl.col("symbol").cast(pl.Utf8),
+            available.alias("_available"),
+            _share_date_expr("period_end", schema).alias("_period_end"),
+            pl.col("total_shares").cast(pl.Float64, strict=False),
+        )
+        .filter(
+            pl.col("symbol").is_in(list(symbols))
+            & pl.col("symbol").is_not_null()
+            & pl.col("_available").is_not_null()
+            & pl.col("total_shares").is_not_null()
+            & (pl.col("total_shares") > 0)
+        )
+        .sort(["symbol", "_available", "_period_end"])
+        .unique(subset=["symbol", "_available"], keep="last")
+        .with_columns(pl.col("_available").dt.epoch("d").cast(pl.Int32).alias("_ord"))
+        .select("symbol", "_ord", "total_shares")
+        .sort(["symbol", "_ord"])
+    )
+    if events.is_empty():
+        return None
+    return events
+
+
+def _forward_fill_share_column(column: np.ndarray, start: int) -> None:
+    segment = column[start:]
+    positions = np.arange(segment.size, dtype=np.int32)
+    chosen = np.where(np.isfinite(segment), positions, np.int32(0))
+    np.maximum.accumulate(chosen, out=chosen)
+    segment[:] = segment[chosen]
+
+
+def _write_asof_total_shares(
+    out: np.ndarray,
+    symbols: list[str],
+    trading_dates: Sequence[date],
+    history: pl.DataFrame,
+    fallback: np.ndarray,
+) -> bool:
+    """把当时已知的总股本前向填充进 ``out`` (time × asset)。
+
+    某个交易日用「可用日 <= 该日」的最新一条。可用日当天若是交易日, 当天就用
+    新股本。可用日落在非交易日时, 从其后第一个交易日起生效。
+
+    早于该股票最早一条记录的交易日, 没有当时已经公开的股本。这时回退到
+    **最早一条已知总股本**, 而不是 instruments 里的最新股本, 避免把之后的
+    增发或送转提前用到上市初期。财务表里完全没有记录的股票才用 fallback
+    (instruments 当前总股本, 或缺失时为 NaN)。
+    """
+    events = _total_share_events(history, symbols)
+    if events is None:
+        return False
+    epoch = date(1970, 1, 1)
+    date_ords = np.asarray(
+        [(value - epoch).days for value in trading_dates],
+        dtype=np.int32,
+    )
+    symbol_to_id = {symbol: index for index, symbol in enumerate(symbols)}
+    out[:] = fallback.reshape(1, -1)
+    grouped = events.group_by("symbol", maintain_order=True).agg(
+        pl.col("_ord"),
+        pl.col("total_shares"),
+    )
+    for symbol, ords, shares in grouped.iter_rows():
+        asset_id = symbol_to_id.get(str(symbol))
+        if asset_id is None:
+            continue
+        ord_values = np.asarray(ords, dtype=np.int32)
+        share_values = np.asarray(shares, dtype=np.float32)
+        if ord_values.size == 0:
+            continue
+        order = np.argsort(ord_values, kind="mergesort")
+        ord_values = ord_values[order]
+        share_values = share_values[order]
+        column = out[:, asset_id]
+        positions = np.searchsorted(date_ords, ord_values, side="left")
+        in_window = positions < date_ords.size
+        if not np.any(in_window):
+            column[:] = share_values[0]
+            continue
+        column[:] = np.nan
+        in_pos = positions[in_window]
+        in_shares = share_values[in_window]
+        for pos, value in zip(in_pos, in_shares, strict=True):
+            column[int(pos)] = value
+        first_idx = int(in_pos[0])
+        if first_idx > 0:
+            column[:first_idx] = share_values[0]
+        _forward_fill_share_column(column, first_idx)
+    return True
+
+
 def _instrument_axis_values(
     symbols: list[str],
     wanted_fields: set[str],
     instruments: pl.DataFrame | None,
     *,
     time_count: int,
+    trading_dates: Sequence[date] | None = None,
+    share_history: pl.DataFrame | None = None,
+    total_shares_out: np.ndarray | None = None,
 ) -> tuple[list[str], dict[str, np.ndarray], dict[str, np.ndarray]]:
     names = [""] * len(symbols)
     fields: dict[str, np.ndarray] = {}
@@ -2307,11 +2499,44 @@ def _instrument_axis_values(
             if value is not None:
                 target[asset_id] = np.float32(value)
 
+    share_matrix: np.ndarray | None = None
+    if (
+        "total_shares" in vectors
+        and trading_dates is not None
+        and share_history is not None
+        and not share_history.is_empty()
+    ):
+        if len(trading_dates) != time_count:
+            logger.warning(
+                "share history date axis %s does not match matrix rows %s",
+                len(trading_dates),
+                time_count,
+            )
+        else:
+            target = total_shares_out
+            if (
+                target is None
+                or target.shape != (time_count, len(symbols))
+                or target.dtype != np.float32
+            ):
+                target = np.empty((time_count, len(symbols)), dtype=np.float32)
+            if _write_asof_total_shares(
+                target,
+                symbols,
+                trading_dates,
+                share_history,
+                vectors["total_shares"],
+            ):
+                vectors.pop("total_shares")
+                share_matrix = target
+
     shape = (1, len(symbols))
     fields.update({
         name: np.broadcast_to(values.reshape(shape), (time_count, len(symbols)))
         for name, values in vectors.items()
     })
+    if share_matrix is not None:
+        fields["total_shares"] = share_matrix
     return names, fields, limits
 
 
@@ -3827,12 +4052,15 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
 
     mask = np.ones(market.shape, dtype=bool)
     close = market.close
+    # 价格带和总市值用当日不复权收盘。market.close 是前复权价, 除权后会把
+    # 早期价格和市值一起缩小。raw_close 才是当日实际价; 没有该列时回退 close。
+    price = market.fields.get("raw_close", close)
     if config.get("price_min") is not None:
-        mask &= close >= float(config["price_min"])
+        mask &= price >= float(config["price_min"])
     if config.get("price_max") is not None:
-        mask &= close <= float(config["price_max"])
+        mask &= price <= float(config["price_max"])
 
-    _apply_bound(mask, close * _optional_field(market, "total_shares"), config, "market_cap")
+    _apply_bound(mask, price * _optional_field(market, "total_shares"), config, "market_cap")
     _apply_bound(mask, close * _optional_field(market, "float_shares"), config, "float_cap")
     _apply_bound(mask, _required_field_for_bound(market, config, "amount"), config, "amount")
     _apply_bound(mask, _optional_field(market, "turnover_rate"), config, "turnover")
