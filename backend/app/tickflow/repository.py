@@ -260,6 +260,13 @@ class DataStore:
                 # 跨版本/平台也可能抛 CatalogException 等。空目录缺视图不影响启动
                 # (后续同步写入数据后会重新刷新视图),这里一律降级为 debug 日志。
                 logger.debug("view registration skipped (no parquet yet): %s", sql[:60])
+        try:
+            from app.fund_flow.store import etf_shares_view_sql
+
+            # union_by_name：历史分区没有 ingested_at，和新分区一起读不能因缺列失败。
+            self.db.execute(etf_shares_view_sql(self.data_dir))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("etf_shares view registration skipped: %s", e)
         self._register_unified_views()
 
     def _has_parquet(self, subdir: str) -> bool:
@@ -2237,11 +2244,11 @@ class KlineRepository:
             self.store._register_unified_views()
 
     def rebuild_views(self) -> None:
-        """重建全部 13 张 parquet 视图并重挂 unified 视图 —— 唯一权威实现。
+        """重建 parquet 视图并重挂 unified 视图 —— 唯一权威实现。
 
         原先 daily_pipeline._refresh_views(盘后管道) 与 /api/data/clear(清库) 各自
         内联了同一份视图重建 SQL, 清库那份还漏了几张视图导致漂移。此处收敛为单一入口:
-        覆盖全部 13 张视图 (二者的超集), 空目录 (清库后) 也能安全重挂。
+        覆盖行情视图和 ETF 份额视图, 空目录 (清库后) 也能安全重挂。
         """
         d = self.store.data_dir.as_posix()
         views = {
@@ -2268,6 +2275,13 @@ class KlineRepository:
                     )
             except Exception as e:  # noqa: BLE001
                 logger.warning("rebuild view %s failed: %s", name, e)
+        try:
+            from app.fund_flow.store import etf_shares_view_sql
+
+            with self._lock:
+                self.db.execute(etf_shares_view_sql(self.store.data_dir))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("rebuild etf_shares view skipped: %s", e)
         with self._lock:
             self.store._register_unified_views()
 

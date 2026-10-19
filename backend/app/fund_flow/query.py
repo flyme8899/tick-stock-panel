@@ -229,17 +229,29 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
     linked = _etf_flow_map(root, day)
     inflows = etf_inflow.latest_inflows(root, as_of=day)
     items = []
-    for row in frame.to_dicts():
+    for row in frame.iter_rows(named=True):
         code = row.get("code")
         if not code:
             continue
         fields = _etf_money_fields(code, linked, inflows)
-        items.append({**row, **fields, "etf_flow_linked": fields["flow_net"] is not None})
+        items.append({
+            **{key: _json_ready(value) for key, value in row.items()},
+            **fields,
+            "etf_flow_linked": fields["flow_net"] is not None,
+        })
     return {
         "trade_date": day,
         "etf_flow_linked": any(item["etf_flow_linked"] for item in items),
         "items": items,
     }
+
+
+def _json_ready(value: object) -> object:
+    """带时区的入库时刻写成 +08:00 文本。空值保持空，不补成写入接口的当前时间。"""
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=CN_TZ)
+        return moment.astimezone(CN_TZ).isoformat(timespec="seconds")
+    return value
 
 
 def _etf_flow_map(data_dir: Path, trade_date: str) -> dict[str, dict[str, float | None]]:
@@ -755,10 +767,10 @@ def _shares_by_code(root: Path, day: str | None) -> dict[str, float]:
     if day is None:
         return {}
     frame = _partition(root, "etf_shares", day)
+    if frame.is_empty() or "code" not in frame.columns or "shares" not in frame.columns:
+        return {}
     out: dict[str, float] = {}
-    for row in frame.to_dicts():
-        code = row.get("code")
-        shares = row.get("shares")
+    for code, shares in frame.select("code", "shares").iter_rows():
         if code and shares is not None:
             out[code] = shares
     return out
@@ -786,7 +798,9 @@ def _etf_changes(root: Path) -> dict:
     current = _partition(root, "etf_shares", day)
     broad = []
     others = []
-    for row in current.to_dicts():
+    # 看板不展示入库时刻。只取份额计算要用的列，避免把时间戳收成 Python 对象。
+    shown = [name for name in ("code", "name", "shares") if name in current.columns]
+    for row in current.select(shown).iter_rows(named=True):
         code = row.get("code")
         if not code:
             continue

@@ -68,6 +68,8 @@ nice -n 19 ionice -c3 docker compose run --rm --no-deps -T \
 
 分钟 K 线（data/kline_minute）体积大，暂不进快照。
 
+etf_shares 的 `ingested_at` 是该行首次写入生产库的时刻（Asia/Shanghai），`updated_at` 是份额、名称、代码或来源后来发生变化的时刻。此功能上线前已经落盘、且之后没有再写过的分区没有这两列，导出后为空。空值不是「当天已经可见」，也不能用导出时间或文件修改时间填上。重写后业务列没变的历史行同样留空；业务列变了则只有 `updated_at`。CSV 里这个时刻带数字偏移（如 `2026-10-09T16:40:00+0800`），parquet 里保留时区。
+
 hot_event_rank 说明：
 
 - `session_date` 是分区日，`slot` 是档位。preopen = 当天 09:15 前最后一版；postclose = 当天 15:05 后第一版；
