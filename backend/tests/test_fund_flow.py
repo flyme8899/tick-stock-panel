@@ -1084,7 +1084,9 @@ def test_szse_windows_cover_history_without_exceeding_six_months() -> None:
     ]
 
 
-def test_sync_etf_shares_keeps_sse_when_szse_fails(tmp_path) -> None:
+def test_sync_etf_shares_keeps_sse_when_szse_fails(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.fund_flow.etf_meta.refresh", lambda *_args, **_kwargs: [])
+
     def ak(name, **kwargs):
         if name == "fund_etf_scale_sse":
             return _etf_ak(name, **kwargs)

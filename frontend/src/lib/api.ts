@@ -2472,6 +2472,8 @@ export interface FundFlowAmountRow {
   change_5d?: number | null
   change_20d?: number | null
   broad?: string | null
+  /** 交易所短简称。看板名称用扩位全称，短简称缺了就空着。 */
+  short_name?: string | null
   /** 份额差 × 当日收盘价，单位亿元。复权跳变或中间缺交易日时为空。 */
   net_inflow_1d?: number | null
   /** 最近 5 个相邻交易日净流入合计，单位亿元。窗口里有空日则为空。 */

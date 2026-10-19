@@ -67,7 +67,13 @@ from app.fund_flow.sources import live_clients
 backfill_etf_share_history(Path("data"), live_clients(), breaker=CircuitBreaker("akshare"))
 ```
 
-深交所报表一次超过 6 个月会返回带表头的空表，回补按不超过 150 天的窗口切。资金页的宽基名单包含沪深 300（含深市 159919）、科创 50，以及创业板（159915，名称像「创业板ETF」「创业板50ETF」）。沪深 300 和科创 50 标成国家队代理，创业板只标指数名。主题产品（例如创业板成长 ETF）不进这份固定名单。
+深交所报表一次超过 6 个月会返回带表头的空表，回补按不超过 150 天的窗口切。
+
+ETF 名称另有一份参考表 `data/fund_flow/etf_meta/meta.parquet`，字段是 `code`、`full_name`、`short_name`、`index_code`、`index_name`、`company`、`source`。它不是按日分区，份额历史文件里的 `name` 仍是交易所原文。`sync_etf_shares` 在写完当日份额后刷新这张表：上交所 `commonSoaQuery.do?sqlId=FUND_LIST&fundType=00`（`secNameFull` / `fundAbbr` / `INDEX_CODE` / `INDEX_NAME` / `companyName`），深交所 `ShowReport` `CATALOGID=1105` 里基金类别为 ETF 的行，新浪 `etf_hq_fund` 只补两边都没有的代码。某个源失败或返回空表时，该源沿用上一版，不会把整张表清空。
+
+看板和 `GET /api/fund-flow/etf-shares` 的 `name` 用 `full_name`。参考表没有这只、代码又是 5 开头时，从份额里的简称去掉开头的 `XD` / `XR` / `DR` / `UC` / `N`。响应另有 `short_name`，没有短简称时为 `null`。
+
+宽基按跟踪指数分组，不再靠名称子串。沪市认指数代码：`000300` 沪深300，`000688` 科创50，`399006` 创业板。深市没有指数代码，名称要严格对上「沪深300」「科创50」「创业板ETF / 创业板50ETF / 创业板指」，并且名称里带成长、价值、增强、红利、ESG 的不算。所以 588020（科创成长，指数 `000690`）不是科创50，159656（沪深300成长）不是沪深300。沪深300和科创50标成国家队代理，创业板只标指数名。同一指数下的产品很多，页面按指数分组，列表限制高度，避免卡片被拉得很长。
 
 这套拉取不进界面上的数据任务槽，也不占重任务执行槽。调度器每 30 秒只唤醒后台线程。日 K 管道或分钟同步正在写盘时，这一轮让路。
 
@@ -113,7 +119,7 @@ python -m app.fund_flow.backfill --from 2026-04-01 --to 2026-10-15 --data-dir /a
 | GET | `/api/fund-flow/intraday?symbols=` | 当天最近一份盘中快照。响应和每一行都有 `source`（`akshare_em_rank` 或 `akshare_ths`）。东财行带主力、超大单、大单、中单、小单净额，单位元。`symbols` 为逗号分隔代码，最多 2000 只。开放令牌的 `read:analysis` 可以读 |
 | GET | `/api/fund-flow/sectors?kind=industry\|concept` | 行业或概念排名。有收盘快照用收盘，否则用当天最后一次盘中 |
 | GET | `/api/fund-flow/margin` | 两融汇总，明细默认最多 100 行 |
-| GET | `/api/fund-flow/etf-shares` | ETF 份额。`net_inflow_1d` / `net_inflow_5d` / `net_inflow_20d` 是份额推算的净流入，单位亿元。能接上领航者时带 `flow_net`（当日）、`flow_net_5d`、`flow_net_20d`，单位同样是亿元。`flow_diverged` 表示 1 日推算和领航者相对差超过 20%。`change_1d` / `change_5d` / `change_20d` 是相对前 1 / 5 / 20 份落盘的份额差（份），与看板 `etf_shares` 同一口径，不足该窗口时为空 |
+| GET | `/api/fund-flow/etf-shares` | ETF 份额。`name` 是参考表里的扩位全称，没有时沪市代码去掉 `XD`/`XR`/`DR`/`UC`/`N` 前缀。`short_name` 是短简称，没有则为空。`net_inflow_1d` / `net_inflow_5d` / `net_inflow_20d` 是份额推算的净流入，单位亿元。能接上领航者时带 `flow_net`（当日）、`flow_net_5d`、`flow_net_20d`，单位同样是亿元。`flow_diverged` 表示 1 日推算和领航者相对差超过 20%。`change_1d` / `change_5d` / `change_20d` 是相对前 1 / 5 / 20 份落盘的份额差（份），与看板 `etf_shares` 同一口径，不足该窗口时为空 |
 | GET | `/api/fund-flow/dsa-context` | 给 DSA 的短摘要。请求头 `X-News-Feed-Token` 与资讯桥相同，不对则 404 |
 
 没有数据时 `items` 为空，不把缺失写成 0。
