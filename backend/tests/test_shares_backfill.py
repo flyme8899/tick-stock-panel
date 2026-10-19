@@ -9,6 +9,7 @@ import pytest
 
 from app.market_time import CN_TZ
 from app.services.shares_backfill import (
+    SOURCE_CNINFO_ONLY,
     SOURCE_TAG,
     LocalRow,
     ShareEvent,
@@ -69,9 +70,10 @@ def test_map_cninfo_and_adata_to_share_schema():
         "证券代码": "600065",
         "变动日期": "2025-07-10",
         "公告日期": "2025-07-08",
-        "总股本": "648,000,000",
-        "人民币普通股": 600_000_000,
-        "已流通股份": 648_000_000,
+        "总股本": "64,800",
+        "人民币普通股": 60_000,
+        "已流通股份": 64_800,
+        "流通受限股份": 4_800,
     }])
     adata = map_adata("600065.SH", [{
         "stock_code": "600065",
@@ -81,14 +83,51 @@ def test_map_cninfo_and_adata_to_share_schema():
         "change_reason": "转增",
     }])
 
-    agreed, reason = reconcile(cninfo, adata)
+    agreed, point_reasons, reason = reconcile(cninfo, adata)
 
     assert reason == ""
-    assert agreed is not None
+    assert point_reasons == []
     assert agreed[0].period_end == date(2025, 7, 10)
     assert agreed[0].announce_date == date(2025, 7, 8)
     assert agreed[0].total_shares == 648_000_000
     assert agreed[0].float_shares == 600_000_000
+    assert agreed[0].source == SOURCE_TAG
+
+
+def test_cninfo_wan_shares_match_adata_share_count():
+    """300067：巨潮 117792.4574 万股，adata 1177924574 股，换算后视为一致。"""
+    cninfo = map_cninfo("300067.SZ", [{
+        "证券代码": "300067",
+        "变动日期": "2026-10-16",
+        "公告日期": "2026-10-16",
+        "总股本": 117792.4574,
+        "人民币普通股": 90_000.5,
+        "已流通股份": 100_000.25,
+        "流通受限股份": 27_791.9574,
+    }])
+    adata = map_adata("300067.SZ", [{
+        "stock_code": "300067",
+        "change_date": "2026-10-16",
+        "total_shares": 1_177_924_574,
+        "list_a_shares": 900_005_000,
+    }])
+
+    assert cninfo[0].total_shares == pytest.approx(1_177_924_574)
+    assert cninfo[0].float_shares == pytest.approx(900_005_000)
+    agreed, point_reasons, reason = reconcile(cninfo, adata)
+    assert reason == ""
+    assert point_reasons == []
+    assert agreed[0].total_shares == pytest.approx(1_177_924_574)
+    assert agreed[0].float_shares == pytest.approx(900_005_000)
+    assert agreed[0].source == SOURCE_TAG
+
+    # 换算后仍差超过 1% 时只复核该点，不按数量级再猜一次单位。
+    raw = [ShareEvent(date(2026, 10, 16), date(2026, 10, 16), 117792.4574, None)]
+    other = [ShareEvent(date(2026, 10, 16), None, 1_177_924_574.0, None)]
+    missed, missed_points, missed_reason = reconcile(raw, other)
+    assert missed == []
+    assert missed_reason == ""
+    assert missed_points == ["total_mismatch:2026-10-16"]
 
 
 def test_sources_within_one_percent_keep_local_value():
@@ -136,13 +175,13 @@ def test_disagreement_does_not_write(tmp_path):
     assert result.wrote is False
     assert result.backup is None
     assert result.changes == []
-    assert result.reviews[0].reason == "total_mismatch"
+    assert result.reviews[0].reason == "total_mismatch:2025-07-10"
     stored = pl.read_parquet(path)
     assert stored.select(original.columns).equals(original)
     with result.review_report.open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["symbol"] == "600065.SH"
-    assert rows[0]["reason"] == "total_mismatch"
+    assert rows[0]["reason"] == "total_mismatch:2025-07-10"
 
 
 def test_apply_is_idempotent_and_dry_run_does_not_write(tmp_path):
@@ -224,6 +263,108 @@ def test_apply_is_idempotent_and_dry_run_does_not_write(tmp_path):
     assert again.wrote is False
     assert list((path.parent / "backups").glob("*.parquet")) == [applied.backup]
     assert pl.read_parquet(path).sort("period_end").equals(stored)
+
+
+def test_cninfo_update_after_adata_is_kept_and_old_mismatch_is_one_point(tmp_path):
+    """002548：adata 停在 2025-09-24，巨潮还有 2026-06-30；旧日对不上只复核该点。"""
+    original = pl.DataFrame({
+        "symbol": ["002548.SZ", "002548.SZ"],
+        "period_end": ["2019-05-29", "2025-09-24"],
+        "announce_date": ["2019-05-30", "2025-09-25"],
+        "total_shares": [391_000_000.0, 800_000_000.0],
+        "float_shares": [300_000_000.0, 700_000_000.0],
+        "source": ["tickflow", "tickflow"],
+    })
+    _write_market(tmp_path, original, [("002548.SZ", "", 1000.0)])
+    path = tmp_path / "financials" / "shares" / "part.parquet"
+
+    def cninfo(_symbol: str) -> list[ShareEvent]:
+        return [
+            ShareEvent(date(2019, 5, 29), date(2019, 5, 30), 422_000_000.0, 320_000_000.0),
+            ShareEvent(date(2025, 9, 24), date(2025, 9, 25), 828_173_658.0, 700_000_000.0),
+            ShareEvent(date(2026, 6, 30), date(2026, 7, 1), 900_000_000.0, 800_000_000.0),
+        ]
+
+    def adata(_symbol: str) -> list[ShareEvent]:
+        return [
+            ShareEvent(date(2019, 5, 29), None, 391_000_000.0, 300_000_000.0),
+            ShareEvent(date(2025, 9, 24), None, 828_173_658.0, 700_000_000.0),
+        ]
+
+    result = run_backfill(
+        tmp_path,
+        apply=True,
+        symbols=["002548.SZ"],
+        as_of=date(2026, 10, 17),
+        report_dir=tmp_path / "reports",
+        fetch_cninfo=cninfo,
+        fetch_adata=adata,
+        sleeper=lambda _seconds: None,
+        spacing_s=0,
+        now=lambda: datetime(2026, 10, 19, 12, 0, tzinfo=CN_TZ),
+    )
+
+    assert [(item.action, item.period_end, item.source_new) for item in result.changes] == [
+        ("correct", date(2025, 9, 24), SOURCE_TAG),
+        ("append", date(2026, 6, 30), SOURCE_CNINFO_ONLY),
+    ]
+    assert [item.reason for item in result.reviews] == ["total_mismatch:2019-05-29"]
+    assert result.wrote is True
+    stored = pl.read_parquet(path).sort("period_end")
+    assert stored["period_end"].to_list() == ["2019-05-29", "2025-09-24", "2026-06-30"]
+    old = stored.row(0, named=True)
+    assert old["total_shares"] == 391_000_000
+    assert old["source"] == "tickflow"
+    agreed = stored.row(1, named=True)
+    assert agreed["total_shares"] == 828_173_658
+    assert agreed["source"] == SOURCE_TAG
+    newest = stored.row(2, named=True)
+    assert newest["total_shares"] == 900_000_000
+    assert newest["announce_date"] == "2026-07-01"
+    assert newest["source"] == SOURCE_CNINFO_ONLY
+
+
+def test_blank_list_status_follows_recent_trades(tmp_path):
+    """list_status 为空时不判退市；近 30 日无成交的股票不入选。"""
+    shares = pl.DataFrame({
+        "symbol": ["600065.SH", "920157.BJ"],
+        "period_end": ["2007-09-30", "2024-06-30"],
+        "total_shares": [238_000_000.0, 50_000_000.0],
+    })
+    inst = tmp_path / "instruments" / "instruments.parquet"
+    inst.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600065.SH", "920157.BJ"],
+        "list_status": ["", ""],
+    }).write_parquet(inst)
+    bar = tmp_path / "kline_daily" / "date=2026-10-17" / "part.parquet"
+    bar.parent.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["920157.BJ"], "volume": [1000.0]}).write_parquet(bar)
+    path = tmp_path / "financials" / "shares" / "part.parquet"
+    path.parent.mkdir(parents=True)
+    shares.write_parquet(path)
+    called: list[str] = []
+
+    def fetch(symbol: str) -> list[ShareEvent]:
+        called.append(symbol)
+        return [ShareEvent(date(2026, 1, 2), date(2026, 1, 3), 60_000_000.0, None)]
+
+    result = run_backfill(
+        tmp_path,
+        apply=False,
+        as_of=date(2026, 10, 17),
+        report_dir=tmp_path / "reports",
+        fetch_cninfo=fetch,
+        fetch_adata=fetch,
+        sleeper=lambda _seconds: None,
+        spacing_s=0,
+        now=lambda: datetime(2026, 10, 19, 12, 0, tzinfo=CN_TZ),
+    )
+
+    assert result.skipped_delisted == []
+    assert result.candidates == ["920157.BJ"]
+    assert called == ["920157.BJ", "920157.BJ"]
+    assert pl.read_parquet(path)["symbol"].to_list() == ["600065.SH", "920157.BJ"]
 
 
 def test_delisted_symbol_is_skipped(tmp_path):

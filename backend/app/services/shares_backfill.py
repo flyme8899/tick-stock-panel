@@ -1,12 +1,19 @@
 """回补仍在上市、但本地股本序列断更或滞后的股票。
 
 巨潮（akshare ``stock_share_change_cninfo``）是主源，adata
-``stock.info.get_stock_shares(is_history=True)`` 做交叉校验。两源在变动日和
-股本上一致才追加或修正；对不上的股票只进复核清单，不写。
+``stock.info.get_stock_shares(is_history=True)`` 做交叉校验。只核对两边都有的
+变动日；对不上的那一个点进复核，其余点仍可写。巨潮独有、且晚于 adata 最新
+变动日的更新允许写入，``source`` 标 ``cninfo_only``。
 
-数量按「股」原样入库，不乘万、不除万。两源数量级对不上会进复核，避免猜单位。
-``period_end`` 用变动日，``announce_date`` 用巨潮公告日。写入行的 ``source``
-为 ``cninfo+adata``。已有列（含 ``source``）原样保留，只改被追加或修正的行。
+巨潮的总股本、人民币普通股、已流通股份、流通受限股份单位都是万股，映射时
+固定乘 10000 转成股。adata 的 ``total_shares`` / ``list_a_shares`` 已经是股。
+换算后仍相差超过 1% 的点进复核，不根据数量级猜单位。``period_end`` 用变动日，
+``announce_date`` 用巨潮公告日。两边都确认的行 ``source`` 为 ``cninfo+adata``。
+已有列（含 ``source``）原样保留，只改被追加或修正的行。
+
+现网 ``instruments.list_status`` 全部为空，退市状态列判断不到任何股票。是否
+仍在上市实际只看近 ``--active-days``（默认 30）个自然日的日线成交量是否大于 0。
+因此 600065、603157 这类近端没有成交的股票，默认模式和 ``--symbols`` 都不会入选。
 
 默认 dry-run。``--apply`` 才写 ``financials/shares/part.parquet``，写之前把分区
 复制到 ``financials/shares/backups/``。请求间隔约 1.2 秒，失败重试；北京时间
@@ -41,6 +48,8 @@ from app.market_time import CN_TZ, cn_now
 logger = logging.getLogger(__name__)
 
 SOURCE_TAG = "cninfo+adata"
+SOURCE_CNINFO_ONLY = "cninfo_only"
+_CNINFO_WAN_TO_SHARES = 10_000
 DEFAULT_STALE_BEFORE = date(2025, 1, 1)
 DEFAULT_ACTIVE_DAYS = 30
 DEFAULT_SPACING_S = 1.2
@@ -62,6 +71,7 @@ class ShareEvent:
     announce_date: date | None
     total_shares: float
     float_shares: float | None
+    source: str = SOURCE_TAG
 
 
 @dataclass(frozen=True)
@@ -255,21 +265,33 @@ def _first_float(row: dict, *names: str) -> float | None:
     return None
 
 
+def _cninfo_shares(row: dict, *names: str) -> float | None:
+    """巨潮股本列是万股。固定乘 10000，不按数量级猜测。"""
+    number = _first_float(row, *names)
+    if number is None:
+        return None
+    return number * _CNINFO_WAN_TO_SHARES
+
+
 def map_cninfo(symbol: str, frame: object) -> list[ShareEvent]:
-    """巨潮股本变动 → 内部事件。总股本、流通股本单位为股。"""
+    """巨潮股本变动 → 内部事件，单位换成股。
+
+    ``总股本``、``人民币普通股``、``已流通股份``、``流通受限股份`` 都是万股。
+    入库的流通股本优先用人民币普通股，否则用已流通股份。流通受限股份没有对应列。
+    """
     events: list[ShareEvent] = []
     for row in _frame_records(frame):
         if not _code_matches(row.get("证券代码"), symbol):
             continue
         period = _as_date(row.get("变动日期"))
-        total = _first_float(row, "总股本")
+        total = _cninfo_shares(row, "总股本")
         if period is None or total is None:
             continue
         events.append(ShareEvent(
             period_end=period,
             announce_date=_as_date(row.get("公告日期")),
             total_shares=total,
-            float_shares=_first_float(row, "人民币普通股", "已流通股份"),
+            float_shares=_cninfo_shares(row, "人民币普通股", "已流通股份"),
         ))
     return events
 
@@ -293,38 +315,60 @@ def map_adata(symbol: str, frame: object) -> list[ShareEvent]:
     return events
 
 
-def reconcile(cninfo: list[ShareEvent], adata: list[ShareEvent]) -> tuple[list[ShareEvent] | None, str]:
-    """两源最新变动日相同，且每个重合变动日的股本相差不超过 1%，才返回可写入事件。
+def reconcile(
+    cninfo: list[ShareEvent],
+    adata: list[ShareEvent],
+) -> tuple[list[ShareEvent], list[str], str]:
+    """核对两边都有的变动日，并收下巨潮晚于 adata 的更新。
 
-    数量以巨潮为准。adata 没有公告日，公告日只取巨潮。只在一边出现的更早变动日
-    不写入，也不当成冲突；最新变动日对不上则整只股票不写。
+    返回 ``(可写入事件, 单点复核原因, 整只股票的拒写原因)``。数量以巨潮为准，
+    公告日只取巨潮。重合日总股本或流通股本相差超过 1% 时，只把该日记成
+    ``total_mismatch:YYYY-MM-DD`` 或 ``float_mismatch:YYYY-MM-DD``，不因此拒写
+    其他日期，也不改单位。巨潮独有且晚于 adata 最新变动日的行 ``source`` 为
+    ``cninfo_only``；两边都有的行为 ``cninfo+adata``。更早的单边变动日不写、
+    也不复核。任一来源为空则整只不写。没有任何可写事件、也没有单点复核时，
+    原因是 ``no_overlap``。
     """
     if not cninfo or not adata:
-        return None, "empty_source"
+        return [], [], "empty_source"
     left = _collapse(cninfo)
     right = _collapse(adata)
-    if max(left) != max(right):
-        return None, "latest_date_mismatch"
+    adata_latest = max(right)
     agreed: list[ShareEvent] = []
+    point_reasons: list[str] = []
     for day in sorted(set(left) & set(right)):
         primary, other = left[day], right[day]
         if rel_diff(primary.total_shares, other.total_shares) > REL_TOL:
-            return None, "total_mismatch"
+            point_reasons.append(f"total_mismatch:{day.isoformat()}")
+            continue
         if (
             primary.float_shares is not None
             and other.float_shares is not None
             and rel_diff(primary.float_shares, other.float_shares) > REL_TOL
         ):
-            return None, "float_mismatch"
+            point_reasons.append(f"float_mismatch:{day.isoformat()}")
+            continue
         agreed.append(ShareEvent(
             period_end=day,
             announce_date=primary.announce_date,
             total_shares=primary.total_shares,
             float_shares=primary.float_shares if primary.float_shares is not None else other.float_shares,
+            source=SOURCE_TAG,
         ))
-    if not agreed:
-        return None, "no_overlap"
-    return agreed, ""
+    for day in sorted(set(left) - set(right)):
+        if day <= adata_latest:
+            continue
+        primary = left[day]
+        agreed.append(ShareEvent(
+            period_end=day,
+            announce_date=primary.announce_date,
+            total_shares=primary.total_shares,
+            float_shares=primary.float_shares,
+            source=SOURCE_CNINFO_ONLY,
+        ))
+    if not agreed and not point_reasons:
+        return [], [], "no_overlap"
+    return agreed, point_reasons, ""
 
 
 def plan_changes(symbol: str, local_rows: list[LocalRow], agreed: list[ShareEvent]) -> list[Change]:
@@ -345,7 +389,7 @@ def plan_changes(symbol: str, local_rows: list[LocalRow], agreed: list[ShareEven
                 float_old=None,
                 float_new=event.float_shares,
                 source_old=None,
-                source_new=SOURCE_TAG,
+                source_new=event.source,
             ))
             continue
         total_drift = old.total_shares is None or rel_diff(old.total_shares, event.total_shares) > REL_TOL
@@ -368,7 +412,7 @@ def plan_changes(symbol: str, local_rows: list[LocalRow], agreed: list[ShareEven
             float_old=old.float_shares,
             float_new=event.float_shares if float_drift else old.float_shares,
             source_old=old.source,
-            source_new=SOURCE_TAG,
+            source_new=event.source,
         ))
     return changes
 
@@ -526,7 +570,11 @@ def _local_rows(frame: pl.DataFrame) -> dict[str, list[LocalRow]]:
 
 
 def recent_traded_symbols(data_dir: Path, *, as_of: date, within_days: int) -> set[str]:
-    """近端日线里成交量大于 0 的股票。没有成交说明已不在交易，不回补。"""
+    """近端日线里成交量大于 0 的股票。
+
+    现网 ``instruments.list_status`` 全部为空，退市状态列判断不到任何股票。
+    是否仍在上市实际只看这里：近 ``within_days`` 个自然日没有成交，就不回补。
+    """
     root = data_dir / "kline_daily"
     if not root.exists():
         return set()
@@ -555,6 +603,11 @@ def recent_traded_symbols(data_dir: Path, *, as_of: date, within_days: int) -> s
 
 
 def delisted_symbols(data_dir: Path) -> set[str]:
+    """``list_status`` 已标成退市的股票。
+
+    现网该列全部为空，这个集合通常是空的，不能靠它识别 600065、603157 这类
+    已无成交的股票。没有近端成交的由 ``recent_traded_symbols`` 排除。
+    """
     path = data_dir / "instruments" / "instruments.parquet"
     if not path.exists():
         return set()
@@ -596,9 +649,10 @@ def select_targets(
 ) -> tuple[list[str], list[str]]:
     """返回 (待拉外部源的股票, 跳过的退市股)。
 
-    默认只含最后一期早于阈值、且近端仍有成交的在市股票。``scan_values`` 改为
-    扫描全部仍有成交的在市股票，写不写仍看外部最新值是否差超过 1% 或历史值
-    需要修正。``symbols`` 把范围收成这几只，退市的仍然跳过。
+    默认只含最后一期早于阈值、且近端仍有成交的股票。现网 ``list_status`` 全空，
+    退市实际只靠近 ``active_days``（默认 30）个自然日无成交，所以近端没有成交的
+    600065、603157 默认不会入选。``symbols`` 同样要求近端有成交；``list_status``
+    已标退市时再额外跳过。``scan_values`` 改为扫描全部近端仍有成交的股票。
     """
     traded = recent_traded_symbols(data_dir, as_of=as_of, within_days=active_days)
     delisted = delisted_symbols(data_dir)
@@ -810,7 +864,12 @@ def run_backfill(
     monotonic: Clock | None = None,
     now: Now | None = None,
 ) -> BackfillResult:
-    """识别断更或滞后的在市股票，两源一致才追加/修正。默认不写分区。"""
+    """识别断更或滞后、且近端仍有成交的股票。默认不写分区。
+
+    现网 ``list_status`` 全空，仍在上市只表示近端日线有成交。重合变动日一致的
+    才写入；巨潮晚于 adata 最新日的独有更新以 ``cninfo_only`` 写入。单个旧变动日
+    对不上只进复核。
+    """
     clock_now = now or cn_now
     as_of = as_of or _as_cn(clock_now()).date()
     targets, skipped = select_targets(
@@ -842,19 +901,30 @@ def run_backfill(
             result.reviews.append(_review(symbol, reason[:200], rows, cninfo, adata_rows))
             logger.warning("股本回补 %s 拉取失败: %s", symbol, exc)
             continue
-        agreed, reason = reconcile(cninfo, adata_rows)
-        if agreed is None:
-            if scan_values and not _attention(
-                stale=stale, local_rows=rows, cninfo=cninfo, adata=adata_rows,
-            ):
-                logger.info("股本回补 %s 两源不一致但本地未滞后，跳过复核", symbol)
+        agreed, point_reasons, reason = reconcile(cninfo, adata_rows)
+        notable = (not scan_values) or _attention(
+            stale=stale, local_rows=rows, cninfo=cninfo, adata=adata_rows,
+        )
+        if reason:
+            if not notable:
+                logger.info("股本回补 %s 两源无法核对但本地未滞后，跳过复核", symbol)
                 continue
             result.reviews.append(_review(symbol, reason, rows, cninfo, adata_rows))
-            logger.info("股本回补 %s 两源不一致(%s)，不写入", symbol, reason)
+            logger.info("股本回补 %s 两源无法核对(%s)，不写入", symbol, reason)
             continue
+        if point_reasons and notable:
+            for point_reason in point_reasons:
+                result.reviews.append(_review(symbol, point_reason, rows, cninfo, adata_rows))
         changes = plan_changes(symbol, rows, agreed)
         if not changes:
-            logger.info("股本回补 %s 与两源一致，无需写入", symbol)
+            if point_reasons:
+                logger.info(
+                    "股本回补 %s 部分变动日对不上(%s)，其余无需写入",
+                    symbol,
+                    ",".join(point_reasons),
+                )
+            else:
+                logger.info("股本回补 %s 与两源一致，无需写入", symbol)
             continue
         result.changes.extend(changes)
         logger.info(
@@ -893,7 +963,10 @@ def warn_lagging_listed_shares(
     stale_before: date = DEFAULT_STALE_BEFORE,
     active_days: int = DEFAULT_ACTIVE_DAYS,
 ) -> list[str]:
-    """在市且最后一期早于阈值时打 WARNING。失败只记日志，返回空列表。"""
+    """近端仍有成交、且最后一期早于阈值时打 WARNING。失败只记日志，返回空列表。
+
+    现网 ``list_status`` 全空，这里的「在市」就是近 ``active_days`` 日成交量大于 0。
+    """
     try:
         day = as_of or cn_now().date()
         targets, _skipped = select_targets(
@@ -907,7 +980,8 @@ def warn_lagging_listed_shares(
         return []
     if targets:
         logger.warning(
-            "股本滞后: %d 只在市股票最后一期早于 %s，且近 %d 日日线仍有成交（样例: %s）。"
+            "股本滞后: %d 只近端仍有成交的股票最后一期早于 %s，近 %d 日日线有成交（样例: %s）。"
+            "现网 list_status 全空，退市实际只靠这段窗口内无成交。"
             "回测市值按当时股本计算，断更会偏低。只告警，不阻断盘后管道。",
             len(targets),
             stale_before.isoformat(),
@@ -931,8 +1005,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="写入股本分区。默认只输出差异")
     parser.add_argument("--dry-run", action="store_true", help="只输出差异，不写分区（默认）")
     parser.add_argument("--stale-before", default=DEFAULT_STALE_BEFORE.isoformat(), help="最后一期早于该日视为断更")
-    parser.add_argument("--active-days", type=int, default=DEFAULT_ACTIVE_DAYS, help="近端多少个自然日内有成交算仍在上市")
-    parser.add_argument("--symbols", default="", help="只处理这些代码，逗号分隔。退市股仍会跳过")
+    parser.add_argument(
+        "--active-days",
+        type=int,
+        default=DEFAULT_ACTIVE_DAYS,
+        help="近端多少个自然日内有成交算仍在上市。现网 list_status 全空，退市实际只靠这段窗口内无成交",
+    )
+    parser.add_argument("--symbols", default="", help="只处理这些代码，逗号分隔。近端无成交的会跳过；list_status 已标退市的也跳过")
     parser.add_argument(
         "--scan-values",
         action="store_true",

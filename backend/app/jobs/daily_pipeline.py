@@ -402,8 +402,9 @@ def run_now(
             logger.warning("laggard detection failed: %s", e)
             stage_errors.append(f"laggard detection: {e}")
 
-    # 在市股票股本断更只记日志。回测市值直接读这张表，断更会把市值算低，
-    # 但告警不能把盘后管道打成失败，也不在这里打外部源。
+    # 近端仍有成交、但股本断更的股票只记日志。现网 instruments.list_status 全空，
+    # 这里的「在市」就是近 30 日日线有成交，不是退市状态列。回测市值直接读这张表，
+    # 断更会把市值算低，但告警不能把盘后管道打成失败，也不在这里打外部源。
     try:
         from app.services.shares_backfill import warn_lagging_listed_shares
 
