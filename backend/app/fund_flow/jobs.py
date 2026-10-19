@@ -15,9 +15,17 @@ from app.fund_flow.circuit import CircuitBreaker, CircuitOpenError, call_with_re
 from app.fund_flow.sources import NORTHBOUND_SYMBOL, SOUTHBOUND_SYMBOL, SourceClients
 
 BACKFILL_DATES = 120
-# 深市 ETF 份额回补起点。官方报表一次超过 6 个月会返回空表，窗口留在 150 天内。
+# 深市 ETF 份额回补起点。官方报表一次超过 6 个月会返回空表。
 ETF_SHARES_HISTORY_START = "2025-10-10"
+# 日历跨度上限。再长，深交所返回带表头的空表。
 SZSE_WINDOW_DAYS = 150
+# .xls 含表头最多 65536 行。数据行数接近这个上限时，表内可能已经从最旧的行截断。
+SZSE_XLS_NEAR_LIMIT = 65_000
+# 单次请求的行数预算，远低于 65535 条数据。按保守的单日只数切窗口。
+SZSE_REQUEST_ROW_BUDGET = 20_000
+SZSE_ASSUMED_ROWS_PER_DAY = 2_000
+# 某一天的深市行数比前一天或后一天少过这个比例，就当成这份分区不完整。
+SZSE_ROW_DROP_RATIO = 0.05
 NORMAL_RPS = 2.5
 SLOW_RPS = 1.0
 FAIL_RATE = 0.05
@@ -755,31 +763,52 @@ def sync_margin(
     return result
 
 
+def szse_dates_per_window() -> int:
+    """一个窗口最多几天。按保守单日行数估算，使单次请求远低于 xls 的 65535 行。"""
+    return max(1, SZSE_REQUEST_ROW_BUDGET // SZSE_ASSUMED_ROWS_PER_DAY)
+
+
+def _szse_calendar_span() -> int:
+    """自然日跨度。交易日大约占 5/7，并且不能超过 6 个月的空表上限。"""
+    calendar = max(1, szse_dates_per_window() * 7 // 5)
+    return min(SZSE_WINDOW_DAYS, calendar)
+
+
 def iter_szse_windows(start: date, end: date) -> list[tuple[date, date]]:
-    """深交所基金规模报表超过 6 个月会返回空表。按 150 天切窗口。"""
+    """深交所基金规模报表超过 6 个月会返回空表，xls 又会在 65536 行截断。窗口两头都躲开。"""
     if end < start:
         return []
+    span = _szse_calendar_span()
     windows: list[tuple[date, date]] = []
     cursor = start
     while cursor <= end:
-        stop = min(end, cursor + timedelta(days=SZSE_WINDOW_DAYS - 1))
+        stop = min(end, cursor + timedelta(days=span - 1))
         windows.append((cursor, stop))
         cursor = stop + timedelta(days=1)
     return windows
 
 
 def szse_windows_for_dates(days: list[str]) -> list[tuple[date, date]]:
-    """按请求到的日期聚类。两头相距超过 150 天就切开，避免空窗被接口丢掉。"""
+    """按请求到的日期聚类。
+
+    两头相距达到 150 天就切开，避免空窗被接口丢掉。
+    同一个窗口里的日期数再按行数预算切开，使单次请求远低于 xls 的 65535 行。
+    """
     parsed = sorted({date.fromisoformat(day) for day in days if len(day) == 10})
     if not parsed:
         return []
+    limit = szse_dates_per_window()
     windows: list[tuple[date, date]] = []
     start = parsed[0]
     end = parsed[0]
+    count = 1
     for day in parsed[1:]:
-        if (day - start).days >= SZSE_WINDOW_DAYS:
+        if (day - start).days >= SZSE_WINDOW_DAYS or count >= limit:
             windows.append((start, end))
             start = day
+            count = 1
+        else:
+            count += 1
         end = day
     windows.append((start, end))
     return windows
@@ -858,6 +887,18 @@ def _load_sse_shares(clients, trade_date: str, breaker: CircuitBreaker, sleeper)
     ]
 
 
+class SzseExportTruncatedError(RuntimeError):
+    """深市份额导出的行数接近 xls 上限，这份结果不能落盘。"""
+
+
+def _reject_truncated_szse(raw: list[dict]) -> None:
+    """xls 含表头 65536 行。靠近上限的导出可能已经从最旧的行被截断。"""
+    if len(raw) >= SZSE_XLS_NEAR_LIMIT:
+        raise SzseExportTruncatedError(
+            f"返回 {len(raw)} 行，接近 xls 65536 行上限，拒绝写入"
+        )
+
+
 def _load_szse_shares(
     clients,
     start: date,
@@ -880,6 +921,8 @@ def _load_szse_shares(
         breaker,
         sleeper=sleeper,
     )
+    # 请求本身成功了。截断是导出上限，不是源故障，不能算进熔断。
+    _reject_truncated_szse(raw)
     grouped: dict[str, list[dict]] = {}
     for row in normalize.normalize_etf_shares(raw):
         day = row["trade_date"]
@@ -887,6 +930,185 @@ def _load_szse_shares(
             continue
         grouped.setdefault(day, []).append(row)
     return grouped
+
+
+def _load_szse_covering(
+    clients,
+    days: list[str],
+    breaker: CircuitBreaker,
+    sleeper,
+    *,
+    keep: set[str],
+) -> dict[str, list[dict]]:
+    """拉取这些日期。行数顶到 xls 上限时拆短再拉，不把截断结果写进去。"""
+    if not days:
+        return {}
+    start = date.fromisoformat(days[0])
+    end = date.fromisoformat(days[-1])
+    try:
+        return _load_szse_shares(clients, start, end, breaker, sleeper, keep=keep)
+    except SzseExportTruncatedError as exc:
+        if len(days) == 1:
+            raise
+        mid = len(days) // 2
+        logger.warning(
+            "fund_scale_daily_szse %s..%s %s，拆成更短窗口",
+            days[0], days[-1], exc,
+        )
+        merged: dict[str, list[dict]] = {}
+        errors: list[BaseException] = []
+        for part in (days[:mid], days[mid:]):
+            try:
+                part_rows = _load_szse_covering(clients, part, breaker, sleeper, keep=keep)
+            except Exception as part_exc:  # noqa: BLE001
+                errors.append(part_exc)
+                continue
+            for day, rows in part_rows.items():
+                merged.setdefault(day, []).extend(rows)
+        if errors and not merged:
+            raise errors[0] from None
+        if errors:
+            logger.warning("fund_scale_daily_szse 拆窗后仍有失败: %s", errors[0])
+        return merged
+
+
+def _collect_szse_shares(
+    clients,
+    days: list[str],
+    breaker: CircuitBreaker,
+    sleeper,
+    *,
+    empty_error: bool = True,
+) -> tuple[dict[str, list[dict]], list[str]]:
+    errors: list[str] = []
+    grouped_all: dict[str, list[dict]] = {}
+    wanted = set(days)
+    for win_start, win_end in szse_windows_for_dates(days):
+        label = f"{win_start.isoformat()}..{win_end.isoformat()}"
+        window_days = [
+            day for day in days
+            if win_start.isoformat() <= day <= win_end.isoformat()
+        ]
+        try:
+            grouped = _load_szse_covering(
+                clients, window_days, breaker, sleeper, keep=wanted,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"fund_scale_daily_szse {label}: {exc}")
+            continue
+        if not grouped:
+            if empty_error:
+                errors.append(f"fund_scale_daily_szse {label} 无数据")
+            continue
+        for day, rows in grouped.items():
+            grouped_all.setdefault(day, []).extend(rows)
+    return grouped_all, errors
+
+
+def szse_share_count(frame: pl.DataFrame) -> int:
+    """深市 ETF 行数。代码以 15 开头；沪市 5 开头的行不计入。"""
+    if frame.is_empty() or "code" not in frame.columns:
+        return 0
+    return frame.filter(pl.col("code").cast(pl.Utf8).str.starts_with("15")).height
+
+
+def _neighbor_szse_counts(stored: list[str], counts: dict[str, int], index: int) -> list[int]:
+    found: list[int] = []
+    if index > 0:
+        found.append(counts[stored[index - 1]])
+    if index + 1 < len(stored):
+        found.append(counts[stored[index + 1]])
+    return found
+
+
+def _szse_count_dropped(count: int, neighbors: list[int]) -> bool:
+    floor = 1 - SZSE_ROW_DROP_RATIO
+    return any(count < neighbor * floor for neighbor in neighbors)
+
+
+def _szse_counts_around(data_dir: Path, days: list[str]) -> tuple[list[str], dict[str, int]]:
+    """要比较的分区，以及它们相邻落盘日的深市行数。"""
+    stored = store.list_dates(data_dir, "etf_shares")
+    pos = {day: index for index, day in enumerate(stored)}
+    needed: set[str] = set()
+    for day in days:
+        index = pos.get(day)
+        if index is None:
+            continue
+        needed.add(day)
+        if index > 0:
+            needed.add(stored[index - 1])
+        if index + 1 < len(stored):
+            needed.add(stored[index + 1])
+    counts = {
+        day: szse_share_count(store.read_partition(data_dir, "etf_shares", day))
+        for day in needed
+    }
+    return stored, counts
+
+
+def etf_share_gap_dates(data_dir: Path, days: list[str]) -> list[str]:
+    """整日没有分区，或者深市行数比相邻日落盘少了超过 5% 的日期。
+
+    缺日回补不能只看文件在不在。xls 截断会留下一份行数偏少的分区，那种也要重拉。
+    """
+    wanted = [day for day in sorted(set(days)) if len(day) == 10]
+    if not wanted:
+        return []
+    stored, counts = _szse_counts_around(data_dir, wanted)
+    pos = {day: index for index, day in enumerate(stored)}
+    gap: list[str] = []
+    for day in wanted:
+        index = pos.get(day)
+        if index is None:
+            gap.append(day)
+            continue
+        if _szse_count_dropped(counts[day], _neighbor_szse_counts(stored, counts, index)):
+            gap.append(day)
+    return gap
+
+
+def _thin_szse_messages(data_dir: Path, days: list[str]) -> list[str]:
+    """分区在，但深市行数相对相邻日掉得太狠。只警告这种，整日缺失交给拉取错误。"""
+    stored = store.list_dates(data_dir, "etf_shares")
+    present = set(stored)
+    thin = [day for day in etf_share_gap_dates(data_dir, days) if day in present]
+    if not thin:
+        return []
+    pos = {day: index for index, day in enumerate(stored)}
+    messages: list[str] = []
+    for day in thin:
+        count = szse_share_count(store.read_partition(data_dir, "etf_shares", day))
+        index = pos[day]
+        bits: list[str] = []
+        for neighbor in (index - 1, index + 1):
+            if not 0 <= neighbor < len(stored):
+                continue
+            other = stored[neighbor]
+            other_count = szse_share_count(store.read_partition(data_dir, "etf_shares", other))
+            bits.append(f"{other} {other_count} 行")
+        message = (
+            f"fund_scale_daily_szse {day} 深市 {count} 行，"
+            f"相邻日 {'、'.join(bits)}，少了超过 5%"
+        )
+        logger.warning(message)
+        messages.append(message)
+    return messages
+
+
+def _write_etf_share_days(
+    data_dir: Path,
+    days: list[str],
+    sse_rows: dict[str, list[dict]],
+    szse_rows: dict[str, list[dict]],
+) -> int:
+    wrote = 0
+    for trade_date in days:
+        rows = sse_rows.get(trade_date, []) + szse_rows.get(trade_date, [])
+        if not rows:
+            continue
+        wrote += store.write_rows(data_dir, "etf_shares", trade_date, rows)
+    return wrote
 
 
 def backfill_etf_share_history(
@@ -899,22 +1121,28 @@ def backfill_etf_share_history(
     end: str | None = None,
     known_days: list[date] | None = None,
     today: date | None = None,
+    gaps_only: bool = False,
 ) -> RunResult:
     """回补 ``start``（默认 2025-10-10）到 ``end`` 的沪深 ETF 份额。
 
     没传 ``known_days`` 时先用本地日 K 分区当交易日历，避开节假日；
     日历覆盖不到起点时才退回工作日（节假日空表由 ``_load_sse_shares`` 兜住）。
+    ``gaps_only`` 只补缺日：整日没有分区的要拉，分区在但深市行数比相邻日少了
+    超过 5% 的也要重拉。不能只补文件不存在的日子。
     """
     if known_days is None:
         calendar = local_trading_days(data_dir)
         if calendar and min(calendar) <= date.fromisoformat(start):
             known_days = calendar
+    dates = etf_share_history_dates(
+        start=start, end=end, known_days=known_days, today=today,
+    )
+    if gaps_only:
+        dates = etf_share_gap_dates(data_dir, dates)
     return backfill_etf_shares(
         data_dir,
         clients,
-        trade_dates=etf_share_history_dates(
-            start=start, end=end, known_days=known_days, today=today,
-        ),
+        trade_dates=dates,
         breaker=breaker,
         sleeper=sleeper,
     )
@@ -928,7 +1156,11 @@ def backfill_etf_shares(
     breaker: CircuitBreaker,
     sleeper: Sleeper | None = None,
 ) -> RunResult:
-    """按日回补 ETF 份额。深市按窗口请求，再和沪市按日落到同一张表。"""
+    """按日回补 ETF 份额。深市按窗口请求，再和沪市按日落到同一张表。
+
+    窗口按行数预算切开。返回行数接近 xls 上限时拒绝写入，并拆短重拉。
+    落盘后再看每一天的深市行数：整日缺失或比相邻日少了超过 5% 的，再拉一次。
+    """
     result = RunResult(kind="etf_shares")
     days = sorted({day for day in trade_dates if len(day) == 10})
     sse_rows: dict[str, list[dict]] = {}
@@ -937,27 +1169,24 @@ def backfill_etf_shares(
             sse_rows[trade_date] = _load_sse_shares(clients, trade_date, breaker, sleeper)
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"fund_etf_scale_sse {trade_date}: {exc}")
-    szse_rows: dict[str, list[dict]] = {}
-    wanted = set(days)
-    for win_start, win_end in szse_windows_for_dates(days):
-        label = f"{win_start.isoformat()}..{win_end.isoformat()}"
-        try:
-            grouped = _load_szse_shares(
-                clients, win_start, win_end, breaker, sleeper, keep=wanted,
-            )
-        except Exception as exc:  # noqa: BLE001
-            result.errors.append(f"fund_scale_daily_szse {label}: {exc}")
-            continue
-        if not grouped:
-            result.errors.append(f"fund_scale_daily_szse {label} 无数据")
-            continue
-        for day, rows in grouped.items():
-            szse_rows.setdefault(day, []).extend(rows)
-    for trade_date in days:
-        rows = sse_rows.get(trade_date, []) + szse_rows.get(trade_date, [])
-        if not rows:
-            continue
-        result.wrote += store.write_rows(data_dir, "etf_shares", trade_date, rows)
+    szse_rows, szse_errors = _collect_szse_shares(clients, days, breaker, sleeper)
+    result.errors.extend(szse_errors)
+    result.wrote += _write_etf_share_days(data_dir, days, sse_rows, szse_rows)
+    gap = etf_share_gap_dates(data_dir, days)
+    if gap:
+        logger.warning("ETF 份额缺日或深市行数骤降，重新拉取: %s", ", ".join(gap))
+        sse_gap: dict[str, list[dict]] = {}
+        for trade_date in gap:
+            try:
+                sse_gap[trade_date] = _load_sse_shares(clients, trade_date, breaker, sleeper)
+            except Exception as exc:  # noqa: BLE001
+                result.errors.append(f"fund_etf_scale_sse {trade_date}: {exc}")
+        szse_gap, gap_errors = _collect_szse_shares(
+            clients, gap, breaker, sleeper, empty_error=False,
+        )
+        result.errors.extend(gap_errors)
+        result.wrote += _write_etf_share_days(data_dir, gap, sse_gap, szse_gap)
+    result.errors.extend(_thin_szse_messages(data_dir, days))
     store.update_kind_state(
         data_dir, "etf_shares",
         last_error=result.errors[-1] if result.errors else None,
@@ -992,6 +1221,7 @@ def sync_etf_shares(
     rows.extend(szse)
     if rows:
         result.wrote = store.write_rows(data_dir, "etf_shares", trade_date, rows)
+    result.errors.extend(_thin_szse_messages(data_dir, [trade_date]))
     # 名称参考表和份额分开写。失败留下错误以便重试，但不清掉上一版，也不回滚份额。
     try:
         result.errors.extend(etf_meta.refresh(data_dir))

@@ -302,7 +302,11 @@ def test_sync_etf_shares_refreshes_meta_without_dropping_shares(tmp_path) -> Non
     assert result.wrote == 2
     assert any("sina" in item for item in result.errors)
     saved = store.read_partition(tmp_path, "etf_shares", "2026-10-09")
-    assert saved["name"].to_list() == ["300ETF", "创业板ETF"]
+    # 落盘顺序不稳定，按代码核对名称。
+    assert dict(zip(saved["code"].to_list(), saved["name"].to_list(), strict=True)) == {
+        "510300": "300ETF",
+        "159915": "创业板ETF",
+    }
     shown = {row["code"]: row for row in query.etf_shares(data_dir=tmp_path)["items"]}
     assert shown["510300"]["name"] == "沪深300ETF华泰柏瑞"
     assert shown["510300"]["short_name"] == "300ETF"
