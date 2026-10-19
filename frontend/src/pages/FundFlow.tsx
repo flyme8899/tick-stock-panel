@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { ChevronRight } from 'lucide-react'
 import { api, type FundFlowAmountRow, type FundFlowBoard, type FundFlowMarginDay, type FundFlowSectorBlock, type FundFlowStockBlock } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
@@ -164,6 +165,45 @@ function navigatorInflow(row: FundFlowAmountRow): string | null {
 
 const ETF_BROAD_ORDER = ['沪深300', '科创50', '创业板']
 
+/** 记下用户收起的分组。不在列表里的组保持默认展开，包括新出现的宽基。 */
+export const ETF_GROUP_COLLAPSE_KEY = 'tf-fund-flow-etf-collapsed'
+
+function readCollapsedEtfGroups(): Set<string> {
+  try {
+    const raw = localStorage.getItem(ETF_GROUP_COLLAPSE_KEY)
+    if (!raw) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((item): item is string => typeof item === 'string' && item.length > 0))
+  } catch {
+    return new Set()
+  }
+}
+
+function writeCollapsedEtfGroups(collapsed: ReadonlySet<string>) {
+  try {
+    if (collapsed.size === 0) {
+      localStorage.removeItem(ETF_GROUP_COLLAPSE_KEY)
+      return
+    }
+    localStorage.setItem(ETF_GROUP_COLLAPSE_KEY, JSON.stringify([...collapsed]))
+  } catch {
+    // 私隐模式写不进去时，这次会话里的折叠仍然有效。
+  }
+}
+
+// 缺一只就不合计：净流入留空表示无法计算，加总会把缺口当成 0。
+function groupNetInflow1d(items: FundFlowAmountRow[]): number | null {
+  if (items.length === 0) return null
+  let sum = 0
+  for (const row of items) {
+    const value = row.net_inflow_1d
+    if (value == null || Number.isNaN(value)) return null
+    sum += value
+  }
+  return sum
+}
+
 function groupEtfRows(items: FundFlowAmountRow[]) {
   const grouped = new Map<string, FundFlowAmountRow[]>()
   const others: FundFlowAmountRow[] = []
@@ -272,6 +312,64 @@ function EtfLine({
   )
 }
 
+function EtfGroupSection({
+  label,
+  items,
+  expanded,
+  onToggle,
+  baselines,
+  badge,
+}: {
+  label: string
+  items: FundFlowAmountRow[]
+  expanded: boolean
+  onToggle: () => void
+  baselines: Record<string, string | null> | undefined
+  badge?: boolean
+}) {
+  const summary = groupNetInflow1d(items)
+  return (
+    <div>
+      <button
+        type="button"
+        className="sticky top-0 z-10 flex w-full items-center gap-1 bg-base py-1 text-left text-[11px] text-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+        data-etf-group={label}
+        data-expanded={expanded ? 'true' : 'false'}
+        aria-expanded={expanded}
+        title={expanded ? '收起这一组' : '展开这一组'}
+        onClick={onToggle}
+      >
+        <ChevronRight
+          className={cn('h-3 w-3 shrink-0 transition-transform', expanded && 'rotate-90')}
+          aria-hidden
+        />
+        <span className="truncate">{label}</span>
+        <span className="shrink-0" data-etf-group-count>{items.length} 只</span>
+        {badge ? (
+          <span className="ml-1 shrink-0 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent">
+            国家队代理
+          </span>
+        ) : null}
+        {!expanded && summary != null ? (
+          <span
+            className={cn('ml-auto shrink-0 font-mono', signedClass(summary))}
+            data-etf-group-inflow
+          >
+            1日合计 {formatYiYuan(summary)}
+          </span>
+        ) : null}
+      </button>
+      {expanded ? (
+        <ul className="space-y-2">
+          {items.map(row => (
+            <EtfLine key={row.code} row={row} baselines={baselines} />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
+
 function EtfShareList({
   rows,
   baselines,
@@ -280,6 +378,18 @@ function EtfShareList({
   baselines: Record<string, string | null> | undefined
 }) {
   const { groups, others } = groupEtfRows(rows)
+  const [collapsed, setCollapsed] = useState(readCollapsedEtfGroups)
+
+  function toggle(label: string) {
+    setCollapsed(prev => {
+      const next = new Set(prev)
+      if (next.has(label)) next.delete(label)
+      else next.add(label)
+      writeCollapsedEtfGroups(next)
+      return next
+    })
+  }
+
   return (
     <div className="min-w-0 overflow-x-auto">
       <p className="mb-2 text-[11px] leading-relaxed text-muted">
@@ -297,37 +407,24 @@ function EtfShareList({
       </div>
       <div className="max-h-80 space-y-2 overflow-y-auto pr-1" data-etf-list>
         {groups.map(group => (
-          <div key={group.label}>
-            <div
-              className="sticky top-0 z-10 bg-base py-1 text-[11px] text-muted"
-              data-etf-group={group.label}
-            >
-              {group.label}
-              <span className="ml-1">{group.items.length} 只</span>
-              {group.label === '沪深300' || group.label === '科创50' ? (
-                <span className="ml-2 rounded border border-accent/40 px-1 py-0.5 text-[10px] text-accent">
-                  国家队代理
-                </span>
-              ) : null}
-            </div>
-            <ul className="space-y-2">
-              {group.items.map(row => (
-                <EtfLine key={row.code} row={row} baselines={baselines} />
-              ))}
-            </ul>
-          </div>
+          <EtfGroupSection
+            key={group.label}
+            label={group.label}
+            items={group.items}
+            expanded={!collapsed.has(group.label)}
+            onToggle={() => toggle(group.label)}
+            baselines={baselines}
+            badge={group.label === '沪深300' || group.label === '科创50'}
+          />
         ))}
         {others.length > 0 ? (
-          <div>
-            <div className="sticky top-0 z-10 bg-base py-1 text-[11px] text-muted" data-etf-group="其他">
-              其他
-            </div>
-            <ul className="space-y-2">
-              {others.map(row => (
-                <EtfLine key={row.code} row={row} baselines={baselines} />
-              ))}
-            </ul>
-          </div>
+          <EtfGroupSection
+            label="其他"
+            items={others}
+            expanded={!collapsed.has('其他')}
+            onToggle={() => toggle('其他')}
+            baselines={baselines}
+          />
         ) : null}
       </div>
     </div>
