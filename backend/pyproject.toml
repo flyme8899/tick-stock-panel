@@ -30,6 +30,9 @@ dependencies = [
     # 不随浮动版本改字段。测试不导入这两个包。
     "efinance==0.5.9",
     "akshare==1.19.1",
+    # 股本回补的交叉校验。2.9.2 起 get_stock_shares(is_history=True) 会翻页，
+    # 更早版本只返回最近 20 条，对不齐巨潮全历史。测试不导入这个包。
+    "adata==2.9.5",
     # Scheduling
     "apscheduler>=3.10",
     # Config

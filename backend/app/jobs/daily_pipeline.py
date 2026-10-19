@@ -402,6 +402,15 @@ def run_now(
             logger.warning("laggard detection failed: %s", e)
             stage_errors.append(f"laggard detection: {e}")
 
+    # 在市股票股本断更只记日志。回测市值直接读这张表，断更会把市值算低，
+    # 但告警不能把盘后管道打成失败，也不在这里打外部源。
+    try:
+        from app.services.shares_backfill import warn_lagging_listed_shares
+
+        warn_lagging_listed_shares(repo.store.data_dir, as_of=today)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("股本滞后检查失败(不阻断): %s", e)
+
     # Step 1.5: 同步除权因子 — 范围与日K拉取方式对齐
     #   日K范围拉取(补缺口/首次) → 除权用日K范围 [daily_range_start, now]
     #     首次会覆盖整个日K区间内的历史除权事件; 补缺口天然只增量(起点=latest_daily≈昨天)
