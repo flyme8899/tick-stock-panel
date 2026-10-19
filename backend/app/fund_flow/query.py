@@ -228,6 +228,7 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
     frame = _partition(root, "etf_shares", day)
     linked = _etf_flow_map(root, day)
     inflows = etf_inflow.latest_inflows(root, as_of=day)
+    _, baselines = _window_baselines(root, day)
     items = []
     for row in frame.iter_rows(named=True):
         code = row.get("code")
@@ -237,6 +238,7 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
         items.append({
             **{key: _json_ready(value) for key, value in row.items()},
             **fields,
+            **_share_change_fields(code, row.get("shares"), baselines),
             "etf_flow_linked": fields["flow_net"] is not None,
         })
     return {
@@ -742,23 +744,56 @@ def _southbound_trend(root: Path) -> dict:
 
 
 # ETF 份额变化的窗口，单位是**落盘份数**而非交易日数。1 指「比上一份落盘」,
-# 5/15 指「比往前第 N 份落盘」。基准按落盘日期往前推，不按自然日 —— 跨周末和
+# 5/20 指「比往前第 N 份落盘」。基准按落盘日期往前推，不按自然日 —— 跨周末和
 # 长假时自然日会取到更早的日期，与「5 日变化」的直觉不符。
 #
 # 用「份数」而不是「交易日数」是刻意的：``etf_shares`` 中间可能缺天（线上就出过
 # 10-13 没落盘），这时「前 1 个交易日」实际会变成 2 个交易日之前。而落盘记录本身
 # 是唯一可靠的锚点 —— 说「较前 N 份落盘」永远准确，前端 tooltip 也照这个措辞。
-_ETF_WINDOWS = (1, 5, 15)
+# 看板和 ``/api/fund-flow/etf-shares`` 都用这组窗口，字段名是 change_{N}d。
+_ETF_WINDOWS = (1, 5, 20)
 
 
 def _window_baseline_dates(dates: list[str], day: str) -> dict[int, str | None]:
-    """每个窗口对应的基准落盘日。不足 N 份落盘时为 None（不编造变化）。"""
-    index = len(dates) - 1
-    if dates[index] != day:
-        # 调用方传错了基准日；不抛异常打断整个看板，退回「拿不到基准」。
+    """每个窗口对应的基准落盘日。不足 N 份落盘，或这一天没有分区时为 None。"""
+    try:
+        index = dates.index(day)
+    except ValueError:
         return {window: None for window in _ETF_WINDOWS}
     return {
         window: (dates[index - window] if index - window >= 0 else None)
+        for window in _ETF_WINDOWS
+    }
+
+
+def _window_baselines(
+    root: Path,
+    day: str,
+    dates: list[str] | None = None,
+) -> tuple[dict[int, str | None], dict[int, dict[str, float]]]:
+    """基准落盘日，以及每个窗口日的 code → 份额。看板和 etf-shares 共用。"""
+    if dates is None:
+        dates = store.list_dates(root, "etf_shares")
+    baseline_days = _window_baseline_dates(dates, day)
+    baselines = {
+        window: _shares_by_code(root, base_day)
+        for window, base_day in baseline_days.items()
+    }
+    return baseline_days, baselines
+
+
+def _share_change_fields(
+    code: str,
+    shares: float | None,
+    baselines: dict[int, dict[str, float]],
+) -> dict[str, float | None]:
+    """份额差，单位份。窗口不足或当天份额缺失时留空，不写成 0。"""
+    return {
+        f"change_{window}d": (
+            None
+            if shares is None or baselines[window].get(code) is None
+            else shares - baselines[window][code]
+        )
         for window in _ETF_WINDOWS
     }
 
@@ -787,11 +822,7 @@ def _etf_changes(root: Path) -> dict:
             "items": [],
         }
     day = dates[-1]
-    baseline_days = _window_baseline_dates(dates, day)
-    # 按窗口预读每个基准交易日的份额。同一日被多个窗口共用时只读一次。
-    baselines: dict[int, dict[str, float]] = {}
-    for window, base_day in baseline_days.items():
-        baselines[window] = _shares_by_code(root, base_day)
+    baseline_days, baselines = _window_baselines(root, day, dates)
     prev_day = baseline_days.get(1)
     linked = _etf_flow_map(root, day)
     inflows = etf_inflow.latest_inflows(root, as_of=day)
@@ -806,26 +837,16 @@ def _etf_changes(root: Path) -> dict:
             continue
         label = _broad_label(code, row.get("name"))
         shares = row.get("shares")
-        prev_shares = baselines[1].get(code)
-        change = None if prev_shares is None or shares is None else shares - prev_shares
-        changes = {
-            window: (
-                None
-                if shares is None or baselines[window].get(code) is None
-                else shares - baselines[window][code]
-            )
-            for window in _ETF_WINDOWS
-        }
+        changes = _share_change_fields(code, shares, baselines)
+        # 1 日变化与 share_change 同源，独立成字段便于前端统一按窗口渲染。
+        change = changes["change_1d"]
         item = {
             "code": code,
             "name": row.get("name"),
             "shares": shares,
-            "prev_shares": prev_shares,
+            "prev_shares": baselines[1].get(code),
             "share_change": change,
-            # 1 日变化与 share_change 同源，独立成字段便于前端统一按窗口渲染。
-            "change_1d": changes[1],
-            "change_5d": changes[5],
-            "change_15d": changes[15],
+            **changes,
             "broad": label,
             **_etf_money_fields(code, linked, inflows),
         }
