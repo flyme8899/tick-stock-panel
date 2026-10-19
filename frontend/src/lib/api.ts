@@ -2779,6 +2779,7 @@ export interface NewsThemeRow {
 
 export interface NewsThemeBoard {
   days: number
+  /** 所选时间窗内的复盘候选篇数（标题含复盘笔记、正文含强势板块或 Markdown 表）。 */
   posts: number
   /** 含 Markdown 主题表的帖子数。散文帖子不计入。 */
   posts_with_table: number

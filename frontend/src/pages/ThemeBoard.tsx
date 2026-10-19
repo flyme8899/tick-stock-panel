@@ -108,7 +108,7 @@ export function ThemeBoard() {
         ))}
         {data && (
           <span className="ml-auto text-xs text-zinc-500">
-            扫描 {data.posts} 篇知识星球笔记 · 解析出主题 {data.posts_parsed ?? 0} 篇 · 共 {rows.length} 行
+            窗口内候选 {data.posts} 篇 · 解析出主题 {data.posts_parsed ?? 0} 篇 · 共 {rows.length} 行
           </span>
         )}
       </div>

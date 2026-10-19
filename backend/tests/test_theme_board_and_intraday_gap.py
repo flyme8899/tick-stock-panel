@@ -258,6 +258,91 @@ def test_cleaning_keeps_markdown_table_and_prose_lines() -> None:
     assert by_name["人形机器人"].summary == "原型机进展"
 
 
+def test_truncated_title_fragments_are_dropped() -> None:
+    """库内标题常被截成「人形机器...」，这种尾巴不能变成主题。"""
+    rows = theme_table.theme_rows_from_text(
+        "",
+        title="10月19日复盘笔记：人形机器...",
+        published_at="2026-10-19T15:00:00+08:00",
+    )
+    assert rows == []
+    rows = theme_table.theme_rows_from_text(
+        "",
+        title="复盘笔记：人形机器人/低空经济/P.../传…",
+    )
+    assert [row.theme for row in rows] == ["人形机器人", "低空经济"]
+
+
+def test_clause_is_not_a_theme_but_sector_names_stay() -> None:
+    text = """一、重磅财经信息
+① 中信证券提到设备订单
+
+三、强势板块和个股分析
+
+早盘韩国股市存储芯片反弹
+① 这是句子，不是板块名
+
+午后证券上涨
+① 同样是句子
+
+半导体设备
+① 设备订单能见度改善
+
+证券
+① 成交回升
+
+文字
+① 零散词
+"""
+    title = "复盘笔记：" + "/".join([
+        "早盘韩国股市存储芯片反弹",
+        "午后证券上涨",
+        "文字",
+        "人形机器人",
+        "物理AI",
+        "光通信",
+        "碳纤维",
+        "冰雪经济",
+        "半导体设备",
+        "证券",
+    ])
+    rows = theme_table.theme_rows_from_text(
+        text, title=title, published_at="2026-10-16T15:00:00+08:00",
+    )
+    themes = [row.theme for row in rows]
+    assert themes == [
+        "人形机器人", "物理AI", "光通信", "碳纤维", "冰雪经济", "半导体设备", "证券",
+    ]
+    assert "中信证券" not in themes
+    assert "一、重磅财经信息" not in themes
+    assert "早盘韩国股市存储芯片反弹" not in themes
+
+
+def test_compound_theme_absorbs_split_title_parts() -> None:
+    text = """三、强势板块和个股分析
+
+影视/传媒
+① 内容侧更强
+
+AI传媒/AI应用
+① 应用端扩散
+"""
+    rows = theme_table.theme_rows_from_text(
+        text,
+        title="复盘笔记：影视/传媒/AI传媒/AI应用",
+        published_at="2026-10-16T15:00:00+08:00",
+    )
+    assert [row.theme for row in rows] == ["影视/传媒", "AI传媒/AI应用"]
+    assert rows[0].summary.startswith("内容侧更强")
+    assert "半导体设备" not in {row.theme for row in rows}
+    # 没有分隔符的长短名都保留，不按子串吞掉。
+    plain = theme_table.theme_rows_from_text(
+        "",
+        title="复盘笔记：半导体/半导体设备",
+    )
+    assert [row.theme for row in plain] == ["半导体", "半导体设备"]
+
+
 def test_odd_prose_never_raises() -> None:
     samples = [
         ("", ""),
@@ -329,7 +414,7 @@ def test_theme_board_reads_zsxq_tables(tmp_path, monkeypatch) -> None:
         store.close()
         service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
 
-    assert payload["posts"] == 3
+    assert payload["posts"] == 2
     assert payload["posts_with_table"] == 2
     assert payload["posts_parsed"] == 2
     themes = {row["theme"] for row in payload["rows"]}
@@ -391,7 +476,7 @@ def test_theme_board_parses_prose_and_dedupes_same_day(tmp_path) -> None:
         store.close()
         service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
 
-    assert payload["posts"] == 5
+    assert payload["posts"] == 3
     assert payload["posts_parsed"] == 3
     assert payload["posts_with_table"] == 1
     assert "非买卖信号" in payload["note"]
@@ -417,6 +502,109 @@ def test_theme_board_parses_prose_and_dedupes_same_day(tmp_path) -> None:
     assert earlier["url"] == "https://example.test/p5"
     assert "降准" not in {row["theme"] for row in payload["rows"]}
     assert "涨停板复盘" not in {row["theme"] for row in payload["rows"]}
+
+
+def _freeze_board_now(monkeypatch, stamp: str) -> None:
+    from app.news import service
+
+    moment = datetime.fromisoformat(stamp)
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return moment.replace(tzinfo=None)
+            return moment.astimezone(tz)
+
+    monkeypatch.setattr(service, "datetime", Frozen)
+
+
+def test_theme_board_window_ignores_recent_chatter(tmp_path, monkeypatch) -> None:
+    """先按日期和候选条件过滤，再套 limit。闲聊帖不能把窗口挤成同一天。"""
+    from app.news import service
+
+    _freeze_board_now(monkeypatch, "2026-10-19T18:00:00+08:00")
+    posts: list[tuple] = []
+    for index in range(30):
+        posts.append((
+            f"noise-{index}",
+            "2026-10-18T23:10:00+08:00",
+            "今天随便聊聊市场，没有主题表。",
+            f"闲聊 {index}",
+            "每日投研",
+            "",
+        ))
+    posts.append((
+        "old-note",
+        "2026-10-14T15:00:00+08:00",
+        _PROSE_BODY,
+        _PROSE_TITLE,
+        "每日投研",
+        "",
+    ))
+    posts.append((
+        "new-note",
+        "2026-10-18T18:00:00+08:00",
+        "",
+        "复盘笔记：证券/光通信",
+        "纳指星球调研",
+        "",
+    ))
+    _seed_news_db(tmp_path, posts)
+    store = service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
+    try:
+        week = service.theme_board(days=7, limit=5)
+        three = service.theme_board(days=3, limit=5)
+    finally:
+        store.close()
+        service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
+
+    assert week["posts"] == 2
+    assert three["posts"] == 1
+    week_themes = {row["theme"] for row in week["rows"]}
+    three_themes = {row["theme"] for row in three["rows"]}
+    assert {"人形机器人", "证券", "光通信"} <= week_themes
+    assert "证券" in three_themes
+    assert "光通信" in three_themes
+    assert "人形机器人" not in three_themes
+
+
+def test_theme_board_folds_title_segment_into_same_day_compound(tmp_path, monkeypatch) -> None:
+    from app.news import service
+
+    _freeze_board_now(monkeypatch, "2026-10-19T18:00:00+08:00")
+    _seed_news_db(tmp_path, [
+        (
+            "title-only",
+            "2026-10-16T16:00:00+08:00",
+            "",
+            "复盘笔记：影视/AI传媒",
+            "每日投研",
+            "https://example.test/title",
+        ),
+        (
+            "body",
+            "2026-10-16T18:00:00+08:00",
+            "三、强势板块和个股分析\n\n影视/传媒\n① 内容侧更强\n\nAI传媒/AI应用\n① 应用端扩散\n",
+            "复盘笔记：影视/传媒/AI传媒/AI应用",
+            "纳指星球调研",
+            "https://example.test/body",
+        ),
+    ])
+    store = service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
+    try:
+        payload = service.theme_board(days=7, limit=10)
+    finally:
+        store.close()
+        service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
+
+    themes = {row["theme"] for row in payload["rows"]}
+    assert themes == {"影视/传媒", "AI传媒/AI应用"}
+    film = next(row for row in payload["rows"] if row["theme"] == "影视/传媒")
+    assert "每日投研" in film["source"]
+    assert "纳指星球调研" in film["source"]
+    assert "内容侧更强" in film["summary"]
+    assert film["url"] == ""
 
 
 def test_theme_board_empty_db_is_safe(tmp_path) -> None:

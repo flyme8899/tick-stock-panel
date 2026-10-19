@@ -90,7 +90,7 @@ from app.news.extract import (
 )
 from app.news.scoring import Candidate, MentionEvent, mention_weight, score_candidates
 from app.news.store import NewsStore
-from app.news.theme_table import theme_rows_from_text
+from app.news.theme_table import redundant_theme_names, theme_rows_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -1900,6 +1900,87 @@ def _dedupe_theme_items(items: list[dict]) -> list[dict]:
     return result
 
 
+def _fold_contained_themes(items: list[dict]) -> list[dict]:
+    """同一天里，短名被 ``A/B`` 盖住时并进复合主题，不另占一行。"""
+    by_day: dict[str, list[dict]] = {}
+    day_order: list[str] = []
+    for item in items:
+        day = item.get("day") or ""
+        if day not in by_day:
+            day_order.append(day)
+            by_day[day] = []
+        by_day[day].append(item)
+    folded: list[dict] = []
+    for day in day_order:
+        folded.extend(_fold_theme_day(by_day[day]))
+    return folded
+
+
+def _fold_theme_day(group: list[dict]) -> list[dict]:
+    drop = redundant_theme_names([item.get("theme") or "" for item in group])
+    if not drop:
+        return group
+    keepers = {item["theme"]: item for item in group if item.get("theme") not in drop}
+    rescued: set[str] = set()
+    for item in group:
+        theme = item.get("theme") or ""
+        if theme not in drop:
+            continue
+        host_name = _longest_compound(theme, list(keepers))
+        if not host_name:
+            rescued.add(theme)
+            continue
+        _merge_theme_view(keepers[host_name], item)
+    return [
+        item for item in group
+        if item.get("theme") not in drop or item.get("theme") in rescued
+    ]
+
+
+def _longest_compound(theme: str, names: list[str]) -> str:
+    matches = [
+        name for name in names
+        if theme != name and theme in _theme_parts(name)
+    ]
+    if not matches:
+        return ""
+    matches.sort(key=len, reverse=True)
+    return matches[0]
+
+
+def _theme_parts(name: str) -> list[str]:
+    return [part for part in re.split(r"[/／、|｜]+", name) if part]
+
+
+def _merge_theme_view(keeper: dict, extra: dict) -> None:
+    keeper["source"] = _append_piece(
+        keeper.get("source") or "", extra.get("source") or "", sep="、", limit=240,
+    )
+    keeper["title"] = _append_piece(
+        keeper.get("title") or "", extra.get("title") or "", sep="；", limit=120,
+    )
+    keeper["summary"] = _append_piece(
+        keeper.get("summary") or "",
+        extra.get("summary") or "",
+        sep="；",
+        limit=_THEME_MERGE_SUMMARY,
+    )
+    keeper["strength"] = _append_piece(
+        keeper.get("strength") or "",
+        extra.get("strength") or "",
+        sep="；",
+        limit=_THEME_MERGE_STRENGTH,
+    )
+    keeper["source_kind"] = _merge_source_kind(
+        keeper.get("source_kind") or "", extra.get("source_kind") or "",
+    )
+    urls = _unique_texts([keeper.get("url") or "", extra.get("url") or ""])
+    keeper["url"] = urls[0] if len(urls) == 1 else ""
+    published = extra.get("published_at") or ""
+    if published > (keeper.get("published_at") or ""):
+        keeper["published_at"] = published
+
+
 def theme_board(*, days: int = 7, limit: int = 400) -> dict:
     """盘后复盘板：汇总星球复盘笔记里的主题，**只读展示**。
 
@@ -1908,9 +1989,11 @@ def theme_board(*, days: int = 7, limit: int = 400) -> dict:
     - 这是**复盘**用的只读视图，回答「这几天笔记里都提了哪些主题」。
     - ``strength`` 是笔记作者手写的判断，**原样透传**。散文没有这一列就留空。
       服务端不做打分、不算排名、不映射成任何方向，也不得接进买点/做T。
-    - 同一天、同一主题只留一行，来源合并。不同日期仍各留一行。
+    - 同一天、同一主题只留一行，来源合并。短名若是同日 ``A/B`` 的一段，并进复合主题。
+      不同日期仍各留一行。
 
-    只读：只调 ``store.zsxq_posts``（一条 SELECT），不写库、不发网络请求。
+    只读：只调 ``store.zsxq_posts``（一条 SELECT）。查询先按日期窗口和复盘候选
+    过滤，再套 ``limit``，不写库、不发网络请求。``posts`` 是窗口内候选篇数。
     """
     span = max(1, min(int(days), 90))
     cap = max(1, min(int(limit), 2000))
@@ -1958,7 +2041,7 @@ def theme_board(*, days: int = 7, limit: int = 400) -> dict:
                 "source_kind": entry.source_kind,
             })
 
-    items = _dedupe_theme_items(items)
+    items = _fold_contained_themes(_dedupe_theme_items(items))
     items.sort(key=lambda item: (item["day"] or "", item["published_at"] or ""), reverse=True)
     return {
         "days": span,
