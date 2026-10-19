@@ -725,3 +725,143 @@ def test_malformed_news_row_is_skipped(tmp_path) -> None:
     conn.commit()
     conn.close()
     assert query._etf_flow_map(tmp_path, "2026-10-14") == {}
+
+
+def _weekdays(start: date, count: int) -> list[str]:
+    found: list[str] = []
+    cursor = start
+    while len(found) < count:
+        if cursor.weekday() < 5:
+            found.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return found
+
+
+def _change_row(root: Path, code: str, *, trade_date: str | None = None) -> dict:
+    payload = query.etf_shares(trade_date=trade_date, data_dir=root)
+    return next(row for row in payload["items"] if row["code"] == code)
+
+
+def test_159325_twenty_day_change_uses_new_share_basis(tmp_path) -> None:
+    """2 倍折算跨进 20 日窗口时，基准份额要乘 f，不能把跳变当成申赎。
+
+    159325：R=2026-09-11，f=2，基准 09-10 的份额 564,460,528，折算后
+    1,204,921,056。当前口径的 20 日变化是 +76,000,000，不是原始相减的
+    +640,460,528。同一批里的 510300 没有折算，三个窗口保持原始差。
+    """
+    code = "159325"
+    plain = "510300"
+    days = _weekdays(date(2026, 9, 10), 21)
+    before, after = 564_460_528, 1_204_921_056
+    assert days[0] == "2026-09-10"
+    assert days[1] == "2026-09-11"
+    for index, day in enumerate(days):
+        _write_shares(tmp_path, day, [
+            (code, before if index == 0 else after),
+            (plain, 1_000_000_000 + index * 1_000_000),
+        ])
+        _mark_trading(tmp_path, day)
+    # 因子记在除权日（登记日的下一交易日），确认落在 R。
+    _write_factor(tmp_path, code, days[2], 2.0)
+
+    raw = after - before
+    assert raw == 640_460_528
+    adjusted = after - before * 2
+    assert adjusted == 76_000_000
+
+    board = query.board(tmp_path)["etf_shares"]
+    assert board["baselines"]["20"] == "2026-09-10"
+    listed = {row["code"]: row for row in board["items"]}
+    split = listed[code]
+    assert split["change_20d"] == adjusted
+    assert split["change_20d"] != raw
+    assert split["change_1d"] == 0
+    assert split["change_5d"] == 0
+    assert split["share_change"] == split["change_1d"]
+
+    direct = _change_row(tmp_path, code)
+    assert direct["change_20d"] == adjusted
+    assert direct["change_1d"] == split["change_1d"]
+    on_record = _change_row(tmp_path, code, trade_date="2026-09-11")
+    assert on_record["change_1d"] == adjusted
+    assert on_record["change_20d"] is None
+
+    untouched = listed[plain]
+    assert untouched["change_1d"] == 1_000_000
+    assert untouched["change_5d"] == 5_000_000
+    assert untouched["change_20d"] == 20_000_000
+    assert _change_row(tmp_path, plain)["change_20d"] == 20_000_000
+
+
+def test_515050_one_day_change_uses_new_share_basis(tmp_path) -> None:
+    """3 倍折算的登记日，1 日变化是折算后的真实申赎，不是份额跳变。"""
+    code = "515050"
+    prev, record, ex = "2026-05-11", "2026-05-12", "2026-05-13"
+    before, after = 3_633_068_500, 10_995_205_400
+    _write_shares(tmp_path, prev, [(code, before)])
+    _write_shares(tmp_path, record, [(code, after)])
+    for day in (prev, record, ex):
+        _mark_trading(tmp_path, day)
+    _write_factor(tmp_path, code, ex, 3.0)
+
+    raw = after - before
+    assert raw == 7_362_136_900
+    adjusted = after - before * 3
+    assert adjusted == 95_999_900
+
+    payload = query.board(tmp_path)["etf_shares"]
+    assert payload["trade_date"] == record
+    board = next(row for row in payload["items"] if row["code"] == code)
+    direct = _change_row(tmp_path, code)
+    assert board["change_1d"] == adjusted
+    assert board["share_change"] == adjusted
+    assert direct["change_1d"] == adjusted
+    assert board["change_1d"] != raw
+
+
+def test_successive_splits_scale_baseline_by_factor_product(tmp_path) -> None:
+    """窗口里两次已确认折算，基准份额乘上 f 的连乘。"""
+    code = "159901"
+    shares = {
+        "2026-06-01": 1_000_000,
+        "2026-06-02": 2_000_000,
+        "2026-06-03": 2_100_000,
+        "2026-06-04": 6_300_000,
+        "2026-06-05": 6_300_000,
+        "2026-06-08": 6_500_000,
+    }
+    for day, amount in shares.items():
+        _write_shares(tmp_path, day, [(code, amount)])
+        _mark_trading(tmp_path, day)
+    _write_factor(tmp_path, code, "2026-06-03", 2.0)
+    _write_factor(tmp_path, code, "2026-06-05", 3.0)
+    row = _board_row(tmp_path, code)
+    assert row["change_5d"] == 500_000
+    assert row["change_5d"] != 6_500_000 - 1_000_000
+    assert row["change_1d"] == 200_000
+    assert _change_row(tmp_path, code)["change_5d"] == 500_000
+
+
+def test_cash_dividend_does_not_scale_share_change(tmp_path) -> None:
+    """价格因子超过 5% 但份额没按 f 跳时，份额变化保持原始差。"""
+    case = _CASH_DIVIDENDS[0]
+    _seed_conversion(tmp_path, case)
+    record_day, record_shares, _close = case["record"]
+    prev_shares = case["prev"][1]
+    raw = record_shares - prev_shares
+    assert raw == 14_000_000
+    row = _change_row(tmp_path, case["code"], trade_date=record_day)
+    assert row["change_1d"] == raw
+
+
+def test_price_factor_without_share_jump_keeps_raw_change(tmp_path) -> None:
+    """因子是 2，份额只增加 5%，不确认折算，1 日变化仍是原始申购。"""
+    code = "510500"
+    prev, record, ex = "2026-04-08", "2026-04-09", "2026-04-10"
+    _write_shares(tmp_path, prev, [(code, 1_000_000_000)])
+    _write_shares(tmp_path, record, [(code, 1_050_000_000)])
+    for day in (prev, record, ex):
+        _mark_trading(tmp_path, day)
+    _write_factor(tmp_path, code, ex, 2.0)
+    assert _board_row(tmp_path, code)["change_1d"] == 50_000_000
+    assert _change_row(tmp_path, code)["change_1d"] == 50_000_000

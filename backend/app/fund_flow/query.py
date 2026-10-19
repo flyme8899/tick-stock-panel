@@ -228,7 +228,8 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
     frame = _partition(root, "etf_shares", day)
     linked = _etf_flow_map(root, day)
     inflows = etf_inflow.latest_inflows(root, as_of=day)
-    _, baselines = _window_baselines(root, day)
+    baseline_days, baselines = _window_baselines(root, day)
+    rebase = _rebase_factors_for_windows(root, baseline_days, day)
     meta = etf_meta.load_index(root)
     items = []
     for row in frame.iter_rows(named=True):
@@ -242,7 +243,14 @@ def etf_shares(*, trade_date: str | None = None, data_dir: Path | None = None) -
             "name": presented["name"],
             "short_name": presented["short_name"],
             **fields,
-            **_share_change_fields(code, row.get("shares"), baselines),
+            **_share_change_fields(
+                code,
+                row.get("shares"),
+                baselines,
+                day=day,
+                baseline_days=baseline_days,
+                rebase_factors=rebase.get(code, []),
+            ),
             "etf_flow_linked": fields["flow_net"] is not None,
         })
     return {
@@ -797,6 +805,8 @@ def _southbound_trend(root: Path) -> dict:
 # 10-13 没落盘），这时「前 1 个交易日」实际会变成 2 个交易日之前。而落盘记录本身
 # 是唯一可靠的锚点 —— 说「较前 N 份落盘」永远准确，前端 tooltip 也照这个措辞。
 # 看板和 ``/api/fund-flow/etf-shares`` 都用这组窗口，字段名是 change_{N}d。
+# 窗口跨过已确认的登记日时，基准份额乘上其后的折算倍数，换算成当前份额口径。
+# 确认规则与净流入相同：只有 ``_shares_rebased`` 认定真跳变才乘 f。
 _ETF_WINDOWS = (1, 5, 20)
 
 
@@ -828,20 +838,60 @@ def _window_baselines(
     return baseline_days, baselines
 
 
+def _rebase_factors_for_windows(
+    root: Path,
+    baseline_days: dict[int, str | None],
+    day: str,
+) -> dict[str, list[tuple[str, float]]]:
+    """各窗口可能跨过的、已确认登记日因子。没有基准日时为空。"""
+    bases = [base for base in baseline_days.values() if base]
+    if not bases:
+        return {}
+    return etf_inflow.confirmed_rebase_factors(
+        root,
+        after=min(bases),
+        on_or_before=day,
+    )
+
+
+def _share_scale(
+    rebase_factors: list[tuple[str, float]],
+    baseline_day: str,
+    day: str,
+) -> float:
+    """基准日之后、截至当日的已确认因子连乘。没有折算时为 1。"""
+    scale = 1.0
+    for record_day, factor in rebase_factors:
+        if baseline_day < record_day <= day and factor > 0:
+            scale *= factor
+    return scale
+
+
 def _share_change_fields(
     code: str,
     shares: float | None,
     baselines: dict[int, dict[str, float]],
+    *,
+    day: str,
+    baseline_days: dict[int, str | None],
+    rebase_factors: list[tuple[str, float]],
 ) -> dict[str, float | None]:
-    """份额差，单位份。窗口不足或当天份额缺失时留空，不写成 0。"""
-    return {
-        f"change_{window}d": (
-            None
-            if shares is None or baselines[window].get(code) is None
-            else shares - baselines[window][code]
-        )
-        for window in _ETF_WINDOWS
-    }
+    """份额差，单位份，口径是当前份额。
+
+    登记日的份额已经按 f 换成新份额，基准日没有。窗口跨过已确认的登记日时，
+    用 ``shares_now − baseline × Πf``，避免把拆分或缩股算成申赎。
+    窗口不足或当天份额缺失时留空，不写成 0。
+    """
+    fields: dict[str, float | None] = {}
+    for window in _ETF_WINDOWS:
+        base = baselines[window].get(code)
+        base_day = baseline_days.get(window)
+        if shares is None or base is None or base_day is None:
+            fields[f"change_{window}d"] = None
+            continue
+        scale = _share_scale(rebase_factors, base_day, day)
+        fields[f"change_{window}d"] = shares - base * scale
+    return fields
 
 
 def _shares_by_code(root: Path, day: str | None) -> dict[str, float]:
@@ -869,6 +919,7 @@ def _etf_changes(root: Path) -> dict:
         }
     day = dates[-1]
     baseline_days, baselines = _window_baselines(root, day, dates)
+    rebase = _rebase_factors_for_windows(root, baseline_days, day)
     prev_day = baseline_days.get(1)
     linked = _etf_flow_map(root, day)
     inflows = etf_inflow.latest_inflows(root, as_of=day)
@@ -885,7 +936,14 @@ def _etf_changes(root: Path) -> dict:
         presented = _etf_presented(code, row.get("name"), meta.get(code))
         label = _broad_label(code, presented["name"], presented["index_code"])
         shares = row.get("shares")
-        changes = _share_change_fields(code, shares, baselines)
+        changes = _share_change_fields(
+            code,
+            shares,
+            baselines,
+            day=day,
+            baseline_days=baseline_days,
+            rebase_factors=rebase.get(code, []),
+        )
         # 1 日变化与 share_change 同源，独立成字段便于前端统一按窗口渲染。
         change = changes["change_1d"]
         item = {

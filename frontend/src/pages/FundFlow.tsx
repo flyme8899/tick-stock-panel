@@ -116,7 +116,7 @@ type EtfColumn = {
   inflow: (row: FundFlowAmountRow) => number | null | undefined
 }
 
-// 份额变化与净流入共用 1 / 5 / 20。份额按前 N 份落盘，净流入是相邻交易日滚动合计。
+// 份额变化与净流入共用 1 / 5 / 20。份额按前 N 份落盘，折算在后端完成；净流入是相邻交易日滚动合计。
 const ETF_COLUMNS: EtfColumn[] = [
   {
     days: 1,
@@ -283,7 +283,7 @@ function EtfShareList({
   return (
     <div className="min-w-0 overflow-x-auto">
       <p className="mb-2 text-[11px] leading-relaxed text-muted">
-        每列上方是份额变化，下方是净流入。净流入 = (当日份额 − 上一份落盘) × 收盘价，单位亿元；5 日 / 20 日是相邻交易日的滚动合计。复权跳变或中间缺交易日时留空。
+        每列上方是份额变化，下方是净流入。净流入 = (当日份额 − 上一份落盘) × 收盘价，单位亿元；5 日 / 20 日是相邻交易日的滚动合计。复权跳变或中间缺交易日时，净流入留空。份额变化按当前份额口径折算：窗口跨过已确认的登记日时，基准份额乘上其后的折算倍数，拆分或缩股本身不计入变化。
       </p>
       <div className="mb-1 flex items-baseline justify-between gap-3 text-[11px] text-muted">
         <span>名称</span>
