@@ -109,18 +109,36 @@ function stockName(row: FundFlowAmountRow): string {
   return row.code || '—'
 }
 
-type EtfWindow = {
+type EtfColumn = {
   days: number
   label: string
-  value: (row: FundFlowAmountRow) => number | null | undefined
+  shares: (row: FundFlowAmountRow) => number | null | undefined
+  inflow: (row: FundFlowAmountRow) => number | null | undefined
 }
 
-// 份额变化的三个窗口。1 日变化与后端的 share_change 同源，单独取字段以便统一渲染。
-const ETF_WINDOWS: EtfWindow[] = [
-  { days: 1, label: '1日', value: row => row.change_1d ?? row.share_change },
-  { days: 5, label: '5日', value: row => row.change_5d },
-  { days: 15, label: '15日', value: row => row.change_15d },
+// 份额变化与净流入共用 1 / 5 / 20。份额按前 N 份落盘，净流入是相邻交易日滚动合计。
+const ETF_COLUMNS: EtfColumn[] = [
+  {
+    days: 1,
+    label: '1日',
+    shares: row => row.change_1d ?? row.share_change,
+    inflow: row => row.net_inflow_1d,
+  },
+  {
+    days: 5,
+    label: '5日',
+    shares: row => row.change_5d,
+    inflow: row => row.net_inflow_5d,
+  },
+  {
+    days: 20,
+    label: '20日',
+    shares: row => row.change_20d,
+    inflow: row => row.net_inflow_20d,
+  },
 ]
+
+const ETF_COL_WIDTH = 'w-[5.75rem]'
 
 function formatShares(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return '—'
@@ -135,12 +153,6 @@ function formatYiYuan(value: number | null | undefined): string {
   const sign = value > 0 ? '+' : ''
   return `${sign}${value.toFixed(2)}亿元`
 }
-
-const ETF_INFLOW_FIELDS: { key: 'net_inflow_1d' | 'net_inflow_5d' | 'net_inflow_20d'; label: string }[] = [
-  { key: 'net_inflow_1d', label: '1日' },
-  { key: 'net_inflow_5d', label: '5日' },
-  { key: 'net_inflow_20d', label: '20日' },
-]
 
 function navigatorInflow(row: FundFlowAmountRow): string | null {
   if (row.flow_net == null && row.flow_net_5d == null && row.flow_net_20d == null) return null
@@ -391,16 +403,16 @@ export function FundFlow() {
               meta={etf?.trade_date ? `${etf.prev_trade_date ? `${etf.prev_trade_date} → ` : ''}${etf.trade_date}` : undefined}
             >
               {(etf?.items.length ?? 0) === 0 ? <Empty text="还没有 ETF 份额。只有一天时只显示份额，不编造变化。" /> : (
-                <div className="min-w-0">
+                <div className="min-w-0 overflow-x-auto">
                   <p className="mb-2 text-[11px] leading-relaxed text-muted">
-                    右侧是份额变化。净流入 = (当日份额 − 上一份落盘) × 收盘价，单位亿元；5 日 / 20 日是相邻交易日的滚动合计。复权跳变或中间缺交易日时留空。
+                    每列上方是份额变化，下方是净流入。净流入 = (当日份额 − 上一份落盘) × 收盘价，单位亿元；5 日 / 20 日是相邻交易日的滚动合计。复权跳变或中间缺交易日时留空。
                   </p>
                   <div className="mb-1 flex items-baseline justify-between gap-3 text-[11px] text-muted">
                     <span>名称</span>
-                    <span className="flex shrink-0 gap-2 sm:gap-3">
-                      {ETF_WINDOWS.map(window => (
-                        <span key={window.label} className="w-[56px] text-right sm:w-[68px]">
-                          {window.label}
+                    <span className="flex shrink-0 gap-2 sm:gap-3" data-etf-windows>
+                      {ETF_COLUMNS.map(column => (
+                        <span key={column.days} className={cn(ETF_COL_WIDTH, 'text-right')}>
+                          {column.label}
                         </span>
                       ))}
                     </span>
@@ -428,24 +440,32 @@ export function FundFlow() {
                               ) : null}
                             </span>
                             <span className="flex shrink-0 gap-2 sm:gap-3">
-                              {ETF_WINDOWS.map(window => (
-                                <span
-                                  key={window.label}
-                                  className={cn('w-[56px] text-right font-mono text-xs sm:w-[68px]', signedClass(window.value(row)))}
-                                  title={etfBaselineTitle(etf?.baselines, window.days)}
-                                >
-                                  {formatShares(window.value(row))}
-                                </span>
-                              ))}
+                              {ETF_COLUMNS.map(column => {
+                                const shares = column.shares(row)
+                                const inflow = column.inflow(row)
+                                return (
+                                  <span
+                                    key={column.days}
+                                    data-window={column.days}
+                                    className={cn(ETF_COL_WIDTH, 'inline-flex flex-col items-end gap-0.5')}
+                                  >
+                                    <span
+                                      data-kind="shares"
+                                      className={cn('whitespace-nowrap font-mono text-xs', signedClass(shares))}
+                                      title={etfBaselineTitle(etf?.baselines, column.days)}
+                                    >
+                                      {formatShares(shares)}
+                                    </span>
+                                    <span
+                                      data-kind="inflow"
+                                      className={cn('whitespace-nowrap font-mono text-[11px]', signedClass(inflow))}
+                                    >
+                                      {formatYiYuan(inflow)}
+                                    </span>
+                                  </span>
+                                )
+                              })}
                             </span>
-                          </div>
-                          <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-[11px]">
-                            <span className="text-muted">净流入</span>
-                            {ETF_INFLOW_FIELDS.map(field => (
-                              <span key={field.key} className={cn('font-mono', signedClass(row[field.key]))}>
-                                {field.label} {formatYiYuan(row[field.key])}
-                              </span>
-                            ))}
                           </div>
                           <div className={cn('mt-0.5 text-[11px]', row.flow_diverged ? 'text-warning' : 'text-muted')}>
                             {row.code}

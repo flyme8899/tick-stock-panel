@@ -2467,10 +2467,10 @@ export interface FundFlowAmountRow {
   shares?: number | null
   prev_shares?: number | null
   share_change?: number | null
-  /** ETF 份额变化：1 / 5 / 15 个交易日。基准按落盘交易日往前推，不足时为 null。 */
+  /** ETF 份额变化：前 1 / 5 / 20 份落盘。不足时为 null。 */
   change_1d?: number | null
   change_5d?: number | null
-  change_15d?: number | null
+  change_20d?: number | null
   broad?: string | null
   /** 份额差 × 当日收盘价，单位亿元。复权跳变或中间缺交易日时为空。 */
   net_inflow_1d?: number | null
@@ -2530,7 +2530,7 @@ export interface FundFlowBoard {
   etf_shares: {
     trade_date: string | null
     prev_trade_date: string | null
-    /** 变化窗口（交易日数）。缺失时前端按 [1,5,15] 兜底。 */
+    /** 变化窗口（落盘份数）。当前为 1 / 5 / 20。 */
     windows?: number[]
     /** 每个窗口的基准交易日，键是窗口天数的字符串。 */
     baselines?: Record<string, string | null>

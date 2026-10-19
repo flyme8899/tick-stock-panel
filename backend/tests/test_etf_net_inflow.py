@@ -181,7 +181,8 @@ def test_five_and_twenty_day_sums_use_each_days_close(tmp_path) -> None:
     assert row["net_inflow_5d"] == pytest.approx(16 + 17 + 18 + 19 + 20)
     assert row["net_inflow_20d"] == pytest.approx(sum(range(1, 21)))
     assert row["change_5d"] == pytest.approx(5e8)
-    assert row["change_15d"] == pytest.approx(15e8)
+    assert row["change_20d"] == pytest.approx(20e8)
+    assert "change_15d" not in row
 
 
 def test_split_on_ex_date_keeps_real_flow_and_raw_share_change(tmp_path) -> None:

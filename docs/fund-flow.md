@@ -113,7 +113,7 @@ python -m app.fund_flow.backfill --from 2026-04-01 --to 2026-10-15 --data-dir /a
 | GET | `/api/fund-flow/intraday?symbols=` | 当天最近一份盘中快照。响应和每一行都有 `source`（`akshare_em_rank` 或 `akshare_ths`）。东财行带主力、超大单、大单、中单、小单净额，单位元。`symbols` 为逗号分隔代码，最多 2000 只。开放令牌的 `read:analysis` 可以读 |
 | GET | `/api/fund-flow/sectors?kind=industry\|concept` | 行业或概念排名。有收盘快照用收盘，否则用当天最后一次盘中 |
 | GET | `/api/fund-flow/margin` | 两融汇总，明细默认最多 100 行 |
-| GET | `/api/fund-flow/etf-shares` | ETF 份额。`net_inflow_1d` / `net_inflow_5d` / `net_inflow_20d` 是份额推算的净流入，单位亿元。能接上领航者时带 `flow_net`（当日）、`flow_net_5d`、`flow_net_20d`，单位同样是亿元。`flow_diverged` 表示 1 日推算和领航者相对差超过 20% |
+| GET | `/api/fund-flow/etf-shares` | ETF 份额。`net_inflow_1d` / `net_inflow_5d` / `net_inflow_20d` 是份额推算的净流入，单位亿元。能接上领航者时带 `flow_net`（当日）、`flow_net_5d`、`flow_net_20d`，单位同样是亿元。`flow_diverged` 表示 1 日推算和领航者相对差超过 20%。`change_1d` / `change_5d` / `change_20d` 是相对前 1 / 5 / 20 份落盘的份额差（份），与看板 `etf_shares` 同一口径，不足该窗口时为空 |
 | GET | `/api/fund-flow/dsa-context` | 给 DSA 的短摘要。请求头 `X-News-Feed-Token` 与资讯桥相同，不对则 404 |
 
 没有数据时 `items` 为空，不把缺失写成 0。

@@ -602,10 +602,13 @@ def test_stock_marked_success_when_fallback_fills_partition(tmp_path, monkeypatc
     assert scheduler._stock_day_complete(thin, "2026-10-13", universe) is False
 
 
-def test_etf_changes_expose_1_5_15_day_windows(tmp_path) -> None:
-    """ETF 份额变化给 1 / 5 / 15 日三个窗口，基准按落盘交易日往前推。"""
-    # 造 20 个交易日的份额：510300 每日 +1e8，510050 每日 -2e8。
-    days = [date(2026, 9, d).isoformat() for d in range(1, 21)]
+def test_etf_changes_expose_1_5_20_day_windows(tmp_path) -> None:
+    """ETF 份额变化给 1 / 5 / 20 日三个窗口，基准按落盘份数往前推。
+
+    看板和 ``/api/fund-flow/etf-shares`` 的 change_* 必须是同一组字段、同一数值。
+    """
+    # 造 21 份落盘：510300 每日 +1e8，510050 每日 -2e8。前 20 份才够 20 日窗口。
+    days = [date(2026, 9, d).isoformat() for d in range(1, 22)]
     for index, day in enumerate(days):
         store.write_rows(tmp_path, "etf_shares", day, [
             {"symbol": "510300", "code": "510300", "name": "沪深300ETF",
@@ -615,22 +618,34 @@ def test_etf_changes_expose_1_5_15_day_windows(tmp_path) -> None:
         ])
     payload = query.board(tmp_path)["etf_shares"]
     assert payload["trade_date"] == days[-1]
-    assert payload["windows"] == [1, 5, 15]
-    # 基准日：最新 20 号，往前 1/5/15 个交易日。
+    assert payload["windows"] == [1, 5, 20]
+    # 基准日：最新一份，往前 1/5/20 份落盘。
     assert payload["baselines"] == {
-        "1": days[-2], "5": days[-6], "15": days[-16],
+        "1": days[-2], "5": days[-6], "20": days[0],
     }
     assert payload["prev_trade_date"] == days[-2]
     by_code = {row["code"]: row for row in payload["items"]}
     hs300 = by_code["510300"]
     assert hs300["change_1d"] == pytest.approx(1e8)
     assert hs300["change_5d"] == pytest.approx(5e8)
-    assert hs300["change_15d"] == pytest.approx(15e8)
-    # 老字段与新字段同源，保持向后兼容。
+    assert hs300["change_20d"] == pytest.approx(20e8)
+    assert "change_15d" not in hs300
+    # 老字段与 1 日字段同源，保持向后兼容。
     assert hs300["share_change"] == hs300["change_1d"]
     sz50 = by_code["510050"]
     assert sz50["change_1d"] == pytest.approx(-2e8)
-    assert sz50["change_15d"] == pytest.approx(-30e8)
+    assert sz50["change_20d"] == pytest.approx(-40e8)
+
+    direct = {row["code"]: row for row in query.etf_shares(data_dir=tmp_path)["items"]}
+    for code in ("510300", "510050"):
+        for key in ("change_1d", "change_5d", "change_20d"):
+            assert direct[code][key] == pytest.approx(by_code[code][key])
+        assert "change_15d" not in direct[code]
+    # 历史日期也按该日往前数落盘，不因为不是最新一日就整窗留空。
+    mid = query.etf_shares(trade_date=days[10], data_dir=tmp_path)
+    mid_hs = next(row for row in mid["items"] if row["code"] == "510300")
+    assert mid_hs["change_1d"] == pytest.approx(1e8)
+    assert mid_hs["change_20d"] is None
 
 
 def test_etf_changes_window_baseline_is_none_when_history_short(tmp_path) -> None:
@@ -643,18 +658,20 @@ def test_etf_changes_window_baseline_is_none_when_history_short(tmp_path) -> Non
         ])
     payload = query.board(tmp_path)["etf_shares"]
     row = payload["items"][0]
-    assert row["change_1d"] == pytest.approx(1e8)      # 有前一交易日
-    assert row["change_5d"] is None                    # 不足 5 日
-    assert row["change_15d"] is None                   # 不足 15 日
+    assert row["change_1d"] == pytest.approx(1e8)      # 有前一份落盘
+    assert row["change_5d"] is None                    # 不足 5 份
+    assert row["change_20d"] is None                   # 不足 20 份
+    assert "change_15d" not in row
     assert payload["baselines"]["5"] is None
-    assert payload["baselines"]["15"] is None
+    assert payload["baselines"]["20"] is None
+    assert "15" not in payload["baselines"]
 
 
 def test_etf_changes_empty_when_no_partition(tmp_path) -> None:
     payload = query.board(tmp_path)["etf_shares"]
     assert payload["trade_date"] is None
     assert payload["items"] == []
-    assert payload["windows"] == [1, 5, 15]
+    assert payload["windows"] == [1, 5, 20]
     assert payload["baselines"] == {}
 
 
