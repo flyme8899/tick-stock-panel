@@ -1077,11 +1077,195 @@ def test_szse_windows_cover_history_without_exceeding_six_months() -> None:
     assert len(windows) >= 3
     for start, end in windows:
         assert (end - start).days < jobs.SZSE_WINDOW_DAYS
+        inside = [day for day in days if start.isoformat() <= day <= end.isoformat()]
+        assert 1 <= len(inside) <= jobs.szse_dates_per_window()
+        assert len(inside) * jobs.SZSE_ASSUMED_ROWS_PER_DAY <= jobs.SZSE_REQUEST_ROW_BUDGET
     sparse = jobs.szse_windows_for_dates(["2025-10-10", "2026-10-09"])
     assert sparse == [
         (date(2025, 10, 10), date(2025, 10, 10)),
         (date(2026, 10, 9), date(2026, 10, 9)),
     ]
+    calendar = jobs.iter_szse_windows(date(2025, 10, 10), date(2026, 10, 9))
+    assert calendar[0][0] == date(2025, 10, 10)
+    for start, end in calendar:
+        assert (end - start).days < jobs._szse_calendar_span()
+
+
+def _szse_share_row(code: str, day: str, shares: float = 1.0) -> dict:
+    return {
+        "symbol": code, "code": code, "name": code,
+        "trade_date": day, "shares": shares, "source": "akshare",
+    }
+
+
+def _write_szse_count(root: Path, day: str, count: int) -> None:
+    store.write_rows(root, "etf_shares", day, [
+        _szse_share_row(f"159{index:03d}", day) for index in range(count)
+    ])
+
+
+def test_etf_share_gap_dates_include_short_partitions(tmp_path) -> None:
+    """缺日不只是没有文件。行数比相邻日少了超过 5% 的分区也要重拉。"""
+    _write_szse_count(tmp_path, "2026-03-12", 100)
+    _write_szse_count(tmp_path, "2026-03-13", 94)
+    _write_szse_count(tmp_path, "2026-03-16", 100)
+    days = ["2026-03-12", "2026-03-13", "2026-03-16", "2026-03-17"]
+    assert jobs.etf_share_gap_dates(tmp_path, days) == ["2026-03-13", "2026-03-17"]
+    # 正好少 5% 还不算骤降。
+    _write_szse_count(tmp_path, "2026-03-13", 95)
+    assert jobs.etf_share_gap_dates(tmp_path, days) == ["2026-03-17"]
+
+
+def test_gap_backfill_refetches_short_days_not_only_missing_ones(tmp_path) -> None:
+    _write_szse_count(tmp_path, "2026-03-12", 20)
+    _write_szse_count(tmp_path, "2026-03-13", 10)
+    seen: list[str] = []
+    original = jobs.backfill_etf_shares
+
+    def _capture(*_args, trade_dates, **_kwargs):
+        seen.extend(trade_dates)
+        return jobs.RunResult(kind="etf_shares")
+
+    try:
+        jobs.backfill_etf_shares = _capture
+        jobs.backfill_etf_share_history(
+            tmp_path, None, breaker=None,
+            start="2026-03-12", end="2026-03-16",
+            known_days=[date(2026, 3, 12), date(2026, 3, 13), date(2026, 3, 16)],
+            gaps_only=True,
+        )
+    finally:
+        jobs.backfill_etf_shares = original
+    assert seen == ["2026-03-13", "2026-03-16"]
+
+
+def _szse_raw(day: str, count: int) -> list[dict]:
+    return [{
+        "基金代码": f"159{index:03d}",
+        "基金简称": "深市ETF",
+        "日期": day,
+        "基金份额": 100.0,
+    } for index in range(count)]
+
+
+def test_szse_near_xls_limit_is_not_written_and_shorter_window_is(tmp_path) -> None:
+    spans: list[tuple[str, str]] = []
+
+    def ak(name, **kwargs):
+        if name == "fund_etf_scale_sse":
+            return []
+        assert name == "fund_scale_daily_szse"
+        start = _iso_compact(kwargs["start_date"])
+        end = _iso_compact(kwargs["end_date"])
+        spans.append((start, end))
+        if start != end:
+            return _szse_raw(end, jobs.SZSE_XLS_NEAR_LIMIT)
+        return _szse_raw(start, 3)
+
+    result = jobs.backfill_etf_shares(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_dates=["2026-03-12", "2026-03-13"],
+        breaker=CircuitBreaker("akshare", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+    )
+    assert result.errors == []
+    assert ("2026-03-12", "2026-03-13") in spans
+    assert ("2026-03-12", "2026-03-12") in spans
+    assert ("2026-03-13", "2026-03-13") in spans
+    saved = store.read_range(tmp_path, "etf_shares")
+    assert set(saved["code"].to_list()) == {"159000", "159001", "159002"}
+    assert saved.height == 6
+
+
+def test_single_day_near_xls_limit_refuses_to_write(tmp_path) -> None:
+    def ak(name, **kwargs):
+        if name == "fund_etf_scale_sse":
+            return []
+        return _szse_raw(_iso_compact(kwargs["end_date"]), jobs.SZSE_XLS_NEAR_LIMIT)
+
+    result = jobs.backfill_etf_shares(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_dates=["2026-03-13"],
+        breaker=CircuitBreaker("akshare", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+    )
+    assert any("拒绝写入" in item for item in result.errors)
+    assert store.list_dates(tmp_path, "etf_shares") == []
+
+
+def test_short_szse_day_is_refetched_then_warned_if_still_short(tmp_path, caplog) -> None:
+    def ak(name, **kwargs):
+        if name == "fund_etf_scale_sse":
+            return []
+        start = date.fromisoformat(_iso_compact(kwargs["start_date"]))
+        end = date.fromisoformat(_iso_compact(kwargs["end_date"]))
+        rows: list[dict] = []
+        cursor = start
+        while cursor <= end:
+            count = 10 if cursor.isoformat() == "2026-03-13" else 20
+            rows.extend(_szse_raw(cursor.isoformat(), count))
+            cursor += timedelta(days=1)
+        return rows
+
+    with caplog.at_level(logging.WARNING):
+        result = jobs.backfill_etf_shares(
+            tmp_path,
+            SourceClients(ak_call=ak),
+            trade_dates=["2026-03-12", "2026-03-13"],
+            breaker=CircuitBreaker("akshare", clock=lambda: 0),
+            sleeper=lambda _seconds: None,
+        )
+    assert any("2026-03-13" in item and "少了超过 5%" in item for item in result.errors)
+    assert any("2026-03-13" in item and "少了超过 5%" in item for item in caplog.messages)
+    thin = store.read_partition(tmp_path, "etf_shares", "2026-03-13")
+    assert jobs.szse_share_count(thin) == 10
+    full = store.read_partition(tmp_path, "etf_shares", "2026-03-12")
+    assert jobs.szse_share_count(full) == 20
+
+
+def test_short_szse_day_is_rewritten_when_refetch_is_complete(tmp_path) -> None:
+    def ak(name, **kwargs):
+        if name == "fund_etf_scale_sse":
+            return []
+        start = _iso_compact(kwargs["start_date"])
+        end = _iso_compact(kwargs["end_date"])
+        if start != end:
+            rows = _szse_raw("2026-03-12", 20) + _szse_raw("2026-03-13", 10)
+            return rows
+        return _szse_raw(start, 20)
+
+    result = jobs.backfill_etf_shares(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        trade_dates=["2026-03-12", "2026-03-13"],
+        breaker=CircuitBreaker("akshare", clock=lambda: 0),
+        sleeper=lambda _seconds: None,
+    )
+    assert result.errors == []
+    assert jobs.szse_share_count(store.read_partition(tmp_path, "etf_shares", "2026-03-13")) == 20
+    assert jobs.szse_share_count(store.read_partition(tmp_path, "etf_shares", "2026-03-12")) == 20
+
+
+def test_catchup_refetches_thin_etf_share_partition(tmp_path) -> None:
+    _write_szse_count(tmp_path, "2026-10-08", 20)
+    _write_szse_count(tmp_path, "2026-10-09", 10)
+    kwargs = dict(
+        trading=False,
+        state={},
+        flags={"enabled": True, "etf_shares": True},
+        breakers_open=set(),
+        data_dir=tmp_path,
+        known_days=[date(2026, 10, 8), date(2026, 10, 9)],
+        universe=0,
+    )
+    assert "etf_shares" in scheduler.catchup_tasks(_saturday(), **kwargs)
+    _write_szse_count(tmp_path, "2026-10-09", 20)
+    assert "etf_shares" not in scheduler.catchup_tasks(_saturday(), **kwargs)
+    partition = store.partition_file(tmp_path, "etf_shares", "2026-10-09")
+    partition.unlink()
+    assert "etf_shares" in scheduler.catchup_tasks(_saturday(), **kwargs)
 
 
 def test_sync_etf_shares_keeps_sse_when_szse_fails(tmp_path, monkeypatch) -> None:

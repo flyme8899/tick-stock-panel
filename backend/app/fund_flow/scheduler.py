@@ -388,7 +388,12 @@ def catchup_tasks(
         if not flags.get(flag) or "akshare" in breakers_open or cooled(task):
             continue
         day = task_day(ready_name, now, trading=trading, known_days=known_days)
-        if _partition_missing(data_dir, kind, day):
+        # 份额缺日不能只看文件在不在。xls 截断会留下行数偏少的分区，这种也要重拉。
+        if kind == "etf_shares":
+            incomplete = bool(jobs.etf_share_gap_dates(data_dir, [day]))
+        else:
+            incomplete = _partition_missing(data_dir, kind, day)
+        if incomplete:
             due.append(task)
     return due
 

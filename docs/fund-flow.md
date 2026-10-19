@@ -67,7 +67,7 @@ from app.fund_flow.sources import live_clients
 backfill_etf_share_history(Path("data"), live_clients(), breaker=CircuitBreaker("akshare"))
 ```
 
-深交所报表一次超过 6 个月会返回带表头的空表，回补按不超过 150 天的窗口切。
+深交所报表一次超过 6 个月会返回带表头的空表，日历跨度仍限制在 150 天内。同一窗口还按行数再切：xls 含表头最多 65536 行，单次请求按每天 2000 行的保守估计留在 2 万行以内，远低于 65535 条数据。返回行数达到 65000 时当成已经截断，报错并且不写入，再把窗口拆短重拉。落盘后比较每个交易日的深市行数（代码以 15 开头），比前一日或后一日少了超过 5% 就记警告并记入错误；整日没有分区，或分区在但行数这样掉下去的，缺日回补都会重拉。只补缺日时用 `backfill_etf_share_history(..., gaps_only=True)`。
 
 ETF 名称另有一份参考表 `data/fund_flow/etf_meta/meta.parquet`，字段是 `code`、`full_name`、`short_name`、`index_code`、`index_name`、`company`、`source`。它不是按日分区，份额历史文件里的 `name` 仍是交易所原文。`sync_etf_shares` 在写完当日份额后刷新这张表：上交所 `commonSoaQuery.do?sqlId=FUND_LIST&fundType=00`（`secNameFull` / `fundAbbr` / `INDEX_CODE` / `INDEX_NAME` / `companyName`），深交所 `ShowReport` `CATALOGID=1105` 里基金类别为 ETF 的行，新浪 `etf_hq_fund` 只补两边都没有的代码。某个源失败或返回空表时，该源沿用上一版，不会把整张表清空。
 
