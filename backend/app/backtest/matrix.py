@@ -1692,6 +1692,7 @@ def _populate_matrix_derived_arrays(
         trading_dates or [],
         actual_symbols,
         data_dir,
+        names=names,
     )
     listing_dates = listing_dates_for_symbols(actual_symbols, instruments)
     return _MatrixDerived(
@@ -1708,14 +1709,25 @@ def _st_matrix_for_dates(
     trading_dates: Sequence[date],
     symbols: Sequence[str],
     data_dir: Path | None,
+    *,
+    names: Sequence[str] | None = None,
 ) -> tuple[np.ndarray | None, bool]:
-    """有 st_history 时返回逐日矩阵; 文件缺失时告警并交给名称回退。"""
+    """有 st_history 时返回逐日矩阵; 文件缺失时告警并交给名称回退。
+
+    baostock 不覆盖北交所, .BJ 列按当前名称整段标记 (与旧口径一致)。
+    """
     if data_dir is None or not trading_dates or not symbols:
         return None, False
     history = load_st_history(data_dir)
     if history is None:
         return None, False
-    return build_st_matrix(trading_dates, symbols, history), True
+    matrix = build_st_matrix(trading_dates, symbols, history)
+    if names is not None and len(names) == len(symbols):
+        for asset_id, (symbol, name) in enumerate(zip(symbols, names, strict=True)):
+            text = str(name or "").upper()
+            if str(symbol).upper().endswith(".BJ") and ("ST" in text or "退" in text):
+                matrix[:, asset_id] = True
+    return matrix, True
 
 
 def _local_trading_calendar(root: Path) -> tuple[date, ...]:
@@ -2118,7 +2130,12 @@ def _pit_state_from_manifest(
     symbols = [str(value) for value in manifest.get("symbols") or []]
     trading_dates = [date.fromisoformat(str(value)[:10]) for value in labels]
     data_dir = Path(str(manifest.get("parquet_root") or "")).parent
-    is_st, restored = _st_matrix_for_dates(trading_dates, symbols, data_dir)
+    is_st, restored = _st_matrix_for_dates(
+        trading_dates,
+        symbols,
+        data_dir,
+        names=[str(value) for value in manifest.get("names") or []],
+    )
     if not restored:
         return None, False, listing, calendar
     return _readonly_optional(is_st), True, listing, calendar

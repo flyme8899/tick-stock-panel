@@ -359,3 +359,146 @@ def test_matrix_filter_dependencies_do_not_require_current_name():
     })
     assert "name" not in deps
     assert {"symbol", "close"} <= deps
+
+
+def _write_three_instruments(tmp_path):
+    instruments = tmp_path / "instruments"
+    instruments.mkdir()
+    pl.DataFrame({
+        "symbol": ["600001.SH", "600002.SH", "830001.BJ"],
+        "name": ["甲", "乙", "ST丙"],
+        "listing_date": ["2020-01-02", "2020-01-02", "2020-01-02"],
+    }).write_parquet(instruments / "instruments.parquet")
+
+
+def test_sync_retries_transient_errors_and_skips_beijing(tmp_path, monkeypatch):
+    import app.services.st_history_sync as sync_mod
+
+    monkeypatch.setattr(sync_mod, "_RETRY_BACKOFF_S", 0.0)
+    _write_three_instruments(tmp_path)
+    calls: dict[str, int] = {}
+
+    def fetch(code: str, start: date, end: date):
+        calls[code] = calls.get(code, 0) + 1
+        if code == "sh.600001" and calls[code] == 1:
+            raise RuntimeError("网络接收错误")
+        return [(date(2020, 1, 2), True), (date(2020, 1, 3), False)]
+
+    written = sync_st_history(tmp_path, fetch_flags=fetch, end=date(2020, 1, 8))
+    assert written == 2
+    assert calls == {"sh.600001": 2, "sh.600002": 1}
+    assert not (tmp_path / "st_history" / "progress.json").exists()
+
+
+def test_sync_flushes_when_the_last_symbol_fails(tmp_path, monkeypatch):
+    import app.services.st_history_sync as sync_mod
+
+    monkeypatch.setattr(sync_mod, "_RETRY_BACKOFF_S", 0.0)
+    _write_three_instruments(tmp_path)
+
+    def fetch(code: str, start: date, end: date):
+        if code == "sh.600002":
+            raise RuntimeError("down")
+        return [(date(2020, 1, 2), True)]
+
+    written = sync_st_history(tmp_path, fetch_flags=fetch, end=date(2020, 1, 8))
+    frame = pl.read_parquet(st_history_path(tmp_path))
+    assert written == 1
+    assert frame["symbol"].to_list() == ["600001.SH"]
+    progress = (tmp_path / "st_history" / "progress.json").read_text(encoding="utf-8")
+    assert "600001.SH" in progress and "600002.SH" not in progress
+
+
+def test_explicit_beijing_symbol_is_not_sent_to_baostock(tmp_path):
+    calls: list[str] = []
+
+    def fetch(code: str, start: date, end: date):
+        calls.append(code)
+        return []
+
+    sync_st_history(
+        tmp_path,
+        symbols=["830001.BJ", "600001.SH"],
+        fetch_flags=fetch,
+        end=date(2020, 1, 8),
+    )
+    assert calls == ["sh.600001"]
+
+
+def test_beijing_st_falls_back_to_current_name_when_history_exists(tmp_path):
+    from app.backtest.matrix import _st_matrix_for_dates
+    from app.services.st_history_sync import st_history_dir
+
+    st_history_dir(tmp_path).mkdir(parents=True)
+    intervals_frame([{
+        "symbol": "600001.SH",
+        "start_date": date(2020, 1, 3),
+        "end_date": None,
+        "st_type": "ST",
+        "source": "baostock",
+    }]).write_parquet(st_history_path(tmp_path))
+    days = [date(2020, 1, 2), date(2020, 1, 3)]
+    matrix, point = _st_matrix_for_dates(
+        days,
+        ["600001.SH", "830001.BJ", "830002.BJ", "830003.BJ"],
+        tmp_path,
+        names=["甲", "ST丙", "丁", "退市戊"],
+    )
+    assert point
+    assert matrix.tolist() == [
+        [False, True, False, True],
+        [True, True, False, True],
+    ]
+
+
+def test_unchanged_intervals_do_not_force_enriched_rebuild(tmp_path, monkeypatch):
+    import app.services.st_history_sync as sync_mod
+    from app.indicators.pipeline import limit_formula_needs_rebuild, write_limit_formula_version
+
+    monkeypatch.setattr(sync_mod, "_RETRY_BACKOFF_S", 0.0)
+    _write_three_instruments(tmp_path)
+
+    def fetch(code: str, start: date, end: date):
+        return [(date(2020, 1, 2), True), (date(2020, 1, 3), False)]
+
+    sync_st_history(tmp_path, fetch_flags=fetch, end=date(2020, 1, 8))
+    write_limit_formula_version(tmp_path)
+    stamped = st_history_path(tmp_path).stat().st_mtime_ns
+
+    sync_st_history(tmp_path, fetch_flags=fetch, end=date(2020, 1, 8))
+    assert st_history_path(tmp_path).stat().st_mtime_ns == stamped
+    assert limit_formula_needs_rebuild(tmp_path) is False
+
+    def changed(code: str, start: date, end: date):
+        return [(date(2020, 1, 2), True)]
+
+    sync_st_history(tmp_path, fetch_flags=changed, end=date(2020, 1, 8))
+    assert st_history_path(tmp_path).stat().st_mtime_ns != stamped
+    assert limit_formula_needs_rebuild(tmp_path) is True
+
+
+def test_baostock_socket_timeout_is_restored(monkeypatch):
+    import socket
+
+    import app.services.st_history_sync as sync_mod
+
+    monkeypatch.setattr(socket, "getdefaulttimeout", lambda: 7.5)
+    restored: list[float | None] = []
+    monkeypatch.setattr(socket, "setdefaulttimeout", restored.append)
+    with sync_mod._baostock_socket_timeout(30.0):
+        assert restored == [30.0]
+    assert restored == [30.0, 7.5]
+
+
+def test_baostock_network_error_is_retryable(monkeypatch):
+    import baostock
+
+    from app.services.st_history_sync import _fetch_baostock_flags
+
+    class Result:
+        error_code = "10002007"
+        error_msg = "网络接收错误。"
+
+    monkeypatch.setattr(baostock, "query_history_k_data_plus", lambda *args, **kwargs: Result())
+    with pytest.raises(RuntimeError, match="网络接收错误"):
+        _fetch_baostock_flags("sh.600001", date(2020, 1, 2), date(2020, 1, 3))

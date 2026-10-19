@@ -23,10 +23,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
+import socket
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import date, datetime
 from pathlib import Path
 
@@ -49,6 +51,10 @@ _SOURCE_BAOSTOCK = "baostock"
 _ST_TYPE = "ST"
 _DEFAULT_START = date(1990, 12, 19)
 _FLUSH_EVERY = 100
+_FETCH_ATTEMPTS = 3
+_RETRY_BACKOFF_S = 2.0
+# baostock 用裸 socket, 对端无响应时 recv 会一直堵。超时是两次 recv 之间的静默上限。
+_FETCH_TIMEOUT_S = 30.0
 
 FlagRow = tuple[date, bool]
 FetchFlags = Callable[[str, date, date], list[FlagRow]]
@@ -66,7 +72,10 @@ def st_history_path(data_dir: Path) -> Path:
 
 
 def st_history_fingerprint(data_dir: Path) -> str:
-    """文件身份。缺失与「空表」分开, 回补完成后缓存和 enriched 会失效。"""
+    """文件身份。缺失与「空表」分开, 内容变化后缓存和 enriched 会失效。
+
+    回补若写出与现文件相同的区间, 不改 mtime, 因此不会触发 enriched 全量重算。
+    """
     path = st_history_path(data_dir)
     if not path.exists():
         return "missing"
@@ -408,8 +417,10 @@ def _fetch_baostock_flags(code: str, start: date, end: date) -> list[FlagRow]:
         frequency="d",
         adjustflag="3",
     )
-    if rs.error_code != "0":
-        raise RuntimeError(f"baostock {code}: {rs.error_msg}")
+    # 超时被 baostock 吃掉后返回「网络接收错误」, 这里抛出让重试重新登录。
+    if rs is None or rs.error_code != "0":
+        message = "" if rs is None else rs.error_msg
+        raise RuntimeError(f"baostock {code}: {message or '网络接收错误'}")
     rows: list[FlagRow] = []
     while rs.next():
         day_text, flag = rs.get_row_data()
@@ -418,6 +429,25 @@ def _fetch_baostock_flags(code: str, start: date, end: date) -> list[FlagRow]:
             continue
         rows.append((day, str(flag).strip() == "1"))
     return rows
+
+
+@contextlib.contextmanager
+def _baostock_socket_timeout(seconds: float) -> Iterator[None]:
+    """给随后新建的 baostock socket 套上超时, 离开时恢复进程默认值。"""
+    previous = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(seconds)
+    try:
+        yield
+    finally:
+        socket.setdefaulttimeout(previous)
+
+
+def _relogin_baostock(bs):
+    if bs is not None:
+        # 连接已断时 logout 也会失败, 忽略即可。
+        with contextlib.suppress(Exception):
+            bs.logout()
+    return _login_baostock()
 
 
 def _login_baostock():
@@ -444,9 +474,18 @@ def _symbols_from_instruments(
     data_dir: Path,
     explicit: Sequence[str] | None,
 ) -> list[tuple[str, date]]:
-    """返回 (canonical_symbol, 拉取起点)。起点优先用上市日。"""
+    """返回 (canonical_symbol, 拉取起点)。起点优先用上市日。
+
+    北交所不进这张表: baostock 只接受 sh/sz, 会一直失败并让 progress.json 清不掉。
+    """
     if explicit:
-        return [(canonical_symbol(symbol), _DEFAULT_START) for symbol in explicit if canonical_symbol(symbol)]
+        selected: list[tuple[str, date]] = []
+        for symbol in explicit:
+            canon = canonical_symbol(symbol)
+            if not canon or canon.endswith(".BJ") or to_baostock_code(canon) is None:
+                continue
+            selected.append((canon, _DEFAULT_START))
+        return selected
     frame = _instrument_rows(data_dir)
     if frame.is_empty() or "symbol" not in frame.columns:
         return []
@@ -463,6 +502,9 @@ def _symbols_from_instruments(
         # 指数代码 (000001.SH 等) 不在股票 ST 范围内: 6 位且以 6/0/3/4/8 开头的股票。
         code = symbol.split(".", 1)[0]
         if symbol.endswith(".SH") and not code.startswith(("6",)):
+            continue
+        # baostock 不支持北交所。矩阵过滤对 .BJ 回退当前名称; 涨跌幅 30% 与 ST 无关。
+        if symbol.endswith(".BJ"):
             continue
         seen.add(symbol)
         listed = parse_listing_date(row.get(column)) if column else None
@@ -488,12 +530,28 @@ def _write_progress(path: Path, completed: set[str]) -> None:
     )
 
 
+def _intervals_equal(left: pl.DataFrame, right: pl.DataFrame) -> bool:
+    columns = list(ST_HISTORY_COLUMNS)
+    return left.select(columns).sort(["symbol", "start_date"]).equals(
+        right.select(columns).sort(["symbol", "start_date"]),
+    )
+
+
 def _write_intervals(data_dir: Path, rows: list[dict]) -> None:
     from app.services.fs_utils import atomic_write_parquet
 
+    frame = intervals_frame(rows)
     path = st_history_path(data_dir)
+    if path.exists():
+        try:
+            existing = load_st_history(data_dir, warn=False)
+        except (OSError, ValueError, pl.exceptions.PolarsError):
+            existing = None
+        if existing is not None and _intervals_equal(existing, frame):
+            logger.info("ST 区间内容未变, 跳过写入 %s", path)
+            return
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_parquet(intervals_frame(rows), path)
+    atomic_write_parquet(frame, path)
 
 
 def sync_st_history(
@@ -536,42 +594,72 @@ def sync_st_history(
     ]
 
     own_session = fetch_flags is None
-    bs = _login_baostock() if own_session else None
     fetcher = fetch_flags or _fetch_baostock_flags
     failures: list[str] = []
-    try:
-        for index, (symbol, listed) in enumerate(pending, start=1):
-            code = to_baostock_code(symbol)
-            if code is None:
-                continue
-            fetch_start = start or listed
-            if fetch_start < _DEFAULT_START:
-                fetch_start = _DEFAULT_START
-            try:
-                flags = fetcher(code, fetch_start, end_day)
-            except Exception as exc:  # noqa: BLE001 — 单只失败不让整批回补报废
-                logger.warning("ST 区间拉取失败 %s: %s", symbol, exc)
-                failures.append(symbol)
-                continue
-            rows.extend(intervals_from_flags(symbol, flags))
-            completed.add(symbol)
-            if index % _FLUSH_EVERY == 0 or index == len(pending):
-                _write_intervals(data_dir, rows)
+    timeout = _baostock_socket_timeout(_FETCH_TIMEOUT_S) if own_session else contextlib.nullcontext()
+    with timeout:
+        bs = _login_baostock() if own_session else None
+        try:
+            for index, (symbol, listed) in enumerate(pending, start=1):
+                code = to_baostock_code(symbol)
+                if code is None:
+                    continue
+                fetch_start = start or listed
+                if fetch_start < _DEFAULT_START:
+                    fetch_start = _DEFAULT_START
+                flags = None
+                for attempt in range(1, _FETCH_ATTEMPTS + 1):
+                    try:
+                        flags = fetcher(code, fetch_start, end_day)
+                        break
+                    except Exception as exc:  # noqa: BLE001 — 单只失败不让整批回补报废
+                        if attempt >= _FETCH_ATTEMPTS:
+                            logger.warning(
+                                "ST 区间拉取失败 %s (已试 %d 次): %s",
+                                symbol,
+                                attempt,
+                                exc,
+                            )
+                            break
+                        logger.info("ST 区间拉取重试 %s 第 %d 次: %s", symbol, attempt, exc)
+                        time.sleep(_RETRY_BACKOFF_S * attempt)
+                        if own_session:
+                            # 长连接断开后后续请求都会失败, 重新登录再试。
+                            try:
+                                bs = _relogin_baostock(bs)
+                            except Exception as login_exc:  # noqa: BLE001
+                                logger.warning("baostock 重新登录失败: %s", login_exc)
+                if flags is None:
+                    failures.append(symbol)
+                    continue
+                rows.extend(intervals_from_flags(symbol, flags))
+                completed.add(symbol)
+                if index % _FLUSH_EVERY == 0:
+                    _write_intervals(data_dir, rows)
+                    _write_progress(progress_path, completed)
+                    logger.info(
+                        "ST 区间进度 %d/%d, 区间 %d 行, 失败 %d",
+                        index,
+                        len(pending),
+                        len(rows),
+                        len(failures),
+                    )
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+            # 收尾必写: 最后一只失败或被跳过时, 循环内的整百落盘不会触发。
+            _write_intervals(data_dir, rows)
+            if pending:
                 _write_progress(progress_path, completed)
                 logger.info(
-                    "ST 区间进度 %d/%d, 区间 %d 行, 失败 %d",
-                    index,
+                    "ST 区间完成 %d/%d, 区间 %d 行, 失败 %d",
+                    len(pending) - len(failures),
                     len(pending),
                     len(rows),
                     len(failures),
                 )
-            if sleep_s > 0:
-                time.sleep(sleep_s)
-        if not pending:
-            _write_intervals(data_dir, rows)
-    finally:
-        if bs is not None:
-            bs.logout()
+        finally:
+            if bs is not None:
+                bs.logout()
 
     if spot_check > 0:
         issues = spot_check_cninfo(
@@ -683,7 +771,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=0,
         help="抽查 N 只与巨潮风险警示公告对照, 0 表示不抽查",
     )
-    parser.add_argument("--sleep", type=float, default=0.0, help="每只股票之间的间隔秒数")
+    parser.add_argument("--sleep", type=float, default=0.05, help="每只股票之间的间隔秒数")
     args = parser.parse_args(list(argv) if argv is not None else None)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.data_dir:
