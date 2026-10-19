@@ -2,6 +2,9 @@
 
 ``data/fund_flow/<kind>/date=YYYY-MM-DD/part.parquet``。写入走临时文件替换。
 同一分区再次写入时按主键合并，后写入的行覆盖同一主键。
+
+``etf_shares`` 另记首次入库时刻 ``ingested_at``（Asia/Shanghai）。重复写入不覆盖。
+份额、名称、代码或来源变了才写 ``updated_at``。历史分区没有这两列时读出来是空，不补时刻。
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.market_time import CN_TZ, cn_now
 from app.services.fs_utils import atomic_write_parquet, atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,12 @@ EASTMONEY_STOCK_SOURCES = frozenset({
     "akshare_em_rank",
 })
 THS_STOCK_SOURCE = "akshare_ths"
+
+# 带时区的微秒时间戳。比 ISO 文本短，时区写在类型上，不跟服务器本地时区走。
+_STAMP_DTYPE = pl.Datetime(time_unit="us", time_zone="Asia/Shanghai")
+_STAMP_COLS = ("ingested_at", "updated_at")
+# 这些列变了才刷新 updated_at。主键和入库时刻本身不算业务值。
+_ETF_VALUE_COLS = ("symbol", "name", "shares", "source")
 
 # 合并主键。后写覆盖先写。
 KEYS: dict[str, list[str]] = {
@@ -122,6 +132,8 @@ _SCHEMAS: dict[str, dict[str, pl.DataType]] = {
         "trade_date": pl.Utf8,
         "shares": pl.Float64,
         "source": pl.Utf8,
+        "ingested_at": _STAMP_DTYPE,
+        "updated_at": _STAMP_DTYPE,
     },
     "southbound": {
         "trade_date": pl.Utf8,
@@ -269,6 +281,18 @@ def align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
     return aligned
 
 
+def _project_schema(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
+    """按内部列投影。缺列补空，不把整表收成 Python 行。"""
+    schema = _SCHEMAS[kind]
+    exprs = []
+    for name, dtype in schema.items():
+        if name in frame.columns:
+            exprs.append(pl.col(name).cast(dtype, strict=False))
+        else:
+            exprs.append(pl.lit(None).cast(dtype).alias(name))
+    return frame.select(exprs)
+
+
 def _align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
     """把分区收成内部列。缺主键的分区能按 ETF 原始列还原，否则整段跳过。"""
     schema = _SCHEMAS[kind]
@@ -277,13 +301,15 @@ def _align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
     names = set(frame.columns)
     if set(schema).issubset(names):
         return frame.select(list(schema.keys()))
+    # 历史 etf_shares 没有入库时刻。主键已在时用表达式补空，避免每次读取
+    # （净流入要连读多日）把分区收成 Python 字典。
+    if all(name in names for name in KEYS[kind]):
+        return _project_schema(kind, frame)
     rows = frame.to_dicts()
     if kind == "etf_shares" and _looks_like_raw_etf(rows):
         prepared = prepare_rows(kind, rows)
         if prepared:
             return frame_of(kind, prepared)
-    if all(name in names for name in KEYS[kind]):
-        return frame_of(kind, rows)
     return empty_frame(kind)
 
 
@@ -311,13 +337,93 @@ def _drop_ths_clobbering_eastmoney(frame: pl.DataFrame) -> pl.DataFrame:
     return frame.join(marked, on=["code", "trade_date", "source"], how="anti")
 
 
-def write_rows(data_dir: Path, kind: str, trade_date: str, rows: list[dict]) -> int:
+def _cn_stamp(moment: datetime | None) -> datetime:
+    """入库时刻固定到北京时间、秒级。不使用服务器本地时区。"""
+    if moment is None:
+        moment = cn_now()
+    moment = moment.replace(tzinfo=CN_TZ) if moment.tzinfo is None else moment.astimezone(CN_TZ)
+    return moment.replace(microsecond=0)
+
+
+def _without_stamps(rows: list[dict]) -> list[dict]:
+    """调用方带入的时刻不算数，避免把补数时间写成首次可见时间。"""
+    return [
+        {key: value for key, value in row.items() if key not in _STAMP_COLS}
+        for row in rows
+    ]
+
+
+def _values_unchanged() -> pl.Expr:
+    checks: list[pl.Expr] = []
+    for name in _ETF_VALUE_COLS:
+        left = pl.col(name)
+        right = pl.col(f"_prev_{name}")
+        same = left.eq_missing(right)
+        if _SCHEMAS["etf_shares"][name] == pl.Float64:
+            same = same | (left.is_nan() & right.is_nan())
+        checks.append(same)
+    return pl.all_horizontal(checks)
+
+
+def _merge_etf_shares(
+    previous: pl.DataFrame | None,
+    incoming: pl.DataFrame,
+    moment: datetime,
+) -> pl.DataFrame:
+    """同一主键保留首次 ``ingested_at``。业务列变了才写 ``updated_at``。
+
+    只合并这一个交易日分区，不读其它日期。历史行的入库时刻是空时保持为空。
+    """
+    keys = KEYS["etf_shares"]
+    columns = list(_SCHEMAS["etf_shares"])
+    incoming = _project_schema("etf_shares", incoming).unique(subset=keys, keep="last")
+    stamp = pl.lit(moment).cast(_STAMP_DTYPE)
+    blank = pl.lit(None).cast(_STAMP_DTYPE)
+    if previous is None or previous.is_empty():
+        return incoming.with_columns(
+            stamp.alias("ingested_at"),
+            blank.alias("updated_at"),
+        ).select(columns)
+
+    previous = _project_schema("etf_shares", previous).unique(subset=keys, keep="last")
+    kept = previous.join(incoming.select(keys), on=keys, how="anti")
+    prev = previous.select(
+        *keys,
+        *[pl.col(name).alias(f"_prev_{name}") for name in (*_ETF_VALUE_COLS, *_STAMP_COLS)],
+        pl.lit(True).alias("_existed"),
+    )
+    joined = incoming.drop(list(_STAMP_COLS)).join(prev, on=keys, how="left")
+    existed = pl.col("_existed").fill_null(False)
+    changed = ~_values_unchanged()
+    stamped = joined.with_columns(
+        pl.when(existed).then(pl.col("_prev_ingested_at")).otherwise(stamp).alias("ingested_at"),
+        pl.when(~existed).then(blank).when(changed).then(stamp).otherwise(
+            pl.col("_prev_updated_at"),
+        ).alias("updated_at"),
+    ).select(columns)
+    if kept.is_empty():
+        return stamped
+    return pl.concat([kept.select(columns), stamped], how="vertical_relaxed")
+
+
+def write_rows(
+    data_dir: Path,
+    kind: str,
+    trade_date: str,
+    rows: list[dict],
+    *,
+    now: datetime | None = None,
+) -> int:
     """合并写入一个交易日分区。返回该分区合并后的行数。
 
     个股分区里，``akshare_ths`` 不能覆盖已有的东财或数据中心行。其它来源仍是后写覆盖先写。
+    ``etf_shares`` 的 ``ingested_at`` 只在主键第一次出现时写入，之后保留。
+    ``now`` 只用于测试注入北京时间；缺省取当前北京时间。
     """
     _check(kind, trade_date)
     rows = prepare_rows(kind, rows)
+    if kind == "etf_shares":
+        rows = _without_stamps(rows)
     if not rows:
         path = partition_file(data_dir, kind, trade_date)
         if path.exists():
@@ -327,17 +433,34 @@ def write_rows(data_dir: Path, kind: str, trade_date: str, rows: list[dict]) -> 
     incoming = frame_of(kind, rows)
     path = partition_file(data_dir, kind, trade_date)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        previous = align_frame(kind, pl.read_parquet(path))
-        merged = pl.concat([previous, incoming], how="vertical_relaxed")
+    if kind == "etf_shares":
+        previous = align_frame(kind, pl.read_parquet(path)) if path.exists() else None
+        merged = _merge_etf_shares(previous, incoming, _cn_stamp(now))
     else:
-        merged = incoming
-    if kind == "stock":
-        merged = _drop_ths_clobbering_eastmoney(merged)
-    keys = [key for key in KEYS[kind] if key in merged.columns]
-    merged = merged.unique(subset=keys, keep="last")
+        if path.exists():
+            previous = align_frame(kind, pl.read_parquet(path))
+            merged = pl.concat([previous, incoming], how="vertical_relaxed")
+        else:
+            merged = incoming
+        if kind == "stock":
+            merged = _drop_ths_clobbering_eastmoney(merged)
+        keys = [key for key in KEYS[kind] if key in merged.columns]
+        merged = merged.unique(subset=keys, keep="last")
     atomic_write_parquet(merged, path)
     return merged.height
+
+
+def etf_shares_view_sql(data_dir: Path) -> str:
+    """ETF 份额的 DuckDB 视图。
+
+    ``union_by_name`` 让没有 ``ingested_at`` 的历史分区和后来写入的分区能一起读。
+    视图定义本身不扫描行。查出来的历史入库时刻是空，不补。
+    """
+    directory = (root(data_dir) / "etf_shares").as_posix().replace("'", "''")
+    return (
+        "CREATE OR REPLACE VIEW etf_shares AS "
+        f"SELECT * FROM read_parquet('{directory}/**/*.parquet', union_by_name=true)"
+    )
 
 
 def read_partition(data_dir: Path, kind: str, trade_date: str) -> pl.DataFrame:

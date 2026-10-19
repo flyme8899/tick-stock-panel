@@ -83,7 +83,11 @@ TABLES: tuple[TableSpec, ...] = (
     TableSpec("kline_etf_daily", "partitioned", "kline_etf_daily", "ETF 日 K"),
     TableSpec("fund_flow_stock", "partitioned", "fund_flow/stock",
               "个股主力资金流（东财，日度，单位元）"),
-    TableSpec("etf_shares", "partitioned", "fund_flow/etf_shares", "ETF 份额（日度）"),
+    TableSpec(
+        "etf_shares", "partitioned", "fund_flow/etf_shares",
+        "ETF 份额（日度）。ingested_at 是首次写入时刻（Asia/Shanghai）；"
+        "更早分区没有该列，导出后为空，不是补写的可见时间",
+    ),
     TableSpec("etf_flow_news", "sqlite", "news/news.sqlite",
               "ETF领航者申赎文章（news.sqlite 中 source=etf_flow，不受 45 天清理）",
               table="news_items",
@@ -417,7 +421,14 @@ def _csv_ready(batch):
     for fld, col in zip(batch.schema, batch.columns, strict=True):
         t = fld.type
         if pa.types.is_timestamp(t):
-            col = pc.strftime(col, format="%Y-%m-%dT%H:%M:%S")
+            # 带时区的列保留偏移（如 +0800），无时区的仍只写墙钟。空值保持空。
+            # 先收到秒，避免微秒时间戳被写成 00.000000。
+            if t.tz is not None:
+                col = pc.cast(col, pa.timestamp("s", tz=t.tz))
+                fmt = "%Y-%m-%dT%H:%M:%S%z"
+            else:
+                fmt = "%Y-%m-%dT%H:%M:%S"
+            col = pc.strftime(col, format=fmt)
         elif pa.types.is_null(t):
             col = col.cast(pa.string())
         elif pa.types.is_dictionary(t):
