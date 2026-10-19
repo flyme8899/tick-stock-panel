@@ -30,6 +30,8 @@ dependencies = [
     # 不随浮动版本改字段。测试不导入这两个包。
     "efinance==0.5.9",
     "akshare==1.19.1",
+    # ST 区间回补: baostock 日线 isST, 免 token。不随浮动版本改字段。
+    "baostock==0.9.4",
     # Scheduling
     "apscheduler>=3.10",
     # Config

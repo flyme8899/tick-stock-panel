@@ -1886,6 +1886,7 @@ class QuoteService:
                     today_ohlcv=today_ohlcv,
                     instruments=instruments,
                     elapsed_minutes=elapsed_minutes,
+                    data_dir=self._repo.store.data_dir,
                 )
                 if enriched_today.is_empty():
                     logger.warning("增量计算结果为空, 回退到全量计算")
