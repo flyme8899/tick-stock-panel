@@ -19,7 +19,7 @@ from datetime import date, datetime
 from datetime import time as dt_time
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 import numpy as np
 import polars as pl
@@ -32,10 +32,19 @@ from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
 from app.market_time import CN_TZ, cn_now
 from app.price_limits import (
+    LEGACY_MAIN_BOARD_ST_LIMIT,
+    MAIN_BOARD_LIMIT,
     MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
     numpy_limit_pct_vectors,
     numpy_limit_price,
     write_numpy_price_limit_matrix,
+)
+from app.services.st_history_sync import (
+    build_st_matrix,
+    listing_dates_for_symbols,
+    load_st_history,
+    st_history_fingerprint,
+    trading_day_counts,
 )
 from app.strategy.scoring import SCORING_DIRECTION_LOW
 
@@ -55,8 +64,8 @@ except ImportError:
 
 _MATRIX_CACHE_VERSION = 1
 # 6: total_shares 从「当前股本广播」改为按交易日的股本矩阵。
-# 旧缓存里的一维向量不能再当历史股本用。
-_DIRECT_MATRIX_LOADER_VERSION = 6
+# 7: price_limit_pct / ST 过滤按 st_history 区间, 不再把当前名称套到每一天。
+_DIRECT_MATRIX_LOADER_VERSION = 7
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -451,6 +460,12 @@ class MarketDataMatrix:
     cache_timing_ms: Mapping[str, float] = field(default_factory=dict)
     # False: 面板没有成交量列, volume 是 1 手占位, 不能用于参与率裁剪。
     volume_observed: bool = True
+    # st_point_in_time 为真时 is_st[d, symbol] 来自 st_history (start <= d < end)。
+    # 为假或 is_st 为空时, 过滤回退到当前名称。
+    is_st: np.ndarray | None = None
+    st_point_in_time: bool = False
+    listing_dates: tuple[date | None, ...] | None = None
+    trading_calendar: tuple[date, ...] | None = None
     _valid_bars: ValidBarIndex | None = field(
         default=None,
         compare=False,
@@ -862,6 +877,7 @@ def _load_market_data_matrix_from_parquet_once(
     if "total_shares" in requested_fields or "total_shares" in build_fields:
         # 财务股本文件更新后, 按日总股本矩阵必须重算。
         instrument_fingerprint += ":" + _share_history_fingerprint(root)
+    history_fingerprint = st_history_fingerprint(root.parent)
 
     dataset = _open_matrix_parquet_dataset(root, skip=skip)
     _validate_matrix_dataset_schema(dataset)
@@ -903,6 +919,7 @@ def _load_market_data_matrix_from_parquet_once(
         requested_partitions,
         instrument_fingerprint,
         source_generation,
+        history_fingerprint,
     )
     if covering is not None:
         path, status = covering
@@ -937,6 +954,7 @@ def _load_market_data_matrix_from_parquet_once(
         instrument_fingerprint,
         profile_generation,
         source_generation,
+        history_fingerprint,
     )
     if (cache_path / "manifest.json").exists():
         market = _load_market_data_matrix_cache(cache_path, cache_status="exact")
@@ -1125,7 +1143,7 @@ def _build_market_data_matrix_from_dataset(
     share_history = (
         _load_matrix_share_history(root) if "total_shares" in wanted_fields else None
     )
-    names, latest_limits = _populate_matrix_derived_arrays(
+    derived = _populate_matrix_derived_arrays(
         actual_symbols,
         arrays,
         fields,
@@ -1136,7 +1154,11 @@ def _build_market_data_matrix_from_dataset(
         vector_fields=vector_fields,
         trading_dates=actual_dates,
         share_history=share_history,
+        data_dir=root.parent,
+        trading_calendar=_local_trading_calendar(root),
     )
+    names = derived.names
+    latest_limits = derived.latest_limits
     if "price_limit_pct" in fields:
         write_numpy_price_limit_matrix(
             fields["price_limit_pct"],
@@ -1144,6 +1166,7 @@ def _build_market_data_matrix_from_dataset(
             actual_symbols,
             names,
             valid=seen,
+            is_st=derived.is_st if derived.st_point_in_time else None,
         )
     for name in vector_fields:
         fields[name] = np.where(seen, fields[name], np.nan).astype(np.float32, copy=False)
@@ -1164,6 +1187,7 @@ def _build_market_data_matrix_from_dataset(
         names,
         latest_limits,
         apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
+        is_st=derived.is_st if derived.st_point_in_time else None,
     )
     release_one_price_boards(
         tradable,
@@ -1201,6 +1225,10 @@ def _build_market_data_matrix_from_dataset(
         limit_down_locked=limit_down_locked,
         fields=MappingProxyType(fields),
         cache_status=cache_status,
+        is_st=_readonly_optional(derived.is_st),
+        st_point_in_time=derived.st_point_in_time,
+        listing_dates=derived.listing_dates,
+        trading_calendar=derived.trading_calendar,
     )
 
 
@@ -1299,7 +1327,7 @@ def _build_market_data_matrix_cache_from_dataset(
         share_history = (
             _load_matrix_share_history(root) if "total_shares" in wanted_fields else None
         )
-        names, latest_limits = _populate_matrix_derived_arrays(
+        derived = _populate_matrix_derived_arrays(
             actual_symbols,
             arrays,
             fields,
@@ -1310,7 +1338,11 @@ def _build_market_data_matrix_cache_from_dataset(
             vector_fields=vector_fields,
             trading_dates=actual_dates,
             share_history=share_history,
+            data_dir=root.parent,
+            trading_calendar=_local_trading_calendar(root),
         )
+        names = derived.names
+        latest_limits = derived.latest_limits
         _mask_unseen_staging_fields(fields, seen)
         _raise_if_matrix_cancelled(cancel_event)
         if "price_limit_pct" in fields:
@@ -1320,6 +1352,7 @@ def _build_market_data_matrix_cache_from_dataset(
                 actual_symbols,
                 names,
                 valid=seen,
+                is_st=derived.is_st if derived.st_point_in_time else None,
             )
         _write_tradable_matrix(
             arrays["tradable"],
@@ -1340,6 +1373,7 @@ def _build_market_data_matrix_cache_from_dataset(
             out_up=arrays["limit_up_locked"],
             out_down=arrays["limit_down_locked"],
             apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
+            is_st=derived.is_st if derived.st_point_in_time else None,
         )
         release_one_price_boards(
             arrays["tradable"],
@@ -1382,6 +1416,15 @@ def _build_market_data_matrix_cache_from_dataset(
             "names": list(names),
             "arrays": array_specs,
             "fields": field_specs,
+            "st_point_in_time": derived.st_point_in_time,
+            "st_history_fingerprint": st_history_fingerprint(root.parent),
+            "listing_dates": [
+                None if value is None else value.isoformat()
+                for value in (derived.listing_dates or ())
+            ],
+            "trading_calendar": [
+                value.isoformat() for value in (derived.trading_calendar or ())
+            ],
         }
         (temporary / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
@@ -1566,6 +1609,15 @@ def _scan_matrix_values(
             target[time_ids, asset_ids] = values
 
 
+class _MatrixDerived(NamedTuple):
+    names: list[str]
+    latest_limits: Mapping[str, np.ndarray]
+    is_st: np.ndarray | None
+    st_point_in_time: bool
+    listing_dates: tuple[date | None, ...] | None
+    trading_calendar: tuple[date, ...] | None
+
+
 def _populate_matrix_derived_arrays(
     actual_symbols: list[str],
     arrays: Mapping[str, np.ndarray],
@@ -1578,7 +1630,9 @@ def _populate_matrix_derived_arrays(
     vector_fields: list[str],
     trading_dates: Sequence[date] | None = None,
     share_history: pl.DataFrame | None = None,
-) -> tuple[list[str], Mapping[str, np.ndarray]]:
+    data_dir: Path | None = None,
+    trading_calendar: tuple[date, ...] | None = None,
+) -> _MatrixDerived:
     instrument_wanted = set(wanted_fields)
     if "turnover_rate" in wanted_fields and "turnover_rate" not in fields:
         instrument_wanted.add("float_shares")
@@ -1634,7 +1688,63 @@ def _populate_matrix_derived_arrays(
                 arrays["volume"],
                 float_shares,
             )
-    return names, latest_limits
+    is_st, st_point_in_time = _st_matrix_for_dates(
+        trading_dates or [],
+        actual_symbols,
+        data_dir,
+        names=names,
+    )
+    listing_dates = listing_dates_for_symbols(actual_symbols, instruments)
+    return _MatrixDerived(
+        names,
+        latest_limits,
+        is_st,
+        st_point_in_time,
+        listing_dates,
+        trading_calendar,
+    )
+
+
+def _st_matrix_for_dates(
+    trading_dates: Sequence[date],
+    symbols: Sequence[str],
+    data_dir: Path | None,
+    *,
+    names: Sequence[str] | None = None,
+) -> tuple[np.ndarray | None, bool]:
+    """有 st_history 时返回逐日矩阵; 文件缺失时告警并交给名称回退。
+
+    baostock 不覆盖北交所, .BJ 列按当前名称整段标记 (与旧口径一致)。
+    """
+    if data_dir is None or not trading_dates or not symbols:
+        return None, False
+    history = load_st_history(data_dir)
+    if history is None:
+        return None, False
+    matrix = build_st_matrix(trading_dates, symbols, history)
+    if names is not None and len(names) == len(symbols):
+        for asset_id, (symbol, name) in enumerate(zip(symbols, names, strict=True)):
+            text = str(name or "").upper()
+            if str(symbol).upper().endswith(".BJ") and ("ST" in text or "退" in text):
+                matrix[:, asset_id] = True
+    return matrix, True
+
+
+def _local_trading_calendar(root: Path) -> tuple[date, ...]:
+    found: list[date] = []
+    for partition in root.glob("date=*"):
+        try:
+            found.append(date.fromisoformat(partition.name.removeprefix("date=")))
+        except ValueError:
+            continue
+    return tuple(sorted(found))
+
+
+def _readonly_optional(values: np.ndarray | None) -> np.ndarray | None:
+    if values is None:
+        return None
+    values.flags.writeable = False
+    return values
 
 
 def _write_turnover_rate_matrix(
@@ -1705,6 +1815,7 @@ def _matrix_disk_cache_path(
     instrument_fingerprint: str,
     profile_generation: str,
     source_generation: str | None,
+    st_history_token: str,
 ) -> Path:
     payload = {
         "version": _DIRECT_MATRIX_LOADER_VERSION,
@@ -1717,6 +1828,7 @@ def _matrix_disk_cache_path(
         "instrument_fingerprint": instrument_fingerprint,
         "profile_generation": str(profile_generation),
         "source_generation": source_generation,
+        "st_history_fingerprint": st_history_token,
     }
     digest = hashlib.blake2b(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
@@ -1795,7 +1907,16 @@ def _instrument_fingerprint(instruments: pl.DataFrame | None) -> bytes:
         return b"no-instruments"
     columns = [
         name
-        for name in ("symbol", "name", "total_shares", "float_shares", "limit_up", "limit_down")
+        for name in (
+            "symbol",
+            "name",
+            "total_shares",
+            "float_shares",
+            "limit_up",
+            "limit_down",
+            "listing_date",
+            "list_date",
+        )
         if name in instruments.columns
     ]
     payload = instruments.select(columns).sort("symbol").to_dicts()
@@ -1815,6 +1936,7 @@ def _find_covering_matrix_cache(
     source_partitions: Mapping[str, str],
     instrument_fingerprint: str,
     source_generation: str | None,
+    st_history_token: str,
 ) -> tuple[Path, str] | None:
     matches: list[tuple[int, int, Path, str]] = []
     for path in root.glob(f"v{_DIRECT_MATRIX_LOADER_VERSION}-*"):
@@ -1830,6 +1952,8 @@ def _find_covering_matrix_cache(
             if manifest.get("symbols_request") != (None if symbols is None else list(symbols)):
                 continue
             if manifest.get("instrument_fingerprint") != instrument_fingerprint:
+                continue
+            if manifest.get("st_history_fingerprint") != st_history_token:
                 continue
             if source_generation is not None:
                 if manifest.get("source_generation") != source_generation:
@@ -1955,6 +2079,7 @@ def _load_market_data_matrix_cache(
     }
     _make_read_only(*fields.values())
     os.utime(path, None)
+    is_st, st_point_in_time, listing_dates, trading_calendar = _pit_state_from_manifest(manifest)
     return MarketDataMatrix(
         timestamps=arrays["timestamps"],
         timestamp_labels=tuple(str(value) for value in manifest["timestamp_labels"]),
@@ -1978,7 +2103,42 @@ def _load_market_data_matrix_cache(
             str(name): float(value)
             for name, value in manifest.get("build_timing_ms", {}).items()
         }),
+        is_st=is_st,
+        st_point_in_time=st_point_in_time,
+        listing_dates=listing_dates,
+        trading_calendar=trading_calendar,
     )
+
+
+def _pit_state_from_manifest(
+    manifest: Mapping[str, Any],
+) -> tuple[np.ndarray | None, bool, tuple[date | None, ...] | None, tuple[date, ...] | None]:
+    """磁盘缓存不存 ST 矩阵, 按清单里的指纹对应的区间表重建。"""
+    point = bool(manifest.get("st_point_in_time", False))
+    listing_raw = manifest.get("listing_dates") or None
+    listing = None
+    if listing_raw:
+        listing = tuple(
+            None if value is None else date.fromisoformat(str(value))
+            for value in listing_raw
+        )
+    calendar_raw = manifest.get("trading_calendar") or ()
+    calendar = tuple(date.fromisoformat(str(value)) for value in calendar_raw) or None
+    if not point:
+        return None, False, listing, calendar
+    labels = manifest.get("timestamp_labels") or []
+    symbols = [str(value) for value in manifest.get("symbols") or []]
+    trading_dates = [date.fromisoformat(str(value)[:10]) for value in labels]
+    data_dir = Path(str(manifest.get("parquet_root") or "")).parent
+    is_st, restored = _st_matrix_for_dates(
+        trading_dates,
+        symbols,
+        data_dir,
+        names=[str(value) for value in manifest.get("names") or []],
+    )
+    if not restored:
+        return None, False, listing, calendar
+    return _readonly_optional(is_st), True, listing, calendar
 
 
 def _slice_and_project_market_data_matrix(
@@ -2034,6 +2194,10 @@ def _slice_and_project_market_data_matrix(
         vector_fields=frozenset(),
         volume_observed=sliced.volume_observed,
         cache_timing_ms=sliced.cache_timing_ms,
+        is_st=sliced.is_st,
+        st_point_in_time=sliced.st_point_in_time,
+        listing_dates=sliced.listing_dates,
+        trading_calendar=sliced.trading_calendar,
     )
 
 
@@ -2552,6 +2716,7 @@ def _limit_lock_matrices(
     out_up: np.ndarray | None = None,
     out_down: np.ndarray | None = None,
     apply_latest_limits: bool = True,
+    is_st: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     shape = close.shape
     up_locked = out_up if out_up is not None else np.zeros(shape, dtype=np.uint8)
@@ -2563,16 +2728,26 @@ def _limit_lock_matrices(
     up_locked.fill(0)
     down_locked.fill(0)
     legacy_pct, current_pct = numpy_limit_pct_vectors(symbols, names)
+    if is_st is not None and is_st.shape != shape:
+        raise ValueError("limit lock is_st shape mismatch")
+    main_board = current_pct == MAIN_BOARD_LIMIT
 
     previous_close = np.full(shape[1], np.nan, dtype=np.float64)
     previous_raw = np.full(shape[1], np.nan, dtype=np.float64)
     previous_adjustment = np.full(shape[1], np.nan, dtype=np.float64)
     for time_id in range(shape[0]):
-        limit_pct = (
-            legacy_pct
-            if trading_dates[time_id] < MAIN_BOARD_ST_LIMIT_CHANGE_DATE
-            else current_pct
-        )
+        if (
+            is_st is not None
+            and trading_dates[time_id] < MAIN_BOARD_ST_LIMIT_CHANGE_DATE
+        ):
+            limit_pct = current_pct.copy()
+            limit_pct[main_board & is_st[time_id]] = LEGACY_MAIN_BOARD_ST_LIMIT
+        else:
+            limit_pct = (
+                legacy_pct
+                if trading_dates[time_id] < MAIN_BOARD_ST_LIMIT_CHANGE_DATE
+                else current_pct
+            )
         present = seen[time_id]
         current_close = close[time_id].astype(np.float64, copy=False)
         current_raw = raw_close[time_id].astype(np.float64, copy=False)
@@ -2897,6 +3072,10 @@ def slice_market_data_matrix(market: MarketDataMatrix, start: int, stop: int) ->
         vector_fields=market.vector_fields,
         cache_timing_ms=market.cache_timing_ms,
         volume_observed=market.volume_observed,
+        is_st=None if market.is_st is None else market.is_st[start:stop],
+        st_point_in_time=market.st_point_in_time,
+        listing_dates=market.listing_dates,
+        trading_calendar=market.trading_calendar,
     )
     _make_read_only(
         result.timestamps,
@@ -3023,6 +3202,10 @@ def _writable_market_copy(market: MarketDataMatrix) -> MarketDataMatrix:
         limit_down_locked=np.array(market.limit_down_locked, copy=True),
         fields=MappingProxyType(fields),
         volume_observed=market.volume_observed,
+        is_st=None if market.is_st is None else np.array(market.is_st, copy=True),
+        st_point_in_time=market.st_point_in_time,
+        listing_dates=market.listing_dates,
+        trading_calendar=market.trading_calendar,
     )
 
 
@@ -3050,6 +3233,10 @@ def _readonly_market_view(market: MarketDataMatrix) -> MarketDataMatrix:
         limit_down_locked=_readonly_view(market.limit_down_locked),
         fields=MappingProxyType(fields),
         volume_observed=market.volume_observed,
+        is_st=None if market.is_st is None else _readonly_view(market.is_st),
+        st_point_in_time=market.st_point_in_time,
+        listing_dates=market.listing_dates,
+        trading_calendar=market.trading_calendar,
     )
 
 
@@ -3113,8 +3300,25 @@ def _append_market_row(
         names=market.names,
         fields=MappingProxyType(fields),
         volume_observed=market.volume_observed and latest.volume_observed,
+        is_st=_append_is_st_row(market, latest, target_ids),
+        st_point_in_time=market.st_point_in_time,
+        listing_dates=market.listing_dates,
+        trading_calendar=market.trading_calendar,
         **arrays,
     )
+
+
+def _append_is_st_row(
+    market: MarketDataMatrix,
+    latest: MarketDataMatrix,
+    target_ids: np.ndarray,
+) -> np.ndarray | None:
+    if market.is_st is None:
+        return None
+    row = np.zeros(len(market.symbols), dtype=bool)
+    if latest.is_st is not None:
+        row[target_ids] = np.asarray(latest.is_st[0], dtype=bool)
+    return np.concatenate([market.is_st, row[None, :]], axis=0)
 
 
 def _encode_axes(
@@ -4066,14 +4270,9 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
     _apply_bound(mask, _optional_field(market, "turnover_rate"), config, "turnover")
 
     if config.get("exclude_st"):
-        asset_mask = np.array(
-            [
-                not any(token in name.upper() for token in ("ST", "*ST", "退"))
-                for name in market.names
-            ],
-            dtype=bool,
-        )
-        mask &= asset_mask[None, :]
+        mask &= _st_exclusion_rows(market)
+
+    _apply_exclude_new_days(mask, market, config)
 
     boards = config.get("boards")
     if isinstance(boards, list) and boards:
@@ -4082,6 +4281,62 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
             board_mask[asset_id] = _symbol_in_boards(symbol, boards)
         mask &= board_mask[None, :]
     return mask
+
+
+_MISSING_LISTING_WARNED = False
+
+
+def _st_exclusion_rows(market: MarketDataMatrix) -> np.ndarray:
+    if (
+        market.st_point_in_time
+        and market.is_st is not None
+        and market.is_st.shape == market.shape
+    ):
+        return ~np.asarray(market.is_st, dtype=bool)
+    kept = np.fromiter(
+        (
+            not any(token in str(name).upper() for token in ("ST", "*ST", "退"))
+            for name in market.names
+        ),
+        dtype=bool,
+        count=len(market.names),
+    )
+    return np.broadcast_to(kept, market.shape)
+
+
+def _apply_exclude_new_days(mask: np.ndarray, market: MarketDataMatrix, config: dict) -> None:
+    """上市日起按交易日计数, 剔除前 exclude_new_days 个交易日。"""
+    raw = config.get("exclude_new_days")
+    if raw is None:
+        return
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return
+    if days <= 0:
+        return
+    listing = market.listing_dates
+    if listing is None or len(listing) != len(market.symbols):
+        _warn_missing_listing_dates()
+        return
+    axis = [date.fromisoformat(str(label)[:10]) for label in market.timestamp_labels]
+    calendar = market.trading_calendar or tuple(axis)
+    counts = trading_day_counts(axis, listing, calendar)
+    known = np.fromiter(
+        (value is not None for value in listing),
+        dtype=bool,
+        count=len(listing),
+    )
+    if known.any():
+        mask[:, known] &= counts[:, known] > days
+
+
+def _warn_missing_listing_dates() -> None:
+    global _MISSING_LISTING_WARNED
+    if _MISSING_LISTING_WARNED:
+        return
+    _MISSING_LISTING_WARNED = True
+    logger.warning("exclude_new_days 已配置, 但矩阵没有上市日, 跳过次新股过滤")
 
 
 def build_matrix_score(

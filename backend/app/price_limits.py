@@ -92,14 +92,30 @@ def no_limit_window_margin_days(symbol: str) -> int:
 
 
 def parse_listing_date(value: object) -> date | None:
-    """instruments 维表 listing_date 列值 → date (兼容 str / date / datetime / None)。"""
+    """instruments.listing_date / stock_basic.list_date → date。
+
+    兼容 date、datetime、``YYYY-MM-DD`` 以及 ``YYYYMMDD`` (str 或 int)。
+    """
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
-    if isinstance(value, str) and value:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        text = f"{value:08d}"
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+    else:
+        return None
+    if len(text) >= 10 and text[4] == "-":
         try:
-            return date.fromisoformat(value[:10])
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+    if len(text) == 8 and text.isdigit():
+        try:
+            return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
         except ValueError:
             return None
     return None
@@ -173,14 +189,26 @@ def polars_limit_price(previous: pl.Expr, limit_pct: pl.Expr, *, up: bool) -> pl
 def numpy_limit_pct_vectors(
     symbols: Sequence[str],
     names: Sequence[str],
+    is_st: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return pre/post-change vectors once; callers select one per date."""
+    """Return pre/post-change vectors once; callers select one per date.
+
+    ``is_st`` 是与 symbols 对齐的一维布尔向量时, 用它代替当前名称。
+    随交易日变化的 ST 矩阵由 :func:`write_numpy_price_limit_matrix` 按行套用。
+    """
     current = np.fromiter(
         (board_limit_pct(str(symbol)) for symbol in symbols),
         dtype=np.float64,
         count=len(symbols),
     )
     legacy = current.copy()
+    if is_st is not None:
+        flags = np.asarray(is_st, dtype=bool)
+        if flags.ndim != 1 or len(flags) != len(symbols):
+            raise ValueError("is_st vector length does not match symbols")
+        main_st = (current == MAIN_BOARD_LIMIT) & flags
+        legacy[main_st] = LEGACY_MAIN_BOARD_ST_LIMIT
+        return legacy, current
     for asset_id, (_symbol, name) in enumerate(zip(symbols, names, strict=True)):
         if current[asset_id] == MAIN_BOARD_LIMIT and is_risk_warning_name(name):
             legacy[asset_id] = LEGACY_MAIN_BOARD_ST_LIMIT
@@ -204,15 +232,48 @@ def write_numpy_price_limit_matrix(
     names: Sequence[str],
     *,
     valid: np.ndarray | None = None,
+    is_st: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Write date-aware limits directly into an existing matrix or memmap."""
+    """Write date-aware limits directly into an existing matrix or memmap.
+
+    ``is_st`` 为 ``(交易日, 标的)`` 时, 2026-07-06 前的主板风险警示用 5%。
+    未提供时回退到当前名称 (与旧矩阵一致)。
+    """
     expected_shape = (len(trading_dates), len(symbols))
     if target.shape != expected_shape:
         raise ValueError("price-limit output shape mismatch")
     if valid is not None and valid.shape != expected_shape:
         raise ValueError("price-limit validity mask shape mismatch")
 
-    legacy, current = numpy_limit_pct_vectors(symbols, names)
+    if is_st is not None and np.ndim(is_st) == 2:
+        flags = np.asarray(is_st, dtype=bool)
+        if flags.shape != expected_shape:
+            raise ValueError("is_st matrix shape mismatch")
+        _current = np.fromiter(
+            (board_limit_pct(str(symbol)) for symbol in symbols),
+            dtype=np.float64,
+            count=len(symbols),
+        )
+        target[:] = _current.astype(np.float32, copy=False)
+        legacy_rows = np.fromiter(
+            (value < MAIN_BOARD_ST_LIMIT_CHANGE_DATE for value in trading_dates),
+            dtype=bool,
+            count=len(trading_dates),
+        )
+        if legacy_rows.any():
+            main_board = _current == MAIN_BOARD_LIMIT
+            row = _current.astype(np.float32, copy=False)
+            target[legacy_rows] = np.where(
+                flags[legacy_rows] & main_board,
+                np.float32(LEGACY_MAIN_BOARD_ST_LIMIT),
+                row,
+            )
+        if valid is not None:
+            target[~valid] = np.nan
+        return target
+
+    vector = None if is_st is None or np.ndim(is_st) != 1 else np.asarray(is_st, dtype=bool)
+    legacy, current = numpy_limit_pct_vectors(symbols, names, vector)
     target[:] = current.astype(np.float32, copy=False)
     legacy_rows = np.fromiter(
         (value < MAIN_BOARD_ST_LIMIT_CHANGE_DATE for value in trading_dates),

@@ -752,6 +752,7 @@ class KlineRepository:
                 previous,
                 missing,
                 self.get_instruments(),
+                data_dir=self.store.data_dir,
             )
             if recovered.is_empty():
                 return df_today
@@ -1817,10 +1818,13 @@ class KlineRepository:
             df = compute_indicators(df)
             df = compute_signals(df)
             instruments = self.get_instruments()
+            from app.services.st_history_sync import load_st_history
+
             df = compute_limit_signals(
                 df,
                 instruments,
                 historical_shares=self.get_historical_shares(),
+                st_history=load_st_history(self.store.data_dir),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("on-demand compute failed: %s", e)
