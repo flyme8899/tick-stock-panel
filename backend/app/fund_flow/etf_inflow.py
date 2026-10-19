@@ -430,6 +430,50 @@ def _registration_adjustments(
     return found
 
 
+def confirmed_rebase_factors(
+    data_dir: Path,
+    *,
+    after: str,
+    on_or_before: str,
+) -> dict[str, list[tuple[str, float]]]:
+    """已确认的登记日份额因子，供份额变化换算成当前份额口径。
+
+    返回 ``code → [(登记日, f), ...]``，按登记日升序。只收录
+    ``after < 登记日 <= on_or_before``。因子记在除权日，这里挪到前一交易日；
+    登记日及其前一交易日的份额还要通过 ``_shares_rebased``。现金分红、
+    份额没按 f 跳变、或这两天缺份额时不返回，调用方保持原始相减。
+    """
+    if not after or not on_or_before or after >= on_or_before:
+        return {}
+    calendar = _trading_calendar(data_dir)
+    adjustments = _registration_adjustments(_split_events(data_dir), calendar)
+    pending: list[tuple[str, str, str, float]] = []
+    needed: set[str] = set()
+    for code, rows in adjustments.items():
+        for record_day, factor in rows.items():
+            if not (after < record_day <= on_or_before):
+                continue
+            prev = _previous_trading_day(calendar, record_day)
+            if prev is None:
+                continue
+            pending.append((code, record_day, prev, factor))
+            needed.add(record_day)
+            needed.add(prev)
+    shares = {day: _share_map(data_dir, day) for day in needed}
+    found: dict[str, list[tuple[str, float]]] = {}
+    for code, record_day, prev, factor in pending:
+        if not _shares_rebased(
+            shares.get(prev, {}).get(code),
+            shares.get(record_day, {}).get(code),
+            factor,
+        ):
+            continue
+        found.setdefault(code, []).append((record_day, factor))
+    for rows in found.values():
+        rows.sort()
+    return found
+
+
 def _shares_rebased(shares_prev: object, shares_now: object, factor: float) -> bool:
     """登记日份额是否真的按因子跳变。份额缺失时不还原。
 

@@ -2467,7 +2467,7 @@ export interface FundFlowAmountRow {
   shares?: number | null
   prev_shares?: number | null
   share_change?: number | null
-  /** ETF 份额变化：前 1 / 5 / 20 份落盘。不足时为 null。 */
+  /** 相对前 1 / 5 / 20 份落盘的份额差，已折算到当前份额口径。不足时为 null。 */
   change_1d?: number | null
   change_5d?: number | null
   change_20d?: number | null

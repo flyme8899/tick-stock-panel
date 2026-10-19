@@ -97,6 +97,7 @@ it('aligns 1/5/20 share changes with net inflow and flags a diverged navigator r
 
   const text = host.textContent || ''
   expect(text).toContain('5 日 / 20 日是相邻交易日的滚动合计')
+  expect(text).toContain('基准份额乘上其后的折算倍数')
   expect(text).not.toContain('15日')
   const headers = host.querySelector('[data-etf-windows]')
   expect(headers?.textContent?.replace(/\s+/g, '')).toBe('1日5日20日')
