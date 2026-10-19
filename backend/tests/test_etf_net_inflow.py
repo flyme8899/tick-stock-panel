@@ -386,6 +386,90 @@ _CONVERSIONS = [
         "ex_yi": -0.0863475,
         "naive_yi": -27.762176421,
     },
+    {
+        # 518800 缩股约 5.8%，幅度和分红重叠，但份额差不是 10 万份的整数倍。
+        "code": "518800",
+        "factor": 0.94231553,
+        "prev": ("2026-04-13", 4_298_419_900),
+        "record": ("2026-04-14", 4_057_279_200, 9.889),
+        "ex": ("2026-04-15", 4_051_979_200, 10.552),
+        "record_yi": 0.7148101995,
+        "ex_yi": -0.559256,
+        "naive_yi": -23.846403823,
+    },
+    {
+        # 以下 7 只和上面的 159537 一样，登记日除了折算还有大额申购。
+        # 份额确认不能把它们退回「份额差 × 折算前价格」。
+        "code": "159582",
+        "factor": 5.0,
+        "prev": ("2026-07-09", 151_621_621),
+        "record": ("2026-07-10", 855_608_105, 4.991),
+        "ex": ("2026-07-13", 885_608_105, 0.929),
+        "record_yi": 0.973245,
+        "ex_yi": 0.2787,
+        "naive_yi": 35.13596541644,
+    },
+    {
+        "code": "159387",
+        "factor": 2.0,
+        "prev": ("2026-03-26", 857_594_824),
+        "record": ("2026-03-27", 1_903_189_648, 1.755),
+        "ex": ("2026-03-30", 1_911_189_648, 0.855),
+        "record_yi": 1.6497,
+        "ex_yi": 0.0684,
+        "naive_yi": 18.3501891612,
+    },
+    {
+        "code": "588120",
+        "factor": 2.0,
+        "prev": ("2026-06-22", 507_811_000),
+        "record": ("2026-06-23", 1_087_622_000, 2.053),
+        "ex": ("2026-06-24", 1_051_622_000, 1.058),
+        "record_yi": 0.73908,
+        "ex_yi": -0.38088,
+        "naive_yi": 11.90351983,
+    },
+    {
+        "code": "560780",
+        "factor": 3.0,
+        "prev": ("2026-06-24", 2_070_496_000),
+        "record": ("2026-06-25", 6_562_488_000, 3.777),
+        "ex": ("2026-06-26", 6_850_488_000, 1.307),
+        "record_yi": 4.41909,
+        "ex_yi": 3.76416,
+        "naive_yi": 169.66253784,
+    },
+    {
+        "code": "561980",
+        "factor": 5.0,
+        "prev": ("2026-06-24", 1_312_110_000),
+        "record": ("2026-06-25", 6_915_550_000, 4.147),
+        "ex": ("2026-06-26", 7_030_550_000, 0.842),
+        "record_yi": 2.94437,
+        "ex_yi": 0.9683,
+        "naive_yi": 232.3746568,
+    },
+    {
+        # 159516 在 7 月这次的单次份额因子是 2（累计从 2 到 4），不是 4。
+        "code": "159516",
+        "factor": 2.0,
+        "prev": ("2026-07-08", 24_569_179_986),
+        "record": ("2026-07-09", 51_770_359_972, 1.945),
+        "ex": ("2026-07-10", 56_603_359_972, 0.905),
+        "record_yi": 25.5962,
+        "ex_yi": 43.73865,
+        "naive_yi": 529.0629507277,
+    },
+    {
+        "code": "588940",
+        "factor": 2.0,
+        "prev": ("2026-07-24", 1_219_420_000),
+        "record": ("2026-07-27", 2_582_840_000, 1.868),
+        "ex": ("2026-07-28", 2_678_840_000, 0.874),
+        "record_yi": 1.34496,
+        "ex_yi": 0.83904,
+        "naive_yi": 25.4686856,
+    },
 ]
 
 
@@ -416,6 +500,46 @@ def test_conversion_record_day_keeps_real_flow_and_ex_day_is_kept(tmp_path, case
     assert record["net_inflow_1d"] == pytest.approx(case["record_yi"])
     assert ex["net_inflow_1d"] == pytest.approx(case["ex_yi"])
     # 除权日份额差仍是原始份数，不因金额还原被改写。
+    assert _board_row(tmp_path, code)["share_change"] == pytest.approx(case["ex"][1] - record_shares)
+
+
+# 因子表只写 ex_factor，不写分红和前收。有这两列时份额因子会还原成 1，
+# 5% 阈值本来就不会碰到。这里锁的是「只有价格因子」仍被当成折算的路径。
+_CASH_DIVIDENDS = [
+    {
+        "code": "159207",
+        # 2025-12-10 现金 0.0546，前收 1.129，价格因子约 5.1%。
+        # 登记日份额 +1400 万份，正好等于前一日 × (f−1)，误还原后只剩约 0。
+        "factor": 1.129 / (1.129 - 0.0546),
+        "prev": ("2025-12-08", 275_483_345),
+        "record": ("2025-12-09", 289_483_345, 1.129),
+        "ex": ("2025-12-10", 297_483_345, 1.075),
+        "record_yi": 0.15806,
+        "ex_yi": 0.086,
+    },
+    {
+        "code": "515100",
+        # 2025-12-23 现金 0.1053，前收 1.543，价格因子约 7.3%。
+        # 周五到周一。误还原会把登记日 +0.571 亿改成约 −3.556 亿。
+        "factor": 1.543 / (1.543 - 0.1053),
+        "prev": ("2025-12-19", 3_882_441_500),
+        "record": ("2025-12-22", 3_919_441_500, 1.543),
+        "ex": ("2025-12-23", 3_945_941_500, 1.437),
+        "record_yi": 0.57091,
+        "ex_yi": 0.380805,
+    },
+]
+
+
+@pytest.mark.parametrize("case", _CASH_DIVIDENDS, ids=[item["code"] for item in _CASH_DIVIDENDS])
+def test_large_cash_dividend_keeps_plain_flows(tmp_path, case) -> None:
+    _seed_conversion(tmp_path, case)
+    code = case["code"]
+    record_day, record_shares, _record_close = case["record"]
+    record = etf_inflow.latest_inflows(tmp_path, as_of=record_day)[code]
+    ex = etf_inflow.latest_inflows(tmp_path, as_of=case["ex"][0])[code]
+    assert record["net_inflow_1d"] == pytest.approx(case["record_yi"])
+    assert ex["net_inflow_1d"] == pytest.approx(case["ex_yi"])
     assert _board_row(tmp_path, code)["share_change"] == pytest.approx(case["ex"][1] - record_shares)
 
 

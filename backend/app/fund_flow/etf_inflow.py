@@ -7,7 +7,9 @@
 1 日用上一份份额落盘做前值。两份落盘之间如果隔了超过 1 个交易日，这一日
 留空，不把缺口写成申赎金额。份额折算的 ``ex_factor`` 记在除权日 E，但交易所
 份额在登记日 R（E 的前一个交易日，按交易日历而不是自然日）已经是折算后的
-数量，当天收盘价仍是折算前的。R 用份额因子 f 还原真实申赎；E 的份额和价格
+数量，当天收盘价仍是折算前的。价格因子偏离 1 超过 5% 只是候选：R 日份额
+要真的按份额因子 f 跳变，才在 R 还原真实申赎。现金分红不改份额基数，
+159207、515100 这种大额分红即使价格因子超过 5% 也不还原。E 的份额和价格
 都在折算后，按普通份额差计算，不再留空。
 5 日 / 20 日是这些 1 日值的滚动合计，窗口按份额落盘份数往后数，和份额
 变化用的「前 N 份落盘」同一套锚点。窗口里有任何一天算不出，合计就留空。
@@ -29,9 +31,16 @@ from app.market_time import CN_TZ
 
 # 5 日、20 日与领航者稿的 net_5d / net_20d 对齐。1 日是滚动的基本步长。
 INFLOW_WINDOWS = (1, 5, 20)
-# 份额折算的因子偏离 1 达到这个幅度，才在登记日还原。现金分红的份额因子
-# 是 1，价格因子贴近 1，不在这里还原。
+# 价格因子偏离 1 达到这个幅度，才成为折算候选。现金分红的价格因子可以
+# 更大（159207 约 5.1%，515100 约 7.3%），不能单靠这个阈值还原。
 _SPLIT_FACTOR_GAP = 0.05
+# 登记日残差 |份额_R − 份额_{R−1}×f| 不超过折算本身带来的份额变动的这个比例，
+# 才确认份额按 f 跳了。159537 同日申购的残差约占 0.52；515100 分红约占 0.87。
+_REBASE_SLACK = 0.65
+# 幅度小于这档时，一笔取整的申赎可能在数值上刚好等于价格因子。这种份额差
+# 落在 10 万份申赎单位上，仍是申购或赎回，不是折算。159207 的 +1400 万份就是。
+_AMBIGUOUS_FACTOR = 0.15
+_CREATION_UNIT = 100_000
 _CASH_EPS = 1e-6
 _DIVERGE_RATIO = 0.20
 _FLOW_KEYS = ("net_1d", "net_5d", "net_20d")
@@ -136,13 +145,20 @@ def latest_inflows(
         series: list[float | None] = []
         code_factors = adjustments.get(code, {})
         for prev, current, adjacent in steps_meta:
+            factor = code_factors.get(current) if adjacent else None
+            if factor is not None and not _shares_rebased(
+                shares.get(prev, {}).get(code),
+                shares.get(current, {}).get(code),
+                factor,
+            ):
+                factor = None
             series.append(step_inflow_yi(
                 shares.get(current, {}).get(code),
                 shares.get(prev, {}).get(code),
                 closes.get(current, {}).get(code),
                 adjacent=adjacent,
                 split=False,
-                factor=code_factors.get(current) if adjacent else None,
+                factor=factor,
             ))
         values = {
             "net_inflow_1d": rolling_inflow(series, 1),
@@ -412,6 +428,35 @@ def _registration_adjustments(
                 continue
             found.setdefault(code, {})[record] = factor
     return found
+
+
+def _shares_rebased(shares_prev: object, shares_now: object, factor: float) -> bool:
+    """登记日份额是否真的按因子跳变。份额缺失时不还原。
+
+    现金分红只改价格。残差相对折算份额变动超过 ``_REBASE_SLACK`` 的，份额
+    没有按 f 重定基数。幅度较小的因子还有一种碰巧：当天申购份数正好等于
+    前一日份额 × (f−1)，残差接近 0，看起来像一次干净的折算。申赎按 10 万份
+    取整，这种整段份额差仍是申购，不还原。2 倍及以上的折算不走这条例外，
+    同日大额申购（159537 等）的残差留在折算结果里。
+    """
+    before = _finite(shares_prev)
+    after = _finite(shares_now)
+    ratio = _finite(factor)
+    if before is None or after is None or ratio is None or ratio <= 0 or before == 0:
+        return False
+    moved = before * (ratio - 1.0)
+    if moved == 0:
+        return False
+    if abs(after - before * ratio) > abs(moved) * _REBASE_SLACK:
+        return False
+    on_grid = abs(ratio - 1.0) < _AMBIGUOUS_FACTOR and _on_creation_grid(after - before)
+    return not on_grid
+
+
+def _on_creation_grid(delta: float) -> bool:
+    """份额差是否落在 10 万份申赎单位上，含不变。允许 1 份舍入。"""
+    units = round(delta / _CREATION_UNIT)
+    return abs(delta - units * _CREATION_UNIT) <= 1.0
 
 
 def _read_parquet(path: Path) -> pl.DataFrame:
