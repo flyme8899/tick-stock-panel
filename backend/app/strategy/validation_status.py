@@ -16,6 +16,7 @@ RETIRED_NOTE = "已下线，不作为买点展示，也不推送"
 UNVERIFIED_NOTE = "未经验证"
 FACTOR_RANK_NOTE = "导出失败"
 REFERENCE_NOTE = "历史未证实，仅供参考"
+BULLISH_ALIGNMENT_NOTE = f"{REFERENCE_NOTE}。历史上信号后 5 日偏弱"
 
 LABELS = {
     "reverse": "风险提示",
@@ -52,7 +53,7 @@ CLASSIFICATION: dict[str, tuple[str, str]] = {
     "fundamental_m3": ("unverified", UNVERIFIED_NOTE),
     "factor_rank_research": ("unverified", FACTOR_RANK_NOTE),
     # reference_only：其余内置策略，含 rsi_midline_pullback
-    "bullish_alignment": ("reference_only", REFERENCE_NOTE),
+    "bullish_alignment": ("reference_only", BULLISH_ALIGNMENT_NOTE),
     "long_lower_shadow_reversal": ("reference_only", REFERENCE_NOTE),
     "low_volatility_leader": ("reference_only", REFERENCE_NOTE),
     "macd_below_zero_revival": ("reference_only", REFERENCE_NOTE),

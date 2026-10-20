@@ -14,6 +14,7 @@ from app.services.trade_marks import strategy_signal_marks
 from app.strategy.engine import StrategyDataContext, StrategyEngine
 from app.strategy.monitor import MonitorRuleEngine
 from app.strategy.validation_status import (
+    BULLISH_ALIGNMENT_NOTE,
     CLASSIFICATION,
     FACTOR_RANK_NOTE,
     REFERENCE_NOTE,
@@ -77,6 +78,9 @@ def test_classification_covers_every_builtin_strategy():
     assert "rsi_midline_pullback" in metas
     assert metas["rsi_midline_pullback"]["validation_status"] == "reference_only"
     assert metas["rsi_midline_pullback"]["validation_note"] == REFERENCE_NOTE
+    assert metas["bullish_alignment"]["validation_status"] == "reference_only"
+    assert metas["bullish_alignment"]["validation_note"] == BULLISH_ALIGNMENT_NOTE
+    assert BULLISH_ALIGNMENT_NOTE == "历史未证实，仅供参考。历史上信号后 5 日偏弱"
     for sid, (status, note) in CLASSIFICATION.items():
         assert metas[sid]["validation_status"] == status
         assert metas[sid]["validation_note"] == note
