@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "pullback_to_support",
+    **validation_fields("pullback_to_support"),
     "name": "缩量回踩",
     "description": "回踩MA20附近 + 缩量 + 中期趋势向上",
     "tags": ["回踩", "支撑"],

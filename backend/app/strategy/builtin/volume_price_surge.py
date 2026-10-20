@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "volume_price_surge",
+    **validation_fields("volume_price_surge"),
     "name": "量价齐升",
     "description": "突破MA20 + 放量 + 收阳",
     "tags": ["量价", "突破"],

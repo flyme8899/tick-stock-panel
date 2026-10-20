@@ -9,9 +9,11 @@ from app.backtest.matrix import (
     build_matrix_score,
     make_signal_matrix,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "factor_rank_research",
+    **validation_fields("factor_rank_research"),
     "name": "因子排名研究",
     "description": "受控多因子截面评分、阈值与排名选股策略",
     "tags": ["因子", "研究", "截面排名"],

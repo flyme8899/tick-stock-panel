@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "broken_board_recovery",
+    **validation_fields("broken_board_recovery"),
     "name": "断板反包",
     "description": "连板≥2后断板1-2天, 出现放量反包信号",
     "tags": ["涨停", "反包"],

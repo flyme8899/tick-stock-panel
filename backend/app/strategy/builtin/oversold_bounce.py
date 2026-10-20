@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "oversold_bounce",
+    **validation_fields("oversold_bounce"),
     "name": "超跌反弹",
     "description": "RSI14 < 30超卖区 + 当日收阳 + 放量, 抄底信号",
     "tags": ["超跌", "反弹", "RSI"],

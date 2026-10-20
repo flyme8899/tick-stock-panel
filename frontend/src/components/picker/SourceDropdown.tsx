@@ -28,6 +28,9 @@ export interface SourceOption {
   selectableNote?: string | null
   /** 可选数是否被 30 只上限截断。截断了要说「至少 N 只」而不是「约 N 只」。 */
   selectableCapped?: boolean
+  badgeText?: string
+  badgeClassName?: string
+  subtitleClassName?: string
 }
 
 function selectableBadge(item: SourceOption): { text: string; className: string } | null {
@@ -178,12 +181,15 @@ export function SourceDropdown({
                   {(item.redCount ?? 0) > 0 && (
                     <span className="ml-1 rounded bg-bull/15 px-1 text-[10px] leading-4 text-bull">加红</span>
                   )}
+                  {item.badgeText && (
+                    <span className={cn('ml-1 rounded px-1 text-[10px] leading-4', item.badgeClassName)}>{item.badgeText}</span>
+                  )}
                   {badge && (
                     <span className={cn('ml-1 rounded px-1 text-[10px] leading-4', badge.className)}>{badge.text}</span>
                   )}
                 </span>
                 {item.subtitle && (
-                  <span className="mt-0.5 block text-[10px] leading-snug text-muted">{item.subtitle}</span>
+                  <span className={cn('mt-0.5 block text-[10px] leading-snug text-muted', item.subtitleClassName)}>{item.subtitle}</span>
                 )}
                 {(item.importance || item.category || item.direction) && (
                   <span className="mt-0.5 block text-[10px] leading-snug text-muted">

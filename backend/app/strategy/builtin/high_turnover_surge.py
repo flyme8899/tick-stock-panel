@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "high_turnover_surge",
+    **validation_fields("high_turnover_surge"),
     "name": "高换手拉升",
     "description": "换手率 > 5% 且涨幅 > 3%, 资金活跃",
     "tags": ["换手率", "放量", "资金"],

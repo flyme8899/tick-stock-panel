@@ -30,13 +30,15 @@ export interface TradeMarkStrategy {
   source: string
   tags: string[]
   fundamental: boolean
+  validation_status?: 'reverse' | 'retired' | 'unverified' | 'reference_only'
+  validation_note?: string
 }
 
 export interface TradeSignalMarker {
   id: string
   date: string
-  side: 'buy' | 'sell'
-  style: 'triangle' | 'breakout'
+  side: 'buy' | 'sell' | 'risk'
+  style: 'triangle' | 'breakout' | 'risk'
   rule: string
   price: number | null
   fwd5: number | null
@@ -129,13 +131,25 @@ export function candleMarkStatus(input: {
 
 export function strategyMarkers(markers: TradeSignalMarker[], enabled: boolean): ChartMarker[] {
   if (!enabled) return []
-  return markers.map(marker => ({
-    date: marker.date.slice(0, 10),
-    kind: marker.side,
-    style: marker.style === 'breakout' ? 'breakout' : 'triangle',
-    markerId: marker.id,
-    color: marker.side === 'buy' ? TRADE_BUY : TRADE_SELL,
-  }))
+  return markers.map(marker => {
+    if (marker.side === 'risk') {
+      // 跑输行业：绿跌圆点，不画红涨买点三角。
+      return {
+        date: marker.date.slice(0, 10),
+        kind: 'neutral' as const,
+        label: '险',
+        markerId: marker.id,
+        color: TRADE_SELL,
+      }
+    }
+    return {
+      date: marker.date.slice(0, 10),
+      kind: marker.side,
+      style: marker.style === 'breakout' ? 'breakout' as const : 'triangle' as const,
+      markerId: marker.id,
+      color: marker.side === 'buy' ? TRADE_BUY : TRADE_SELL,
+    }
+  })
 }
 
 export function fillMarkers(fills: TradeFill[], enabled: boolean): ChartMarker[] {
@@ -249,7 +263,21 @@ export function intradayTradeMarks(input: {
       const day = String(marker?.date ?? '').slice(0, 10)
       const time = sessionMinute(marker?.time, DAILY_MARK_MINUTE)
       const price = finitePrice(marker?.price)
-      if (!day || !time || !keep(day) || (marker.side !== 'buy' && marker.side !== 'sell')) continue
+      if (!day || !time || !keep(day) || (marker.side !== 'buy' && marker.side !== 'sell' && marker.side !== 'risk')) continue
+      if (marker.side === 'risk') {
+        out.push({
+          date: day,
+          time,
+          side: 'neutral',
+          style: 'dot',
+          color: TRADE_SELL,
+          label: '险',
+          tip: marker.rule || '风险提示',
+          price,
+          source: 'strategy',
+        })
+        continue
+      }
       out.push({
         date: day,
         time,

@@ -1,6 +1,7 @@
 import { Settings2, TrendingDown, RadioTower } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { storage } from '@/lib/storage'
+import { validationBadgeClass, validationLabel, validationNote, validationTextClass } from '@/lib/strategyValidation'
 
 // ===== 卡片尺寸 =====
 
@@ -100,13 +101,15 @@ interface StrategyCardProps {
   awaitRun?: boolean
   /** 本轮计算失败的说明; 有值时不把 0 显示成命中数 */
   error?: string
+  validationStatus?: string
+  validationText?: string
 }
 
 export function StrategyCard({
   name, description, source, active, count, expiredCount,
   loading, cardSize,
   onRun, disabled, onSettings, monitored, onToggleMonitor, timeframeBadge, computing, awaitRun,
-  error,
+  error, validationStatus, validationText,
 }: StrategyCardProps) {
   const cs = CARD_STYLES[cardSize]
   const activeCls = active
@@ -117,6 +120,10 @@ export function StrategyCard({
     : 'bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent'
   const srcLabel = cardSize === 'mini' ? (SRC_MAP[source ?? ''] ?? '内') : (SRC_MAP[source ?? ''] ?? '内置')
   const badgeCls = BADGE_CLS_MAP[source ?? 'builtin'] ?? BADGE_CLS_MAP.builtin
+  const statusLabel = validationLabel(validationStatus)
+  const statusNote = validationNote(validationStatus, validationText)
+  const statusCls = validationBadgeClass(validationStatus)
+  const statusTextCls = validationTextClass(validationStatus)
 
   // 失效数 > 0 时显示
   const hasExpired = expiredCount != null && expiredCount > 0
@@ -134,6 +141,7 @@ export function StrategyCard({
             className="flex flex-col items-start cursor-pointer disabled:opacity-50 disabled:cursor-wait w-full">
             <div className="flex items-center gap-1.5 max-w-full">
               <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${badgeCls}`}>{srcLabel}</span>
+              <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${statusCls}`} title={statusNote}>{statusLabel}</span>
               {timeframeBadge && (
                 <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400">{timeframeBadge}</span>
               )}
@@ -142,6 +150,7 @@ export function StrategyCard({
             {description && (
               <span className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1" title={description}>{description}</span>
             )}
+            <span className={`text-[10px] leading-tight mt-0.5 line-clamp-2 ${statusTextCls}`} title={statusNote}>{statusNote}</span>
             {error && !loading && !computing && (
               <span className="mt-1.5 text-[10px] text-danger" title={error}>失败</span>
             )}
@@ -185,6 +194,7 @@ export function StrategyCard({
             className="flex flex-col items-start cursor-pointer disabled:opacity-50 disabled:cursor-wait min-w-0">
             <div className="flex items-center gap-1.5 min-w-0">
               <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${badgeCls}`}>{srcLabel}</span>
+              <span className={`text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 ${statusCls}`} title={statusNote}>{statusLabel}</span>
               {timeframeBadge && (
                 <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400">{timeframeBadge}</span>
               )}
@@ -207,6 +217,7 @@ export function StrategyCard({
               {description && (
                 <span className="text-[10px] text-muted leading-tight line-clamp-1 max-w-[120px]" title={description}>{description}</span>
               )}
+              <span className={`text-[10px] leading-tight line-clamp-1 max-w-[140px] ${statusTextCls}`} title={statusNote}>{statusNote}</span>
               {hasExpired && (
                 <span className="text-[9px] font-mono text-red-400/80">{'-' + expiredCount}</span>
               )}
@@ -230,6 +241,7 @@ export function StrategyCard({
           <button onClick={onRun} disabled={disabled}
             className="flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-wait">
             <span className="text-[8px] px-0.5 rounded bg-secondary/10 text-muted border border-border font-medium leading-tight">{srcLabel}</span>
+            <span className={`text-[8px] px-0.5 rounded border font-medium leading-tight ${statusCls}`} title={statusNote}>{statusLabel}</span>
             <span className="text-[10px] font-medium whitespace-nowrap text-foreground">{name}</span>
             {error && !loading && !computing && (
               <span className="text-[9px] text-danger shrink-0" title={error}>失败</span>

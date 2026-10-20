@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "strong_open",
+    **validation_fields("strong_open"),
     "name": "强势高开",
     "description": "高开 > 3% 且收盘高于开盘价, 集合竞价强势",
     "tags": ["高开", "强势"],

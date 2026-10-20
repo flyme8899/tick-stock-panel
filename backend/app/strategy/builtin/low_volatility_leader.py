@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "low_volatility_leader",
+    **validation_fields("low_volatility_leader"),
     "name": "低波动龙头",
     "description": "20日动量为正 + 年化波动 < 30% + MA20上方",
     "tags": ["低波动", "龙头"],

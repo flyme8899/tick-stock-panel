@@ -14,9 +14,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "macd_golden",
+    **validation_fields("macd_golden"),
     "name": "MACD 金叉放量",
     "description": "MACD金叉当日 + 量能放大",
     "tags": ["MACD", "金叉", "放量"],

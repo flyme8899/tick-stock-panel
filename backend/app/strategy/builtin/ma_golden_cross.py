@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "ma_golden_cross",
+    **validation_fields("ma_golden_cross"),
     "name": "MA 金叉",
     "description": "MA5上穿MA20当日触发, 量能配合",
     "tags": ["均线", "金叉"],

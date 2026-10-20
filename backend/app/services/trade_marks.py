@@ -19,6 +19,7 @@ from typing import Any
 import polars as pl
 
 from app.services.price_basis import minute_prev_close, minute_reads_are_adjusted, repo_data_dir
+from app.strategy.validation_status import present_trade_markers, resolve
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +104,15 @@ def catalog(engine) -> list[dict]:
             continue
         tags = list(meta.get("tags") or [])
         sid = str(meta.get("id") or "")
+        status, note = resolve(meta)
         rows.append({
             "id": sid,
             "name": meta.get("name") or sid,
             "source": meta.get("source") or "",
             "tags": tags,
             "fundamental": sid.startswith("fundamental_") or "基本面" in tags,
+            "validation_status": status,
+            "validation_note": note,
         })
     return rows
 
@@ -286,7 +290,8 @@ def forward_return(closes: list[float | None], index: int, horizon: int) -> floa
 
 
 def summarize_entries(markers: list[dict]) -> dict:
-    buys = [row for row in markers if row.get("side") == "buy"]
+    # 风险提示仍计入样本，方便对照后 20 日；下线买点已在展示层去掉。
+    buys = [row for row in markers if row.get("side") in {"buy", "risk"}]
     sample = [row["fwd20"] for row in buys if isinstance(row.get("fwd20"), (int, float))]
     wins = sum(1 for value in sample if value > 0)
     return {
@@ -400,6 +405,14 @@ def build_payload(
                     end=end_s,
                 )
                 markers = apply_forward_returns(raw, _close_series(symbol_panel, symbol))
+                try:
+                    defn = engine.get(strategy_id)
+                except ValueError:
+                    defn = None
+                if defn is not None:
+                    markers, validation_note = present_trade_markers(defn.meta, markers)
+                    if note is None:
+                        note = validation_note
             except ValueError as exc:
                 if str(exc).startswith("unknown strategy"):
                     raise

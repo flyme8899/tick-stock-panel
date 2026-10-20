@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "platform_consolidation_breakout",
+    **validation_fields("platform_consolidation_breakout"),
     "name": "平台整理突破",
     "description": "近N日窄幅横盘 (振幅收敛) 后放量突破平台上沿, 蓄势变盘",
     "tags": ["形态", "平台", "突破"],

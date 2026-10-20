@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "rsi_midline_pullback",
+    **validation_fields("rsi_midline_pullback"),
     "name": "RSI 中轴回踩",
     "description": "多头趋势 (MA60 上方) 中 RSI 回落至 50 中轴区间企稳, 强势股低吸",
     "tags": ["RSI", "趋势", "低吸"],

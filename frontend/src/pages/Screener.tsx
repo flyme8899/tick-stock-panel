@@ -18,6 +18,7 @@ import { type NavItem } from '@/lib/listNav'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useStrategyPool } from '@/lib/useStrategyPool'
 import { StrategyCard, CardSize, loadCardSize, cardWrapCls } from '@/components/screener/StrategyCard'
+import { normalizeStatus, validationNote, validationTextClass } from '@/lib/strategyValidation'
 import { ScreenerTable } from '@/components/screener/ScreenerTable'
 import { ScreenerFilter as ScreenerFilterType, defaultFilter, filterActive, countActiveFilters, applyFilter, FilterPanel } from '@/components/screener/ScreenerFilter'
 import { StrategySettingsDialog } from '@/components/screener/StrategySettingsDialog'
@@ -225,6 +226,13 @@ export function Screener() {
     const map: Record<string, string> = {}
     for (const p of strategyPresets) {
       map[p.id] = p.name
+    }
+    return map
+  }, [strategyPresets])
+  const strategyValidation = useMemo(() => {
+    const map: Record<string, { status?: string; note?: string }> = {}
+    for (const p of strategyPresets) {
+      map[p.id] = { status: p.validation_status, note: p.validation_note }
     }
     return map
   }, [strategyPresets])
@@ -999,6 +1007,8 @@ export function Screener() {
                       ? summaryQuery.data.results[id].error
                       : undefined
                   }
+                  validationStatus={s.validation_status}
+                  validationText={s.validation_note}
                   expiredCount={expiredCounts[id]}
                   loading={runAll.isPending}
                   computing={pendingRunIds.has(id) || selfRunning || minuteRunning}
@@ -1039,7 +1049,7 @@ export function Screener() {
                     <span className="text-secondary">{strategyIdToName[activeStrategy] ?? ''}</span>
                   )}
                   <TrendingUp className="h-4 w-4 text-accent" />
-                  {showAll ? '全部' : ''}命中 <span className="text-accent num">{displayRows.length}</span> 只
+                  {showAll ? '全部' : ''}{!showAll && normalizeStatus(strategyMap.get(activeStrategy ?? '')?.validation_status) === 'reverse' ? '风险' : !showAll && normalizeStatus(strategyMap.get(activeStrategy ?? '')?.validation_status) === 'retired' ? '记录' : '命中'} <span className="text-accent num">{displayRows.length}</span> 只
                   {filterActive(filter) && displayRows.length !== (showAll ? allRows.length : result!.total) && (
                     <span className="text-muted text-xs">/ {showAll ? allRows.length : result!.total}</span>
                   )}
@@ -1143,6 +1153,20 @@ export function Screener() {
                   )}
                 </div>
               </div>
+              {!showAll && activeStrategy && (
+                <p className={`text-xs leading-snug ${validationTextClass(strategyMap.get(activeStrategy)?.validation_status)}`}>
+                  {validationNote(
+                    strategyMap.get(activeStrategy)?.validation_status,
+                    strategyMap.get(activeStrategy)?.validation_note,
+                  )}
+                  {normalizeStatus(strategyMap.get(activeStrategy)?.validation_status) === 'retired'
+                    ? ' 这些记录不是买点，也不会推送。'
+                    : ''}
+                  {normalizeStatus(strategyMap.get(activeStrategy)?.validation_status) === 'reverse'
+                    ? ' 下表按风险提示展示，不是买点。'
+                    : ''}
+                </p>
+              )}
 
               {/* 筛选面板: 只要原始结果有数据就显示 (哪怕筛完后为空, 用户才能改条件) */}
               {showFilter && (showAll ? allRows.length > 0 : !!result?.rows.length) && (
@@ -1187,6 +1211,7 @@ export function Screener() {
                     rows={displayRows}
                     columns={columns}
                     strategyIdToName={strategyIdToName}
+                    strategyValidation={strategyValidation}
                     symbolStrategyMap={symbolStrategyMap}
                     activeStrategy={activeStrategy}
                     activeSymbol={previewSymbol}

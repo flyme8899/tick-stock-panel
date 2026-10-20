@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "bullish_alignment",
+    **validation_fields("bullish_alignment"),
     "name": "均线多头",
     "description": "MA5>MA10>MA20>MA60多头排列 + 短期动量为正",
     "tags": ["均线", "多头"],

@@ -27,6 +27,7 @@ from app.strategy.custom_signals import _OP_BUILDERS  # type: ignore  # 复用�
 from app.strategy.custom_signals import signal_names as _custom_signal_names
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_signals
 from app.strategy.monitor_rules import date_rule_in_window
+from app.strategy.validation_status import annotate_strategy_push, pushes
 
 logger = logging.getLogger(__name__)
 
@@ -1113,9 +1114,16 @@ class MonitorRuleEngine:
         hit_rows: list[tuple[str, str, Any, Any, Any, list[str]]] = []
 
         rtype = rule.get("type", "signal")
+        strategy_meta = None
         if rtype == "strategy":
             # 策略类型: 跑策略选股, 同时产出所选的信号和结果池变更事件
             hit_rows = self._match_strategy(scoped, rule)
+            sid = rule.get("strategy_id")
+            if sid and self._strategy_engine is not None:
+                try:
+                    strategy_meta = self._strategy_engine.get(sid).meta
+                except Exception:  # noqa: BLE001
+                    strategy_meta = None
         elif rtype == "ladder":
             # 连板梯队封单监控: 独立处理 (需带预警封单值, 走专属 message)
             return self._evaluate_ladder(scoped, rule, now)
@@ -1158,6 +1166,11 @@ class MonitorRuleEngine:
                     conditions=list(rule.get("conditions", [])) if rule.get("type") != "strategy" else None,
                     signals=hit_sigs,
                 )
+            if strategy_meta is not None:
+                annotated = annotate_strategy_push(strategy_meta, ev_type, message)
+                if annotated is None:
+                    continue
+                message = annotated
 
             ev = {
                 "ts": int(now * 1000),
@@ -1372,6 +1385,10 @@ class MonitorRuleEngine:
         current_pool = eligible_symbols
         prev_pool = self._strategy_pools.get(pool_key)
         self._strategy_pools[pool_key] = current_pool
+
+        # 下线策略仍写入上面的选股结果，供研究和页面回显；不产生推送事件。
+        if not pushes(s.meta):
+            return []
 
         notify_events = set(rule.get("notify_events") or ("pool_entry", "pool_exit"))
         sname = s.meta.get("name", "") or s.meta.get("id", sid)

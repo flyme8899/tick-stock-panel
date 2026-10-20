@@ -30,6 +30,7 @@ import polars as pl
 
 from app.market_time import CN_TZ, cn_now, current_trading_day
 from app.services.fs_utils import atomic_write_text
+from app.strategy.validation_status import resolve
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,11 @@ class PickerDeps:
     load_top_events: Callable[[datetime], dict] = field(default=empty_hot_snapshot)
 
 
+def _with_validation(item: dict, meta: dict | None = None) -> dict:
+    status, note = resolve(meta if meta is not None else item)
+    return {**item, "validation_status": status, "validation_note": note}
+
+
 def classify_strategies(metas: list[dict]) -> tuple[list[dict], list[dict]]:
     """内置日线策略进技术面；因子生成的策略进因子打分。基本面 id 不进这两栏。"""
     technical: list[dict] = []
@@ -242,11 +248,11 @@ def classify_strategies(metas: list[dict]) -> tuple[list[dict], list[dict]]:
             continue
         if "1d" not in (meta.get("timeframes") or ["1d"]):
             continue
-        item = {
+        item = _with_validation({
             "id": sid,
             "name": str(meta.get("name") or sid),
             "description": str(meta.get("description") or ""),
-        }
+        }, meta)
         tags = {str(tag) for tag in (meta.get("tags") or [])}
         if sid.startswith("custom_factor_") or "factor" in tags:
             factor.append(item)
@@ -1385,7 +1391,7 @@ def build_catalog(deps: PickerDeps, snapshot: dict | None = None, hot_error: str
                 "id": "fundamental",
                 "label": "基本面",
                 "items": [
-                    _item(item["id"], item["name"], item["description"])
+                    _with_validation(_item(item["id"], item["name"], item["description"]))
                     for item in FUNDAMENTAL_PRESETS
                 ],
             },
@@ -1505,6 +1511,15 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
     hit_names: dict[str, list[dict[str, str]]] = defaultdict(list)
     hit_scores: dict[str, list[float]] = defaultdict(list)
     hit_events: dict[str, str] = {}
+    validation_by_source = {
+        (group.get("id"), item.get("id")): {
+            "validation_status": item.get("validation_status"),
+            "validation_note": item.get("validation_note"),
+        }
+        for group in catalog.get("groups") or []
+        for item in group.get("items") or []
+        if item.get("validation_status")
+    }
 
     def _take(source: SourceSpec, scores: dict[str, float | None], events: dict[str, str] | None, error: str | None) -> None:
         if error and not scores:
@@ -1514,8 +1529,14 @@ def run_picker(sources: list[SourceSpec], combine: str, filters: FilterSpec, dep
             warnings.append(error)
         participating.append(set(scores))
         source_name = names.get((source.type, source.id), source.id)
+        chip = {"id": source.id, "name": source_name}
+        stamped = validation_by_source.get((source.type, source.id))
+        if stamped:
+            chip.update(stamped)
+        elif source.type in {"technical", "factor", "fundamental"}:
+            chip.update(_with_validation({"id": source.id}))
         for symbol, score in scores.items():
-            hit_names[symbol].append({"id": source.id, "name": source_name})
+            hit_names[symbol].append(chip)
             if score is not None:
                 hit_scores[symbol].append(float(score))
             if events and events.get(symbol) and symbol not in hit_events:

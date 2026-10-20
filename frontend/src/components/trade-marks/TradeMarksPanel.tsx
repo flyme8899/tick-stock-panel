@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useQuery } from '@tanstack/react-query'
 import type { ChartMarker, ChartPriceLine } from '@/components/EChartsCandlestick'
 import { ApiError, api } from '@/lib/api'
-import { fmtPct } from '@/lib/format'
+import { fmtPct, priceColorClass } from '@/lib/format'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import {
@@ -19,6 +19,7 @@ import {
   type TradeMarkDetail,
   type TradeTMark,
 } from '@/lib/trade-marks'
+import { validationLabel } from '@/lib/strategyValidation'
 
 export interface TradeMarkOverlayPrefs {
   /** 日K和分时共用。关掉后两边都不画买卖点。 */
@@ -97,8 +98,8 @@ function SignalCard({ detail }: { detail: TradeMarkDetail }) {
       <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-secondary">
         <span>日期 {detail.date}</span>
         <span>价格 {fmtPrice(detail.price)}</span>
-        <span>后5日 {formatForward(detail.fwd5)}</span>
-        <span>后20日 {formatForward(detail.fwd20)}</span>
+        <span className={priceColorClass(detail.fwd5)}>后5日 {formatForward(detail.fwd5)}</span>
+        <span className={priceColorClass(detail.fwd20)}>后20日 {formatForward(detail.fwd20)}</span>
       </div>
     </div>
   )
@@ -261,7 +262,9 @@ export function TradeMarksOverlay({
               <option value={prefs.strategyId}>{prefs.strategyId}</option>
             )}
             {strategies.map(row => (
-              <option key={row.id} value={row.id}>{row.name}</option>
+              <option key={row.id} value={row.id}>
+                {row.name} · {validationLabel(row.validation_status)}
+              </option>
             ))}
           </select>
         )}
@@ -335,11 +338,11 @@ export function TradeMarksOverlay({
                         >
                           <td className="py-1 pr-1 font-mono">{row.date.slice(5)}</td>
                           <td className="py-1 pr-1" style={{ color: row.side === 'buy' ? TRADE_BUY : TRADE_SELL }}>
-                            {row.side === 'buy' ? '买' : '卖'}
+                            {row.side === 'risk' ? '风险' : row.side === 'buy' ? '买' : '卖'}
                           </td>
                           <td className="py-1 pr-1 font-mono">{fmtPrice(row.price)}</td>
-                          <td className="py-1 pr-1 font-mono">{formatForward(row.fwd5)}</td>
-                          <td className="py-1 pr-1 font-mono">{formatForward(row.fwd20)}</td>
+                          <td className={`py-1 pr-1 font-mono ${priceColorClass(row.fwd5)}`}>{formatForward(row.fwd5)}</td>
+                          <td className={`py-1 pr-1 font-mono ${priceColorClass(row.fwd20)}`}>{formatForward(row.fwd20)}</td>
                           <td className="max-w-[88px] truncate py-1" title={row.rule}>{row.rule}</td>
                         </tr>
                       ))}

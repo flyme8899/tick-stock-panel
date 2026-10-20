@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "breakout_new_high_60d",
+    **validation_fields("breakout_new_high_60d"),
     "name": "放量创60日新高",
     "description": "收盘突破前60日最高价, 量比配合, 趋势强度确认",
     "tags": ["突破", "新高"],

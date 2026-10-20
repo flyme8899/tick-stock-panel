@@ -348,6 +348,8 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
         "app.strategy.builtin.factor_rank_research",
         "app.strategy.fundamental_screens",
         "app.strategy.market_data",   # 新增: 策略可读取指数/ETF 日K
+        # 展示标注。模块只有状态常量和文案，策略计算不依赖它。
+        "app.strategy.validation_status",
         "datetime",
         "__future__",
     })

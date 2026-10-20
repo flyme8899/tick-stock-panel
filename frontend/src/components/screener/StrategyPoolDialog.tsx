@@ -3,6 +3,7 @@ import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { X, Plus, GripVertical, Upload, Loader2, Trash2, ListPlus } from 'lucide-react'
 import { api, type StrategyDetail } from '@/lib/api'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { validationBadgeClass, validationLabel, validationNote } from '@/lib/strategyValidation'
 
 interface Props {
   pool: string[]
@@ -334,6 +335,12 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                         <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[s.source] ?? SOURCE_CLS.builtin}`}>
                           {SOURCE_LABEL[s.source] ?? '内置'}
                         </span>
+                        <span
+                          className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${validationBadgeClass(s.validation_status)}`}
+                          title={validationNote(s.validation_status, s.validation_note)}
+                        >
+                          {s.validation_label || validationLabel(s.validation_status)}
+                        </span>
                         {s.timeframes?.includes('1m') && (
                           <span className={TF_BADGE_CLS}>分钟</span>
                         )}
@@ -390,6 +397,12 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                             </span>
                             <span className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${SOURCE_CLS[src] ?? SOURCE_CLS.builtin}`}>
                               {SOURCE_LABEL[src] ?? '内置'}
+                            </span>
+                            <span
+                              className={`text-[8px] px-1 py-px rounded border leading-tight shrink-0 ${validationBadgeClass(s?.validation_status)}`}
+                              title={validationNote(s?.validation_status, s?.validation_note)}
+                            >
+                              {s?.validation_label || validationLabel(s?.validation_status)}
                             </span>
                             {s?.timeframes?.includes('1m') && (
                               <span className={TF_BADGE_CLS}>分钟</span>
