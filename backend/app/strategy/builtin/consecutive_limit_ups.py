@@ -3,9 +3,11 @@
 import numpy as np
 
 from app.backtest.matrix import MarketDataMatrix, SignalMatrix, make_signal_matrix, matrix_feature
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "consecutive_limit_ups",
+    **validation_fields("consecutive_limit_ups"),
     "name": "连板股",
     "description": "当日涨停且连续涨停≥2天, 强势追涨",
     "tags": ["涨停", "连板"],

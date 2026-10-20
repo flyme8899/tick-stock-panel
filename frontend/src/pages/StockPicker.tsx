@@ -12,6 +12,7 @@ import { cn } from '@/lib/cn'
 import { fmtBigNum } from '@/lib/format'
 import { toNavItems } from '@/lib/listNav'
 import { QK } from '@/lib/queryKeys'
+import { validationBadgeClass, validationLabel, validationNote, validationTextClass, type ValidationStatus } from '@/lib/strategyValidation'
 
 type Pick = { type: string; id: string }
 
@@ -37,7 +38,29 @@ function confirmSourceLabel(confirm?: {
   return confirm.lagged ? `消息滞后确认 · ${name} ${confirm.strength}` : `${name} ${confirm.strength}`
 }
 
-const STRATEGY_TAG = 'inline-block rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-px text-[10px] font-medium leading-tight text-amber-600 dark:text-amber-400'
+const STRATEGY_TAG = 'inline-block rounded border px-1.5 py-px text-[10px] font-medium leading-tight'
+
+function strategyOption(item: {
+  id: string
+  name: string
+  description?: string
+  validation_status?: string
+  validation_note?: string
+}) {
+  return {
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    badgeText: validationLabel(item.validation_status),
+    badgeClassName: validationBadgeClass(item.validation_status),
+    subtitle: validationNote(item.validation_status, item.validation_note),
+    subtitleClassName: validationTextClass(item.validation_status),
+  }
+}
+
+function strategyChipClass(status?: ValidationStatus | string): string {
+  return `${STRATEGY_TAG} ${validationBadgeClass(status)}`
+}
 
 function optionalNumber(raw: string): number | undefined {
   const text = raw.trim()
@@ -67,7 +90,7 @@ function exportCsv(rows: PickerRow[], profitLabel: string) {
     row.name,
     row.industry,
     row.score ?? '',
-    row.strategies.map(item => item.name).join(' '),
+    row.strategies.map(item => `${item.name} · ${validationLabel(item.validation_status)}`).join(' '),
     row.event,
     row.roe ?? '',
     row.profit_yoy ?? '',
@@ -263,7 +286,7 @@ export function StockPicker() {
           <SourcesMenu
             query={sources}
             label="基本面"
-            options={groupById(groups, 'fundamental')?.items ?? []}
+            options={(groupById(groups, 'fundamental')?.items ?? []).map(strategyOption)}
             selectedIds={idsOf(picks, 'fundamental')}
             onToggle={id => setPicks(current => togglePick(current, 'fundamental', id))}
           />
@@ -309,14 +332,14 @@ export function StockPicker() {
           <SourcesMenu
             query={sources}
             label="技术面/短线"
-            options={groupById(groups, 'technical')?.items ?? []}
+            options={(groupById(groups, 'technical')?.items ?? []).map(strategyOption)}
             selectedIds={idsOf(picks, 'technical')}
             onToggle={id => setPicks(current => togglePick(current, 'technical', id))}
           />
           <SourcesMenu
             query={sources}
             label="因子打分"
-            options={factor?.items ?? []}
+            options={(factor?.items ?? []).map(strategyOption)}
             selectedIds={idsOf(picks, 'factor')}
             onToggle={id => setPicks(current => togglePick(current, 'factor', id))}
             ready={(
@@ -515,7 +538,11 @@ export function StockPicker() {
                       <td className="px-3 py-2 tabular-nums">{row.score ?? '—'}</td>
                       <td className="px-3 py-2">
                         <span className="flex flex-wrap gap-0.5">
-                          {row.strategies.map(item => <span key={item.id} className={STRATEGY_TAG}>{item.name}</span>)}
+                          {row.strategies.map(item => (
+                            <span key={item.id} className={strategyChipClass(item.validation_status)} title={validationNote(item.validation_status, item.validation_note)}>
+                              {item.name} · {validationLabel(item.validation_status)}
+                            </span>
+                          ))}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-secondary">{row.event || '—'}</td>
@@ -552,7 +579,11 @@ export function StockPicker() {
                       </button>
                       <p className="mt-1 text-[11px] text-muted">{row.industry || '—'} · 得分 {row.score ?? '—'} · {row.change === 'new' ? '新进' : '保留'}</p>
                       <div className="mt-1 flex flex-wrap gap-0.5">
-                        {row.strategies.map(item => <span key={item.id} className={STRATEGY_TAG}>{item.name}</span>)}
+                        {row.strategies.map(item => (
+                          <span key={item.id} className={strategyChipClass(item.validation_status)} title={validationNote(item.validation_status, item.validation_note)}>
+                            {item.name} · {validationLabel(item.validation_status)}
+                          </span>
+                        ))}
                       </div>
                       {row.event && <p className="mt-1 text-[11px] text-secondary">{row.event}</p>}
                       <p className="mt-1 text-[11px] tabular-nums text-secondary">

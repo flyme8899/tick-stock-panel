@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "trend_breakout",
+    **validation_fields("trend_breakout"),
     "name": "趋势突破",
     "description": "MA60上方 + 60日新高 + 量能 ≥ 2倍均量",
     "tags": ["趋势", "突破", "放量"],

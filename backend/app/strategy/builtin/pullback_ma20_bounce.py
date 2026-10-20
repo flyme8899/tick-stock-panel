@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "pullback_ma20_bounce",
+    **validation_fields("pullback_ma20_bounce"),
     "name": "均线回踩反弹",
     "description": "价格在MA20附近(±2%)且MA5>MA20>MA60多头排列, 回踩买入",
     "tags": ["回踩", "均线", "反弹"],

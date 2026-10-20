@@ -24,11 +24,13 @@ import {
 } from '@/components/DimensionMembersDialog'
 import { toNavItems, type NavItem } from '@/lib/listNav'
 import { cn } from '@/lib/cn'
+import { validationBadgeClass, validationLabel, validationNote } from '@/lib/strategyValidation'
 
 interface ScreenerTableProps {
   rows: any[]
   columns: ColumnConfig[]
   strategyIdToName: Record<string, string>
+  strategyValidation?: Record<string, { status?: string; note?: string }>
   symbolStrategyMap: Map<string, string[]>
   activeStrategy: string | null
   watchlistSet: Set<string>
@@ -67,6 +69,10 @@ interface ScreenerTableProps {
 
 /** 渲染标签数组（含 maxTags 折叠/展开、横竖排列）。策略列与 ext 列共用。
  *  maxTagsOverride: 调用方直接指定折叠上限 (策略列用: 全局展开=0 不折叠, 收起=1 只显首个)。 */
+function validationTagClass(status?: string): string {
+  return `inline-block px-1.5 py-px rounded text-[10px] font-medium leading-tight border ${validationBadgeClass(status)}`
+}
+
 function renderTagList(
   tags: string[],
   col: ColumnConfig,
@@ -75,6 +81,8 @@ function renderTagList(
   tagClassName: string,
   onTagClick?: (tag: string) => void,
   maxTagsOverride?: number,
+  tagClasses?: string[],
+  tagTitles?: string[],
 ): ReactNode {
   if (tags.length === 0) return <span className="text-muted">—</span>
 
@@ -96,13 +104,14 @@ function renderTagList(
         <button
           key={i}
           type="button"
+          title={tagTitles?.[i]}
           onClick={event => { event.stopPropagation(); onTagClick(tag) }}
-          className={`${tagClassName} hover:brightness-95`}
+          className={`${tagClasses?.[i] ?? tagClassName} hover:brightness-95`}
         >
           {tag}
         </button>
       ) : (
-        <span key={i} className={tagClassName}>{tag}</span>
+        <span key={i} title={tagTitles?.[i]} className={tagClasses?.[i] ?? tagClassName}>{tag}</span>
       ))}
       {!showAll && hiddenCount > 0 && (
         <button
@@ -161,7 +170,7 @@ function renderExtValue(
 }
 
 export function ScreenerTable({
-  rows, columns, strategyIdToName, symbolStrategyMap, activeStrategy,
+  rows, columns, strategyIdToName, strategyValidation, symbolStrategyMap, activeStrategy,
   watchlistSet, onPreview, onAddToWatchlist, onRemoveFromWatchlist, watchlistPending, klineData = {},
   dailyKChartVisible = true, onToggleDailyKChart,
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
@@ -302,7 +311,15 @@ export function ScreenerTable({
       }
       case 'strategies': {
         const strats = symbolStrategyMap.get(r.symbol) ?? (activeStrategy ? [activeStrategy] : [])
-        const tags = strats.map(sid => strategyIdToName[sid] ?? sid)
+        const tags = strats.map(sid => {
+          const meta = strategyValidation?.[sid]
+          const name = strategyIdToName[sid] ?? sid
+          return {
+            text: `${name} · ${validationLabel(meta?.status)}`,
+            title: validationNote(meta?.status, meta?.note),
+            className: validationTagClass(meta?.status),
+          }
+        })
         const cellKey = `${r.symbol}::${col.id}`
         const expanded = expandedCells.has(cellKey)
         // 收起时每行显示前N个 + "+N" 计数 (跟随列设置"显示前N个", 未配置默认 3),
@@ -311,7 +328,7 @@ export function ScreenerTable({
         const maxTags = strategyTagsExpanded ? 0 : (cfgMaxTags > 0 ? cfgMaxTags : 3)
         return (
           <td key={col.id} className="px-3 py-2">
-            {renderTagList(tags, col, expanded, () => toggleExpand(cellKey), STRATEGY_TAG_CLS, undefined, maxTags)}
+            {renderTagList(tags.map(tag => tag.text), col, expanded, () => toggleExpand(cellKey), STRATEGY_TAG_CLS, undefined, maxTags, tags.map(tag => tag.className), tags.map(tag => tag.title))}
           </td>
         )
       }

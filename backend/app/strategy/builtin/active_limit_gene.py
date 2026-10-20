@@ -8,9 +8,11 @@ from app.backtest.matrix import (
     make_signal_matrix,
     matrix_feature,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "active_limit_gene",
+    **validation_fields("active_limit_gene"),
     "name": "涨停基因活跃股",
     "description": "近60日涨停次数达标的活跃标的, 且当日未涨停、缩量休整 — 股性筛选池",
     "tags": ["涨停", "活跃", "股性"],

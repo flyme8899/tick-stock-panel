@@ -3,9 +3,11 @@
 import numpy as np
 
 from app.backtest.matrix import MarketDataMatrix, SignalMatrix, make_signal_matrix, matrix_feature
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "boll_breakout",
+    **validation_fields("boll_breakout"),
     "name": "布林突破",
     "description": "突破布林上轨 + 放量, 强势加速信号",
     "tags": ["布林", "突破"],

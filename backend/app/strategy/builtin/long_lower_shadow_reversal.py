@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "long_lower_shadow_reversal",
+    **validation_fields("long_lower_shadow_reversal"),
     "name": "长下影反击",
     "description": "近5日超跌后收长下影线且收盘收复实体, 下方承接强势的反转信号",
     "tags": ["K线形态", "超跌", "反转"],

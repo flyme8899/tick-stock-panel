@@ -81,6 +81,19 @@ describe('买卖点标记映射', () => {
     expect(strategyMarkers([marker()], false)).toEqual([])
   })
 
+  it('反向信号画成绿跌风险点，不画红涨买点', () => {
+    const marks = strategyMarkers([
+      marker({ id: 'risk:2024-03-01', side: 'risk', style: 'risk', rule: '历史上该信号后 20 日显著跑输行业' }),
+    ], true)
+    expect(marks).toEqual([{
+      date: '2024-03-01',
+      kind: 'neutral',
+      label: '险',
+      markerId: 'risk:2024-03-01',
+      color: '#12B76A',
+    }])
+  })
+
   it('模拟盘成交画成 B/S 圆点', () => {
     const fills: TradeFill[] = [
       { date: '2024-03-01', side: 'buy', price: 10.5, qty: 100, account: 'default' },

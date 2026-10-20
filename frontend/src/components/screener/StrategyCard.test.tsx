@@ -29,6 +29,19 @@ function render(props: Record<string, unknown>) {
   act(() => { root!.render(<StrategyCard {...base} {...props} />) })
 }
 
+it('shows the validation note on the card', () => {
+  render({
+    name: '连板股',
+    validationStatus: 'reverse',
+    validationText: '历史上该信号后 20 日显著跑输行业',
+  })
+
+  expect(container.textContent).toContain('风险提示')
+  expect(container.textContent).toContain('历史上该信号后 20 日显著跑输行业')
+  const note = [...container.querySelectorAll('span')].find(node => node.textContent?.includes('跑输行业'))
+  expect(note?.className).toContain('text-bear')
+})
+
 it('shows 待计算 hint when awaitRun and count is missing', () => {
   render({ awaitRun: true })
 

@@ -20,6 +20,8 @@ from pathlib import Path
 
 import polars as pl
 
+from app.strategy.validation_status import validation_fields
+
 logger = logging.getLogger(__name__)
 
 LOOKBACK_DAYS = 2
@@ -124,6 +126,7 @@ def _meta(strategy_id: str, name: str, description: str, params: list, *, descen
         "order_by": "symbol",
         "descending": descending,
         "limit": _RESULT_LIMIT,
+        **validation_fields(strategy_id),
     }
 
 

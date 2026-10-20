@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
+from app.services.ndjson_heartbeat import with_heartbeat
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
@@ -29,7 +30,7 @@ from app.strategy.scoring import (
     effective_scoring,
     effective_scoring_directions,
 )
-from app.services.ndjson_heartbeat import with_heartbeat
+from app.strategy.validation_status import LABELS as VALIDATION_LABELS
 
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 logger = logging.getLogger(__name__)
@@ -190,6 +191,12 @@ def _strategy_detail(
         "tags": s.meta.get("tags", []),
         "source": s.source,
         "research_only": s.meta.get("research_only", False),
+        "validation_status": s.meta.get("validation_status", "reference_only"),
+        "validation_note": s.meta.get("validation_note", ""),
+        "validation_label": VALIDATION_LABELS.get(
+            s.meta.get("validation_status", "reference_only"),
+            VALIDATION_LABELS["reference_only"],
+        ),
         "execution_backend": s.execution_backend,
         "asset_types": s.meta.get("asset_types", ["stock"]),
         "timeframes": s.meta.get("timeframes", ["1d"]),

@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "near_limit_up",
+    **validation_fields("near_limit_up"),
     "name": "逼近涨停",
     "description": "涨幅 > 7% 且距涨停 < 3%, 追涨信号",
     "tags": ["涨停", "追涨"],

@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "n_day_low_reversal",
+    **validation_fields("n_day_low_reversal"),
     "name": "新低反转",
     "description": "触及60日新低后当日收阳放量, 反转信号",
     "tags": ["反转", "新低"],

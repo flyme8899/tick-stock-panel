@@ -31,6 +31,7 @@ from app.strategy.scoring import (
     scoring_value_expr,
     scoring_warmup_bars,
 )
+from app.strategy.validation_status import attach_validation
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +469,8 @@ class StrategyEngine:
         # _strategy_detail() 的 {p["id"]: p["default"] for p in params} 处抛 TypeError,
         # 导致整个 /api/strategies 列表 500. 降级为空 list 而非崩溃, 策略仍可见可用.
         meta["params"] = _normalize_param_defs(meta.get("params"))
+        # 展示和推送读这个字段。缺省 reference_only，不改变信号计算。
+        attach_validation(meta)
 
         # 合并默认基础过滤
         bf = {**DEFAULT_BASIC_FILTER}

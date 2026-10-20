@@ -3,9 +3,11 @@
 import numpy as np
 
 from app.backtest.matrix import MarketDataMatrix, SignalMatrix, make_signal_matrix, matrix_feature
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "limit_up_momentum",
+    **validation_fields("limit_up_momentum"),
     "name": "连板接力",
     "description": "连板股 + 今日涨幅 > 5%, 连板接力追踪",
     "tags": ["涨停", "连板", "接力"],

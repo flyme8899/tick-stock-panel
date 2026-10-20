@@ -468,6 +468,9 @@ export interface ScreenerStrategy {
   source?: string
   /** 支持的周期, 如 ['1d'] / ['1m'] (分钟策略) */
   timeframes?: string[]
+  validation_status?: 'reverse' | 'retired' | 'unverified' | 'reference_only'
+  validation_note?: string
+  validation_label?: string
 }
 
 export interface StrategyLoadError {
@@ -914,6 +917,9 @@ export interface StrategyDetail {
   tags: string[]
   source: 'builtin' | 'custom' | 'ai' | 'composite'
   research_only?: boolean
+  validation_status?: 'reverse' | 'retired' | 'unverified' | 'reference_only'
+  validation_note?: string
+  validation_label?: string
   execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite' | 'minute_filter'
   asset_types: string[]
   timeframes: string[]
@@ -2827,6 +2833,8 @@ export interface PickerSourceItem {
   selectable_note?: string | null
   /** selectable_count 是否被 30 只上限截断(截断时 N 是「至少」不是「约」)。 */
   selectable_capped?: boolean
+  validation_status?: 'reverse' | 'retired' | 'unverified' | 'reference_only'
+  validation_note?: string
 }
 
 export interface PickerSourceGroup {
@@ -2881,7 +2889,12 @@ export interface PickerRow {
   name: string
   industry: string
   score: number | null
-  strategies: Array<{ id: string; name: string }>
+  strategies: Array<{
+    id: string
+    name: string
+    validation_status?: 'reverse' | 'retired' | 'unverified' | 'reference_only'
+    validation_note?: string
+  }>
   event: string
   roe: number | null
   profit_yoy: number | null

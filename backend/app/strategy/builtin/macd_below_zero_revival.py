@@ -11,9 +11,11 @@ from app.backtest.matrix import (
 from app.backtest.matrix import (
     valid_shift as shift,
 )
+from app.strategy.validation_status import validation_fields
 
 META = {
     "id": "macd_below_zero_revival",
+    **validation_fields("macd_below_zero_revival"),
     "name": "MACD 零下回升",
     "description": "股价创阶段新低而 MACD DIF 拒绝新低并回升 (底背离简化), 零轴下方动能修复",
     "tags": ["MACD", "背离", "超跌"],
