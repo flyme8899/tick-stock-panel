@@ -28,6 +28,12 @@ reasoning_effort=low，并把上限提到 16384。空内容再试一次；若是
 保持较短。读超时再试 2 次。某一张图仍超时就跳过，已经抽出的其他图继续合并；
 正负号确认超时则沿用第一次结果。全部图片都超时才算抽取失败。
 
+搜狗给出的文章地址是 ``weixin.sogou.com/link``。这个地址现在经常返回 200
+和一段跳转脚本，而不是 302。脚本用 ``url += '...'`` 把 ``mp.weixin.qq.com``
+拆开拼出来。请求 ``/link`` 时带上搜索页刚下发的 Cookie 和 Referer，再按片段
+把原文地址拼回去。拼不出来，或拼出来的页面仍然不是微信原文时，把恢复到的长链
+交给 DeepSeek Fetch；没有长链就改看网易号，不把这一轮直接判死。
+
 微信稿还有一层 DeepSeek Fetch 兜底（``ETF_FLOW_FETCH_FALLBACK=true`` 且配置了
 ``DEEPSEEK_API_KEY``）：原文页抓不到、页里没有表格图片、或视觉抽取失败时，把
 清洗过的长链交给 DeepSeek，解析它识别出的表格。网易号没有微信长链，不走兜底。
@@ -125,6 +131,16 @@ _RAW_BUDGET = 18_000
 FETCH_MIN_ROWS = 10
 
 _FLOW_TITLE = re.compile(r"(\d{1,2})月(\d{1,2})日ETF基金申购和赎回")
+# 搜狗 /link 不返回 302，而是用 url += '...' 把微信原文地址拆开。
+_SOGOU_URL_PART = re.compile(
+    r"""(?<![A-Za-z0-9_])url\s*(\+)?=\s*(['"])((?:\\.|(?!\2).)*)\2""",
+    re.S,
+)
+_JS_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)")
+_DOC_COOKIE = re.compile(
+    r"""document\.cookie\s*=\s*(['"])((?:\\.|(?!\1).)*)\1""",
+    re.I | re.S,
+)
 _DOCID = re.compile(r"^[0-9A-Za-z]{8,24}$")
 _IMAGE_HOSTS = {
     "nimg.ws.126.net",
@@ -465,6 +481,55 @@ def parse_sogou_articles(html_text: str, now: datetime) -> list[ArticleRef]:
             )
             break
     return refs
+
+
+def parse_sogou_js_redirect(html_text: str) -> str:
+    """从搜狗跳转页的 ``url += '...'`` 片段拼出 mp.weixin.qq.com 原文地址。
+
+    拼出来的地址不是 https 的微信原文时返回空字符串，调用方不要跟着跳。
+    """
+    found = ""
+    parts: list[str] = []
+    for match in _SOGOU_URL_PART.finditer(html_text or ""):
+        fragment = _js_unescape(html.unescape(match.group(3)))
+        if match.group(1) != "+":
+            found = _mp_article_url("".join(parts)) or found
+            parts = [fragment] if fragment else []
+            continue
+        if fragment:
+            parts.append(fragment)
+    return _mp_article_url("".join(parts)) or found
+
+
+def _js_unescape(value: str) -> str:
+    def repl(match: re.Match) -> str:
+        token = match.group(1)
+        if len(token) == 5 and token[0] == "u":
+            return chr(int(token[1:], 16))
+        if len(token) == 3 and token[0] == "x":
+            return chr(int(token[1:], 16))
+        return {
+            "n": "\n",
+            "r": "\r",
+            "t": "\t",
+            "\\": "\\",
+            "'": "'",
+            '"': '"',
+            "/": "/",
+        }.get(token, token)
+
+    return _JS_ESCAPE.sub(repl, value or "")
+
+
+def _mp_article_url(url: str) -> str:
+    text = (url or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        return ""
+    parsed = urlparse(text)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or parsed.username or parsed.password or host != WECHAT_HOST:
+        return ""
+    return text
 
 
 def index_flow_refs(refs: list[ArticleRef]) -> dict[str, ArticleRef]:
@@ -1264,10 +1329,32 @@ def collect_etf_flow(
 
 
 def _pull(client, now: datetime, root: Path, expect: bool) -> dict:
-    ref, _reason = _resolve_ref(client, now, root, expect)
-    result = _ingest_ref(client, ref)
+    ref, reason = _resolve_ref(client, now, root, expect)
+    try:
+        result = _ingest_ref(client, ref)
+    except ExtractFailedError as exc:
+        # 搜狗链接没还原成微信原文时，DeepSeek 已经在 _ingest_ref 里试过。
+        # 还是无效就改看网易号，避免这一轮直接失败。
+        if reason != "sogou" or "微信文章地址无效" not in str(exc):
+            raise
+        logger.warning("ETF领航者微信原文地址无效，改看网易号: %s", _public_error(exc))
+        alt = _netease_today(client, now, expect)
+        if alt is None:
+            raise
+        result = _ingest_ref(client, alt)
     _note_stored_recovery(root)
     return result
+
+
+def _netease_today(client, now: datetime, expect: bool) -> ArticleRef | None:
+    """搜狗原文打不开时，网易号列表里仍可能有同一天的稿。"""
+    refs, error = _netease_refs(client)
+    if error is not None and not refs:
+        return None
+    chosen, why = choose_flow_article(refs, day=now.date(), expect=expect)
+    if chosen is not None and (why == "today" or not expect):
+        return chosen
+    return None
 
 
 def ingest_wechat_url(
@@ -1347,10 +1434,15 @@ def _ingest_ref(client, ref: ArticleRef) -> dict:
 
 
 def _fallback_page(ref: ArticleRef, exc: BaseException) -> ArticlePage | None:
-    """微信原文页打不开时，用列表里的长链和标题拼一页，图片留空，交给兜底。"""
+    """微信原文页打不开时，用长链和标题拼一页，图片留空，交给兜底。
+
+    列表里的搜狗 ``/link`` 不是微信长链。跳转脚本恢复出的地址挂在异常上。
+    """
     if ref.channel != "wechat" or not fallback_ready():
         return None
-    url = sanitize_wechat_url(ref.url)
+    url = sanitize_wechat_url(ref.url) or sanitize_wechat_url(
+        str(getattr(exc, "article_url", "") or "")
+    )
     article_id = wechat_article_id(url) if url else ""
     if not article_id or not _FLOW_TITLE.search(_plain(ref.title)):
         return None
@@ -1565,10 +1657,23 @@ def _load_page(client, ref: ArticleRef) -> ArticlePage:
         if (urlparse(final).hostname or "").lower() != NETEASE_HOST:
             raise ExtractFailedError("网易文章地址无效")
         return parse_netease_article(html_text, ref)
-    html_text, final = _fetch(client, ref.url, allow_hosts=_WECHAT_FETCH_HOSTS)
+    try:
+        html_text, final = _fetch(client, ref.url, allow_hosts=_WECHAT_FETCH_HOSTS)
+    except ExtractFailedError as exc:
+        _attach_article_url(exc, _recovered_url(client))
+        raise
+    except Exception as exc:  # 原文地址已拼出时，网络失败也交给兜底
+        recovered = _recovered_url(client)
+        if not recovered:
+            raise
+        raise _invalid_wechat(recovered) from exc
     if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
-        raise ExtractFailedError("微信文章地址无效")
-    page = parse_wechat_article(html_text, resolve_wechat_article_url(html_text, final), ref)
+        raise _invalid_wechat(_recovered_url(client))
+    try:
+        page = parse_wechat_article(html_text, resolve_wechat_article_url(html_text, final), ref)
+    except ExtractFailedError as exc:
+        _attach_article_url(exc, _recovered_url(client) or final)
+        raise
     # 搜狗时间有时是标题里的交易日。页面上的发布时间才是告警日那天的早晨。
     clock = wechat_published_at(html_text)
     if clock is None:
@@ -1791,9 +1896,29 @@ def _fetch(
     allow_hosts: set[str],
     params: dict | None = None,
 ) -> tuple[str, str]:
+    if _is_sogou_link(url):
+        _set_client_attr(client, "_sogou_recovered_url", "")
     response, final = _open(client, url, allow_hosts=allow_hosts, params=params)
-    text = getattr(response, "text", "") or ""
-    return text[:2_000_000], final
+    text = (getattr(response, "text", "") or "")[:2_000_000]
+    _remember_sogou_search(client, response, url, params, final, text)
+    if not _is_sogou_link(final):
+        return text, final
+    # 200 的跳转页不是微信原文。拼出地址再请求一次，失败时把长链留给兜底。
+    target = parse_sogou_js_redirect(text)
+    if not target:
+        _set_client_attr(client, "_sogou_recovered_url", "")
+        return text, final
+    _set_client_attr(client, "_sogou_recovered_url", target)
+    try:
+        response, landed = _open(client, target, allow_hosts=allow_hosts)
+    except ExtractFailedError:
+        raise
+    except Exception as exc:  # 原文地址已拼出，这一跳失败交给兜底
+        raise _invalid_wechat(target) from exc
+    if (urlparse(landed).hostname or "").lower() != WECHAT_HOST:
+        raise _invalid_wechat(target)
+    page = (getattr(response, "text", "") or "")[:2_000_000]
+    return page, landed
 
 
 def _open(
@@ -1807,7 +1932,7 @@ def _open(
     query = params
     for _hop in range(4):
         _check_url(current, allow_hosts)
-        response = client.get(current, params=query, headers=_headers(current))
+        response = client.get(current, params=query, headers=_headers(current, client))
         query = None
         status = int(getattr(response, "status_code", 200) or 200)
         if status in {301, 302, 303, 307, 308}:
@@ -1863,11 +1988,124 @@ def _check_url(url: str, allow_hosts: set[str]) -> None:
         raise RuntimeError("地址不在允许的站点里")
 
 
-def _headers(url: str) -> dict[str, str]:
+def _is_sogou_link(url: str) -> bool:
+    parsed = urlparse(url or "")
+    return (parsed.hostname or "").lower() == "weixin.sogou.com" and (parsed.path or "").startswith(
+        "/link"
+    )
+
+
+def _invalid_wechat(url: str) -> ExtractFailedError:
+    exc = ExtractFailedError("微信文章地址无效")
+    exc.article_url = url or ""
+    return exc
+
+
+def _attach_article_url(exc: ExtractFailedError, url: str) -> None:
+    if getattr(exc, "article_url", "") or not url:
+        return
+    exc.article_url = url
+
+
+def _recovered_url(client) -> str:
+    return str(getattr(client, "_sogou_recovered_url", "") or "")
+
+
+def _set_client_attr(client, name: str, value) -> None:
+    try:
+        setattr(client, name, value)
+    except (AttributeError, TypeError):
+        return
+
+
+def _remember_sogou_search(client, response, url: str, params, final: str, text: str) -> None:
+    """记下搜索页的 Cookie 和完整地址，后面打开 /link 时一起带上。"""
+    parsed = urlparse(final or url)
+    host = (parsed.hostname or "").lower()
+    if host != "weixin.sogou.com" or (parsed.path or "").startswith("/link"):
+        return
+    referer = url
+    if params:
+        query = urlencode(params)
+        if query:
+            referer = url + ("&" if "?" in url else "?") + query
+    _set_client_attr(
+        client,
+        "_sogou_link_context",
+        {"referer": referer, "cookie": _cookie_header(response, text)},
+    )
+
+
+def _cookie_header(response, html_text: str) -> str:
+    pairs: dict[str, str] = {}
+    cookies = getattr(response, "cookies", None)
+    if cookies is not None:
+        try:
+            for key, value in cookies.items():
+                _take_cookie(str(key), str(value), pairs)
+        except (AttributeError, TypeError, ValueError):
+            pass
+    for raw in _set_cookie_values(response):
+        piece = str(raw).split(";", 1)[0]
+        if "=" not in piece:
+            continue
+        name, value = piece.split("=", 1)
+        _take_cookie(name, value, pairs)
+    for match in _DOC_COOKIE.finditer(html_text or ""):
+        piece = _js_unescape(html.unescape(match.group(2))).split(";", 1)[0]
+        if "=" not in piece:
+            continue
+        name, value = piece.split("=", 1)
+        _take_cookie(name, value, pairs)
+    return "; ".join(f"{name}={value}" for name, value in pairs.items())
+
+
+def _set_cookie_values(response) -> list[str]:
+    headers = getattr(response, "headers", None) or {}
+    get_list = getattr(headers, "get_list", None)
+    if callable(get_list):
+        try:
+            values = [str(item) for item in get_list("set-cookie") if item]
+        except (AttributeError, TypeError, ValueError):
+            values = []
+        if values:
+            return values
+    getter = getattr(headers, "get", None)
+    if not callable(getter):
+        return []
+    raw = getter("set-cookie")
+    if raw is None:
+        raw = getter("Set-Cookie")
+    if isinstance(raw, (list, tuple)):
+        return [str(item) for item in raw if item]
+    if raw:
+        return [str(raw)]
+    return []
+
+
+def _take_cookie(name: str, value: str, pairs: dict[str, str]) -> None:
+    key = (name or "").strip()
+    if not key or not all(ch.isalnum() or ch in {"_", "-"} for ch in key):
+        return
+    cleaned = (value or "").replace("\r", "").replace("\n", "").strip()
+    if cleaned:
+        pairs[key] = cleaned
+
+
+def _headers(url: str, client=None) -> dict[str, str]:
     headers = dict(_BROWSER)
     host = (urlparse(url).hostname or "").lower()
     if host.endswith("sogou.com"):
         headers["Referer"] = "https://weixin.sogou.com/"
+        if _is_sogou_link(url):
+            ctx = getattr(client, "_sogou_link_context", None) if client is not None else None
+            if isinstance(ctx, dict):
+                referer = str(ctx.get("referer") or "")
+                cookie = str(ctx.get("cookie") or "")
+                if referer:
+                    headers["Referer"] = referer
+                if cookie:
+                    headers["Cookie"] = cookie
     elif host == "nimg.ws.126.net":
         headers["Referer"] = "https://www.163.com/"
     elif host.endswith("163.com"):

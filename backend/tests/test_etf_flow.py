@@ -23,6 +23,7 @@ from app.news.config import (
 from app.news.etf_flow import (
     MISSING_SOURCE,
     PAGE_FETCH_TIMEOUT,
+    SOGOU_SEARCH_URL,
     VISION_HTTP_TIMEOUT,
     VISION_LENGTH_MAX_TOKENS,
     VISION_TIMEOUT_RETRIES,
@@ -49,6 +50,7 @@ from app.news.etf_flow import (
     parse_netease_media,
     parse_sogou_account,
     parse_sogou_articles,
+    parse_sogou_js_redirect,
     parse_vision_response,
     parse_wechat_article,
     resolve_wechat_article_url,
@@ -813,6 +815,96 @@ def test_sign_mismatch_across_retries_clears_only_that_cell(news_db):
     assert row["net_5d"] == -1.0
     assert row["net_20d"] == 0.2
     assert all(item["code"] == "" or len(item["code"]) == 6 for item in extracted["etfs"])
+
+
+JS_WECHAT_URL = (
+    "https://mp.weixin.qq.com/s?__biz=MzkzMjYzNDk5NQ%3D%3D&mid=2247490079&idx=1"
+    "&sn=2c4167ebf6a527f91b54fb5c3668ba60&chksm=deadbeef&scene=27#rd"
+)
+
+
+def test_sogou_js_redirect_fixture_builds_wechat_url():
+    html = _text("sogou_link_js.html")
+    assert parse_sogou_js_redirect(html) == JS_WECHAT_URL
+    assert parse_sogou_js_redirect("url += 'https://evil.example/s?sn=1';") == ""
+    assert parse_sogou_js_redirect("url += 'http://mp.weixin.qq.com/s?sn=1';") == ""
+    assert "mp.weixin.qq.com" not in html
+
+
+def test_sogou_link_sends_search_cookie_and_referer(news_db):
+    from urllib.parse import urlencode
+
+    epoch = int(datetime(2026, 10, 10, 7, 32, tzinfo=CN_TZ).timestamp())
+    search_html = (
+        _sogou_hit("10月9日ETF基金申购和赎回", epoch)
+        + '<script>document.cookie="ABTEST=9; path=/"</script>'
+    )
+
+    class LinkClient(Client):
+        def __init__(self):
+            super().__init__(
+                media=_text("netease_media_stale.html"),
+                sogou=search_html,
+                wechat=_text("wechat_article.html"),
+            )
+            self.header_log: list[tuple[str, dict]] = []
+
+        def get(self, url, params=None, headers=None):
+            self.header_log.append((url, headers or {}))
+            if url.startswith("https://weixin.sogou.com/weixin"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(
+                    self.sogou,
+                    url,
+                    headers={"set-cookie": "SNUID=sogou-snuid; Path=/; HttpOnly"},
+                )
+            if url.startswith("https://weixin.sogou.com/link"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(_text("sogou_link_js.html"), url)
+            if url.startswith("https://mp.weixin.qq.com/"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(self.wechat, url)
+            return super().get(url, params=params, headers=headers)
+
+    client = LinkClient()
+    saved = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
+    assert saved["inserted"] == 1
+    link_headers = next(headers for url, headers in client.header_log if "/link?" in url)
+    assert link_headers["Cookie"] == "SNUID=sogou-snuid; ABTEST=9"
+    assert link_headers["Referer"] == SOGOU_SEARCH_URL + "?" + urlencode(
+        {"type": "2", "query": "ETF领航者 10月9日ETF基金申购和赎回", "ie": "utf8"}
+    )
+    assert any(url.startswith(JS_WECHAT_URL.split("#", 1)[0]) for url in client.gets)
+    row = get_store()._conn.execute("SELECT source_id, url FROM news_items").fetchone()
+    assert row["source_id"] == "wechat:2c4167ebf6a527f91b54fb5c3668ba60"
+    assert "sn=2c4167ebf6a527f91b54fb5c3668ba60" in row["url"]
+
+
+def test_invalid_sogou_link_falls_through_to_netease(news_db):
+    epoch = int(datetime(2026, 10, 10, 7, 32, tzinfo=CN_TZ).timestamp())
+
+    class NoScript(Client):
+        def get(self, url, params=None, headers=None):
+            if url.startswith("https://weixin.sogou.com/link"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp("<html><script>var url = '';</script></html>", url)
+            return super().get(url, params=params, headers=headers)
+
+    client = NoScript(
+        media=_text("netease_media.html"),
+        article=_text("netease_article.html"),
+        sogou=_sogou_hit("10月9日ETF基金申购和赎回", epoch),
+    )
+    saved = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
+    assert saved["inserted"] == 1
+    assert saved["found"] is True
+    assert "error" not in saved
+    row = get_store()._conn.execute("SELECT source_id FROM news_items").fetchone()
+    assert row["source_id"].startswith("netease:")
 
 
 def test_redirect_stops_before_leaving_allowlist():
