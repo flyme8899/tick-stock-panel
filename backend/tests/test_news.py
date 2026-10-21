@@ -70,6 +70,24 @@ def test_cleaning_phrases_and_hashtags():
     assert "纳指" not in clean_text(raw)
 
 
+def test_book_title_tag_is_filled_back_inside_brackets():
+    """知识星球书名是书名号包住的 web/book 标签。标签删掉后不能只剩空《》。"""
+    book = (
+        '<e type="web" href="https://example.test/book" '
+        'title="%E4%B8%89%E4%BD%93" style="book" />'
+    )
+    web_only = '<e type="web" title="%E6%B4%BB%E7%9D%80" />'
+    styled = '<e style="Book" type="text" title="%E7%99%BE%E5%B9%B4%E5%AD%A4%E7%8B%AC" />'
+    mention = '<e type="mention" uid="1" title="%E5%BC%A0%E4%B8%89" />'
+    hashtag = '<e type="hashtag" hid="9" title="%23%E7%BA%B3%E6%8C%87%23" />'
+    raw = f"以及《{book}》和《{web_only}》，另有《{styled}》{mention}{hashtag}正文"
+    cleaned = clean_text(raw)
+    assert cleaned == "以及《三体》和《活着》，另有《百年孤独》正文"
+    assert "《》" not in cleaned
+    assert "张三" not in cleaned
+    assert "纳指" not in cleaned
+
+
 def test_content_hash_cross_source_and_images():
     body = "同一条足够长的财经正文用来跨源去重"
     assert content_hash(body) == content_hash(body)

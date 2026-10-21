@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { INTRADAY_NET_HINT, intradayNetTitle } from './format'
 import { mergeColumns } from './list-columns'
+import { SCREENER_BUILTIN_COLUMNS } from './screener-columns'
 import { BUILTIN_COLUMNS, COLUMN_GROUPS } from './watchlist-columns'
 
 // #328: 自选页新增 今开/最高/最低/昨收/成交量/涨停价/跌停价 七列。
@@ -94,6 +95,25 @@ describe('watchlist columns: 自选加入信息列', () => {
     expect(byId.get('builtin:price')!.visible).toBe(true)
     expect(merged[0].id).toBe('builtin:symbol')
     expect(merged.map(c => c.id).slice(-2)).toEqual(['builtin:added_at', 'builtin:pct_since_added'])
+  })
+})
+
+describe('watchlist columns: 60D 动量', () => {
+  it('列 key 是 momentum_60d，和筛选页、单元格渲染一致', () => {
+    const col = BUILTIN_COLUMNS.find(c => c.id === 'builtin:momentum_60d')
+    expect(col?.source).toEqual({ type: 'builtin', key: 'momentum_60d' })
+    const screener = SCREENER_BUILTIN_COLUMNS.find(c => c.id === 'builtin:momentum_60d')
+    expect(screener?.source).toEqual({ type: 'builtin', key: 'momentum_60d' })
+  })
+
+  it('已保存的旧 key 在合并时回到默认的 momentum_60d', () => {
+    const col = BUILTIN_COLUMNS.find(c => c.id === 'builtin:momentum_60d')
+    expect(col).toBeTruthy()
+    const saved = [{ ...col!, source: { type: 'builtin' as const, key: 'momentum' }, visible: true }]
+    const merged = mergeColumns(saved, BUILTIN_COLUMNS)
+    const again = merged.find(c => c.id === 'builtin:momentum_60d')
+    expect(again?.source).toEqual({ type: 'builtin', key: 'momentum_60d' })
+    expect(again?.visible).toBe(true)
   })
 })
 
