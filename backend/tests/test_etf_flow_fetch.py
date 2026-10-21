@@ -305,6 +305,64 @@ def test_mismatched_fetch_title_is_rejected(fetch_env):
         _store_page(client, _page([]))
 
 
+def test_invalid_wechat_address_falls_back_to_deepseek(fetch_env, caplog):
+    """搜狗 /link 拼出了长链，但最终仍不是微信原文时，要打到 DeepSeek。"""
+    caplog.set_level(logging.INFO, logger="app.news.mp_fetch")
+    link_html = (FIXTURES / "sogou_link_js.html").read_text(encoding="utf-8")
+
+    class Page:
+        def __init__(self, text="", status=200, headers=None):
+            self.text = text
+            self.status_code = status
+            self.headers = headers or {}
+            self.content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"http {self.status_code}")
+
+    class LinkClient:
+        def __init__(self):
+            self.gets: list[str] = []
+            self.fetch_calls: list[tuple] = []
+            self.vision_calls = 0
+
+        def get(self, url, params=None, headers=None):
+            self.gets.append(url)
+            if url.startswith("https://weixin.sogou.com/link"):
+                return Page(link_html)
+            if url.startswith("https://mp.weixin.qq.com/"):
+                return Page(
+                    "", status=302, headers={"location": "https://weixin.sogou.com/antispider"}
+                )
+            if url.startswith("https://weixin.sogou.com/antispider"):
+                return Page("<html>verify</html>")
+            raise AssertionError(url)
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            if url == mp_fetch.FETCH_URL:
+                self.fetch_calls.append((json, headers, timeout))
+                return Resp(_fixture("deepseek_fetch_table.json"))
+            self.vision_calls += 1
+            raise AssertionError(url)
+
+        def close(self):
+            pass
+
+    client = LinkClient()
+    ref = ArticleRef("", TITLE, "https://weixin.sogou.com/link?url=abc", PUBLISHED, "wechat")
+    saved = _ingest_ref(client, ref)
+    assert saved["inserted"] == 1
+    assert client.vision_calls == 0
+    assert client.fetch_calls[0][0] == {"url": LONG}
+    assert any(url.startswith("https://mp.weixin.qq.com/s?") for url in client.gets)
+    assert "DeepSeek fetch 请求" in caplog.text
+    row = get_store()._conn.execute("SELECT source_id, url, raw_json FROM news_items").fetchone()
+    assert row["source_id"] == "wechat:2c4167ebf6a527f91b54fb5c3668ba60"
+    assert row["url"] == LONG
+    assert json.loads(row["raw_json"])["via"] == "deepseek_fetch"
+
+
 def test_wechat_page_error_falls_back_for_listed_long_link(fetch_env):
     client = FetchClient(
         [Resp(_fixture("deepseek_fetch_table.json"))],
