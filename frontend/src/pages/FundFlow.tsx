@@ -351,11 +351,15 @@ function EtfGroupSection({
           </span>
         ) : null}
         {!expanded && summary != null ? (
-          <span
-            className={cn('ml-auto shrink-0 font-mono', signedClass(summary))}
-            data-etf-group-inflow
-          >
-            1日合计 {formatYiYuan(summary)}
+          <span className="ml-auto flex shrink-0 gap-2 sm:gap-3">
+            <span
+              className={cn(ETF_COL_WIDTH, 'text-right font-mono whitespace-nowrap', signedClass(summary))}
+              data-etf-group-inflow
+            >
+              1日合计 {formatYiYuan(summary)}
+            </span>
+            <span className={ETF_COL_WIDTH} aria-hidden />
+            <span className={ETF_COL_WIDTH} aria-hidden />
           </span>
         ) : null}
       </button>
