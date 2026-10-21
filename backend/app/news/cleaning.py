@@ -30,19 +30,43 @@ _PHRASES: tuple[tuple[str, str], ...] = (
     ("万谷", "万股"),
 )
 
-_HASHTAG = re.compile(
-    r"""<e\s+[^>]*type\s*=\s*["']hashtag["'][^>]*/>""",
-    re.IGNORECASE,
+_E_TAG = re.compile(r"<e\s+([^>]*?)/>", re.IGNORECASE)
+_E_ATTR = re.compile(
+    r"""([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""",
 )
-_E_TAG = re.compile(r"<e\s+[^>]*/>", re.IGNORECASE)
 _IMG_PLACEHOLDER = re.compile(r"\[图片消息\]\([^)]*\)")
 _MEDIA_IN_TEXT = re.compile(r"mediaId=([^)\s]+)")
 _JI_BETWEEN_HAN = re.compile(r"(?<=[\u4e00-\u9fff])ji(?=[\u4e00-\u9fff])")
 
 
+def _e_attr(blob: str, name: str) -> str:
+    wanted = name.lower()
+    for match in _E_ATTR.finditer(blob or ""):
+        if match.group(1).lower() == wanted:
+            return match.group(2) if match.group(2) is not None else (match.group(3) or "")
+    return ""
+
+
+def _replace_e_tag(match: re.Match[str]) -> str:
+    """书名标签把 title 填回去；话题标签和其它 `<e/>` 整段丢掉。"""
+    attrs = match.group(1) or ""
+    kind = _e_attr(attrs, "type").lower()
+    if kind == "hashtag":
+        return ""
+    title = _e_attr(attrs, "title")
+    style = _e_attr(attrs, "style").lower()
+    if title and (style == "book" or kind == "web"):
+        return unquote(title)
+    return ""
+
+
 def strip_hashtags(text: str) -> str:
-    """去掉知识星球 `<e type="hashtag" .../>`，不把标签标题拼回正文。"""
-    return _E_TAG.sub("", _HASHTAG.sub("", text or ""))
+    """去掉话题标签。`style="book"` 或带 title 的 web 标签改填回书名。
+
+    正文里的写法是 ``《<e ... style="book" />》``。书名号在标签外面，
+    这里只替换标签本身，左右书名号保持一对。
+    """
+    return _E_TAG.sub(_replace_e_tag, text or "")
 
 
 def clean_text(text: str) -> str:

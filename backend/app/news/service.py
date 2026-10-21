@@ -1829,16 +1829,25 @@ def _unique_texts(values: list[str]) -> list[str]:
 
 
 def _append_piece(current: str, extra: str, *, sep: str, limit: int) -> str:
+    """整段相等、或一段已经包含另一段时不再拼接。
+
+    摘要正文里本身有「；」。先按分隔符拆开再判断，会把同一整段再接一次。
+    """
     text = (extra or "").strip()
     if not text:
         return current
-    parts = [part for part in (current or "").split(sep) if part]
-    if text not in parts:
-        parts.append(text)
-    joined = sep.join(parts)
-    if len(joined) <= limit:
-        return joined
-    return joined[: max(0, limit - 1)].rstrip() + "…"
+    base = (current or "").strip()
+    if not base:
+        chosen = text
+    elif text == base or text in base:
+        chosen = base
+    elif base in text:
+        chosen = text
+    else:
+        chosen = f"{base}{sep}{text}"
+    if len(chosen) <= limit:
+        return chosen
+    return chosen[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _merge_source_kind(left: str, right: str) -> str:
@@ -1850,7 +1859,7 @@ def _merge_source_kind(left: str, right: str) -> str:
 
 
 def _dedupe_theme_items(items: list[dict]) -> list[dict]:
-    """同一天、同一主题只留一行。来源用顿号接上，强弱和摘要只补不改写。"""
+    """同一天、同一主题只留一行。来源用顿号接上，强弱和摘要整段去重后才补。"""
     merged: dict[tuple[str, str], dict] = {}
     order: list[tuple[str, str]] = []
     for item in items:

@@ -8,7 +8,7 @@
 
    - 标题 ``复盘笔记：人形机器人/低空经济``，用 ``/``、``、`` 等把主题列出来；
    - 正文分成「一、重磅财经信息 / 二、大盘表现 / 三、强势板块和个股分析」，
-     第三段里主题名单独成一行，下面跟 ``①②`` 要点。
+     第三段里主题名单独成一行，下面跟 ``①②`` 要点；没有要点时用紧随的第一段正文。
 
 「涨停板复盘」「雁阵图」多为图片帖，正文几乎为空，本模块不处理。
 
@@ -69,7 +69,8 @@ class ThemeRow:
 
     ``source_kind`` 标记抽取来源：``table`` 表格、``prose`` 散文、
     ``mixed`` 同一主题两边都抽到了。散文没有强弱列时 ``strength`` 为空。
-    ``summary`` 是强势板块段落里紧随该主题的 ``①`` 要点摘录，没有则为空。
+    ``summary`` 是强势板块段里的摘录。有 ``①`` 要点时用要点；没有要点时用主题名下
+    第一段正文，并按同样的长度上限截断。没有可摘的正文时为空。
     """
 
     theme: str
@@ -363,8 +364,32 @@ def _point_text(raw: str) -> str:
     return _LIST_MARK.sub("", text, count=1).strip()
 
 
+def _theme_summary(points: list[str], paragraph: list[str]) -> str:
+    """有要点用要点。没有要点时，第一段正文走同一套长度上限。"""
+    if points:
+        return _summarize_points(points)
+    body = "".join(paragraph).strip()
+    if not body:
+        return ""
+    return _summarize_points([body])
+
+
+def _is_later_section(raw: str) -> bool:
+    """强势板块段内部的下一小节。摘要到这里为止，这一行本身不是主题。"""
+    text = _clean_candidate(raw)
+    if not text:
+        return False
+    if _SECTION_LINE.match(text):
+        return True
+    return text.startswith("涨停板") or text.startswith("雁阵图")
+
+
 def _themes_from_sections(text: str) -> list[tuple[str, str]]:
-    """只扫「强势板块」这一段。段外的短行、节标题和 ① 行都不是主题。"""
+    """只扫「强势板块」这一段。段外的短行、节标题和 ① 行都不是主题。
+
+    主题下有 ``①②`` 时摘要仍是要点。没有要点时，取主题名下第一段非空正文
+    （遇到空行结束，也不越过「涨停板」等下一小节）。
+    """
     if not text or "强势板块" not in text:
         return []
     lines = text.splitlines()
@@ -372,17 +397,23 @@ def _themes_from_sections(text: str) -> list[tuple[str, str]]:
     for start, end in _strong_section_ranges(lines):
         current = ""
         points: list[str] = []
+        paragraph: list[str] = []
+        paragraph_closed = False
 
         def flush() -> None:
-            nonlocal current, points
+            nonlocal current, points, paragraph, paragraph_closed
             if current:
-                found.append((current, _summarize_points(points)))
+                found.append((current, _theme_summary(points, paragraph)))
             current = ""
             points = []
+            paragraph = []
+            paragraph_closed = False
 
         for line in lines[start:end]:
             raw = line.strip()
             if not raw:
+                if paragraph:
+                    paragraph_closed = True
                 continue
             if _POINT_MARK.match(raw) or _LIST_MARK.match(raw):
                 if current:
@@ -390,10 +421,16 @@ def _themes_from_sections(text: str) -> list[tuple[str, str]]:
                     if point:
                         points.append(point)
                 continue
+            if _is_later_section(raw):
+                flush()
+                continue
             candidate = _clean_candidate(raw)
             if _theme_name_ok(candidate):
                 flush()
                 current = candidate
+                continue
+            if current and not points and not paragraph_closed:
+                paragraph.append(raw)
         flush()
     return found
 

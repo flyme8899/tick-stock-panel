@@ -76,6 +76,7 @@ import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { computeGroupPcts, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
 import { fmtPct } from '@/lib/format'
 import { findDataSource } from '@/lib/dataSources'
+import { realtimeQuoteStatusLabel } from '@/lib/realtimeStatusLabel'
 import { toggleTheme, useTheme } from '@/lib/theme'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
@@ -526,15 +527,15 @@ export function Layout() {
     : null
   const realtimeToggleDisabled = toggleQuote.isPending || isPaused
   const realtimeActive = realtimeEnabled && isRunning && isTrading
-  const realtimeStatusLabel = toggleQuote.isPending
-    ? '正在更新'
-    : isPaused
-      ? '同步期间暂停'
-      : realtimeActive
-        ? '运行中'
-        : realtimeEnabled
-          ? (isTrading ? '正在连接' : '等待交易时段')
-          : '已关闭'
+  const realtimeStatusLabel = realtimeQuoteStatusLabel({
+    pending: toggleQuote.isPending,
+    paused: isPaused,
+    enabled: realtimeEnabled,
+    running: isRunning,
+    isTrading,
+    isPollingWindow: quoteStatus?.is_polling_window,
+    marketPhase: quoteStatus?.market_phase,
+  })
   const realtimeStatusClass = realtimeActive
     ? 'text-accent'
     : realtimeEnabled || isPaused

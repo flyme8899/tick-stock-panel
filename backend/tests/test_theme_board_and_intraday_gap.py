@@ -343,6 +343,99 @@ AI传媒/AI应用
     assert [row.theme for row in plain] == ["半导体", "半导体设备"]
 
 
+# 形态对齐 news_items 34951 / 34088：同一天两帖同一组主题。
+# 端侧AI、物理AI、创新药下面没有 ①②，正文是一整段；书名是 web/book 标签。
+# 不使用线上原文。
+_PLANET_BOOK = (
+    '<e type="web" href="https://example.test/book" '
+    'title="%E4%B8%89%E4%BD%93" style="book" />'
+)
+_PLANET_HASHTAG = '<e type="hashtag" hid="9" title="%23%E7%BA%B3%E6%8C%87%23" />'
+_PLANET_TITLE = "复盘笔记：端侧AI/物理AI/创新药"
+_PLANET_EDGE_SUMMARY = "据Counterpoint，端侧出货回升，以及《三体》。；OpenAI发布新模型"
+
+
+def _planet_note_raw() -> str:
+    return (
+        "三、强势板块和个股分析\n\n"
+        "端侧AI\n"
+        f"{_PLANET_HASHTAG}据Counterpoint，端侧出货回升，以及《{_PLANET_BOOK}》。"
+        "；OpenAI发布新模型\n\n"
+        "物理AI\n"
+        "据产业调研，工厂场景落地加快。\n\n"
+        "创新药\n"
+        "临床读出密集，资金回流。\n\n"
+        "涨停板\n"
+        "这行属于下一小节，不要收进摘要。\n"
+    )
+
+
+def test_section_without_points_uses_first_paragraph() -> None:
+    """没有 ①② 时，摘要取主题名下第一段，并在涨停板之前停下。强弱仍留空。"""
+    from app.news.cleaning import clean_text
+
+    cleaned = clean_text(_planet_note_raw())
+    rows = theme_table.theme_rows_from_text(
+        cleaned,
+        title=_PLANET_TITLE,
+        published_at="2026-10-16T15:40:00+08:00",
+    )
+    assert [row.theme for row in rows] == ["端侧AI", "物理AI", "创新药"]
+    by_name = {row.theme: row for row in rows}
+    assert by_name["端侧AI"].summary == _PLANET_EDGE_SUMMARY
+    assert by_name["物理AI"].summary == "据产业调研，工厂场景落地加快。"
+    assert by_name["创新药"].summary == "临床读出密集，资金回流。"
+    assert {row.strength for row in rows} == {""}
+    assert "纳指" not in by_name["端侧AI"].summary
+    assert "这行属于下一小节" not in {row.summary for row in rows}
+    assert "涨停板" not in {row.theme for row in rows}
+
+
+def test_section_paragraph_stops_at_blank_line_and_loses_to_points() -> None:
+    long_body = "据" + ("甲" * 120)
+    text = (
+        "三、强势板块和个股分析\n\n"
+        "端侧AI\n"
+        "据Counterpoint，端侧出货回升。\n"
+        "\n"
+        "这是第二段，不要收进摘要。\n\n"
+        "物理AI\n"
+        "据产业调研，这段在有要点时不采用。\n"
+        "① 工厂订单能见度改善\n\n"
+        "创新药\n"
+        f"{long_body}\n"
+    )
+    rows = theme_table.theme_rows_from_text(text, published_at="2026-10-16T15:00:00+08:00")
+    by_name = {row.theme: row for row in rows}
+    assert by_name["端侧AI"].summary == "据Counterpoint，端侧出货回升。"
+    assert "第二段" not in by_name["端侧AI"].summary
+    assert by_name["物理AI"].summary == "工厂订单能见度改善"
+    assert by_name["物理AI"].strength == ""
+    assert by_name["创新药"].summary.endswith("…")
+    assert len(by_name["创新药"].summary) == 80
+    assert by_name["创新药"].strength == ""
+
+
+def test_append_piece_does_not_duplicate_semicolon_summary() -> None:
+    """摘要里的「；」是正文，不是拼接边界。整段相同或已包含就不再接。"""
+    from app.news.service import _append_piece
+
+    summary = _PLANET_EDGE_SUMMARY
+    assert _append_piece(summary, summary, sep="；", limit=160) == summary
+    assert summary.count("OpenAI发布新模型") == 1
+    assert _append_piece(summary, "OpenAI发布新模型", sep="；", limit=160) == summary
+    longer = summary + "；夜盘订单能见度改善"
+    assert _append_piece(summary, longer, sep="；", limit=160) == longer
+    assert longer.count("以及《三体》") == 1
+    joined = _append_piece(summary, "另一星球补充了丝杠订单", sep="；", limit=160)
+    assert joined == summary + "；另一星球补充了丝杠订单"
+    assert joined.count("OpenAI发布新模型") == 1
+    assert _append_piece(summary, "  ", sep="；", limit=160) == summary
+    clipped = _append_piece("甲" * 30, "乙" * 30, sep="；", limit=20)
+    assert len(clipped) == 20
+    assert clipped.endswith("…")
+
+
 def test_odd_prose_never_raises() -> None:
     samples = [
         ("", ""),
@@ -605,6 +698,54 @@ def test_theme_board_folds_title_segment_into_same_day_compound(tmp_path, monkey
     assert "纳指星球调研" in film["source"]
     assert "内容侧更强" in film["summary"]
     assert film["url"] == ""
+
+
+def test_theme_board_merges_two_posts_without_duplicating_semicolon(tmp_path) -> None:
+    """34951 / 34088 这种同一天、两个星球、同一主题。摘要含「；」也只留一份。"""
+    from app.news import service
+    from app.news.cleaning import clean_text
+
+    cleaned = clean_text(_planet_note_raw())
+    _seed_news_db(tmp_path, [
+        (
+            "34951",
+            "2026-10-16T15:40:00+08:00",
+            cleaned,
+            _PLANET_TITLE,
+            "每日投研",
+            "https://example.test/34951",
+        ),
+        (
+            "34088",
+            "2026-10-16T18:00:00+08:00",
+            cleaned,
+            _PLANET_TITLE,
+            "纳指星球调研",
+            "https://example.test/34088",
+        ),
+    ])
+    store = service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
+    try:
+        payload = service.theme_board(days=30)
+    finally:
+        store.close()
+        service.reset_store_for_tests(tmp_path / "news" / "news.sqlite")
+
+    by_name = {row["theme"]: row for row in payload["rows"]}
+    assert set(by_name) == {"端侧AI", "物理AI", "创新药"}
+    edge = by_name["端侧AI"]
+    assert edge["summary"] == _PLANET_EDGE_SUMMARY
+    assert edge["summary"].count("OpenAI发布新模型") == 1
+    assert edge["summary"].count("《三体》") == 1
+    assert "《》" not in edge["summary"]
+    assert edge["strength"] == ""
+    assert edge["day"] == "2026-10-16"
+    assert edge["url"] == ""
+    assert "每日投研" in edge["source"]
+    assert "纳指星球调研" in edge["source"]
+    assert by_name["物理AI"]["strength"] == ""
+    assert by_name["创新药"]["strength"] == ""
+    assert "这行属于下一小节" not in {row["summary"] for row in payload["rows"]}
 
 
 def test_theme_board_empty_db_is_safe(tmp_path) -> None:
