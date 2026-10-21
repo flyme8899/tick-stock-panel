@@ -235,6 +235,18 @@ it('collapses one ETF group from its title and keeps the others open', async () 
     const summary = collapsed.querySelector('[data-etf-group-inflow]')
     expect(summary?.textContent).toBe('1日合计 +16.31亿元')
     expect(summary?.className).toContain('text-danger')
+    const windows = host.querySelector('[data-etf-windows]')
+    const summaryColumns = summary?.parentElement
+    expect(windows?.children).toHaveLength(3)
+    expect(windows?.children[0]?.textContent).toBe('1日')
+    expect(summaryColumns?.children).toHaveLength(3)
+    expect(summaryColumns?.children[0]).toBe(summary)
+    expect(summaryColumns?.children[1]?.textContent).toBe('')
+    expect(summaryColumns?.children[2]?.textContent).toBe('')
+    for (const index of [0, 1, 2]) {
+      expect(summaryColumns?.children[index]?.className).toContain('w-[5.75rem]')
+      expect(windows?.children[index]?.className).toContain('w-[5.75rem]')
+    }
     expect(rowByCode('510300')).toBeUndefined()
     expect(rowByCode('510310')).toBeUndefined()
     expect(rowByCode('588000')?.textContent).toContain('-2.00亿元')
