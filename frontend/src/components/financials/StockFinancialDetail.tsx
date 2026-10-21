@@ -12,6 +12,8 @@ import { fmtPrice, fmtBigNum, fmtDate } from '@/lib/format'
 import { Skeleton } from '@/components/data/Skeleton'
 import { startAnalysis, findLatestHistoryReport, openHistoryReport } from '@/lib/aiReportStore'
 import { toast } from '@/components/Toast'
+import { FinancialMetricsCharts } from './FinancialMetricsCharts'
+import { DEFAULT_RECENT_PERIODS, type SeriesWindow } from '@/lib/financialSeries'
 
 interface Props {
   symbol: string
@@ -26,6 +28,13 @@ const TABS: { key: TabKey; label: string; icon: typeof TrendingUp }[] = [
   { key: 'balance_sheet', label: '资产负债表', icon: Wallet },
   { key: 'cash_flow', label: '现金流量表', icon: Activity },
   { key: 'shares', label: '股本', icon: ChartPie },
+]
+
+// 图表展示窗按钮。默认近 N 期 —— 全量季报能到 40+ 期, 挤在一张图里全是毛刺。
+const CHART_WINDOWS: { key: SeriesWindow; label: string }[] = [
+  { key: 'recent', label: `近 ${DEFAULT_RECENT_PERIODS} 期` },
+  { key: 'all', label: '全部' },
+  { key: 'annual', label: '仅年报' },
 ]
 
 // 字段定义:键 → (中文名, 格式化类型)
@@ -121,6 +130,8 @@ function formatValue(v: number | null | undefined, fmt: FmtType): string {
 
 export function StockFinancialDetail({ symbol, name }: Props) {
   const [tab, setTab] = useState<TabKey>('metrics')
+  // 图表展示窗: 默认近 N 期, 可切全部 / 仅年报(只影响核心指标 Tab 的两对折线)
+  const [chartWindow, setChartWindow] = useState<SeriesWindow>('recent')
   // AI 分析:点击时检查历史,若已有同标的报告则二次确认
   const [checking, setChecking] = useState(false)
   const [confirmReport, setConfirmReport] = useState<{ id: string; created_at: string; focus: string } | null>(null)
@@ -229,6 +240,36 @@ export function StockFinancialDetail({ symbol, name }: Props) {
 
       {/* 表格内容 */}
       <div className="p-4">
+        {/* 核心指标 Tab: 密表上方先给图表, 趋势比单期数字好读 */}
+        {tab === 'metrics' && (
+          <div className="mb-5">
+            <div className="flex items-center gap-1.5 mb-3">
+              {CHART_WINDOWS.map(w => {
+                const active = chartWindow === w.key
+                return (
+                  <button
+                    key={w.key}
+                    onClick={() => setChartWindow(w.key)}
+                    className={`px-2.5 py-1 rounded-btn text-[11px] font-medium border transition-colors ${
+                      active
+                        ? 'border-accent/50 bg-accent/10 text-accent'
+                        : 'border-border text-muted hover:text-secondary'
+                    }`}
+                  >
+                    {w.label}
+                  </button>
+                )
+              })}
+            </div>
+            <FinancialMetricsCharts
+              metrics={metrics.data?.data}
+              income={income.data?.data}
+              window={chartWindow}
+              recentN={DEFAULT_RECENT_PERIODS}
+            />
+            <div className="mt-5 border-t border-border/60" />
+          </div>
+        )}
         {current.isLoading ? (
           <div className="space-y-2">
             {Array.from({ length: 6 }).map((_, i) => (
