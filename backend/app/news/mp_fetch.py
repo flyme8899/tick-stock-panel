@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -54,6 +55,9 @@ _CODE = re.compile(r"\d{6}")
 _SN = re.compile(r"[0-9a-f]{32}")
 _SN_LOOSE = re.compile(r"[0-9A-Za-z_-]{6,128}")
 _BIZ = re.compile(r"[0-9A-Za-z+/]{8,64}={0,2}")
+# 搜狗跳出来的临时链：/s?src=&timestamp=&ver=&signature=&new=1，没有 __biz。
+_SIGNED_SRC = re.compile(r"\d{1,6}")
+_SIGNED_SIGNATURE = re.compile(r"[0-9A-Za-z_+\-/=.*~]{8,512}")
 _ETF_COLUMNS = {"1日申赎": "net_1d", "5日申赎": "net_5d", "20日申赎": "net_20d"}
 _CAT_COLUMNS = {"申赎额": "net_1d", "五日申赎额": "net_5d", "二十日申赎额": "net_20d"}
 _VERTICAL_HEADER = (
@@ -122,6 +126,48 @@ def sanitize_wechat_url(url: str) -> str:
     )
 
 
+def signed_wechat_url(url: str) -> str:
+    """搜狗临时签名链。没有 __biz/mid/sn 时，DeepSeek 仍可以按这个地址抓。
+
+    只留 src、timestamp、ver、signature、new。不合格就返回空字符串。
+    """
+    text = (url or "").strip().split("#", 1)[0]
+    parsed = urlparse(text)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != WECHAT_HOST:
+        return ""
+    if parsed.username or parsed.password or parsed.path != "/s":
+        return ""
+    query = parse_qs(parsed.query)
+    # 已经带 sn 的是永久长链，交给 sanitize，不要裁成临时链。
+    if (query.get("sn") or [""])[0].strip():
+        return ""
+    src = _prefix(_SIGNED_SRC, (query.get("src") or [""])[0].strip())
+    signature = _prefix(_SIGNED_SIGNATURE, (query.get("signature") or [""])[0].strip())
+    if not (src and signature):
+        return ""
+    pairs = [("src", src)]
+    for key in ("timestamp", "ver", "new"):
+        value = (query.get(key) or [""])[0].strip()
+        if value and re.fullmatch(r"[0-9A-Za-z._-]{1,32}", value):
+            pairs.append((key, value))
+    pairs.append(("signature", signature))
+    return "https://mp.weixin.qq.com/s?" + urlencode(pairs)
+
+
+def signed_article_id(url: str) -> str:
+    """临时链没有 sn。用 signature 的摘要当入库 id，避免空 id。"""
+    signed = signed_wechat_url(url)
+    if not signed:
+        return ""
+    signature = (parse_qs(urlparse(signed).query).get("signature") or [""])[0]
+    return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:32]
+
+
+def fetchable_wechat_url(url: str) -> str:
+    """永久长链优先。只有临时签名链时也返回，交给 DeepSeek。"""
+    return sanitize_wechat_url(url) or signed_wechat_url(url)
+
+
 def _alternate_url(url: str) -> str:
     """同一篇文章的另一种写法（__biz 不做百分号编码）。
 
@@ -143,7 +189,8 @@ def fetch_article(url: str, client=None, *, data_dir: Path | None = None) -> dic
     key = deepseek_api_key()
     if not key:
         raise FetchFallbackError("未配置 DEEPSEEK_API_KEY")
-    target = sanitize_wechat_url(url)
+    long_link = sanitize_wechat_url(url)
+    target = long_link or signed_wechat_url(url)
     if not target:
         raise FetchFallbackError("微信文章地址无效")
     own = client is None
@@ -151,7 +198,8 @@ def fetch_article(url: str, client=None, *, data_dir: Path | None = None) -> dic
     last = "DeepSeek fetch 失败"
     try:
         for attempt in range(FETCH_RETRIES + 1):
-            address = target if attempt == 0 else _alternate_url(target)
+            # 临时链没有另一种 __biz 写法。重试仍用同一条签名地址。
+            address = _alternate_url(long_link) if long_link and attempt else target
             _count(data_dir, "requests")
             try:
                 response = client.post(
