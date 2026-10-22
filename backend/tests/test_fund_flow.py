@@ -2813,6 +2813,115 @@ def test_live_individual_flow_uses_shared_gate(monkeypatch) -> None:
     assert rows[0]["股票代码"] == "600519"
 
 
+@pytest.mark.parametrize(
+    ("name", "module"),
+    [
+        ("stock_fund_flow_industry", "industry"),
+        ("stock_fund_flow_concept", "concept"),
+    ],
+)
+def test_live_sector_flow_uses_shared_gate(monkeypatch, name: str, module: str) -> None:
+    """板块也要走 gate。裸调 ``ak.<fn>`` 没有读超时，同花顺一挂就永不返回。"""
+    seen: dict = {}
+
+    def fake_call(fn_name, **kwargs):
+        seen["name"] = fn_name
+        seen["kwargs"] = kwargs
+        return [{"行业": "半导体", "净额": 1}]
+
+    def bare_call(*_args, **_kwargs):
+        raise AssertionError("板块资金流不能再裸调 akshare")
+
+    import akshare as ak
+
+    monkeypatch.setattr("app.eastmoney.akshare_gate.call_akshare", fake_call)
+    monkeypatch.setattr(ak, "stock_fund_flow_industry", bare_call)
+    monkeypatch.setattr(ak, "stock_fund_flow_concept", bare_call)
+    from app.fund_flow.sources import live_clients
+
+    rows = live_clients().ak(name, symbol="即时")
+    assert seen == {"name": name, "kwargs": {"symbol": "即时"}}
+    assert rows[0]["行业"] == "半导体"
+    # 名称到 akshare 函数的映射不能写反
+    assert jobs.fetch_sector_rows(SourceClients(ak_call=fake_call), module) == [
+        {"行业": "半导体", "净额": 1}
+    ]
+
+
+def test_sector_flow_gate_set_covers_paging_sources() -> None:
+    """走 gate 的必须只在允许列表里，且板块两个都在。"""
+    from app.fund_flow.sources import _GATED_AK_NAMES
+
+    assert {"stock_fund_flow_industry", "stock_fund_flow_concept"} <= _GATED_AK_NAMES
+    assert _GATED_AK_NAMES <= AK_ALLOWLIST
+
+
+@pytest.mark.parametrize("kind", ["industry", "concept"])
+def test_sector_read_timeout_returns_errors_and_does_not_block(tmp_path, kind: str) -> None:
+    """源站不回包 → 读超时。sync_sectors 必须带 errors 返回，不能卡住。"""
+    import requests
+
+    jobs.reset_sector_cache()
+    calls: list[str] = []
+
+    def ak(name, **kwargs):
+        calls.append(name)
+        raise requests.exceptions.ReadTimeout("10jqka 读超时")
+
+    result = jobs.sync_sectors(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        kind=kind,
+        trade_date="2026-10-22",
+        captured_at="2026-10-22T09:32:00",
+        snapshot="intraday",
+        breaker=CircuitBreaker("akshare"),
+        sleeper=lambda _s: None,
+    )
+    assert result.errors
+    assert "读超时" in result.errors[0]
+    assert result.wrote == 0
+    # 重试次数有上限，不会无限重试
+    assert len(calls) == 4
+    assert store.load_state(tmp_path)["kinds"][kind]["last_error"]
+    jobs.reset_sector_cache()
+
+
+def test_sector_timeout_logs_kind_without_stopping_worker(tmp_path, caplog) -> None:
+    """超时只跳过这一轮板块，且日志带 kind，方便事后对时间线。"""
+    jobs.reset_sector_cache()
+    caplog.set_level(logging.WARNING, logger="app.fund_flow.jobs")
+
+    def ak(name, **kwargs):
+        raise TimeoutError("timed out")
+
+    result = jobs.sync_sectors(
+        tmp_path,
+        SourceClients(ak_call=ak),
+        kind="industry",
+        trade_date="2026-10-22",
+        captured_at="2026-10-22T09:32:00",
+        snapshot="intraday",
+        breaker=CircuitBreaker("akshare"),
+        sleeper=lambda _s: None,
+    )
+    assert result.errors
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("industry" in message and "超时" in message for message in messages)
+    jobs.reset_sector_cache()
+
+
+def test_sector_timeout_is_recognised_through_exception_chain() -> None:
+    """超时可能被包了一层，按因果链也要认出来。"""
+    import requests
+
+    wrapped = RuntimeError("akshare 调用失败")
+    wrapped.__cause__ = requests.exceptions.ReadTimeout("read timed out")
+    assert jobs._is_timeout_error(wrapped)
+    assert jobs._is_timeout_error(TimeoutError("x"))
+    assert not jobs._is_timeout_error(RuntimeError("空表"))
+
+
 def test_old_intraday_partition_without_order_columns_still_reads(tmp_path) -> None:
     path = store.partition_file(tmp_path, "stock_intraday", "2026-10-09")
     path.parent.mkdir(parents=True)
