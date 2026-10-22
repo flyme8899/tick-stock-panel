@@ -271,6 +271,8 @@ def test_sector_cache_and_margin_schedule(tmp_path) -> None:
 
     assert jobs.previous_session(date(2026, 10, 12)) == date(2026, 10, 9)
     assert jobs.previous_session(date(2026, 10, 12), [date(2026, 9, 30)]) == date(2026, 9, 30)
+    # 假时钟写进去的缓存 (1061.0, ...) 对后续走真实时间的用例是脏的，用完就清。
+    jobs.reset_sector_cache()
 
 
 def test_due_tasks_follow_shanghai_clock() -> None:
@@ -2822,6 +2824,11 @@ def test_live_individual_flow_uses_shared_gate(monkeypatch) -> None:
 )
 def test_live_sector_flow_uses_shared_gate(monkeypatch, name: str, module: str) -> None:
     """板块也要走 gate。裸调 ``ak.<fn>`` 没有读超时，同花顺一挂就永不返回。"""
+    # 缓存是模块级的，按 ``time.monotonic()`` 判 60 秒有效期。前序用例用假时钟
+    # （1061 之类的固定值）写过缓存，而 monotonic 是**进程启动后**的秒数 ——
+    # CI runner 刚开机时它可能还没超过那个值 +60，就会命中脏缓存拿到「银行」。
+    # 这里不传 clock，走的是真实时间，必须先清干净。
+    jobs.reset_sector_cache()
     seen: dict = {}
 
     def fake_call(fn_name, **kwargs):
