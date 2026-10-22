@@ -32,7 +32,10 @@ from app.news.etf_flow import (
     _call_vision,
     _fetch,
     _page_client,
+    _normalize_sogou_href,
     _public_error,
+    _unescape_url_fragment,
+    _wechat_query_params,
     apply_trade_date,
     backfill_dates,
     backfill_etf_flow,
@@ -829,6 +832,134 @@ def test_sogou_js_redirect_fixture_builds_wechat_url():
     assert parse_sogou_js_redirect("url += 'https://evil.example/s?sn=1';") == ""
     assert parse_sogou_js_redirect("url += 'http://mp.weixin.qq.com/s?sn=1';") == ""
     assert "mp.weixin.qq.com" not in html
+
+
+JS_WECHAT_URL_WITH_TIMESTAMP = (
+    "https://mp.weixin.qq.com/s?__biz=MzkzMjYzNDk5NQ%3D%3D&mid=2247490079&idx=1"
+    "&sn=2c4167ebf6a527f91b54fb5c3668ba60&timestamp=1729490000&src=11&signature=deadbeef"
+)
+
+# html.unescape 会把 &timestamp 解成 ×tamp 的所有证据串
+_ENTITY_DAMAGE = ("\u00d7", "%C3%97", "%c3%97", "&times;", "\u00d7tamp")
+
+
+def _assert_no_entity_damage(url: str) -> None:
+    for bad in _ENTITY_DAMAGE:
+        assert bad not in url, f"URL 被实体解码破坏（出现 {bad!r}）: {url}"
+    # 查询串里的每个键都必须是完整的 key=value，不能出现被吃掉的 &times
+    query = url.split("?", 1)[-1]
+    for part in query.split("&"):
+        key = part.split("=", 1)[0]
+        assert "\u00d7" not in key, f"参数名被解坏: {key}"
+
+
+def test_unescape_url_fragment_keeps_timestamp():
+    """html.unescape('&timestamp=1') == '×tamp=1'，安全解码不能这么干。"""
+    import html as _html
+
+    # 先证明坑是真的，避免将来有人"优化"回 html.unescape
+    assert _html.unescape("&timestamp=1") == "\u00d7tamp=1"
+
+    assert _unescape_url_fragment("&timestamp=1") == "&timestamp=1"
+    assert _unescape_url_fragment("&src=11") == "&src=11"
+    assert _unescape_url_fragment("&signature=abc") == "&signature=abc"
+    # 真正需要解的仍然解
+    assert _unescape_url_fragment("&amp;timestamp=1") == "&timestamp=1"
+    assert _unescape_url_fragment("&amp;amp;mid=1") == "&mid=1"
+    assert _unescape_url_fragment(r"\u0026sn=abc") == "&sn=abc"
+    assert _unescape_url_fragment(r"\x26sn=abc") == "&sn=abc"
+    assert _unescape_url_fragment(r"https:\/\/mp.weixin.qq.com\/s") == "https://mp.weixin.qq.com/s"
+    # 其余命名实体原样保留（不解 &nbsp; &lt; &times; 等）
+    assert _unescape_url_fragment("&times;=1") == "&times;=1"
+    assert _unescape_url_fragment("&nbsp;") == "&nbsp;"
+
+
+def test_sogou_js_redirect_keeps_literal_timestamp():
+    """回归：字面量 &timestamp= 的跳转片段不能被解成 ×tamp。"""
+    html = _text("sogou_link_js_timestamp.html")
+    url = parse_sogou_js_redirect(html)
+    assert url == JS_WECHAT_URL_WITH_TIMESTAMP
+    assert "timestamp=" in url
+    _assert_no_entity_damage(url)
+
+
+def test_sogou_js_redirect_inline_timestamp_variants():
+    """内联片段：&timestamp / &src / &signature 三种都必须原样保留。"""
+    for query in (
+        "&timestamp=1729490000",
+        "&src=11&signature=deadbeef",
+        "&timestamp=1729490000&src=11&signature=deadbeef",
+    ):
+        frag = (
+            "<script>var url = '';"
+            "url += 'https://mp.weixin.qq.com/s?__biz=MzkzMjYzNDk5NQ%3D%3D';"
+            f"url += '&mid=2247490079&idx=1&sn=2c4167ebf6a527f91b54fb5c3668ba60{query}';"
+            "</script>"
+        )
+        url = parse_sogou_js_redirect(frag)
+        assert url.startswith("https://mp.weixin.qq.com/s?")
+        for key in ("timestamp", "src", "signature"):
+            if f"{key}=" in query:
+                assert f"{key}=" in url, f"{key} 丢失: {url}"
+        _assert_no_entity_damage(url)
+        # 拼接后的地址必须仍能解析出合法微信 id
+        assert wechat_article_id(url) == "2c4167ebf6a527f91b54fb5c3668ba60"
+
+
+def test_sogou_js_redirect_url_survives_resolve_and_id():
+    """跳转 → 落地页 → resolve_wechat_article_url 仍能得到合法 id。"""
+    url = parse_sogou_js_redirect(_text("sogou_link_js_timestamp.html"))
+    article_html = _text("wechat_article.html")
+    resolved = resolve_wechat_article_url(article_html, url)
+    assert resolved.startswith("https://mp.weixin.qq.com/s?__biz=")
+    assert wechat_article_id(resolved) == "2c4167ebf6a527f91b54fb5c3668ba60"
+    # resolve 只保留 __biz/mid/idx/sn，不把 timestamp 带进稳定地址
+    assert "timestamp" not in resolved
+    _assert_no_entity_damage(resolved)
+
+
+def test_wechat_query_params_keeps_sn_next_to_timestamp():
+    """resolve 内部按 query 取 __biz/mid/idx/sn 时也不能被 html.unescape 吃掉 sn。
+
+    &sn=xxx&timestamp=... 整段 unescape 会变成 &sn=xxx×tamp=..., sn 的值被吞，
+    结果只剩 __biz/mid/idx，id 退化成 mid。
+    """
+    url = JS_WECHAT_URL_WITH_TIMESTAMP
+    params = _wechat_query_params(url)
+    assert params["sn"] == "2c4167ebf6a527f91b54fb5c3668ba60"
+    assert params["mid"] == "2247490079"
+    # &amp; 形态照旧能解
+    assert _wechat_query_params(
+        "https://mp.weixin.qq.com/s?__biz=MzkzAjE0MDA=&amp;mid=9&amp;idx=1&amp;sn=abcdef"
+    ) == {"__biz": "MzkzAjE0MDA=", "mid": "9", "idx": "1", "sn": "abcdef"}
+
+
+def test_normalize_sogou_href_keeps_literal_timestamp():
+    """列表 href 里塞了带 &timestamp= 的微信长链，同样不能被解坏。"""
+    inner = (
+        "https://mp.weixin.qq.com/s?__biz=MzkzMjYzNDk5NQ%3D%3D&mid=2247490079&idx=1"
+        "&sn=2c4167ebf6a527f91b54fb5c3668ba60&timestamp=1729490000&src=11"
+    )
+    href = "https://weixin.sogou.com/link?url=" + inner
+    got = _normalize_sogou_href(href)
+    assert got == href
+    _assert_no_entity_damage(got)
+    assert "timestamp=" in got
+
+
+def test_normalize_sogou_href_decodes_amp_only():
+    """&amp; 形态照旧还原成 &，且不会被过度解码。"""
+    href = "https://weixin.sogou.com/link?url=https://mp.weixin.qq.com/s?a=1&amp;mid=2247490079"
+    assert _normalize_sogou_href(href) == (
+        "https://weixin.sogou.com/link?url=https://mp.weixin.qq.com/s?a=1&mid=2247490079"
+    )
+    assert _normalize_sogou_href("https://evil.example/link?url=x") == ""
+
+
+def test_sogou_js_redirect_rejects_non_wechat():
+    """安全解码不影响原有的域名校验。"""
+    assert parse_sogou_js_redirect("url += 'https://evil.example/s?sn=1';") == ""
+    assert parse_sogou_js_redirect("url += 'http://mp.weixin.qq.com/s?sn=1';") == ""
 
 
 def test_sogou_link_sends_search_cookie_and_referer(news_db):
