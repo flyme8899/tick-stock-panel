@@ -31,10 +31,11 @@ from app.news.etf_flow import (
     ExtractFailedError,
     _call_vision,
     _fetch,
-    _page_client,
     _normalize_sogou_href,
+    _page_client,
     _public_error,
     _unescape_url_fragment,
+    _unique_long_link,
     _wechat_query_params,
     apply_trade_date,
     backfill_dates,
@@ -1009,6 +1010,141 @@ def test_sogou_link_sends_search_cookie_and_referer(news_db):
         {"type": "2", "query": "ETF领航者 10月9日ETF基金申购和赎回", "ie": "utf8"}
     )
     assert any(url.startswith(JS_WECHAT_URL.split("#", 1)[0]) for url in client.gets)
+    row = get_store()._conn.execute("SELECT source_id, url FROM news_items").fetchone()
+    assert row["source_id"] == "wechat:2c4167ebf6a527f91b54fb5c3668ba60"
+    assert "sn=2c4167ebf6a527f91b54fb5c3668ba60" in row["url"]
+
+
+SIGNED_WECHAT_URL = (
+    "https://mp.weixin.qq.com/s?src=11&timestamp=1729000000&ver=4746"
+    "&signature=AbCdEfGhIjKlMnOpQrStUvWxYz012345&new=1"
+)
+PERMANENT_WECHAT_URL = (
+    "https://mp.weixin.qq.com/s?__biz=MzkzMjYzNDk5NQ%3D%3D&mid=2247490079&idx=1"
+    "&sn=2c4167ebf6a527f91b54fb5c3668ba60"
+)
+
+
+def test_signed_redirect_fixture_exposes_permanent_params():
+    assert parse_sogou_js_redirect(_text("sogou_link_signed.html")) == SIGNED_WECHAT_URL
+    resolved = resolve_wechat_article_url(_text("wechat_signed_article.html"), SIGNED_WECHAT_URL)
+    assert "sn=2c4167ebf6a527f91b54fb5c3668ba60" in resolved
+    assert "__biz=" in resolved
+    assert "mid=2247490079" in resolved
+    one = (
+        "https://mp.weixin.qq.com/s?__biz=MzkzMjYzNDk5NQ==&amp;mid=2247490079&amp;idx=1"
+        "&amp;sn=2c4167ebf6a527f91b54fb5c3668ba60"
+    )
+    assert _unique_long_link(f'<a href="{one}">') == PERMANENT_WECHAT_URL
+    other = one.replace("2c4167ebf6a527f91b54fb5c3668ba60", "a" * 32).replace(
+        "mid=2247490079", "mid=2247490080"
+    )
+    assert _unique_long_link(f'<a href="{one}"></a><a href="{other}"></a>') == ""
+
+
+def test_signed_link_with_wechat_headers_stores_permanent_url(news_db):
+    from urllib.parse import urlencode
+
+    epoch = int(datetime(2026, 10, 10, 7, 32, tzinfo=CN_TZ).timestamp())
+    search_html = (
+        _sogou_hit("10月9日ETF基金申购和赎回", epoch)
+        + '<script>document.cookie="SUV=sogou-suv; path=/"</script>'
+    )
+    referer = (
+        SOGOU_SEARCH_URL
+        + "?"
+        + urlencode({"type": "2", "query": "ETF领航者 10月9日ETF基金申购和赎回", "ie": "utf8"})
+    )
+
+    class SignedClient(Client):
+        def __init__(self):
+            super().__init__(
+                media=_text("netease_media_stale.html"),
+                sogou=search_html,
+                wechat=_text("wechat_signed_article.html"),
+            )
+            self.header_log: list[tuple[str, dict]] = []
+
+        def get(self, url, params=None, headers=None):
+            sent = headers or {}
+            self.header_log.append((url, sent))
+            if url.startswith("https://weixin.sogou.com/weixin"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(
+                    self.sogou,
+                    url,
+                    headers={"set-cookie": "SNUID=sogou-snuid; Path=/; HttpOnly"},
+                )
+            if url.startswith("https://weixin.sogou.com/link"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(_text("sogou_link_signed.html"), url)
+            if url.startswith("https://mp.weixin.qq.com/"):
+                self.gets.append(url)
+                self.params.append(params)
+                cookie = sent.get("Cookie") or ""
+                served = (
+                    "MicroMessenger" in (sent.get("User-Agent") or "")
+                    and "SUV=sogou-suv" in cookie
+                    and "SNUID=sogou-snuid" in cookie
+                    and "weixin.sogou.com" in (sent.get("Referer") or "")
+                )
+                body = "wechat_signed_article.html" if served else "wechat_param_error.html"
+                return Resp(_text(body), url)
+            return super().get(url, params=params, headers=headers)
+
+    client = SignedClient()
+    saved = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
+    assert saved["inserted"] == 1
+    signed_headers = next(headers for url, headers in client.header_log if "signature=" in url)
+    assert "MicroMessenger" in signed_headers["User-Agent"]
+    assert "SUV=sogou-suv" in signed_headers["Cookie"]
+    assert "SNUID=sogou-snuid" in signed_headers["Cookie"]
+    assert signed_headers["Referer"] == referer
+    link_headers = next(headers for url, headers in client.header_log if "/link?" in url)
+    assert "MicroMessenger" not in link_headers["User-Agent"]
+    row = get_store()._conn.execute("SELECT source_id, url FROM news_items").fetchone()
+    assert row["source_id"] == "wechat:2c4167ebf6a527f91b54fb5c3668ba60"
+    assert "sn=2c4167ebf6a527f91b54fb5c3668ba60" in row["url"]
+    assert not any("signature=" in url and "sn=" in url for url in client.gets)
+
+
+def test_search_html_long_link_is_fetched_when_signed_page_has_no_id(news_db):
+    epoch = int(datetime(2026, 10, 10, 7, 32, tzinfo=CN_TZ).timestamp())
+    search_html = _sogou_hit("10月9日ETF基金申购和赎回", epoch) + (
+        f'<script>var msg_link = "{PERMANENT_WECHAT_URL}";</script>'
+    )
+
+    class SearchLinkClient(Client):
+        def __init__(self):
+            super().__init__(media=_text("netease_media_stale.html"), sogou=search_html)
+            self.long_hits: list[str] = []
+
+        def get(self, url, params=None, headers=None):
+            if url.startswith("https://weixin.sogou.com/weixin"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(self.sogou, url, headers={"set-cookie": "SNUID=sogou-snuid"})
+            if url.startswith("https://weixin.sogou.com/link"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(_text("sogou_link_signed.html"), url)
+            if url.startswith("https://mp.weixin.qq.com/") and "signature=" in url:
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(_text("wechat_param_error.html"), url)
+            if "sn=2c4167ebf6a527f91b54fb5c3668ba60" in url:
+                self.gets.append(url)
+                self.params.append(params)
+                self.long_hits.append(url)
+                return Resp(_text("wechat_article.html"), url)
+            return super().get(url, params=params, headers=headers)
+
+    client = SearchLinkClient()
+    saved = _collect(client, news_db, SATURDAY, today_trading=False, yesterday_trading=True)
+    assert saved["inserted"] == 1
+    assert client.long_hits == [PERMANENT_WECHAT_URL]
     row = get_store()._conn.execute("SELECT source_id, url FROM news_items").fetchone()
     assert row["source_id"] == "wechat:2c4167ebf6a527f91b54fb5c3668ba60"
     assert "sn=2c4167ebf6a527f91b54fb5c3668ba60" in row["url"]

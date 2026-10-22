@@ -31,12 +31,16 @@ reasoning_effort=low，并把上限提到 16384。空内容再试一次；若是
 搜狗给出的文章地址是 ``weixin.sogou.com/link``。这个地址现在经常返回 200
 和一段跳转脚本，而不是 302。脚本用 ``url += '...'`` 把 ``mp.weixin.qq.com``
 拆开拼出来。请求 ``/link`` 时带上搜索页刚下发的 Cookie 和 Referer，再按片段
-把原文地址拼回去。拼不出来，或拼出来的页面仍然不是微信原文时，把恢复到的长链
-交给 DeepSeek Fetch；没有长链就改看网易号，不把这一轮直接判死。
+把原文地址拼回去。拼出来的经常是带 src/signature 的临时链，没有 __biz/mid/sn。
+请求临时链时换成微信内置浏览器的 UA，并带上搜狗 Referer 和 SUV/SNUID 等 Cookie，
+才能从正文的 msg_link、og:url 或 biz/mid/sn 还原成长链。搜索结果里若只有一条
+长链，也用那条。拼不出来，或页面仍然不是微信原文时，把长链交给 DeepSeek Fetch；
+只有临时链时也把临时链交过去。两种地址都没有就改看网易号，不把这一轮直接判死。
 
 微信稿还有一层 DeepSeek Fetch 兜底（``ETF_FLOW_FETCH_FALLBACK=true`` 且配置了
 ``DEEPSEEK_API_KEY``）：原文页抓不到、页里没有表格图片、或视觉抽取失败时，把
-清洗过的长链交给 DeepSeek，解析它识别出的表格。网易号没有微信长链，不走兜底。
+清洗过的长链（没有长链时用临时签名链）交给 DeepSeek，解析它识别出的表格。
+网易号没有微信地址，不走兜底。
 兜底结果通常缺全市场和宽基，``raw_json`` 里 ``via`` 记为 ``deepseek_fetch``。
 """
 
@@ -68,8 +72,11 @@ from app.news.mp_fetch import (
     deepseek_api_key,
     fallback_ready,
     fetch_article,
+    fetchable_wechat_url,
     parse_flow_markdown,
     sanitize_wechat_url,
+    signed_article_id,
+    signed_wechat_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -166,6 +173,13 @@ _BROWSER = {
     ),
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
+# 临时签名链用桌面 Chrome 会落到「参数错误」。微信内打开才会吐出带 sn 的正文。
+_WECHAT_UA = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Version/4.0 Chrome/131.0.0.0 Mobile Safari/537.36 "
+    "MicroMessenger/8.0.49.2600(0x28003151) WeChat/arm64 Weixin "
+    "NetType/WIFI Language/zh_CN"
+)
 SOFT_MISSING_TEXT = "11:00 暂缺 ETF领航者当日申赎文章，继续采集到 15:00"
 SOFT_MISSING_ALERT = f"TSP 资讯采集：{SOFT_MISSING_TEXT}。"
 SOFT_EXTRACT_ALERT = "TSP 资讯采集：11:00 暂缺 ETF领航者当日申赎表格，继续采集到 15:00。"
@@ -1465,13 +1479,17 @@ def _fallback_page(ref: ArticleRef, exc: BaseException) -> ArticlePage | None:
     """微信原文页打不开时，用长链和标题拼一页，图片留空，交给兜底。
 
     列表里的搜狗 ``/link`` 不是微信长链。跳转脚本恢复出的地址挂在异常上。
+    没有 __biz/mid/sn 时，改用 src/signature 临时链。
     """
     if ref.channel != "wechat" or not fallback_ready():
         return None
-    url = sanitize_wechat_url(ref.url) or sanitize_wechat_url(
-        str(getattr(exc, "article_url", "") or "")
-    )
+    carried = str(getattr(exc, "article_url", "") or "")
+    url = sanitize_wechat_url(ref.url) or sanitize_wechat_url(carried)
     article_id = wechat_article_id(url) if url else ""
+    if not url:
+        # 临时链没有 sn。清洗成长链会得到空串，DeepSeek 仍可以按签名地址抓。
+        url = signed_wechat_url(carried) or signed_wechat_url(ref.url)
+        article_id = signed_article_id(url) if url else ""
     if not article_id or not _FLOW_TITLE.search(_plain(ref.title)):
         return None
     logger.warning("ETF领航者微信原文页打不开，改走 DeepSeek fetch: %s", _public_error(exc))
@@ -1538,9 +1556,9 @@ def _fetch_fallback(client, page: ArticlePage, *, reason: str = "") -> dict | No
 
 def _fetch_check(url: str, root: Path) -> int:
     """命令行自检：清洗链接后只走兜底解析，打印行数和结果，不写库。"""
-    target = sanitize_wechat_url(url)
+    target = fetchable_wechat_url(url)
     if not target:
-        print("只接受带 __biz/mid/idx/sn 的 mp.weixin.qq.com 长链")
+        print("只接受带 __biz/mid/idx/sn 的微信长链，或带 src/signature 的临时链")
         return 2
     if not deepseek_api_key():
         print("未配置 DEEPSEEK_API_KEY")
@@ -1563,7 +1581,7 @@ def _fetch_check(url: str, root: Path) -> int:
     print(
         json.dumps(
             {
-                "article_id": wechat_article_id(target),
+                "article_id": wechat_article_id(target) or signed_article_id(target),
                 "title": title,
                 "trade_date": extracted.get("trade_date") or "",
                 "categories": len(extracted.get("categories") or []),
@@ -1929,24 +1947,67 @@ def _fetch(
     response, final = _open(client, url, allow_hosts=allow_hosts, params=params)
     text = (getattr(response, "text", "") or "")[:2_000_000]
     _remember_sogou_search(client, response, url, params, final, text)
-    if not _is_sogou_link(final):
-        return text, final
-    # 200 的跳转页不是微信原文。拼出地址再请求一次，失败时把长链留给兜底。
-    target = parse_sogou_js_redirect(text)
-    if not target:
-        _set_client_attr(client, "_sogou_recovered_url", "")
-        return text, final
-    _set_client_attr(client, "_sogou_recovered_url", target)
+    if _is_sogou_link(final):
+        # 200 的跳转页不是微信原文。拼出地址再请求一次，失败时把地址留给兜底。
+        target = parse_sogou_js_redirect(text)
+        if not target:
+            _set_client_attr(client, "_sogou_recovered_url", "")
+            return text, final
+        _set_client_attr(client, "_sogou_recovered_url", target)
+        try:
+            response, landed = _open(client, target, allow_hosts=allow_hosts)
+        except ExtractFailedError:
+            raise
+        except Exception as exc:  # 原文地址已拼出，这一跳失败交给兜底
+            raise _invalid_wechat(target) from exc
+        if (urlparse(landed).hostname or "").lower() != WECHAT_HOST:
+            raise _invalid_wechat(target)
+        text = (getattr(response, "text", "") or "")[:2_000_000]
+        final = landed
+    if _is_signed_wechat_url(final):
+        return _follow_signed_article(client, text, final, allow_hosts)
+    return text, final
+
+
+def _follow_signed_article(
+    client,
+    html_text: str,
+    landed: str,
+    allow_hosts: set[str],
+) -> tuple[str, str]:
+    """临时链换成永久长链。正文里已经有 sn 就不再请求；否则用搜索页里唯一的一条。"""
+    permanent = sanitize_wechat_url(resolve_wechat_article_url(html_text, landed))
+    if permanent:
+        _set_client_attr(client, "_sogou_recovered_url", permanent)
+        return html_text, landed
+    from_search = _unique_long_link(_search_html(client))
+    if not from_search:
+        return html_text, landed
+    _set_client_attr(client, "_sogou_recovered_url", from_search)
     try:
-        response, landed = _open(client, target, allow_hosts=allow_hosts)
-    except ExtractFailedError:
-        raise
-    except Exception as exc:  # 原文地址已拼出，这一跳失败交给兜底
-        raise _invalid_wechat(target) from exc
-    if (urlparse(landed).hostname or "").lower() != WECHAT_HOST:
-        raise _invalid_wechat(target)
+        response, final = _open(client, from_search, allow_hosts=allow_hosts)
+    except (RuntimeError, httpx.HTTPError, OSError):
+        return html_text, landed
+    if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
+        return html_text, landed
     page = (getattr(response, "text", "") or "")[:2_000_000]
-    return page, landed
+    return page, final
+
+
+def _unique_long_link(html_text: str) -> str:
+    """搜索结果里只有一篇的长链才采用。多篇 sn 不用，避免把别的稿套进来。"""
+    text = html.unescape(html_text or "").replace("\\u0026", "&").replace("\\/", "/")
+    found: dict[str, str] = {}
+    for match in re.finditer(r"https://mp\.weixin\.qq\.com/s\?[^\"'\s<>\\]+", text, re.I):
+        clean = sanitize_wechat_url(match.group(0))
+        article_id = wechat_article_id(clean) if clean else ""
+        if article_id:
+            found[article_id] = clean
+    if len(found) == 1:
+        return next(iter(found.values()))
+    if found:
+        return ""
+    return sanitize_wechat_url(resolve_wechat_article_url(text, ""))
 
 
 def _open(
@@ -2023,6 +2084,24 @@ def _is_sogou_link(url: str) -> bool:
     )
 
 
+def _is_signed_wechat_url(url: str) -> bool:
+    """src + signature、且没有 sn 的 /s 地址。永久长链不走这套微信头。"""
+    parsed = urlparse(url or "")
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or (parsed.hostname or "").lower() != WECHAT_HOST
+        or parsed.path != "/s"
+    ):
+        return False
+    query = parse_qs(parsed.query)
+    src = (query.get("src") or [""])[0].strip()
+    signature = (query.get("signature") or [""])[0].strip()
+    sn = (query.get("sn") or [""])[0].strip()
+    return bool(src and signature and not sn)
+
+
 def _invalid_wechat(url: str) -> ExtractFailedError:
     exc = ExtractFailedError("微信文章地址无效")
     exc.article_url = url or ""
@@ -2037,6 +2116,10 @@ def _attach_article_url(exc: ExtractFailedError, url: str) -> None:
 
 def _recovered_url(client) -> str:
     return str(getattr(client, "_sogou_recovered_url", "") or "")
+
+
+def _search_html(client) -> str:
+    return str(getattr(client, "_sogou_search_html", "") or "")
 
 
 def _set_client_attr(client, name: str, value) -> None:
@@ -2062,6 +2145,7 @@ def _remember_sogou_search(client, response, url: str, params, final: str, text:
         "_sogou_link_context",
         {"referer": referer, "cookie": _cookie_header(response, text)},
     )
+    _set_client_attr(client, "_sogou_search_html", (text or "")[:500_000])
 
 
 def _cookie_header(response, html_text: str) -> str:
@@ -2134,6 +2218,17 @@ def _headers(url: str, client=None) -> dict[str, str]:
                     headers["Referer"] = referer
                 if cookie:
                     headers["Cookie"] = cookie
+    elif host == WECHAT_HOST and _is_signed_wechat_url(url):
+        headers["User-Agent"] = _WECHAT_UA
+        headers["Referer"] = "https://weixin.sogou.com/"
+        ctx = getattr(client, "_sogou_link_context", None) if client is not None else None
+        if isinstance(ctx, dict):
+            referer = str(ctx.get("referer") or "")
+            cookie = str(ctx.get("cookie") or "")
+            if referer:
+                headers["Referer"] = referer
+            if cookie:
+                headers["Cookie"] = cookie
     elif host == "nimg.ws.126.net":
         headers["Referer"] = "https://www.163.com/"
     elif host.endswith("163.com"):

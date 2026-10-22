@@ -29,6 +29,8 @@ from app.news.mp_fetch import (
     fetch_article,
     parse_flow_markdown,
     sanitize_wechat_url,
+    signed_article_id,
+    signed_wechat_url,
     unescape_markdown,
 )
 from app.news.service import get_store, reset_store_for_tests
@@ -183,6 +185,12 @@ def test_sanitize_strips_junk_glued_to_sn():
     assert sanitize_wechat_url(LONG.replace("mp.weixin.qq.com", "evil.example")) == ""
     assert sanitize_wechat_url(LONG.replace("https://", "http://")) == ""
     assert sanitize_wechat_url("https://mp.weixin.qq.com/s?__biz=MzkzMjYzNDk5NQ%3D%3D&mid=1") == ""
+    signed = (
+        "https://mp.weixin.qq.com/s?src=11&timestamp=1729000000&ver=4746"
+        "&signature=AbCdEfGhIjKlMnOpQrStUvWxYz012345&new=1"
+    )
+    assert sanitize_wechat_url(signed) == ""
+    assert signed_wechat_url(LONG + "&src=11&signature=AbCdEfGhIjKlMnOpQrStUvWxYz012345") == ""
 
 
 def test_fetch_sends_clean_url_with_timeout_and_counts_usage(fetch_env):
@@ -361,6 +369,87 @@ def test_invalid_wechat_address_falls_back_to_deepseek(fetch_env, caplog):
     assert row["source_id"] == "wechat:2c4167ebf6a527f91b54fb5c3668ba60"
     assert row["url"] == LONG
     assert json.loads(row["raw_json"])["via"] == "deepseek_fetch"
+
+
+def test_param_error_page_falls_back_to_signed_link(fetch_env, caplog):
+    """临时链打开仍是「参数错误」、搜索页也没有长链时，DeepSeek 直接抓临时链。"""
+    caplog.set_level(logging.INFO, logger="app.news.mp_fetch")
+    link_html = (FIXTURES / "sogou_link_signed.html").read_text(encoding="utf-8")
+    signed = (
+        "https://mp.weixin.qq.com/s?src=11&timestamp=1729000000&ver=4746"
+        "&signature=AbCdEfGhIjKlMnOpQrStUvWxYz012345&new=1"
+    )
+    cleaned = signed_wechat_url(signed)
+
+    class Page:
+        def __init__(self, text="", status=200, headers=None):
+            self.text = text
+            self.status_code = status
+            self.headers = headers or {}
+            self.content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"http {self.status_code}")
+
+    class LinkClient:
+        def __init__(self):
+            self.gets: list[str] = []
+            self.header_log: list[dict] = []
+            self.fetch_calls: list[tuple] = []
+            self.vision_calls = 0
+
+        def get(self, url, params=None, headers=None):
+            self.gets.append(url)
+            self.header_log.append(headers or {})
+            if url.startswith("https://weixin.sogou.com/link"):
+                return Page(link_html)
+            if url.startswith("https://mp.weixin.qq.com/"):
+                return Page((FIXTURES / "wechat_param_error.html").read_text(encoding="utf-8"))
+            raise AssertionError(url)
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            if url == mp_fetch.FETCH_URL:
+                self.fetch_calls.append((json, headers, timeout))
+                return Resp(_fixture("deepseek_fetch_table.json"))
+            self.vision_calls += 1
+            raise AssertionError(url)
+
+        def close(self):
+            pass
+
+    client = LinkClient()
+    ref = ArticleRef("", TITLE, "https://weixin.sogou.com/link?url=abc", PUBLISHED, "wechat")
+    saved = _ingest_ref(client, ref)
+    assert saved["inserted"] == 1
+    assert client.vision_calls == 0
+    assert client.fetch_calls[0][0] == {"url": cleaned}
+    signed_headers = next(
+        headers
+        for url, headers in zip(client.gets, client.header_log, strict=True)
+        if "signature=" in url
+    )
+    assert "MicroMessenger" in signed_headers["User-Agent"]
+    assert "weixin.sogou.com" in signed_headers["Referer"]
+    assert "DeepSeek fetch 请求" in caplog.text
+    row = get_store()._conn.execute("SELECT source_id, url, raw_json FROM news_items").fetchone()
+    assert row["source_id"] == f"wechat:{signed_article_id(signed)}"
+    assert row["url"] == cleaned
+    assert json.loads(row["raw_json"])["via"] == "deepseek_fetch"
+
+
+def test_fetch_accepts_signed_temp_link(fetch_env):
+    signed = (
+        "https://mp.weixin.qq.com/s?src=11&timestamp=1729000000&ver=4746"
+        "&signature=AbCdEfGhIjKlMnOpQrStUvWxYz012345&new=1&scene=27#rd"
+    )
+    cleaned = signed_wechat_url(signed)
+    client = FetchClient([httpx.ReadTimeout("slow"), Resp(_fixture("deepseek_fetch_table.json"))])
+    fetch_article(signed, client, data_dir=fetch_env)
+    assert cleaned.startswith("https://mp.weixin.qq.com/s?src=11&")
+    assert "signature=" in cleaned
+    assert "__biz=" not in cleaned
+    assert [call[0]["url"] for call in client.fetch_calls] == [cleaned, cleaned]
 
 
 def test_wechat_page_error_falls_back_for_listed_long_link(fetch_env):
