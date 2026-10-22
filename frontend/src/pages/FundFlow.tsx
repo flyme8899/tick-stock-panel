@@ -193,15 +193,29 @@ function writeCollapsedEtfGroups(collapsed: ReadonlySet<string>) {
 }
 
 // 缺一只就不合计：净流入留空表示无法计算，加总会把缺口当成 0。
-function groupNetInflow1d(items: FundFlowAmountRow[]): number | null {
+// 三个窗口各算各的 —— 缺 5d 不该把 1d / 20d 一起废掉。
+function sumWindow(
+  items: FundFlowAmountRow[],
+  pick: (row: FundFlowAmountRow) => number | null | undefined,
+): number | null {
   if (items.length === 0) return null
   let sum = 0
   for (const row of items) {
-    const value = row.net_inflow_1d
+    const value = pick(row)
     if (value == null || Number.isNaN(value)) return null
     sum += value
   }
   return sum
+}
+
+type EtfGroupInflows = { d1: number | null; d5: number | null; d20: number | null }
+
+function groupNetInflows(items: FundFlowAmountRow[]): EtfGroupInflows {
+  return {
+    d1: sumWindow(items, row => row.net_inflow_1d),
+    d5: sumWindow(items, row => row.net_inflow_5d),
+    d20: sumWindow(items, row => row.net_inflow_20d),
+  }
 }
 
 function groupEtfRows(items: FundFlowAmountRow[]) {
@@ -327,7 +341,15 @@ function EtfGroupSection({
   baselines: Record<string, string | null> | undefined
   badge?: boolean
 }) {
-  const summary = groupNetInflow1d(items)
+  const inflows = groupNetInflows(items)
+  // 表头已经是 1日 / 5日 / 20日，列内不再写「N日合计」前缀：三列各占 5.75rem，
+  // 带前缀会挤爆。任一窗口有合计才渲染整块，三列都缺时与「无合计」语义一致。
+  const cells: { window: '1d' | '5d' | '20d'; value: number | null }[] = [
+    { window: '1d', value: inflows.d1 },
+    { window: '5d', value: inflows.d5 },
+    { window: '20d', value: inflows.d20 },
+  ]
+  const hasInflow = cells.some(cell => cell.value != null)
   return (
     <div>
       <button
@@ -350,16 +372,22 @@ function EtfGroupSection({
             国家队代理
           </span>
         ) : null}
-        {!expanded && summary != null ? (
+        {!expanded && hasInflow ? (
           <span className="ml-auto flex shrink-0 gap-2 sm:gap-3">
-            <span
-              className={cn(ETF_COL_WIDTH, 'text-right font-mono whitespace-nowrap', signedClass(summary))}
-              data-etf-group-inflow
-            >
-              1日合计 {formatYiYuan(summary)}
-            </span>
-            <span className={ETF_COL_WIDTH} aria-hidden />
-            <span className={ETF_COL_WIDTH} aria-hidden />
+            {cells.map(cell => (
+              <span
+                key={cell.window}
+                className={cn(
+                  ETF_COL_WIDTH,
+                  'text-right font-mono whitespace-nowrap',
+                  cell.value != null && signedClass(cell.value),
+                )}
+                data-etf-group-inflow
+                data-window={cell.window}
+              >
+                {cell.value != null ? formatYiYuan(cell.value) : ''}
+              </span>
+            ))}
           </span>
         ) : null}
       </button>

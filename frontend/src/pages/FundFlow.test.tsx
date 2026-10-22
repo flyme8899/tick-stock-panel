@@ -113,6 +113,11 @@ function rowByCode(code: string): HTMLElement | undefined {
   return [...host.querySelectorAll('li')].find(row => row.textContent?.includes(code))
 }
 
+// 折叠态的三列合计。按 data-window 取，避免依赖节点顺序或整段 textContent。
+function inflowCell(label: string, window: '1d' | '5d' | '20d'): HTMLElement | null {
+  return groupButton(label).querySelector(`[data-etf-group-inflow][data-window="${window}"]`)
+}
+
 it('aligns 1/5/20 share changes with net inflow and flags a diverged navigator row', async () => {
   await act(async () => {
     root.render(
@@ -191,6 +196,8 @@ it('collapses one ETF group from its title and keeps the others open', async () 
       shares: 4e8,
       change_1d: 1e8,
       net_inflow_1d: 6.31,
+      net_inflow_5d: -2.2,
+      net_inflow_20d: 7.7,
     },
     {
       code: '159915',
@@ -199,6 +206,9 @@ it('collapses one ETF group from its title and keeps the others open', async () 
       shares: 2e8,
       change_1d: -1e8,
       net_inflow_1d: -1.5,
+      // 创业板组只有这一只，三个窗口都有数
+      net_inflow_5d: -3.5,
+      net_inflow_20d: null,
     },
     {
       code: '512100',
@@ -232,17 +242,27 @@ it('collapses one ETF group from its title and keeps the others open', async () 
     expect(collapsed.textContent).toContain('沪深300')
     expect(collapsed.textContent).toContain('2 只')
     expect(collapsed.textContent).toContain('国家队代理')
-    const summary = collapsed.querySelector('[data-etf-group-inflow]')
-    expect(summary?.textContent).toBe('1日合计 +16.31亿元')
-    expect(summary?.className).toContain('text-danger')
+    // 三个窗口各自合计，列内不再写「N日合计」前缀
+    const d1 = inflowCell('沪深300', '1d')
+    expect(d1?.textContent).toBe('+16.31亿元')
+    expect(d1?.className).toContain('text-danger')
+    // 15.5 + (-2.2)
+    expect(inflowCell('沪深300', '5d')?.textContent).toBe('+13.30亿元')
+    expect(inflowCell('沪深300', '5d')?.className).toContain('text-danger')
+    // 510300 的 20d 为 null，整列留空
+    expect(inflowCell('沪深300', '20d')?.textContent).toBe('')
+    expect(inflowCell('沪深300', '20d')?.className).not.toContain('text-danger')
+    expect(inflowCell('沪深300', '20d')?.className).not.toContain('text-bear')
+    expect(collapsed.textContent).not.toContain('合计')
+
     const windows = host.querySelector('[data-etf-windows]')
-    const summaryColumns = summary?.parentElement
+    const summaryColumns = d1?.parentElement
     expect(windows?.children).toHaveLength(3)
     expect(windows?.children[0]?.textContent).toBe('1日')
+    expect(windows?.children[1]?.textContent).toBe('5日')
+    expect(windows?.children[2]?.textContent).toBe('20日')
     expect(summaryColumns?.children).toHaveLength(3)
-    expect(summaryColumns?.children[0]).toBe(summary)
-    expect(summaryColumns?.children[1]?.textContent).toBe('')
-    expect(summaryColumns?.children[2]?.textContent).toBe('')
+    expect(summaryColumns?.children[0]).toBe(d1)
     for (const index of [0, 1, 2]) {
       expect(summaryColumns?.children[index]?.className).toContain('w-[5.75rem]')
       expect(windows?.children[index]?.className).toContain('w-[5.75rem]')
@@ -255,9 +275,11 @@ it('collapses one ETF group from its title and keeps the others open', async () 
     expect(JSON.parse(localStorage.getItem(ETF_GROUP_COLLAPSE_KEY) || '[]')).toEqual(['沪深300'])
 
     await clickGroup('创业板')
-    const gem = groupButton('创业板')
-    expect(gem.querySelector('[data-etf-group-inflow]')?.textContent).toBe('1日合计 -1.50亿元')
-    expect(gem.querySelector('[data-etf-group-inflow]')?.className).toContain('text-bear')
+    expect(inflowCell('创业板', '1d')?.textContent).toBe('-1.50亿元')
+    expect(inflowCell('创业板', '1d')?.className).toContain('text-bear')
+    expect(inflowCell('创业板', '5d')?.textContent).toBe('-3.50亿元')
+    expect(inflowCell('创业板', '5d')?.className).toContain('text-bear')
+    expect(inflowCell('创业板', '20d')?.textContent).toBe('')
     expect(rowByCode('159915')).toBeUndefined()
     expect(JSON.parse(localStorage.getItem(ETF_GROUP_COLLAPSE_KEY) || '[]')).toEqual(['沪深300', '创业板'])
   } finally {
@@ -270,7 +292,12 @@ it('restores collapsed groups from localStorage and clears the record when reope
   await renderPage()
 
   expect(groupButton('科创50').getAttribute('aria-expanded')).toBe('false')
-  expect(groupButton('科创50').querySelector('[data-etf-group-inflow]')?.textContent).toBe('1日合计 -2.00亿元')
+  // 科创50 只有 510300 以外的 588000：1d 有数，5d / 20d 为 null，对应列留空
+  expect(inflowCell('科创50', '1d')?.textContent).toBe('-2.00亿元')
+  expect(inflowCell('科创50', '1d')?.className).toContain('text-bear')
+  expect(inflowCell('科创50', '5d')?.textContent).toBe('')
+  expect(inflowCell('科创50', '20d')?.textContent).toBe('')
+  expect(groupButton('科创50').textContent).not.toContain('合计')
   expect(rowByCode('588000')).toBeUndefined()
   expect(groupButton('沪深300').getAttribute('aria-expanded')).toBe('true')
   expect(rowByCode('510300')).toBeTruthy()
@@ -295,6 +322,9 @@ it('does not invent a 1-day total when a row in the group has no inflow', async 
     shares: 8e8,
     change_1d: 0.2e8,
     net_inflow_1d: null,
+    // 5d / 20d 有数，验证缺口只影响 1d 那一列
+    net_inflow_5d: 3.3,
+    net_inflow_20d: 4.4,
   }
   board.etf_shares.items = [...original, gap]
   try {
@@ -302,10 +332,34 @@ it('does not invent a 1-day total when a row in the group has no inflow', async 
     await clickGroup('沪深300')
     const header = groupButton('沪深300')
     expect(header.querySelector('[data-etf-group-count]')?.textContent).toBe('2 只')
-    expect(header.querySelector('[data-etf-group-inflow]')).toBeNull()
+    // 1d 组内有一只缺数 → 这一列空
+    expect(inflowCell('沪深300', '1d')?.textContent).toBe('')
+    // 5d：510300 的 15.5 + 510330 的 3.3；20d：510300 为 null → 整列空
+    expect(inflowCell('沪深300', '5d')?.textContent).toBe('+18.80亿元')
+    expect(inflowCell('沪深300', '20d')?.textContent).toBe('')
     expect(header.textContent).not.toContain('合计')
     expect(rowByCode('510300')).toBeUndefined()
     expect(rowByCode('510330')).toBeUndefined()
+  } finally {
+    board.etf_shares.items = original
+  }
+})
+
+it('hides the whole inflow block when every window of the group is missing', async () => {
+  const original = board.etf_shares.items
+  const base = original[0]!
+  board.etf_shares.items = [
+    { ...base, net_inflow_1d: null, net_inflow_5d: null, net_inflow_20d: null },
+  ]
+  try {
+    await renderPage()
+    await clickGroup('沪深300')
+    const header = groupButton('沪深300')
+    expect(header.getAttribute('aria-expanded')).toBe('false')
+    // 三窗口皆缺：整块不渲染，不留三个空列误导
+    expect(header.querySelector('[data-etf-group-inflow]')).toBeNull()
+    expect(header.textContent).not.toContain('合计')
+    expect(rowByCode('510300')).toBeUndefined()
   } finally {
     board.etf_shares.items = original
   }
