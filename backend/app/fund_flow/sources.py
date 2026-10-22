@@ -48,6 +48,15 @@ BLOCKED_AK_NAMES = frozenset({
     "stock_sector_fund_flow_rank",
 })
 
+# 必须走 ``app.eastmoney.akshare_gate.call_akshare`` 的函数：要翻页、要共用东财
+# 间隔、要补缺省读超时。板块和个股一样是逐页拉的，漏掉它们就会在源站挂住时无限阻塞。
+_GATED_AK_NAMES = frozenset({
+    "stock_fund_flow_industry",
+    "stock_fund_flow_concept",
+    "stock_fund_flow_individual",
+    "stock_individual_fund_flow_rank",
+})
+
 EASTMONEY_BILL_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 EASTMONEY_HEADERS = {
     "User-Agent": (
@@ -234,9 +243,14 @@ def live_clients(data_dir: Path | None = None) -> SourceClients:
         return payload
 
     def ak_call(name: str, **kwargs: Any):
-        # 个股资金流分页走共用限流：东财间隔、缺省超时。同花顺即时榜和东财当日排名
-        # 都会连续翻页，一次要几十秒。其它 akshare 函数保持原请求，避免把两融、ETF 也改到这把锁上。
-        if name in {"stock_fund_flow_individual", "stock_individual_fund_flow_rank"}:
+        # 盘中要连翻好几页的几路都走共用限流：东财间隔、缺省超时。
+        # 个股两个（同花顺即时榜、东财当日排名）一次几十秒；板块两个
+        # （行业 / 概念，同花顺 hyzjl、gnzjl）同样是逐页翻。板块原先裸调
+        # ``requests.get``，没有读超时 —— 2026-10-22 同花顺一挂，这一路永不
+        # 返回，主循环整个堵死，15:05 的收盘快照和后续日频全停。走这把锁之后
+        # 同花顺主机也会补上 ``REQUEST_TIMEOUT``，最坏情况按超时失败退出。
+        # 其它 akshare 函数保持原请求，避免把两融、ETF 也改到这把锁上。
+        if name in _GATED_AK_NAMES:
             from app.eastmoney.akshare_gate import call_akshare
 
             return call_akshare(name, **kwargs)

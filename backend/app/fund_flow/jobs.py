@@ -601,6 +601,26 @@ def sync_stock_intraday(
     )
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """是不是超时类异常。
+
+    各层超时的异常类型不统一：``requests`` 抛 ``ReadTimeout``（继承
+    ``Timeout`` → ``OSError``），``httpx`` 抛 ``ReadTimeout``（继承
+    ``TimeoutException``），还有直接把 ``TimeoutError`` 抛出来的。这里按类名
+    兜住，避免 import 具体的库把依赖绑死。
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__
+        if name in {"Timeout", "ReadTimeout", "ConnectTimeout", "TimeoutError",
+                    "TimeoutException", "ReadTimeoutError", "ConnectTimeoutError"}:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def fetch_sector_rows(
     clients: SourceClients,
     kind: str,
@@ -615,7 +635,17 @@ def fetch_sector_rows(
     if cached is not None and now - cached[0] < cache_s:
         return cached[1]
     name = "stock_fund_flow_industry" if kind == "industry" else "stock_fund_flow_concept"
-    rows = clients.ak(name, symbol="即时")
+    try:
+        rows = clients.ak(name, symbol="即时")
+    except Exception as exc:  # noqa: BLE001
+        # 板块这一路原先没有读超时，源站不回包时整轮永不结束。现在最坏是这里
+        # 抛 ReadTimeout —— 留一行带 kind 的日志，事后能分清「超时跳过」和
+        # 「空表」。
+        if _is_timeout_error(exc):
+            logger.warning("板块资金流 %s 拉取超时，跳过本轮: %s", kind, exc)
+        else:
+            logger.warning("板块资金流 %s 拉取失败，跳过本轮: %s", kind, exc)
+        raise
     _sector_cache[kind] = (now, rows)
     return rows
 
@@ -641,8 +671,13 @@ def sync_sectors(
             sleeper=sleeper,
         )
     except Exception as exc:  # noqa: BLE001
+        # 超时也走这条：重试耗尽后吞掉，记进 errors，worker 接着跑下一项。
+        # 不为了「重试到通」在这里无限等待。
         result.errors.append(str(exc))
         store.update_kind_state(data_dir, kind, last_error=str(exc))
+        logger.warning(
+            "板块资金流 %s（%s）本轮失败，已跳过: %s", kind, snapshot, exc,
+        )
         return result
     rows = normalize.normalize_sectors(
         raw, trade_date=trade_date, captured_at=captured_at, snapshot=snapshot,
