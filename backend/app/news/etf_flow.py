@@ -491,7 +491,8 @@ def parse_sogou_js_redirect(html_text: str) -> str:
     found = ""
     parts: list[str] = []
     for match in _SOGOU_URL_PART.finditer(html_text or ""):
-        fragment = _js_unescape(html.unescape(match.group(3)))
+        # 不能用 html.unescape: 会把 &timestamp= 解成 ×tamp=（见 _unescape_url_fragment）
+        fragment = _unescape_url_fragment(match.group(3))
         if match.group(1) != "+":
             found = _mp_article_url("".join(parts)) or found
             parts = [fragment] if fragment else []
@@ -519,6 +520,31 @@ def _js_unescape(value: str) -> str:
         }.get(token, token)
 
     return _JS_ESCAPE.sub(repl, value or "")
+
+
+def _unescape_url_fragment(value: str) -> str:
+    """解码可能拼进 URL 的 JS 字符串片段。只解 ``&amp;`` 和 ``\\uXXXX`` / ``\\xXX``。
+
+    不能用 ``html.unescape``。HTML5 的命名实体允许省略分号，``&timestamp=`` 里的
+    ``&times`` 会被当成 ``&times``（乘号）解成 ``×``，查询串就变成 ``×tamp=``
+    （``×`` 编码后是 ``%C3%97``）。同一个坑还有 ``&times;`` 本身、``&sect`` 之类：
+    任何形如 ``&`` + 实体名 + 尾随字符的查询参数都可能被吃掉。
+
+    这里只做两种在 URL 里确定无歧义的转换：
+
+    * ``&amp;`` → ``&``，循环到稳定（``&amp;amp;`` 可能层层转义）
+    * 已有的 ``_js_unescape``（``\\u0026`` / ``\\x26`` / ``\\/`` 等）
+
+    其余实体一律原样保留。少解一个实体最多让参数名多出 ``&amp;`` 字样（调用方按
+    字面量 ``&`` 切分时仍能拿到正确的键），而多解一个就会把 URL 解坏。
+    """
+    text = value or ""
+    for _ in range(4):
+        decoded = text.replace("&amp;", "&")
+        if decoded == text:
+            break
+        text = decoded
+    return _js_unescape(text)
 
 
 def _mp_article_url(url: str) -> str:
@@ -914,7 +940,9 @@ def wechat_published_at(html_text: str) -> datetime | None:
 
 
 def _wechat_query_params(url: str) -> dict[str, str]:
-    query = parse_qs(urlparse(html.unescape(url or "")).query)
+    # 这里同样不能 html.unescape: 微信地址常带 &timestamp=, 整段解码后 &sn=xxx&timestamp=
+    # 会变成 &sn=xxx×tamp=, sn 的值被吃掉, 只剩 __biz/mid/idx, 于是又落回「缺少 id」。
+    query = parse_qs(urlparse(_unescape_url_fragment(url or "")).query)
     found: dict[str, str] = {}
     for key in ("__biz", "mid", "idx", "sn"):
         values = query.get(key) or []
@@ -2370,7 +2398,10 @@ def _normalize_image(raw: str) -> str:
 
 
 def _normalize_sogou_href(href: str) -> str:
-    text = html.unescape((href or "").strip())
+    # 列表页的 href 是 URL, 同样不能走 html.unescape。搜狗会把微信长链整段塞进
+    # link?url=, 其中若带字面量 &timestamp= / &src= / &signature=, 整段 unescape
+    # 会把 &times 吃成 ×, 后续按 & 切分内层参数时 mid/sn 就丢了。
+    text = _unescape_url_fragment((href or "").strip())
     if text.startswith("//"):
         text = "https:" + text
     elif text.startswith("/"):
