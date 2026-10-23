@@ -7,7 +7,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
 
 function yi(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) return '—'
+  if (value == null || !Number.isFinite(value)) return '—'
   const n = value / 1e8
   const sign = n > 0 ? '+' : ''
   return `${sign}${n.toFixed(2)} 亿`
@@ -142,7 +142,7 @@ const ETF_COLUMNS: EtfColumn[] = [
 const ETF_COL_WIDTH = 'w-[5.75rem]'
 
 function formatShares(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) return '—'
+  if (value == null || !Number.isFinite(value)) return '—'
   const n = value / 1e8
   const sign = n > 0 ? '+' : ''
   return `${sign}${n.toFixed(2)}亿份`
@@ -150,7 +150,7 @@ function formatShares(value: number | null | undefined): string {
 
 // 份额推算和领航者稿都已经是亿元，不再除 1 亿。
 function formatYiYuan(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) return '—'
+  if (value == null || !Number.isFinite(value)) return '—'
   const sign = value > 0 ? '+' : ''
   return `${sign}${value.toFixed(2)}亿元`
 }
@@ -202,7 +202,7 @@ function sumWindow(
   let sum = 0
   for (const row of items) {
     const value = pick(row)
-    if (value == null || Number.isNaN(value)) return null
+    if (value == null || !Number.isFinite(value)) return null
     sum += value
   }
   return sum

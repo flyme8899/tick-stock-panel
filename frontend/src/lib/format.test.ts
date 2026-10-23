@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { cnDateTimeFromUtc, fmtBigNum } from './format'
+import { cnDateTimeFromUtc, fmtBigNum, fmtPct, fmtPrice, fmtSignedFlow, fmtVolume, priceColorClass } from './format'
 
 // 后端自选 added_at 是 datetime.utcnow() 写入的 naive UTC 串 (无 Z 后缀)。
 // 若按 JS 默认的本地时区解析, 非北京时区会显示错日; 北京时间 00:00-08:00 加入的
@@ -84,5 +84,52 @@ describe('fmtBigNum: 按绝对值分级并保留符号', () => {
     for (const v of [null, undefined, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       expect(fmtBigNum(v)).toBe('—')
     }
+  })
+})
+
+// --------------------------------------------------------------------------- //
+// Infinity 漏网: Number.isNaN 不是有限性检查
+// --------------------------------------------------------------------------- //
+// `Number.isNaN(Infinity) === false`, 所以老写法会把 +Infinity / -Infinity 当成
+// 正常数字放过去: fmtPrice(Infinity) 出 "Infinity", fmtPct 出 "+Infinity%",
+// priceColorClass(Infinity) 出涨色 —— 而这一列在 UI 上本该是「无数据」。
+// 后端一旦漏出一个 inf (polars 的 close/prev - 1、除零、overflow 都会产出),
+// 整张表就会出现一屏 `Infinity` / `NaN`。统一换成 `!Number.isFinite`。
+describe('格式化函数: 非有限数一律按缺失处理', () => {
+  const nonFinite = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]
+
+  it('fmtPrice', () => {
+    for (const v of nonFinite) expect(fmtPrice(v)).toBe('—')
+    for (const v of [null, undefined]) expect(fmtPrice(v)).toBe('—')
+    expect(fmtPrice(12.345)).toBe('12.35')
+  })
+
+  it('fmtPct', () => {
+    for (const v of nonFinite) expect(fmtPct(v)).toBe('—')
+    expect(fmtPct(0.0123)).toBe('+1.23%')
+    expect(fmtPct(-0.0123)).toBe('-1.23%')
+  })
+
+  it('fmtVolume', () => {
+    for (const v of nonFinite) expect(fmtVolume(v)).toBe('—')
+    expect(fmtVolume(1.5e8)).toBe('1.50亿')
+  })
+
+  it('fmtSignedFlow', () => {
+    for (const v of nonFinite) expect(fmtSignedFlow(v)).toBe('—')
+    expect(fmtSignedFlow(-2.5e8)).toBe('-2.50亿')
+  })
+
+  it('priceColorClass: 非有限数不能染色', () => {
+    for (const v of nonFinite) expect(priceColorClass(v)).toBe('text-muted')
+    // 红涨绿跌
+    expect(priceColorClass(1)).toBe('text-bull')
+    expect(priceColorClass(-1)).toBe('text-bear')
+    expect(priceColorClass(0)).toBe('text-muted')
+  })
+
+  it('fmtBigNum 保持原有行为 (本批不动, 防回归)', () => {
+    for (const v of nonFinite) expect(fmtBigNum(v)).toBe('—')
+    expect(fmtBigNum(-500_000_000)).toBe('-5.00亿')
   })
 })

@@ -1,18 +1,18 @@
 // 数字 / 价格 / 涨跌幅 格式化(§6.0.2 等宽数字)
 
 export function fmtPrice(v: number | null | undefined, digits = 2): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   return v.toFixed(digits)
 }
 
 export function fmtPct(v: number | null | undefined, digits = 2): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   const sign = v > 0 ? '+' : ''
   return `${sign}${(v * 100).toFixed(digits)}%`
 }
 
 export function fmtVolume(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   const sign = v < 0 ? '-' : ''
   const a = Math.abs(v)
   if (a >= 1e8) return `${sign}${(a / 1e8).toFixed(2)}亿`
@@ -22,7 +22,7 @@ export function fmtVolume(v: number | null | undefined): string {
 
 // A 股语义色:红涨绿跌 → 仅用于价格相关元素
 export function priceColorClass(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v) || v === 0) return 'text-muted'
+  if (v == null || !Number.isFinite(v) || v === 0) return 'text-muted'
   return v > 0 ? 'text-bull' : 'text-bear'
 }
 
@@ -59,7 +59,7 @@ export function intradayNetTitle(clock: string, hasValue: boolean, source?: stri
 
 /** 带符号的金额（元）。正数红、负数绿由 priceColorClass 决定；缺失是 —，不是 0。 */
 export function fmtSignedFlow(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   if (v === 0) return '0'
   const sign = v > 0 ? '+' : '-'
   const abs = Math.abs(v)
