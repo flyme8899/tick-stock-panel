@@ -21,8 +21,14 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
     `mode` 在替换*之前*打到临时文件上。凭证类文件如果先落盘再 chmod, 中间有一段
     以默认权限存在的窗口; 先改临时文件就没有这个窗口。Windows 上 chmod 只影响
     只读位, 失败不该让写入失败, 所以吞掉 OSError, 与原调用处的处理一致。
+
+    临时文件必须每次唯一 (见 `_unique_tmp_path`), 与 `atomic_write_parquet` 同款:
+    固定叫 `<name>.tmp` 时, 同一进程的多个线程会往**同一个**临时文件里写 ——
+    一个线程 `os.replace` 把它搬走, 另一个线程紧接着 `os.replace` 已不存在的源就抛
+    FileNotFoundError; 更糟的是 `write_text` 会先截断已有临时文件, 此刻被搬走就是
+    把**空文件**提交成正式文件, 读侧读到空串 (配置被静默清空)。
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = _unique_tmp_path(path)
     try:
         tmp.write_text(text, encoding="utf-8")
         if mode is not None:
@@ -79,3 +85,34 @@ def atomic_write_parquet(df: pl.DataFrame, path: Path) -> None:
     finally:
         _discard_quietly(tmp)
 
+
+
+# --------------------------------------------------------------------------- #
+# 分区级进程内互斥
+# --------------------------------------------------------------------------- #
+
+_partition_locks: dict[str, threading.Lock] = {}
+_partition_locks_guard = threading.Lock()
+
+
+def partition_lock(key: str) -> threading.Lock:
+    """按分区键取一把进程内互斥锁, 用于「读旧分区 → 合并 → 写回」串行化。
+
+    并发写同一分区时, 两个线程都先读到同一份旧内容, 各自合并后分别 ``os.replace``,
+    后落盘的那份把先落盘的整份覆盖掉 —— 另一个线程写入的行直接消失, 而且**不报错**。
+    ``atomic_write_*`` 的唯一临时文件只保证两边不会互相搬走源文件, 挡不住这种逻辑覆盖。
+
+    锁按业务分区键 (如 ``pe_ttm`` / ``research_report:2026-10-23``) 分粒度, 不同
+    分区互不影响。锁对象常驻于字典, 因此不会出现「一个线程持有 A 锁、另一个线程拿到
+    新建的 B 锁」的分裂。
+
+    范围限定: 只做**进程内线程**互斥。跨进程 (例如 web 进程与独立回补脚本同时写同
+    一分区) 需要文件锁, 本模块不提供 —— 那种场景下 ``atomic_write_*`` 仍能保证不写
+    出半截文件, 但两份合并结果会互相覆盖。
+    """
+    with _partition_locks_guard:
+        lock = _partition_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _partition_locks[key] = lock
+        return lock

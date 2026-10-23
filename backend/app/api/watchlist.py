@@ -559,9 +559,27 @@ def watchlist_enriched(
     keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares", "asset_type"] if c in df.columns]
     df = df.select(keep)
 
+    # sanitize NaN / Inf —— 必须早于涨跌停价计算。
+    # polars 的 when/then 不是惰性分支: then 里的表达式会先在整列上求值再按 mask 选值,
+    # 所以「加了 is_not_null 守护」并不能阻止 polars_limit_price 在 NaN/Inf 行上做
+    # floor().cast(Int64) 的严格转换 —— 单个脏值就会抛 InvalidOperationError 让整个
+    # 端点 500。清洗放这里, 后续任何数值计算 (涨跌停价 / 扩展列) 看到的都是有限数。
+    float_cols = [c for c in df.columns if df[c].dtype.is_float()]
+    if float_cols:
+        df = df.with_columns([
+            pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite())
+              .then(None)
+              .otherwise(pl.col(c))
+              .alias(c)
+            for c in float_cols
+        ])
+
     # 涨跌停价 (交易所整数分半进位口径, 仅股票): prev_close/名称已在行上, 对自选的
     # 几十~几百行向量化现算为亚毫秒级, 不写回 enriched 存储。ETF (跨境/债券 5% 等)
     # 与指数的涨跌幅规则不在 price_limits 覆盖内, 置 null 由前端渲染 "—"。
+    # 注意: 上面虽已清洗 NaN/Inf, 这里仍用 is_finite & > 0 做守卫 —— 清洗只覆盖
+    # 「清洗那一刻已存在的列」, 双保险可保证将来前插的新数值列不会把严格转换打爆;
+    # prev_close == 0 不是有效参考价, 同样跳过 (否则会算出 0.0 的假涨停价)。
     as_of_date = as_of if isinstance(as_of, date) else None
     if as_of_date is None and as_of:
         try:
@@ -574,7 +592,12 @@ def watchlist_enriched(
             pl.lit(as_of_date),
             polars_is_risk_warning_name(pl.col("name")),
         )
-        stock_with_prev = (pl.col("asset_type") == "stock") & pl.col("prev_close").is_not_null()
+        stock_with_prev = (
+            (pl.col("asset_type") == "stock")
+            & pl.col("prev_close").is_not_null()
+            & pl.col("prev_close").is_finite()
+            & (pl.col("prev_close") > 0)
+        )
         df = df.with_columns(
             pl.when(stock_with_prev)
             .then(polars_limit_price(pl.col("prev_close"), pct, up=True))
@@ -674,17 +697,6 @@ def watchlist_enriched(
                             df = df.join(ext_df, on="symbol", how="left")
                     except Exception as e2:
                         logger.debug("ext join fallback failed for %s.%s: %s", config_id, field_name, e2)
-
-    # sanitize NaN / Inf
-    float_cols = [c for c in df.columns if df[c].dtype.is_float()]
-    if float_cols:
-        df = df.with_columns([
-            pl.when(pl.col(c).is_nan() | pl.col(c).is_infinite())
-              .then(None)
-              .otherwise(pl.col(c))
-              .alias(c)
-            for c in float_cols
-        ])
 
     # 按自选添加顺序（新加的在前）重排行
     order_map = {s: i for i, s in enumerate(symbols)}
