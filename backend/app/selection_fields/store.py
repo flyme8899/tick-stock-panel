@@ -9,7 +9,7 @@ from pathlib import Path
 
 import polars as pl
 
-from app.services.fs_utils import atomic_write_parquet, atomic_write_text
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text, partition_lock
 
 KINDS = ("northbound", "holders", "index_members", "unlock", "pe_ttm")
 
@@ -148,26 +148,35 @@ def commit(
         frame = _frame(kind, rows)
         path = part_path(data_dir, kind)
         path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_parquet(frame, path)
-        update_meta(data_dir, kind, status="ok", error="", note=note)
+        # 整表覆盖也要进锁: 与 upsert_pe_rows 的读改写共用 `pe_ttm` 这把锁, 否则
+        # 一次全量 commit 与一次增量 upsert 交错时, 全量落盘的那份会把增量行冲掉。
+        with partition_lock(kind):
+            atomic_write_parquet(frame, path)
+            update_meta(data_dir, kind, status="ok", error="", note=note)
         return
     update_meta(data_dir, kind, status="error", error=error, note=note)
 
 
 def upsert_pe_rows(data_dir: Path | str, rows: list[dict]) -> None:
+    """按 symbol 增量合并 PE。
+
+    「读旧表 → 合并 → 写回」必须在同一把锁里, 否则两个线程都读到同一份旧表, 各自
+    合并后分别落盘, 后落盘的那份把先落盘的新行整片覆盖 —— 没有异常, 数据静默丢失。
+    """
     if not rows:
         return
     fresh = _frame("pe_ttm", rows)
-    current = read_frame(data_dir, "pe_ttm")
-    merged = (
-        pl.concat([current, fresh], how="vertical")
-        .unique(subset=["symbol"], keep="last")
-        .sort("symbol")
-    )
     path = part_path(data_dir, "pe_ttm")
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_parquet(merged, path)
-    update_meta(data_dir, "pe_ttm", status="ok", error="", note="")
+    with partition_lock("pe_ttm"):
+        current = read_frame(data_dir, "pe_ttm")
+        merged = (
+            pl.concat([current, fresh], how="vertical")
+            .unique(subset=["symbol"], keep="last")
+            .sort("symbol")
+        )
+        atomic_write_parquet(merged, path)
+        update_meta(data_dir, "pe_ttm", status="ok", error="", note="")
 
 
 def load_checkpoint(data_dir: Path | str) -> dict:
