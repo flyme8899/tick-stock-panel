@@ -406,6 +406,30 @@ def _merge_etf_shares(
     return pl.concat([kept.select(columns), stamped], how="vertical_relaxed")
 
 
+_partition_locks: dict[str, threading.Lock] = {}
+_partition_locks_guard = threading.Lock()
+
+
+def _partition_lock(kind: str, trade_date: str) -> threading.Lock:
+    """同一分区的读改写要串行。
+
+    并发写同一分区时，两个线程都先读到同一份旧内容，各自合并后分别 ``os.replace``，
+    后落盘的那个把先落盘的整份覆盖掉 —— 另一个线程写入的行直接消失，而且不报错。
+    锁按 ``kind + 交易日`` 分粒度，不同分区互不影响。
+
+    进程内线程之间的竞态靠这把锁；跨进程（例如 web 进程与独立回补脚本同时写）由
+    ``atomic_write_parquet`` 的唯一临时文件保证不互相搬走源文件，但**不**保证两个
+    进程的合并结果都保留 —— 那种场景需要文件锁，当前没有这样的调用组合。
+    """
+    key = f"{kind}:{trade_date}"
+    with _partition_locks_guard:
+        lock = _partition_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _partition_locks[key] = lock
+        return lock
+
+
 def write_rows(
     data_dir: Path,
     kind: str,
@@ -419,7 +443,21 @@ def write_rows(
     个股分区里，``akshare_ths`` 不能覆盖已有的东财或数据中心行。其它来源仍是后写覆盖先写。
     ``etf_shares`` 的 ``ingested_at`` 只在主键第一次出现时写入，之后保留。
     ``now`` 只用于测试注入北京时间；缺省取当前北京时间。
+
+    「读旧分区 → 合并 → 写回」整段在同一分区的锁里完成，否则并发写会互相覆盖。
     """
+    with _partition_lock(kind, trade_date):
+        return _write_rows_locked(data_dir, kind, trade_date, rows, now=now)
+
+
+def _write_rows_locked(
+    data_dir: Path,
+    kind: str,
+    trade_date: str,
+    rows: list[dict],
+    *,
+    now: datetime | None = None,
+) -> int:
     _check(kind, trade_date)
     rows = prepare_rows(kind, rows)
     if kind == "etf_shares":
