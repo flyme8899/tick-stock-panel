@@ -624,3 +624,73 @@ def test_dates_etf_none_when_no_etf_in_watchlist(monkeypatch):
 
     assert res["dates"]["stock"] == "2026-10-08"
     assert res["dates"]["etf"] is None
+
+
+def test_watchlist_enriched_nonfinite_prev_close_does_not_raise(monkeypatch):
+    """昨收为 NaN / +Inf / -Inf 时不得抛异常 (端点 500), 涨跌停价降级为 null。
+
+    回归场景: polars 的 when/then 不是惰性分支, `then` 里的
+    `polars_limit_price` 会先在**整列**上求值, 内部
+    `(previous * 100 + 0.5).floor().cast(pl.Int64)` 是严格转换, 遇到 NaN/Inf
+    直接抛 InvalidOperationError。此前只有 `is_not_null` 守卫, NaN/Inf 能通过,
+    单个脏值就让整个自选行情接口 500; NaN/Inf 清洗又排在涨跌停价之后, 拦不住。
+    """
+    symbols = ("600519.SH", "600000.SH", "300001.SZ", "600009.SH")
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols",
+                        lambda: [{"symbol": s} for s in symbols])
+    repo = _FakeRepo(
+        enriched_df=_quote_df([
+            # 正常行 (回归锚点: 1800 x 1.1 = 1980 / 1620)
+            ("600519.SH", 1900.0, 1800.0, 123456.0, 1810.0, 1950.0, 1799.0),
+            # 非有限昨收三例: NaN / +Inf / -Inf
+            ("600000.SH", 10.0, float("nan"), 1000.0, 9.9, 10.1, 9.8),
+            ("300001.SZ", 10.0, float("inf"), 1000.0, 9.9, 10.1, 9.8),
+            ("600009.SH", 10.0, float("-inf"), 1000.0, 9.9, 10.1, 9.8),
+        ]),
+        enriched_date="2026-07-08",
+        name_map={"600519.SH": "贵州茅台", "600000.SH": "浦发银行",
+                  "300001.SZ": "特锐德", "600009.SH": "上海机场"},
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+    rows = {r["symbol"]: r for r in res["rows"]}
+
+    # 前提: 四行都要返回, 且没有一行因异常被静默丢掉
+    assert set(rows) == set(symbols)
+
+    # 正常行不受影响 (回归)
+    assert rows["600519.SH"]["limit_up_price"] == 1980.0
+    assert rows["600519.SH"]["limit_down_price"] == 1620.0
+    assert rows["600519.SH"]["prev_close"] == 1800.0
+
+    # 非有限昨收行: 涨跌停价降级为 null, 且 prev_close 本身也被清洗成 null
+    for sym in ("600000.SH", "300001.SZ", "600009.SH"):
+        assert rows[sym]["limit_up_price"] is None, sym
+        assert rows[sym]["limit_down_price"] is None, sym
+        assert rows[sym]["prev_close"] is None, sym
+        # 其余数值列不受牵连
+        assert rows[sym]["close"] == 10.0, sym
+
+
+def test_watchlist_enriched_zero_prev_close_skips_limit_prices(monkeypatch):
+    """prev_close == 0: 涨跌停价应为 null (0 不是有效参考价), 不能算成 0.0。
+
+    与 NaN/Inf 同属「没有可用昨收」, 走同一个 is_finite & > 0 守卫。
+    """
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols",
+                        lambda: [{"symbol": "600519.SH"}])
+    repo = _FakeRepo(
+        enriched_df=_quote_df([
+            ("600519.SH", 1900.0, 0.0, 123456.0, 1810.0, 1950.0, 1799.0),
+        ]),
+        enriched_date="2026-07-08",
+        name_map={"600519.SH": "贵州茅台"},
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+    row = res["rows"][0]
+
+    assert row["limit_up_price"] is None
+    assert row["limit_down_price"] is None
+    # prev_close=0 是有限数, 不属于 NaN/Inf 清洗范围, 原样透传
+    assert row["prev_close"] == 0.0
