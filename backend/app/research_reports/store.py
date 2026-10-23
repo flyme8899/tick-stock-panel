@@ -10,7 +10,7 @@ from pathlib import Path
 
 import polars as pl
 
-from app.services.fs_utils import atomic_write_parquet, atomic_write_text
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text, partition_lock
 
 KINDS = frozenset({"stock", "industry"})
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -86,24 +86,28 @@ def frame_of(kind: str, rows: list[dict]) -> pl.DataFrame:
 
 
 def write_rows(data_dir: Path, kind: str, publish_date: str, rows: list[dict]) -> int:
-    """按发布日合并。空列表不创建分区。"""
+    """按发布日合并。空列表不创建分区。
+
+    「读旧分区 → 合并 → 写回」整段在同一分区的锁里完成，否则并发写会互相覆盖:
+    两个线程都读到同一份旧内容，后落盘的那份把先落盘的行冲掉，且不报错。
+    """
     _check(kind, publish_date)
-    if not rows:
-        path = partition_file(data_dir, kind, publish_date)
-        if path.exists():
-            return align_frame(kind, pl.read_parquet(path)).height
-        return 0
-    incoming = frame_of(kind, rows)
     path = partition_file(data_dir, kind, publish_date)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        previous = align_frame(kind, pl.read_parquet(path))
-        merged = pl.concat([previous, incoming], how="vertical_relaxed")
-    else:
-        merged = incoming
-    merged = merged.unique(subset=["info_code"], keep="last", maintain_order=True)
-    atomic_write_parquet(merged, path)
-    return merged.height
+    with partition_lock(f"{kind}:{publish_date}"):
+        if not rows:
+            if path.exists():
+                return align_frame(kind, pl.read_parquet(path)).height
+            return 0
+        incoming = frame_of(kind, rows)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            previous = align_frame(kind, pl.read_parquet(path))
+            merged = pl.concat([previous, incoming], how="vertical_relaxed")
+        else:
+            merged = incoming
+        merged = merged.unique(subset=["info_code"], keep="last", maintain_order=True)
+        atomic_write_parquet(merged, path)
+        return merged.height
 
 
 def align_frame(kind: str, frame: pl.DataFrame) -> pl.DataFrame:
