@@ -74,12 +74,25 @@ export function flowClock(capturedAt: string | null | undefined): string {
   return match?.[1] ?? ''
 }
 
+/**
+ * 金额（元）→ 万亿 / 亿 / 万。按 **绝对值** 分级并保留符号。
+ *
+ * 早期版本拿有符号值直接比较 `v >= 1e8`，负数永远不满足，全部落到 `v.toFixed(0)`：
+ * `-5e8` 出 `-500000000`，而同量级的正数出 `5.00亿` —— 差 8 个数量级。归母净利润、
+ * 板块净流入这类字段常年为负，显示出来就是一串难读的裸数字。
+ * 同时把 `Infinity` / `-Infinity` 归到 `—`（原实现会输出 `Infinity亿`），
+ * 并规避 `(-0.4).toFixed(0) === '-0'` 的负零。
+ */
 export function fmtBigNum(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '—'
-  if (v >= 1_000_000_000_000) return `${(v / 1_000_000_000_000).toFixed(2)}万亿`
-  if (v >= 100_000_000) return `${(v / 100_000_000).toFixed(2)}亿`
-  if (v >= 10_000) return `${(v / 10_000).toFixed(0)}万`
-  return v.toFixed(0)
+  if (v == null || !Number.isFinite(v)) return '—'
+  const sign = v < 0 ? '-' : ''
+  const abs = Math.abs(v)
+  if (abs >= 1_000_000_000_000) return `${sign}${(abs / 1_000_000_000_000).toFixed(2)}万亿`
+  if (abs >= 100_000_000) return `${sign}${(abs / 100_000_000).toFixed(2)}亿`
+  if (abs >= 10_000) return `${sign}${(abs / 10_000).toFixed(0)}万`
+  // 兜底分支四舍五入后可能是 0，此时不能再带负号
+  const rounded = abs.toFixed(0)
+  return rounded === '0' ? '0' : `${sign}${rounded}`
 }
 
 export function fmtDate(s: string | Date | null | undefined): string {

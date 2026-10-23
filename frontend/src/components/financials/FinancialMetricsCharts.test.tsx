@@ -158,6 +158,24 @@ describe('buildAnnualOption', () => {
     expect(html).toContain('50.00亿')
     expect(html).toContain('1.50 元')
   })
+
+  it('亏损年份的 tooltip 与柱子口径一致 (负数也要换单位)', () => {
+    // 亏损年报是常态: 柱子按亿元画 (-3.2), tooltip 若把 -3.2e8 原样打出 -320000000,
+    // 同一条 tooltip 里就会出现「柱子 -3.2 / 文字 -320000000」的割裂。
+    const loss = buildAnnualBundle(
+      [{ period_end: '2023-12-31', eps_basic: -0.8 }, { period_end: '2024-12-31', eps_basic: 0.3 }],
+      [
+        { period_end: '2023-12-31', revenue: 2.4e9, net_income_attributable: -3.2e8 },
+        { period_end: '2024-12-31', revenue: 3.1e9, net_income_attributable: 1.1e8 },
+      ],
+    )
+    const opt: any = buildAnnualOption(loss, CT)
+    const html: string = opt.tooltip.formatter([{ dataIndex: 0 }])
+    expect(html).toContain('-3.20亿')
+    expect(html).toContain('24.00亿')
+    expect(html).not.toContain('-320000000')
+    expect(html).toContain('-0.80 元')
+  })
 })
 
 describe('FinancialMetricsCharts 渲染', () => {
