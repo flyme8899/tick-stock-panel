@@ -21,8 +21,14 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
     `mode` 在替换*之前*打到临时文件上。凭证类文件如果先落盘再 chmod, 中间有一段
     以默认权限存在的窗口; 先改临时文件就没有这个窗口。Windows 上 chmod 只影响
     只读位, 失败不该让写入失败, 所以吞掉 OSError, 与原调用处的处理一致。
+
+    临时文件必须每次唯一 (见 `_unique_tmp_path`), 与 `atomic_write_parquet` 同款:
+    固定叫 `<name>.tmp` 时, 同一进程的多个线程会往**同一个**临时文件里写 ——
+    一个线程 `os.replace` 把它搬走, 另一个线程紧接着 `os.replace` 已不存在的源就抛
+    FileNotFoundError; 更糟的是 `write_text` 会先截断已有临时文件, 此刻被搬走就是
+    把**空文件**提交成正式文件, 读侧读到空串 (配置被静默清空)。
     """
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = _unique_tmp_path(path)
     try:
         tmp.write_text(text, encoding="utf-8")
         if mode is not None:
