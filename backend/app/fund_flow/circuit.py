@@ -64,13 +64,45 @@ class CircuitBreaker:
 
     def snapshot(self) -> dict:
         with self._lock:
-            open_now = self._clock() < self.open_until
+            now = self._clock()
+            open_now = now < self.open_until
             return {
                 "source": self.source,
                 "state": "open" if open_now else "closed",
                 "consecutive_failures": self.consecutive_failures,
                 "open_until": self.open_until,
+                # ``open_until`` 是 ``self._clock()`` 基准上的绝对时刻, 缺省时钟是
+                # ``time.monotonic()`` —— 进程重启后从 0 重新计数。把它原样写盘、
+                # 再在重启后读回来, 冷却期会被放大成「重启前已运行了多久」。
+                # 落盘只认这个剩余秒数; ``open_until`` 保留只为兼容旧状态文件。
+                "cooldown_remaining_s": max(0.0, self.open_until - now),
             }
+
+    def restore(self, row: dict) -> None:
+        """从 ``snapshot()`` 的结果恢复。``row`` 可能来自旧版本。
+
+        ``open_until`` 的绝对值在新进程里没有意义 (monotonic 从 0 起算), 所以有
+        ``cooldown_remaining_s`` 时按剩余秒数重算。
+
+        旧状态文件只有 ``open_until``, 无法判断它是「monotonic 残留」还是「别的东西」。
+        两种可能的代价不对称: 当成有效值会白等几天, 当成过期只是提前重试一次 (失败
+        会重新触发熔断)。取后者 —— 一律视为已过期。
+        """
+        with self._lock:
+            try:
+                self.consecutive_failures = int(row.get("consecutive_failures") or 0)
+            except (TypeError, ValueError):
+                self.consecutive_failures = 0
+            remaining = row.get("cooldown_remaining_s")
+            if remaining is None:
+                # 旧格式, 见上: 丢弃 open_until, 下一轮正常重试。
+                self.open_until = 0.0
+                return
+            try:
+                left = max(0.0, float(remaining))
+            except (TypeError, ValueError):
+                left = 0.0
+            self.open_until = self._clock() + left if left > 0 else 0.0
 
 
 def call_with_retry(

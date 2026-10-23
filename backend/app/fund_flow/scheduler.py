@@ -866,11 +866,9 @@ class FundFlowWorker:
             if name == "akshare" and intraday_busy:
                 continue
             row = saved.get(name) or {}
-            try:
-                breaker.open_until = float(row.get("open_until") or 0)
-                breaker.consecutive_failures = int(row.get("consecutive_failures") or 0)
-            except (TypeError, ValueError):
-                continue
+            # 交给 breaker 自己解释: open_until 是 monotonic 基准的绝对时刻, 跨进程
+            # 重启后没有意义, 要按剩余冷却秒数重算。见 CircuitBreaker.restore。
+            breaker.restore(row)
 
     def _persist_breakers(self, data_dir: Path) -> None:
         def mutate(payload: dict) -> None:
