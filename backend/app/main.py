@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -515,11 +516,32 @@ async def lifespan(app: FastAPI):
         mining_process_lock.release()
 
 
+def _api_docs_enabled() -> bool:
+    """交互式 API 文档默认关闭, 需要时用环境变量显式打开。
+
+    默认开着的三个端点在生产里是**不认证就能拿到的资产清单**:
+    - ``/openapi.json`` 一份就能列出全部路由、参数、请求体 schema (实测约 300KB,
+      300+ 条 ``/api/`` 路由), 攻击者不必猜路径;
+    - ``/docs`` / ``/redoc`` 直接在上面套一层可点可试的 UI。
+
+    而认证中间件只拦 ``/api/`` 前缀, 这三个路径本来就不在拦截范围内, 只能靠
+    白名单把它们放行 —— 现在改成默认不挂载, 白名单也就一并清掉。
+    自托管调试需要时: ``TSP_ENABLE_API_DOCS=1`` 启动即可恢复原行为。
+    """
+    raw = os.environ.get("TSP_ENABLE_API_DOCS", "").strip().lower()
+    return raw not in ("", "0", "false", "no", "off")
+
+
+_DOCS_ON = _api_docs_enabled()
+
 app = FastAPI(
     title="Tick Stock Panel",
     version=__version__,
     description="A 股选股 + 回测面板 — TickFlow 适配",
     lifespan=lifespan,
+    docs_url="/docs" if _DOCS_ON else None,
+    redoc_url="/redoc" if _DOCS_ON else None,
+    openapi_url="/openapi.json" if _DOCS_ON else None,
 )
 
 # CORS: 允许局域网访问 (自托管场景, 放开所有来源)
@@ -546,15 +568,14 @@ _AUTH_WHITELIST_PREFIX = ("/api/auth/",)
 _AUTH_WHITELIST_EXACT = (
     "/health",
     "/api/health",
-    "/openapi.json",
-    "/api/openapi.json",
-    "/docs",
-    "/redoc",
     # SSE 事件流: EventSource 带不了 Authorization 头, 凭证即 query 里的
     # 一次性票据, 端点内校验 (api/events.py); POST /api/events/ticket 不在
     # 白名单, 仍走网关 Bearer 通道
     "/api/events",
 )
+# 注: /openapi.json、/api/openapi.json、/docs、/redoc 原先在这份白名单里, 为的是让
+# 未登录也能看交互式文档。现在文档默认不挂载 (见 `_api_docs_enabled`), 白名单随之清掉;
+# 用 TSP_ENABLE_API_DOCS=1 打开后它们仍可匿名访问, 开启文档就等于接受公开 schema。
 
 
 @app.middleware("http")
