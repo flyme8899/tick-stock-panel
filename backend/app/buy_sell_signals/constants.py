@@ -1,0 +1,182 @@
+"""买卖信号骨架的元数据常量。
+
+这个包**故意**与 `app.services.trade_marks`、`app.news.push` 没有任何 import 关系。
+
+原因不是洁癖: 那两个模块里的 `VWAP_BAND = 0.015`、`RANGE_BAND = 0.003`、
+`T_COOLDOWN_MIN = 60` 是**提醒层**参数 —— 它们回答「这条消息值不值得现在弹出来」。
+信号门禁回答的是另一个问题: 「这个形态是不是一个有效信号」。把提醒层的阈值搬进
+门禁, 等于让推送静音策略悄悄改掉信号的判定标准, 而且改的时候没有任何人会觉得
+自己动了信号。
+
+数值上可能碰巧相等, 语义上没有任何关系。所以这里重新定义、独立演进, 并且
+`tests/test_buy_sell_signal_registry.py` 里有一条静态检查守着「本包不得 import
+这三个符号」。
+
+## 冷却字段为什么叫 `push_dedupe_cooldown_until`
+
+提醒层的「冷却」在本仓至少有两种不同含义:
+
+- `T_COOLDOWN_MIN`: 做 T 里"同一只票一天之内不再出一轮", 是**轮次上限**
+- `push_dedupe_cooldown_until`: 同一信号在推送通道里别重复播报, 是**去重**
+
+这两件事只要共用一个名字, 将来做 T 分支(旁支 h)与本包混在一起时就一定会有人
+搞错。所以本包只用后者, 并且名字里带 `push_` 前缀, 明确它属于提醒层而不属于信号层。
+
+## Bonferroni m=6
+
+`BONFERRONI_M = 6` 来自 PARAM_NAIL, 对应 `independent_family_v1` 的家族划分:
+6 个独立家族各做一次检验, 显著性门槛 α_family = 0.05 / 6。
+
+本批次**只把它写进元数据**, 不跑 p 值、不做显著性判定。写进 `version` 字符串是为了
+让以后任何一条信号都能追溯"它是在哪个多重检验口径下被声明的"——事后补这个信息是
+补不回来的。
+
+仅供研究，不构成投资建议；执行须人工确认。
+"""
+from __future__ import annotations
+
+from typing import Final
+
+# ---------------------------------------------------------------- 命名空间
+
+NAMESPACE: Final = "buy_sell_signals"
+"""存储 / 日志 / 未来表的命名空间前缀。
+
+与 `trade_marks` 分开、与未来做 T(旁支 h)分开。任何跨包引用都必须带这个前缀,
+不允许出现裸的 `signal_registry` 之类可能撞车的名字。
+"""
+
+# ---------------------------------------------------------------- 设计钉版本
+
+SIGNAL_DESIGN_PIN: Final = "design_pin_v1"
+"""信号设计口径的版本钉。
+
+含义: 从"哪些字段进注册表"到"状态机允许怎么走"这一整套设计, 当前是第几版。
+改动 `models.SignalRecord` 的必填字段、或改动 `state_machine` 的转移表, 都要 bump。
+
+与 `indicators/pipeline.py` 的 `LIMIT_FORMULA_VERSION` 同一性质: 它是给人看的标签,
+真正的判据在代码与测试里。
+"""
+
+# ---------------------------------------------------------------- 多重检验口径
+
+BONFERRONI_SCHEME_ID: Final = "independent_family_v1"
+BONFERRONI_M: Final = 6
+BONFERRONI_FAMILY_ALPHA: Final = 0.05 / BONFERRONI_M
+"""α_family = 0.05 / 6 ≈ 0.008333。
+
+**仅供元数据展示与文档引用**, 本批次不做 p 值计算、不做显著性门禁。
+"""
+
+
+def design_version() -> str:
+    """拼出可写进 `SignalRecord.version` 的版本串。
+
+    形如 ``design_pin_v1+independent_family_v1:m6``。把 Bonferroni 口径拼进来是
+    刻意的: 版本串会跟着记录一起落盘(将来), 事后能直接读出"这条信号是在 m=6 的
+    多重检验口径下声明的", 而不需要去翻当时的 git log。
+    """
+    return f"{SIGNAL_DESIGN_PIN}+{BONFERRONI_SCHEME_ID}:m{BONFERRONI_M}"
+
+
+# ---------------------------------------------------------------- 枚举取值
+
+SIGNAL_FAMILIES: Final = frozenset({"minute_event", "daily_fundamental", "composite"})
+"""信号家族。决定这只信号靠什么数据、走什么验证路径。"""
+
+EVENT_CLASSES: Final = frozenset(
+    {
+        "auction",            # 竞价: 09:25 集合竞价定盘那一刻的信息
+        "intraday_volume",    # 盘中放量
+        "limit_reopen",       # 炸板 / 回封
+        "daily_quality_value",# 日线质量与估值
+        "other",
+    }
+)
+
+# ---------------------------------------------------------------- 竞价 / 开盘后噪声
+
+AUCTION_RULE_ID_NONE: Final = None
+"""非竞价类信号的 `auction_rule_id` 取值。
+
+用 `None` 而不是空串: 空串看起来像"有规则但名字是空的", `None` 才明确"这一类
+信号根本不经过竞价规则"。
+"""
+
+AUCTION_STAT_BUCKET_0925: Final = "auction_0925"
+"""09:25 集合竞价统计桶。竞价类信号的统计只能落进这个桶, 且只有这一个桶。
+
+**本批次不做竞价回测**。这里定义常量是为了让字段有合法的封闭取值, 而不是为了让
+谁现在就去算它。特别地: **不允许**用 09:30 之后第一根 1 分钟 K 线冒充 09:25 ——
+两者是完全不同的信息集(集合竞价撮合 vs 连续竞价), 混用会让竞价类信号的统计
+全部失真。
+"""
+
+POST_OPEN_NOISE_BUCKETS: Final = frozenset(
+    {
+        "open_0930_1000",     # 开盘半小时, 昨收缺口与情绪释放最集中
+        "intraday_1000_1430", # 常规盘中
+        "close_1430_1500",    # 尾盘, 资金调仓
+    }
+)
+
+NOISE_MIX_FORBIDDEN: Final = True
+"""竞价桶与开盘后噪声桶**不得混算**。
+
+这是硬约束而不是配置项: 两类样本的统计性质不同(竞价是离散撮合、开盘后是连续
+成交), 合并算出来的均值/命中率没有解释意义。所以写成了模块级常量而不是记录字段
+—— 记录上留一个可配置开关, 迟早会有人把它打开。
+"""
+
+# ---------------------------------------------------------------- 冷却(提醒层, 非信号层)
+
+PUSH_DEDUPE_COOLDOWN_FIELD: Final = "push_dedupe_cooldown_until"
+"""提醒层去重字段名。语义: 在此之前不要重复推送同一信号。
+
+**不是**做 T 的"单日每票 1 轮"上限。两者互不引用、互不推导。
+"""
+
+PUSH_DEDUPE_COOLDOWN_MIN: Final = 30
+"""默认的推送去重窗口(分钟)。
+
+与 `trade_marks.T_COOLDOWN_MIN = 60` **没有关系**: 那个是"同一只票一天内不再出
+新一轮做 T", 语义是轮次上限; 这个是"同一条信号别重复播报", 语义是去重。
+数值不同是结果, 不是目的 —— 就算将来碰巧改成一样, 也不得合并成一个常量。
+"""
+
+# ---------------------------------------------------------------- 行业口径
+
+INDUSTRY_STANDARD_SW_L1: Final = "sw_l1"
+"""默认行业口径: 申万一级。
+
+**PIT 来源只能用 `sw_pit` 里那套 history × l1_map**。同花顺当前态
+(`ext_hy_ths` / `industry_ths`) 是快照, 没有 valid_from/valid_to, 拿它当历史
+归属就是在用未来的行业分类污染过去的信号 —— 而这类污染从结果上完全看不出来。
+"""
+
+INDUSTRY_STANDARD_THS_CURRENT: Final = "ths_current"
+"""同花顺当前态。**不被本包接受**, 仅用于在错误信息里指名道姓地说清拒绝的是什么。"""
+
+# ---------------------------------------------------------------- 合规
+
+DISCLAIMER_KEY: Final = "research_only_v1"
+
+__all__ = [
+    "AUCTION_RULE_ID_NONE",
+    "AUCTION_STAT_BUCKET_0925",
+    "BONFERRONI_FAMILY_ALPHA",
+    "BONFERRONI_M",
+    "BONFERRONI_SCHEME_ID",
+    "DISCLAIMER_KEY",
+    "EVENT_CLASSES",
+    "INDUSTRY_STANDARD_SW_L1",
+    "INDUSTRY_STANDARD_THS_CURRENT",
+    "NAMESPACE",
+    "NOISE_MIX_FORBIDDEN",
+    "POST_OPEN_NOISE_BUCKETS",
+    "PUSH_DEDUPE_COOLDOWN_FIELD",
+    "PUSH_DEDUPE_COOLDOWN_MIN",
+    "SIGNAL_DESIGN_PIN",
+    "SIGNAL_FAMILIES",
+    "design_version",
+]
