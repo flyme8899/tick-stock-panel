@@ -10,7 +10,7 @@ from pathlib import Path
 
 import polars as pl
 
-from app.services.fs_utils import atomic_write_parquet, atomic_write_text, partition_lock
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text, partition_writer
 
 KINDS = frozenset({"stock", "industry"})
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -90,10 +90,14 @@ def write_rows(data_dir: Path, kind: str, publish_date: str, rows: list[dict]) -
 
     「读旧分区 → 合并 → 写回」整段在同一分区的锁里完成，否则并发写会互相覆盖:
     两个线程都读到同一份旧内容，后落盘的那份把先落盘的行冲掉，且不报错。
+
+    锁是两层的: 线程锁 + 跨进程文件锁 (``partition_writer``)。研报定时任务与
+    ``scripts/`` 下的补数脚本会写同一个发布日分区, 只有线程锁挡不住后者。
     """
     _check(kind, publish_date)
     path = partition_file(data_dir, kind, publish_date)
-    with partition_lock(f"{kind}:{publish_date}"):
+    with partition_writer(data_dir, f"{kind}:{publish_date}", retry_s=0.2, attempts=10,
+                          on_busy="info"):
         if not rows:
             if path.exists():
                 return align_frame(kind, pl.read_parquet(path)).height
