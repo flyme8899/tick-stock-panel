@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
+from app.services.json_safe import json_safe
 from app.config import settings
 from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
@@ -409,6 +410,17 @@ class BacktestService:
         return None
 
 
+def _json_safe(v):
+    """本模块专用: 走 `coerce=True` 语义。
+
+    这里的返回值直接进 `json.dumps`, 后面**没有** `jsonable_encoder` 再帮忙编码,
+    所以 datetime 必须转 isoformat、numpy 标量必须转原生 —— 这是原先本地实现的
+    语义, 被 `tests/test_backtest_stats_json_safe.py` 钉着
+    (`_json_safe(date(2026,1,2)) == "2026-01-02"`), 收敛到共享实现时必须原样保住。
+    """
+    return json_safe(v, coerce=True)
+
+
 def _config_to_dict(c: BacktestConfig) -> dict:
     return {
         "symbols": c.symbols,
@@ -423,18 +435,3 @@ def _config_to_dict(c: BacktestConfig) -> dict:
         "matching": c.matching,
     }
 
-
-def _json_safe(v):
-    # 非有限浮点 (inf / NaN) 必须先于原生标量分支拦下: Starlette 的 JSONResponse 用
-    # json.dumps(allow_nan=False) 渲染, 漏一个就是整个响应 500。pf.stats() 经
-    # pandas Series.to_dict() 出来时 numpy 标量已被装箱成原生 float (全胜时
-    # Profit Factor = inf, 零波动时 Sharpe = NaN), 两条分支都要覆盖。
-    if isinstance(v, (float, np.floating)) and not math.isfinite(float(v)):
-        return None
-    if isinstance(v, (int, float, str, bool)) or v is None:
-        return v
-    if isinstance(v, (np.floating, np.integer)):
-        return float(v)
-    if hasattr(v, "isoformat"):
-        return v.isoformat()
-    return str(v)

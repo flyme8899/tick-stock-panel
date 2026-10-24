@@ -61,6 +61,7 @@ from app.extensions.loader import (
     start_backend_extensions,
 )
 from app.jobs import daily_pipeline
+from app.services.json_safe import SafeJSONResponse
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
@@ -442,6 +443,29 @@ async def _application_lifespan(app: FastAPI):
         extension_registry,
     )
 
+    # regime 口径自检: 口径常量变过而历史表没重算, 表里就会混着两套口径的行,
+    # 下游(回测 regime_filter / AI 助手 / Regime 页)读到的是混合序列。
+    # 这里只做**明确拦截**: 比对 stamp 与当前常量指纹, 不一致就大声报出来并挂到
+    # app.state 上由 /api/regime/caliber 暴露给前端, 但**不自动重算** —— 全量重算要
+    # 扫全 A enriched, 在启动路径里同步做会把启动拖到分钟级, 放后台则无法告知用户
+    # 结果。前置条件不在也无法判断(enriched 可能还没同步), 交给用户显式触发。
+    try:
+        from app.services import regime_caliber
+
+        caliber = regime_caliber.check_caliber(store.data_dir)
+        app.state.regime_caliber = caliber
+        message = regime_caliber.describe_drift(caliber)
+        if caliber["match"]:
+            logger.info(message)
+        elif caliber["reason"] == "missing":
+            logger.warning("%s — 建议执行一次 POST /api/regime/recompute 全量重算", message)
+        else:
+            logger.warning("%s — 必须执行一次 POST /api/regime/recompute 全量重算", message)
+    except Exception as e:  # noqa: BLE001
+        # 自检失败不阻断启动: 它只是提示, 不该让整个服务起不来。
+        logger.warning("regime caliber check failed (soft): %s", e)
+        app.state.regime_caliber = None
+
     try:
         yield
     finally:
@@ -571,6 +595,11 @@ app = FastAPI(
     docs_url="/docs" if _DOCS_ON else None,
     redoc_url="/redoc" if _DOCS_ON else None,
     openapi_url="/openapi.json" if _DOCS_ON else None,
+    # 出口统一消毒: polars/pandas 除零、空集 mean 会产出 inf/NaN, Starlette 的
+    # JSONResponse 用 allow_nan=False 渲染 —— 漏一个非有限浮点就是**整段响应 500**,
+    # 而不是那一行变 null。默认响应类换成 SafeJSONResponse, 渲染前先过 json_safe,
+    # 于是任何走默认 JSONResponse 的路由都不可能吐出 NaN/Infinity, 也不会因此 500。
+    default_response_class=SafeJSONResponse,
 )
 
 # CORS: 默认放开所有来源 (自托管场景, 局域网访问)。

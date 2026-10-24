@@ -122,7 +122,7 @@ function PanelEmpty({ icon: Icon, title, hint, action }: {
 }
 
 function fmtReturn(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   return fmtPct(v)
 }
 
@@ -414,19 +414,19 @@ function BenchmarkCard({ q, onOpenStock }: {
 }
 
 function fmtRatio(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   if (Math.abs(v) >= 100) return v.toFixed(0)
   return v.toFixed(1)
 }
 
 function fmtGapThreshold(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '5%'
+  if (v == null || !Number.isFinite(v)) return '5%'
   const pct = Math.round(v * 1000) / 10
   return `${Number.isInteger(pct) ? String(pct) : pct.toFixed(1)}%`
 }
 
 function fmtRatioThreshold(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '10'
+  if (v == null || !Number.isFinite(v)) return '10'
   return Number.isInteger(v) ? String(v) : v.toFixed(1)
 }
 

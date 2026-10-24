@@ -60,6 +60,35 @@ v_breadth = 近 20 个交易日, 每日 (上涨家数 / 下跌家数) 的均值
 > 让整条 `regime_history`（含 `up_count/down_count` 与派生的 score/state）统一到新口径。
 > 这是**有意为之**的口径修正 —— regime 分数会小幅变化，不是 bug。
 
+### 2.5.1 这条纪律现在是**自动检测**的（口径版本 / caliber）
+
+上面那句"上线必做"原本靠人记住。漏做不会有任何信号：`up_count` 就是 `up_count`，
+没有任何字段标注它是哪套算法算的，混算就此永久留在表里。现在由机器守：
+
+| 环节 | 行为 |
+|---|---|
+| 口径定义 | `regime_builder.REGIME_CALIBER_VERSION`（人读标签）+ 参与口径的常量清单 `regime_caliber.CALIBER_CONSTANTS` |
+| 指纹 | `regime_caliber.caliber_fingerprint()` 把**常量值本身**序列化后取 sha256 前 16 位。改任何常量，指纹必变 —— **不依赖谁记得 bump 版本号** |
+| 登记 | `<data_dir>/regime_history/.regime_caliber.json`，跟着表一起搬 |
+| 写 stamp | **只在全量重算成功后**（`POST /api/regime/recompute` 不传 `start`）。区间重算只统一了一段，写 stamp 等于撒谎，所以不写 |
+| 启动自检 | `main.py` lifespan 比对一次，不一致打 warning 并挂到 `app.state.regime_caliber`。**不自动重算** —— 全量重算要扫全 A enriched，放在启动路径里会把启动拖到分钟级 |
+| 增量拦截 | `compute_regime_incremental` 发现口径变了就**直接返回空表、不补算**，日志写明"需要全量重算"；`daily_pipeline` 把这条记为 `skipped: regime_caliber_drift`，进度文案显示"市场环境口径已变更, 需全量重算" |
+| 只读查询 | `GET /api/regime/caliber` → `{match, reason, changed, version, fingerprint, stamped_at, message}` |
+
+两种 `match=false` 必须区别对待，这是刻意的：
+
+- `reason="missing"`：从没登记过（首次部署，或本特性上线前的历史数据）。**没有证据**说明表里
+  是混口径的，只提示、不拦增量。
+- `reason="changed"`：有 stamp 且指纹不同 —— 表里确实可能混着两套口径，增量被拦。
+
+**新增口径参数时必须把它加进 `CALIBER_CONSTANTS`**，否则它变了指纹也不会变。
+`backend/tests/test_regime_caliber.py` 里有一条测试逐个常量改值验证指纹必变，新加常量
+忘了登记不会静默通过。
+
+**注意**：本特性不动任何口径数值。`BREADTH_OUTLIER` / `BREADTH_THRESHOLDS` / 分档线
+一个都没改，`test_thresholds_frozen` 与 `test_threshold_values_themselves_are_not_touched`
+一起钉着。
+
 **注意（北交所）**：北交所个股 ±30% 涨跌停会被当作毛刺剔除。
 这与研究口径一致（研究同样剔除 `|r|>25%`），因此**保留该行为**，在此写明即可。
 

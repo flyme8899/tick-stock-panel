@@ -42,7 +42,7 @@ function renderExtInline(
   expanded: boolean,
   onToggle: () => void,
 ): ReactNode {
-  if (val == null || (typeof val === 'number' && Number.isNaN(val))) {
+  if (val == null || (typeof val === 'number' && !Number.isFinite(val))) {
     return <span className="text-muted">—</span>
   }
   if (typeof val === 'number') {
@@ -218,7 +218,7 @@ export function StockInfoBar({
       const { configId, fieldName } = f.source
       const val = extData[`${configId}__${fieldName}`]
       // 无值的 ext 字段整体跳过（与 builtin 无数据行为一致）
-      if (val == null || (typeof val === 'number' && Number.isNaN(val))) return null
+      if (val == null || (typeof val === 'number' && !Number.isFinite(val))) return null
       const cellKey = `${symbol}::${f.id}`
       return (
         <span key={f.id} className="inline-flex items-center gap-1">

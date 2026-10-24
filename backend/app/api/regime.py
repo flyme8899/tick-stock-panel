@@ -181,12 +181,13 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
     repo = request.app.state.repo
     data_dir = _data_dir(request)
     end = end or date.today()
+    full_recompute = start is None
     if start is None:
         # 全量: 从 enriched 最早日强制重算到今天
         earliest = regime_builder.earliest_enriched_date(repo)
         if earliest is None:
             invalidate_regime_cache()
-            return {"ok": True, "computed": 0}
+            return {"ok": True, "computed": 0, "caliber_stamped": False}
         start = earliest
     new_rows = regime_builder.run_regime_batch(repo, start=start, end=end)
     if not new_rows.is_empty():
@@ -203,11 +204,46 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
             mainline_rows += rows.height
 
     invalidate_regime_cache()
+    # 只有**全量**重算完才写 stamp: 那是"整张表已经统一到当前口径"的唯一时刻。
+    # 区间重算(start 传了)只覆盖一段, 表里仍是混合口径 —— 这时写 stamp 等于撒谎,
+    # 下一次启动会把"口径一致"当作事实, 混算就此被永久掩盖。
+    caliber_written = False
+    if full_recompute:
+        from app.services import regime_caliber
+
+        regime_caliber.write_stamp(data_dir, reason="POST /api/regime/recompute 全量重算")
+        caliber_written = True
     return {
         "ok": True,
         "computed": new_rows.height if not new_rows.is_empty() else 0,
         "phase_days": phase_days,
         "mainline_rows": mainline_rows,
+        "caliber_stamped": caliber_written,
+    }
+
+
+@router.get("/caliber")
+def regime_caliber_status(request: Request):
+    """当前口径与历史表口径是否一致(只读)。
+
+    ``match=False`` + ``reason="changed"`` 表示口径常量变过、表里可能混着两套口径 ——
+    前端据此在 Regime 页挂一条提示, 引导用户点「重算」。``reason="missing"`` 是从来没
+    登记过(本特性上线前的历史数据), 只提示、不拦。
+
+    请求路径不读 parquet, 只读一个几百字节的 stamp 文件。
+    """
+    from app.services import regime_caliber
+
+    report = regime_caliber.check_caliber(_data_dir(request))
+    return {
+        "match": report["match"],
+        "reason": report["reason"],
+        "changed": report["changed"],
+        "version": report["current"]["version"],
+        "fingerprint": report["current"]["fingerprint"],
+        "stamped_version": (report["stamped"] or {}).get("version"),
+        "stamped_at": (report["stamped"] or {}).get("written_at"),
+        "message": regime_caliber.describe_drift(report),
     }
 
 
