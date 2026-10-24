@@ -21,6 +21,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from app.services.json_safe import json_safe as _json_safe_shared
+
 logger = logging.getLogger(__name__)
 
 MAX_RETAINED_RUNS = 200
@@ -46,26 +48,8 @@ class FactorRunBusyError(FactorRunStoreError):
 
 
 def json_safe(value: Any) -> Any:
-    """把回测结果收成可落盘的 JSON。非有限浮点记为 null，避免整份结果写失败。"""
-    if value is None or isinstance(value, (str, bool, int)):
-        return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, Path):
-        return str(value)
-    module = type(value).__module__
-    if module == "numpy" or module.startswith("numpy."):
-        try:
-            return json_safe(value.item())
-        except Exception:  # noqa: BLE001 — numpy 标量形态不一，失败就退回字符串
-            return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_safe(item) for item in value]
-    return str(value)
+    """本模块专用: 走 `coerce=True` 语义 (结果直接落盘 / 直出 json.dumps, 无上层编码)。"""
+    return _json_safe_shared(value, coerce=True)
 
 
 def _now_iso() -> str:

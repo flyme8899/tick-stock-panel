@@ -26,7 +26,7 @@ export function boardTag(symbol: string): { label: string; color: string } | nul
 // ===== RSI 指标带颜色 =====
 
 export function RSIBadge({ value }: { value: number | null | undefined }) {
-  if (value == null || Number.isNaN(value)) return <span className="text-muted">—</span>
+  if (value == null || !Number.isFinite(value)) return <span className="text-muted">—</span>
   let color = 'text-secondary'
   if (value >= 80) color = 'text-danger font-medium'
   else if (value >= 70) color = 'text-bull'
@@ -37,15 +37,25 @@ export function RSIBadge({ value }: { value: number | null | undefined }) {
 
 // ===== 纯数据列渲染 =====
 
+/** 数值 → 固定小数位文本; 非有限数 / 缺失一律 —。
+ *
+ * 裸 `x.toFixed(1)` 对 Infinity 返回 `"Infinity"`、对 NaN 返回 `"NaN"`, 直接上屏。
+ * 这类列 (kdj / turnover 等) 不像 price 那样经过 fmtPrice, 必须单独守。 */
+function fmtFixed(value: unknown, digits: number, suffix = ''): string {
+  const n = Number(value)
+  if (value == null || value === '' || !Number.isFinite(n)) return '—'
+  return `${n.toFixed(digits)}${suffix}`
+}
+
 function fmtMaybePrice(value: any) {
-  return value != null && !Number.isNaN(value) ? fmtPrice(value) : '—'
+  return value != null && Number.isFinite(value) ? fmtPrice(value) : '—'
 }
 
 export type SelectionCellGaps = { gapKeys?: string[] }
 
 function isBlankCell(value: unknown): boolean {
   if (value == null) return true
-  if (typeof value === 'number' && Number.isNaN(value)) return true
+  if (typeof value === 'number' && !Number.isFinite(value)) return true
   if (typeof value === 'string' && value.trim() === '') return true
   return false
 }
@@ -57,7 +67,7 @@ function fmtPercentPoint(value: number): string {
 
 /** 0–1 比率显示成百分数，不加正负号。空值是「—」。 */
 function fmtUnsignedRatio(value: unknown): string {
-  if (value == null || Number.isNaN(Number(value))) return '—'
+  if (value == null || !Number.isFinite(Number(value))) return '—'
   return `${(Number(value) * 100).toFixed(2)}%`
 }
 
@@ -105,7 +115,7 @@ export function renderBuiltinDataCell(
     case 'change_amount':
       return <td key={col.id} className={`${numCls} ${priceColorClass(r.change_amount)}`}>{r.change_amount != null ? fmtPrice(r.change_amount) : '—'}</td>
     case 'amplitude':
-      return <td key={col.id} className={numCls}>{r.amplitude != null ? `${(r.amplitude * 100).toFixed(2)}%` : '—'}</td>
+      return <td key={col.id} className={numCls}>{r.amplitude != null && Number.isFinite(Number(r.amplitude)) ? `${(Number(r.amplitude) * 100).toFixed(2)}%` : '—'}</td>
     case 'open':         return <td key={col.id} className={numCls}>{fmtMaybePrice(r.open)}</td>
     case 'high':         return <td key={col.id} className={numCls}>{fmtMaybePrice(r.high)}</td>
     case 'low':          return <td key={col.id} className={numCls}>{fmtMaybePrice(r.low)}</td>
@@ -117,7 +127,7 @@ export function renderBuiltinDataCell(
       return <td key={col.id} className={`${numCls} ${r.limit_down_price != null ? 'text-bear' : ''}`}>{r.limit_down_price != null ? fmtPrice(r.limit_down_price) : '—'}</td>
     // 成交
     case 'turnover':
-      return <td key={col.id} className={numCls}>{r.turnover_rate != null ? `${Number(r.turnover_rate).toFixed(2)}%` : '—'}</td>
+      return <td key={col.id} className={numCls}>{fmtFixed(r.turnover_rate, 2, '%')}</td>
     case 'volume':
       return <td key={col.id} className={`${numCls} text-secondary`}>{r.volume != null ? fmtVolume(r.volume) : '—'}</td>
     case 'amount':
@@ -152,9 +162,9 @@ export function renderBuiltinDataCell(
       return <td key={col.id} className={numCls}>{r.macd_dea != null ? fmtPrice(r.macd_dea) : '—'}</td>
     case 'macd_hist':
       return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist)}`}>{r.macd_hist != null ? fmtPrice(r.macd_hist) : '—'}</td>
-    case 'kdj_k': return <td key={col.id} className={numCls}>{r.kdj_k != null ? r.kdj_k.toFixed(1) : '—'}</td>
-    case 'kdj_d': return <td key={col.id} className={numCls}>{r.kdj_d != null ? r.kdj_d.toFixed(1) : '—'}</td>
-    case 'kdj_j': return <td key={col.id} className={numCls}>{r.kdj_j != null ? r.kdj_j.toFixed(1) : '—'}</td>
+    case 'kdj_k': return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_k, 1)}</td>
+    case 'kdj_d': return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_d, 1)}</td>
+    case 'kdj_j': return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_j, 1)}</td>
     case 'boll_upper': return <td key={col.id} className={numCls}>{r.boll_upper != null ? fmtPrice(r.boll_upper) : '—'}</td>
     case 'boll_lower': return <td key={col.id} className={numCls}>{r.boll_lower != null ? fmtPrice(r.boll_lower) : '—'}</td>
     case 'atr14':    return <td key={col.id} className={numCls}>{r.atr_14 != null ? fmtPrice(r.atr_14) : '—'}</td>
@@ -263,13 +273,13 @@ export function renderBuiltinDataCell(
       return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_w)}`}>{r.macd_hist_w != null ? fmtPrice(r.macd_hist_w) : '—'}</td>
     case 'kdj_k_w':
       if (isBlankCell(r.kdj_k_w) && gaps?.gapKeys?.includes('kdj_k_w')) return gapTd(col)
-      return <td key={col.id} className={numCls}>{r.kdj_k_w != null ? Number(r.kdj_k_w).toFixed(1) : '—'}</td>
+      return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_k_w, 1)}</td>
     case 'kdj_d_w':
       if (isBlankCell(r.kdj_d_w) && gaps?.gapKeys?.includes('kdj_d_w')) return gapTd(col)
-      return <td key={col.id} className={numCls}>{r.kdj_d_w != null ? Number(r.kdj_d_w).toFixed(1) : '—'}</td>
+      return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_d_w, 1)}</td>
     case 'kdj_j_w':
       if (isBlankCell(r.kdj_j_w) && gaps?.gapKeys?.includes('kdj_j_w')) return gapTd(col)
-      return <td key={col.id} className={numCls}>{r.kdj_j_w != null ? Number(r.kdj_j_w).toFixed(1) : '—'}</td>
+      return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_j_w, 1)}</td>
     case 'macd_dif_m':
       if (isBlankCell(r.macd_dif_m) && gaps?.gapKeys?.includes('macd_dif_m')) return gapTd(col)
       return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_m)}`}>{r.macd_dif_m != null ? fmtPrice(r.macd_dif_m) : '—'}</td>
@@ -281,13 +291,13 @@ export function renderBuiltinDataCell(
       return <td key={col.id} className={`${numCls} ${priceColorClass(r.macd_hist_m)}`}>{r.macd_hist_m != null ? fmtPrice(r.macd_hist_m) : '—'}</td>
     case 'kdj_k_m':
       if (isBlankCell(r.kdj_k_m) && gaps?.gapKeys?.includes('kdj_k_m')) return gapTd(col)
-      return <td key={col.id} className={numCls}>{r.kdj_k_m != null ? Number(r.kdj_k_m).toFixed(1) : '—'}</td>
+      return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_k_m, 1)}</td>
     case 'kdj_d_m':
       if (isBlankCell(r.kdj_d_m) && gaps?.gapKeys?.includes('kdj_d_m')) return gapTd(col)
-      return <td key={col.id} className={numCls}>{r.kdj_d_m != null ? Number(r.kdj_d_m).toFixed(1) : '—'}</td>
+      return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_d_m, 1)}</td>
     case 'kdj_j_m':
       if (isBlankCell(r.kdj_j_m) && gaps?.gapKeys?.includes('kdj_j_m')) return gapTd(col)
-      return <td key={col.id} className={numCls}>{r.kdj_j_m != null ? Number(r.kdj_j_m).toFixed(1) : '—'}</td>
+      return <td key={col.id} className={numCls}>{fmtFixed(r.kdj_j_m, 1)}</td>
     case 'pb':            return <td key={col.id} className={numCls}>{r.pb != null ? fmtPrice(r.pb) : '—'}</td>
     case 'gross_margin':  return <td key={col.id} className={numCls}>{r.gross_margin != null ? fmtPct(r.gross_margin) : '—'}</td>
     case 'net_margin':    return <td key={col.id} className={numCls}>{r.net_margin != null ? fmtPct(r.net_margin) : '—'}</td>
