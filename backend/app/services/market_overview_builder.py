@@ -22,6 +22,7 @@ from typing import Any
 import polars as pl
 
 from app.services.ext_data import ExtConfig, ExtConfigStore
+from app.services.json_safe import json_safe
 from app.services.index_const import CORE_INDEX_NAMES, CORE_INDEX_SYMBOLS
 from app.services.screener import ScreenerService
 
@@ -44,16 +45,6 @@ def _finite(v: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return f if math.isfinite(f) else None
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
 
 
 def _board(symbol: str) -> str:
@@ -602,7 +593,7 @@ def build_market_overview(
     else:
         emotion_label = "冰点"
 
-    return _json_safe({
+    return json_safe({
         "as_of": str(as_of),
         "quote_status": status,
         "indices": indices,

@@ -38,13 +38,13 @@ import {
 //   都是【已是百分比值】(如 1.2 表示 1.2%),直接 toFixed 即可,不要 *100。
 // ================================================================
 function fmtPctAlready(v: number | null | undefined, digits = 2, withSign = false): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   const sign = withSign && v > 0 ? '+' : ''
   return `${sign}${v.toFixed(digits)}%`
 }
 // A 股惯例: 强势=红, 弱式=绿(对齐 Dashboard scoreColor)
 function scoreColor(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '#71717A'
+  if (v == null || !Number.isFinite(v)) return '#71717A'
   if (v >= 70) return '#F04438'
   if (v >= 55) return '#FB923C'
   if (v >= 45) return '#F59E0B'

@@ -19,7 +19,7 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import CN_TZ, cn_now
-from app.services.fs_utils import atomic_write_parquet, atomic_write_text
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text, partition_writer
 
 logger = logging.getLogger(__name__)
 
@@ -406,28 +406,19 @@ def _merge_etf_shares(
     return pl.concat([kept.select(columns), stamped], how="vertical_relaxed")
 
 
-_partition_locks: dict[str, threading.Lock] = {}
-_partition_locks_guard = threading.Lock()
+_LOCK_RETRY_S = 0.2
+"""撞上分区文件锁后的退避间隔。
+
+争锁窗口只有一次"读分区 → 合并 → ``os.replace``"，实测亚秒级；0.2 秒退避、10 次
+重试 ≈ 2 秒，足够穿过同进程并发和一次快速回补的写入，又不至于让一次真正的长时间
+占用把采集线程拖很久。与 ``replace_with_retry`` 的 (10 次 × 0.5 秒) 同一量级。
+"""
+_LOCK_ATTEMPTS = 10
+"""文件锁重试次数。耗尽后抛 `PartitionLockBusy`，失败可见。"""
 
 
-def _partition_lock(kind: str, trade_date: str) -> threading.Lock:
-    """同一分区的读改写要串行。
-
-    并发写同一分区时，两个线程都先读到同一份旧内容，各自合并后分别 ``os.replace``，
-    后落盘的那个把先落盘的整份覆盖掉 —— 另一个线程写入的行直接消失，而且不报错。
-    锁按 ``kind + 交易日`` 分粒度，不同分区互不影响。
-
-    进程内线程之间的竞态靠这把锁；跨进程（例如 web 进程与独立回补脚本同时写）由
-    ``atomic_write_parquet`` 的唯一临时文件保证不互相搬走源文件，但**不**保证两个
-    进程的合并结果都保留 —— 那种场景需要文件锁，当前没有这样的调用组合。
-    """
-    key = f"{kind}:{trade_date}"
-    with _partition_locks_guard:
-        lock = _partition_locks.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _partition_locks[key] = lock
-        return lock
+def _partition_key(kind: str, trade_date: str) -> str:
+    return f"{kind}:{trade_date}"
 
 
 def write_rows(
@@ -444,9 +435,26 @@ def write_rows(
     ``etf_shares`` 的 ``ingested_at`` 只在主键第一次出现时写入，之后保留。
     ``now`` 只用于测试注入北京时间；缺省取当前北京时间。
 
-    「读旧分区 → 合并 → 写回」整段在同一分区的锁里完成，否则并发写会互相覆盖。
+    「读旧分区 → 合并 → 写回」整段在同一分区的锁里完成，否则并发写会互相覆盖:
+    两个线程都读到同一份旧内容，各自合并后分别 ``os.replace``，后落盘的那个把先落盘
+    的整份覆盖掉 —— 另一个线程写入的行直接消失，而且不报错。
+
+    锁分两层（``partition_writer``）: 线程锁挡同进程其它线程，文件锁挡**其它进程**
+    —— 回补 CLI 与 Web 进程写同一个 ``date=`` 分区是完全可能的组合，原先只有线程锁，
+    跨进程那条路径上 ``atomic_write_parquet`` 只能保证不写出半截文件，挡不住整份覆盖。
+
+    **写者之间是耐心的**: 撞锁时按 ``_LOCK_RETRY_S`` 退避重试，而不是一次冲突就放弃
+    整批采集 —— 争锁的窗口只有一次"读分区 + 合并 + replace"，等几百毫秒就能过。重试
+    ``_LOCK_ATTEMPTS`` 次仍拿不到才抛 `app.services.fs_utils.PartitionLockBusy`，
+    不让它静默跳过。
     """
-    with _partition_lock(kind, trade_date):
+    with partition_writer(
+        Path(data_dir),
+        _partition_key(kind, trade_date),
+        retry_s=_LOCK_RETRY_S,
+        attempts=_LOCK_ATTEMPTS,
+        on_busy="info",
+    ):
         return _write_rows_locked(data_dir, kind, trade_date, rows, now=now)
 
 

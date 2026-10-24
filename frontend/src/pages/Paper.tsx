@@ -36,7 +36,7 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 function fmtMoney(v: number | null | undefined, digits = 2) {
-  if (v == null || Number.isNaN(Number(v))) return '--'
+  if (v == null || !Number.isFinite(Number(v))) return '--'
   return Number(v).toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
 }
 

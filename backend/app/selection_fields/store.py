@@ -9,7 +9,7 @@ from pathlib import Path
 
 import polars as pl
 
-from app.services.fs_utils import atomic_write_parquet, atomic_write_text, partition_lock
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text, partition_writer
 
 KINDS = ("northbound", "holders", "index_members", "unlock", "pe_ttm")
 
@@ -150,7 +150,8 @@ def commit(
         path.parent.mkdir(parents=True, exist_ok=True)
         # 整表覆盖也要进锁: 与 upsert_pe_rows 的读改写共用 `pe_ttm` 这把锁, 否则
         # 一次全量 commit 与一次增量 upsert 交错时, 全量落盘的那份会把增量行冲掉。
-        with partition_lock(kind):
+        # 跨进程同理 —— 全量刷新与增量补数可能分别在 web 进程和脚本里跑。
+        with partition_writer(Path(data_dir), kind, retry_s=0.2, attempts=10, on_busy="info"):
             atomic_write_parquet(frame, path)
             update_meta(data_dir, kind, status="ok", error="", note=note)
         return
@@ -162,13 +163,14 @@ def upsert_pe_rows(data_dir: Path | str, rows: list[dict]) -> None:
 
     「读旧表 → 合并 → 写回」必须在同一把锁里, 否则两个线程都读到同一份旧表, 各自
     合并后分别落盘, 后落盘的那份把先落盘的新行整片覆盖 —— 没有异常, 数据静默丢失。
+    跨进程 (定时增量 vs 手动补数) 由 ``partition_writer`` 的文件锁兜住。
     """
     if not rows:
         return
     fresh = _frame("pe_ttm", rows)
     path = part_path(data_dir, "pe_ttm")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with partition_lock("pe_ttm"):
+    with partition_writer(Path(data_dir), "pe_ttm", retry_s=0.2, attempts=10, on_busy="info"):
         current = read_frame(data_dir, "pe_ttm")
         merged = (
             pl.concat([current, fresh], how="vertical")

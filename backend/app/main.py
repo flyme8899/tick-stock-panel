@@ -61,6 +61,7 @@ from app.extensions.loader import (
     start_backend_extensions,
 )
 from app.jobs import daily_pipeline
+from app.services.json_safe import SafeJSONResponse
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
@@ -565,6 +566,11 @@ app = FastAPI(
     docs_url="/docs" if _DOCS_ON else None,
     redoc_url="/redoc" if _DOCS_ON else None,
     openapi_url="/openapi.json" if _DOCS_ON else None,
+    # 出口统一消毒: polars/pandas 除零、空集 mean 会产出 inf/NaN, Starlette 的
+    # JSONResponse 用 allow_nan=False 渲染 —— 漏一个非有限浮点就是**整段响应 500**,
+    # 而不是那一行变 null。默认响应类换成 SafeJSONResponse, 渲染前先过 json_safe,
+    # 于是任何走默认 JSONResponse 的路由都不可能吐出 NaN/Infinity, 也不会因此 500。
+    default_response_class=SafeJSONResponse,
 )
 
 # CORS: 允许局域网访问 (自托管场景, 放开所有来源)

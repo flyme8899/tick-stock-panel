@@ -202,16 +202,6 @@ def _finite(v: Any) -> float | None:
     return f if math.isfinite(f) else None
 
 
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    return value
-
-
 def _board(symbol: str) -> str:
     if symbol.endswith(".BJ"):
         return "北交所"

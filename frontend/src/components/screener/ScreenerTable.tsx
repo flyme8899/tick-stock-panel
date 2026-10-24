@@ -143,7 +143,7 @@ function renderExtValue(
   onToggle: () => void,
   onTagClick?: (tag: string) => void,
 ): ReactNode {
-  if (val == null || Number.isNaN(val)) return <span className="text-muted">—</span>
+  if (val == null || !Number.isFinite(val)) return <span className="text-muted">—</span>
   if (typeof val === 'number') {
     // 数字格式化: 千分位 + 单位换算 + 小数位(由列配置控制)
     const cfg = col.extDisplay
@@ -226,7 +226,7 @@ export function ScreenerTable({
       const expanded = expandedCells.has(cellKey)
       const sourceField = `${configId}.${fieldName}`
       const dimensionKind = dimensionKindForSourceField(sourceField)
-      const tdClass = val == null || Number.isNaN(val)
+      const tdClass = val == null || !Number.isFinite(val)
         ? 'px-3 py-2 text-center text-muted'
         : typeof val === 'number'
           ? 'px-3 py-2 text-right num tabular-nums'

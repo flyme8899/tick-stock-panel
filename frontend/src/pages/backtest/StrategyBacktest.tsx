@@ -237,7 +237,9 @@ function RegimeRecomputeButton({ from, to, pending, onClick }: {
   )
 }
 
-const numOrNull = (v: string) => v === '' || Number.isNaN(Number(v)) ? null : Number(v)
+// 参数输入解析: 非法与 Infinity 一并归 null。`1e999` 这种串 Number() 出来是
+// Infinity, 旧写法会放它进后端 —— 后端按 float 收下, 再回吐就成了非法 JSON。
+const numOrNull = (v: string) => v === '' || !Number.isFinite(Number(v)) ? null : Number(v)
 const clamp = (v: number, min?: number, max?: number) => {
   let next = v
   if (min != null) next = Math.max(next, min)
@@ -357,29 +359,29 @@ const strategyBacktestConfigSignature = (detail: StrategyDetail) => JSON.stringi
 })
 
 const fmtMoney = (v: number | null | undefined) => {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   return v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 const fmtSignedMoney = (v: number | null | undefined) => {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   const sign = v > 0 ? '+' : ''
   return `${sign}${fmtMoney(v)}`
 }
 
 const fmtShares = (v: number | null | undefined) => {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   return v.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
 }
 
 const fmtLots = (v: number | null | undefined) => {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   return v.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
 }
 
 const statValueColor = (v: number | null | undefined) => {
   // 中性值继承页面前景色 (亮暗主题都可读), 不再写死近白色
-  if (v == null || Number.isNaN(v) || v === 0) return 'inherit'
+  if (v == null || !Number.isFinite(v) || v === 0) return 'inherit'
   return v > 0 ? '#f87171' : '#34d399'
 }
 
@@ -418,12 +420,12 @@ type DailyTradeRow = {
 }
 
 function fmtPositionPct(v: number | null | undefined, digits = 2): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   return `${(Math.abs(v) * 100).toFixed(digits)}%`
 }
 
 function fmtScore(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(Number(v))) return '—'
+  if (v == null || !Number.isFinite(Number(v))) return '—'
   return Number(v).toFixed(1)
 }
 
@@ -1351,7 +1353,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     const start = String(result.config?.start ?? resultStartDate).slice(0, 10)
     const end = String(result.config?.end ?? resultEndDate).slice(0, 10)
     const pct = (v: unknown) => (v == null ? '' : fmtPct(Number(v)))
-    const num = (v: unknown) => (v == null || Number.isNaN(Number(v)) ? '' : String(v))
+    const num = (v: unknown) => (v == null || !Number.isFinite(Number(v)) ? '' : String(v))
 
     const lines: string[] = []
     lines.push('# 概要', '指标,数值')

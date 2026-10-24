@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.services.json_safe import json_safe
 from app.config import settings
 from app.services.backtest import (
     BacktestConfig,
@@ -912,20 +913,6 @@ async def strategy_cancel(request: Request):
 # 参数网格优化器 — 复用 _BacktestJob SSE 框架 (多组参数并行回测 + 排序)
 # ══════════════════════════════════════════════════════════════
 
-def _json_safe(obj):
-    """递归把 nan/inf 置 None —— json.dumps(default=str) 处理不了它们, 会输出非法 JSON
-    字面量 NaN/Infinity 让前端 JSON.parse 崩。优化器/WF 结果嵌套深 (逐组/逐折的
-    sortino 等零波动场景可能算出 nan), 序列化前统一清洗。"""
-    import math
-    if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
-    if isinstance(obj, dict):
-        return {k: _json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_json_safe(v) for v in obj]
-    return obj
-
-
 # 透传给每组回测的 StrategyBacktestConfig 字段 (作为 backtest_kwargs)。
 _OPT_BT_FIELDS = [
     "matching", "fees_pct", "commission_pct", "stamp_tax_pct", "slippage_bps",
@@ -1137,7 +1124,7 @@ async def optimize_stream(
                         # 取消时优化器把每组记为 cancelled 并正常返回, 需在此分流为取消提示而非"完成"。
                         yield f"event: error\ndata: {json.dumps({'message': '优化已取消'}, ensure_ascii=False)}\n\n"
                     elif job.result is not None:
-                        yield f"event: done\ndata: {json.dumps(_json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
+                        yield f"event: done\ndata: {json.dumps(json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
                     return
                 tick += 1
                 if tick % 4 == 0 and await request.is_disconnected():
@@ -1364,7 +1351,7 @@ async def walkforward_stream(
                     elif job.cancel_event.is_set():
                         yield f"event: error\ndata: {json.dumps({'message': 'walk-forward 已取消'}, ensure_ascii=False)}\n\n"
                     elif job.result is not None:
-                        yield f"event: done\ndata: {json.dumps(_json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
+                        yield f"event: done\ndata: {json.dumps(json_safe(job.result), ensure_ascii=False, default=str)}\n\n"
                     return
                 tick += 1
                 if tick % 4 == 0 and await request.is_disconnected():
