@@ -719,13 +719,37 @@ def run_now(
         try:
             emit("compute_regime", 90, "计算市场环境…")
             from app.services import regime_builder
+
             from app.api.regime import invalidate_regime_cache
+
+            # 增量入口自己会在口径漂移时拒绝补算(返回空表)。这里先读一次结论, 好让
+            # 管道把它记成"跳过的原因", 而不是安静地显示"市场环境 0 天"。
+            caliber_blocked = False
+            try:
+                from app.services import regime_caliber
+
+                _caliber = regime_caliber.check_caliber(repo.store.data_dir)
+                caliber_blocked = not _caliber["match"] and _caliber["reason"] == "changed"
+                if caliber_blocked:
+                    logger.warning(
+                        "compute_regime 跳过: %s — 需要 POST /api/regime/recompute 全量重算",
+                        regime_caliber.describe_drift(_caliber),
+                    )
+            except Exception as e:  # noqa: BLE001
+                # 自检本身失败时不要拦: 让 compute_regime_incremental 自己判断,
+                # 它那边还有一道同样的检查。
+                logger.warning("regime caliber 检查失败(忽略, 交给增量入口判断): %s", e)
+
             new_regime = regime_builder.compute_regime_incremental(repo, repo.store.data_dir)
             regime_days = new_regime.height if not new_regime.is_empty() else 0
             if regime_days:
                 invalidate_regime_cache()
                 logger.info("compute_regime: %d days", regime_days)
-            emit("compute_regime", 92, f"市场环境 {regime_days} 天")
+            if caliber_blocked:
+                skipped.append("regime_caliber_drift")
+                emit("compute_regime", 92, "市场环境口径已变更, 需全量重算")
+            else:
+                emit("compute_regime", 92, f"市场环境 {regime_days} 天")
             # 阶段切换推送监控通知 (软失败, 不影响管道): 末两日阶段不同 = 今日发生切换。
             # 切入退潮/冰点为风险信号, 用 warn 级别; 其余 info。
             if regime_days:

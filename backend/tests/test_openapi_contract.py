@@ -76,6 +76,7 @@ EXPECTED_OPEN_ENDPOINTS: set[str] = {
     "GET /api/paper/trades",
     "GET /api/regime/breadth",
     "GET /api/regime/breadth/latest",
+    "GET /api/regime/caliber",
     "GET /api/regime/coverage",
     "GET /api/regime/history",
     "GET /api/regime/latest",

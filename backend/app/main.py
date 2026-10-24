@@ -442,6 +442,29 @@ async def _application_lifespan(app: FastAPI):
         extension_registry,
     )
 
+    # regime 口径自检: 口径常量变过而历史表没重算, 表里就会混着两套口径的行,
+    # 下游(回测 regime_filter / AI 助手 / Regime 页)读到的是混合序列。
+    # 这里只做**明确拦截**: 比对 stamp 与当前常量指纹, 不一致就大声报出来并挂到
+    # app.state 上由 /api/regime/caliber 暴露给前端, 但**不自动重算** —— 全量重算要
+    # 扫全 A enriched, 在启动路径里同步做会把启动拖到分钟级, 放后台则无法告知用户
+    # 结果。前置条件不在也无法判断(enriched 可能还没同步), 交给用户显式触发。
+    try:
+        from app.services import regime_caliber
+
+        caliber = regime_caliber.check_caliber(store.data_dir)
+        app.state.regime_caliber = caliber
+        message = regime_caliber.describe_drift(caliber)
+        if caliber["match"]:
+            logger.info(message)
+        elif caliber["reason"] == "missing":
+            logger.warning("%s — 建议执行一次 POST /api/regime/recompute 全量重算", message)
+        else:
+            logger.warning("%s — 必须执行一次 POST /api/regime/recompute 全量重算", message)
+    except Exception as e:  # noqa: BLE001
+        # 自检失败不阻断启动: 它只是提示, 不该让整个服务起不来。
+        logger.warning("regime caliber check failed (soft): %s", e)
+        app.state.regime_caliber = None
+
     try:
         yield
     finally:
