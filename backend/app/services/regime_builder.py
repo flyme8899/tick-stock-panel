@@ -45,6 +45,11 @@ STATE_RANGE = 45        # 45-55 震荡
 STATE_LEAN_WEAK = 30    # 30-45 偏弱
 # < 30 弱势
 
+# 口径版本(人读标签)。改动任何参与口径的常量时一起 bump —— 但不要指望它:
+# 真正生效的是 `app.services.regime_caliber.caliber_fingerprint()` 算出的内容指纹,
+# 忘记 bump 这个常量也能发现口径变了。它只负责在日志/接口里给人一个「第几版口径」的说法。
+REGIME_CALIBER_VERSION = "2"
+
 STATE_LABELS = {
     "strong": "强势",
     "lean_strong": "偏强",
@@ -913,7 +918,23 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
 
     双检测: 1) 缺口(enriched 有但 regime 没有) 2) stale(enriched 被覆写)。
     自动补齐所有需要的日。返回本次新算的 DataFrame。
+
+    **口径漂移时直接返回空表, 不补算**: 增量算出来的行是当前口径, 而历史行是旧口径,
+    补进去只会让两种口径混在同一张表里(20 日滚动窗口还会把它们平均在一起)。这时
+    唯一正确的动作是全量重算 —— 见 `app.services.regime_caliber`, 用户走
+    ``POST /api/regime/recompute``。返回空表而不是抛异常: 调用方(daily_pipeline)把它
+    当软失败处理, 抛异常只会多一条"管道步骤失败"的噪音, 真正的结论在日志里。
     """
+    from app.services import regime_caliber
+
+    caliber = regime_caliber.check_caliber(data_dir)
+    if not caliber["match"] and caliber["reason"] == "changed":
+        logger.warning(
+            "regime incremental: 跳过补算 — %s; 需要一次全量重算 (POST /api/regime/recompute)",
+            regime_caliber.describe_drift(caliber),
+        )
+        return pl.DataFrame()
+
     today = today or date.today()
     existing = load_regime_history(data_dir)
 
