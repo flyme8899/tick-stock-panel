@@ -38,6 +38,7 @@ from app.buy_sell_signals import (
 )
 from app.buy_sell_signals import state_machine
 from app.buy_sell_signals import store as store_module
+from app.buy_sell_signals import models as models_module
 from app.market_time import cn_now
 
 PKG_DIR = Path(__file__).resolve().parents[1] / "app" / "buy_sell_signals"
@@ -231,15 +232,85 @@ def test_transition_table_has_no_inbound_edge_to_publishable():
 
 def test_limit_reopen_cannot_be_published_even_with_full_checklist():
     rec = _record(event_class="limit_reopen")
-    observing = transition(rec, "observe")
+    # 构造出来就已经是 observe, 不需要(也不该)再 transition 一次。
+    assert rec.status == "observe"
     with pytest.raises(ManualPublishRejected, match="limit_reopen"):
-        manual_publish(observing, publisher="qa", checklist=_full_checklist(), note="x")
+        manual_publish(rec, publisher="qa", checklist=_full_checklist(), note="x")
 
 
 def test_limit_reopen_cannot_enter_publishable_via_transition():
-    observing = transition(_record(event_class="limit_reopen"), "observe")
+    observing = _record(event_class="limit_reopen")
     with pytest.raises(SignalTransitionError):
         transition(observing, "publishable")
+
+
+# ============================================== limit_reopen 初始 observe(批次 20261025g2 ①)
+
+
+def test_limit_reopen_defaults_to_observe():
+    """炸板/回封不传 status 时, 构造完就是 observe —— 不是 candidate。"""
+    rec = _record(event_class="limit_reopen")
+    assert rec.status == "observe"
+    assert rec.status == models_module.LIMIT_REOPEN_INITIAL_STATUS
+
+
+def test_limit_reopen_does_not_need_explicit_transition():
+    """少了"必须先 transition 一次"这道手续, 也不该因此获得发布资格。
+
+    这条测的是"省掉的只是起点手续, 不是闸门": 省一步之后仍然不能发布。
+    """
+    rec = _record(event_class="limit_reopen")
+    with pytest.raises(ManualPublishRejected):
+        manual_publish(rec, publisher="qa", checklist=_full_checklist(), note="x")
+    with pytest.raises(SignalTransitionError):
+        transition(rec, "publishable")
+
+
+def test_limit_reopen_push_gate_stays_not_armed():
+    """初始 gate 不得是 armed —— 本修不能顺手把推送闸点开。"""
+    rec = _record(event_class="limit_reopen")
+    assert rec.push_gate != "armed"
+    assert rec.push_eligible is False
+
+
+@pytest.mark.parametrize("event_class", ["auction", "intraday_volume", "daily_quality_value", "other"])
+def test_other_event_classes_still_default_to_candidate(event_class):
+    """回归: 只有 limit_reopen 改起点, 其它类别一律不动。"""
+    assert _record(event_class=event_class).status == "candidate"
+
+
+def test_limit_reopen_explicit_publishable_still_rejected():
+    """显式传 publishable 不会被"强制 observe"悄悄改回 observe 再放行。
+
+    这条是刻意的区分: 强制只作用于**默认值**(candidate), 不作用于调用方的显式意图。
+    否则 `status="publishable"` 会被静默改成 observe, 调用方以为发布成功、实际记录
+    停在 observe —— 一个看起来没报错却什么也没发生的 bug。
+    """
+    with pytest.raises(SignalValidationError, match="manual_published_at"):
+        _record(event_class="limit_reopen", status="publishable", push_gate="armed")
+
+
+def test_limit_reopen_explicit_observe_unchanged():
+    assert _record(event_class="limit_reopen", status="observe").status == "observe"
+
+
+def test_limit_reopen_survives_with_fields():
+    """`with_fields` 走的是 `dataclasses.replace`, 会重新跑 `__post_init__`。
+
+    observe 不是 candidate, 所以强制逻辑不会二次生效、也不会把状态打回 candidate。
+    """
+    rec = _record(event_class="limit_reopen")
+    updated = rec.with_fields(manual_note="观察中")
+    assert updated.status == "observe"
+
+
+def test_limit_reopen_can_still_retire():
+    """初始 observe 之后, 正常的非发布通路仍然畅通(retire 是合法出边)。"""
+    rec = _record(event_class="limit_reopen")
+    retired = transition(rec, "retired")
+    assert retired.status == "retired"
+    assert retired.push_gate == "offline"
+
 
 
 # =========================================================== 人工发布闸
@@ -546,6 +617,90 @@ def test_constant_names_do_not_collide_with_reminder_layer():
 def test_package_is_not_under_custom_dsa():
     assert "custom" not in PKG_DIR.parts
     assert "dsa" not in PKG_DIR.parts
+
+
+# ============================================== 与 t_rounds 零耦合(批次 20261025g2 ②)
+
+
+def test_buy_sell_signals_does_not_import_t_rounds():
+    """#201 的 h 包与本包零符号耦合。任何 import 都会让这条红。
+
+    `t_rounds/constants.py` 的 docstring 里提到了本包的名字 —— 那是说明文字, 不是
+    依赖。这里只看 import 语句, 不做全文匹配。
+    """
+    for path in sorted(PKG_DIR.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                modules.append(node.module)
+            elif isinstance(node, ast.Import):
+                modules.extend(alias.name for alias in node.names)
+            for module in modules:
+                assert not module.startswith("app.t_rounds"), f"{path.name} import 了 {module}"
+                assert ".t_rounds" not in module, f"{path.name} import 了 {module}"
+
+
+def test_buy_sell_signals_shares_no_constants_with_t_rounds():
+    """两边不得共用任何**常量值** —— 名字撞了不值一提, 值一样才危险。
+
+    `NAMESPACE` / `DISCLAIMER_TEXT` 这类同名不是问题: 它们是"各自持有一份"的值,
+    本来就长得一样(两个包的脚注当然相同)。真正要防的是 `MAX_ROUNDS_PER_DAY` /
+    `T_COOLDOWN_MIN` 这类**数值**被两边共用 —— 调一边会悄悄改另一边。
+
+    所以这里比的是 "大写常量名 + 值" 的组合, 只对字符串/数字/布尔这类可比较的
+    标量做判断, 且显式放过那些"设计上就该相同"的文案。
+    """
+    import importlib
+
+    from app.buy_sell_signals import constants as g_const
+
+    tr_const = importlib.import_module("app.t_rounds.constants")
+
+    allowed_same_value = {"NAMESPACE", "DISCLAIMER_TEXT", "T_MONITOR_EVENT_TYPE"}
+
+    def _scalar_constants(module) -> dict[str, object]:
+        out = {}
+        for name, value in vars(module).items():
+            if not name.isupper():
+                continue
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                out[name] = value
+        return out
+
+    ours = _scalar_constants(g_const)
+    theirs = _scalar_constants(tr_const)
+    shared = {
+        name
+        for name in set(ours) & set(theirs)
+        if name not in allowed_same_value and ours[name] == theirs[name]
+    }
+    assert not shared, f"与 t_rounds 共用了常量值: {sorted(shared)}"
+
+
+def test_buy_sell_signals_numeric_gate_constants_absent_from_t_rounds():
+    """反向: t_rounds 的门禁数值也不许出现在本包常量里。"""
+    import importlib
+
+    from app.buy_sell_signals import constants as g_const
+
+    tr_const = importlib.import_module("app.t_rounds.constants")
+    ours = {n: v for n, v in vars(g_const).items() if n.isupper() and isinstance(v, (int, float)) and not isinstance(v, bool)}
+    theirs = {n: v for n, v in vars(tr_const).items() if n.isupper() and isinstance(v, (int, float)) and not isinstance(v, bool)}
+    for name, value in theirs.items():
+        collisions = [gname for gname, gvalue in ours.items() if gvalue == value]
+        assert not collisions, f"t_rounds.{name}={value} 与本包 {collisions} 同值"
+
+
+def test_buy_sell_signals_not_wired_into_main_or_store_defaults():
+    """本包不得接线到 `main.py` / 日管道; Store 默认不落盘的状态也不因本派改变。"""
+    backend = PKG_DIR.parents[1]
+    main_py = backend / "app" / "main.py"
+    assert "buy_sell_signals" not in main_py.read_text(encoding="utf-8")
+
+    with pytest.raises(PersistDisabledError):
+        DiskSignalRegistryStore(Path("/tmp/should-not-be-created-g2"))
+
 
 
 def test_cooldown_field_is_push_dedupe_named():

@@ -50,6 +50,16 @@ SIGNAL_STATUSES: Final = frozenset(
 
 PUSH_GATES: Final = frozenset({"blocked", "manual_pending", "armed", "cooldown", "offline"})
 
+LIMIT_REOPEN_INITIAL_STATUS: Final = "observe"
+"""`event_class="limit_reopen"`(炸板/回封)的初始状态。
+
+炸板类事件在构造那一刻就已经进入"记录但不发布"的状态, 不需要调用方再显式走一次
+`transition(..., "observe")`。理由是: 少一次必须记得做的动作, 就少一次忘记做。
+
+注意这只改了**起点**, 不是改了通路 —— `state_machine` 里禁止 `limit_reopen` 进入
+`publishable` 的双重拦截原样保留。初始 observe 不等于"观察一轮之后就能发布"。
+"""
+
 
 class SignalValidationError(ValueError):
     """记录本身不合法(而非状态转移非法)。
@@ -89,6 +99,11 @@ class SignalRecord:
 
     # ---- 状态 / 推送闸 --------------------------------------------------
     status: str = "candidate"
+    """当前状态。
+
+    默认 `candidate`。唯一的例外是 `event_class="limit_reopen"`: 见
+    `__post_init__`, 这类信号构造出来就是 `observe`。
+    """
     push_gate: str = "manual_pending"
     last_status_change_at: datetime = field(default_factory=cn_now)
     last_pushed_at: datetime | None = None
@@ -137,6 +152,20 @@ class SignalRecord:
         _require(isinstance(self.display_name, str) and self.display_name.strip(), "display_name 不能为空")
         _require(self.family in SIGNAL_FAMILIES, f"未知 family: {self.family!r}")
         _require(self.event_class in EVENT_CLASSES, f"未知 event_class: {self.event_class!r}")
+
+        # 炸板/回封的初始状态强制为 observe(REVIEW_pr200 建议 1)。
+        #
+        # 放在 status 合法性校验之前, 因为这一步本身就是"把默认值改成合法值":
+        # 调用方什么都不传时 status 是 candidate, 而对这类信号 candidate 不是它该在
+        # 的地方。用 object.__setattr__ 是因为 frozen dataclass 的字段只能这样改。
+        #
+        # 只改默认值, 不改调用方的显式意图: 传了非 candidate 的 status 就原样保留,
+        # 由下面的校验决定它合法与否 —— 包括显式传 publishable(仍会被
+        # "publishable 必须有人签过字" 拒掉)。这样"忘传 status"和"故意传错"不会
+        # 被同一条规则吞掉。
+        if self.event_class == "limit_reopen" and self.status == "candidate":
+            object.__setattr__(self, "status", LIMIT_REOPEN_INITIAL_STATUS)
+
         _require(self.status in SIGNAL_STATUSES, f"未知 status: {self.status!r}")
         _require(self.push_gate in PUSH_GATES, f"未知 push_gate: {self.push_gate!r}")
 
