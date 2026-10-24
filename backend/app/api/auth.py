@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import defaultdict
 from threading import Lock
@@ -32,6 +33,20 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 COOKIE_NAME = "tf_session"
 _COOKIE_MAX_AGE = 30 * 24 * 3600  # 与 SESSION_TTL 一致
+
+
+def _cookie_secure() -> bool:
+    """会话 cookie 是否带 ``Secure`` 标志。由 ``TSP_COOKIE_SECURE`` 控制, **默认 False**。
+
+    默认 False 是刻意的: 这个面板的典型部署是「自托管 + 局域网 http://」。一旦默认
+    ``Secure``, 浏览器会拒绝在纯 http 下存这个 cookie —— 表现是"登录成功但立刻又跳回
+    登录页", 而且没有任何报错。那会把所有现有部署升级后锁在门外, 代价远大于收益。
+
+    反代加了 HTTPS 的部署应当显式打开: ``TSP_COOKIE_SECURE=1``。开启后浏览器只在
+    https 连接上回传该 cookie, 挡掉明文链路上的会话劫持。
+    """
+    raw = os.environ.get("TSP_COOKIE_SECURE", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 # 限流: { "ip:..." 或 "user:...": (fail_count, lock_until_ts) }
 _fail_counter: dict[str, tuple[int, float]] = defaultdict(lambda: (0, 0.0))
@@ -215,6 +230,7 @@ def login(req: LoginIn, request: Request, response: Response) -> dict:
 
     _clear_login_fails(ip, username)
     # HttpOnly: 防 XSS 窃取; SameSite=Lax: 防 CSRF; Path=/: 全站生效
+    # Secure: 由 TSP_COOKIE_SECURE 控制, 默认 False —— 理由见 `_cookie_secure`。
     response.set_cookie(
         key=COOKIE_NAME,
         value=token,
@@ -222,7 +238,7 @@ def login(req: LoginIn, request: Request, response: Response) -> dict:
         httponly=True,
         samesite="lax",
         path="/",
-        secure=False,  # 自托管可能无 HTTPS, 不强制 secure(建议反代加 HTTPS)
+        secure=_cookie_secure(),
     )
     return {
         "ok": True,
