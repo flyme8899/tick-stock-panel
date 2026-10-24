@@ -534,6 +534,35 @@ def _api_docs_enabled() -> bool:
 
 _DOCS_ON = _api_docs_enabled()
 
+
+def _split_origins(raw: str) -> list[str]:
+    """逗号分隔的来源列表 → 去空白、去空项。
+
+    允许 ``https://a.example.com, https://b.example.com`` 这种带空格的写法 —— 环境变量
+    里手写空格是常态, 多一个空格就让整条 CORS 静默失效太难查。
+    """
+    return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
+
+
+def _cors_origins() -> list[str]:
+    """CORS 允许的来源: ``TSP_CORS_ORIGINS`` 未设时保持 ``*``(自托管局域网场景)。
+
+    设了就**只**放行列出的来源。收紧到具体来源时顺手打开 credentials: 浏览器规范
+    禁止 ``allow_origins=["*"]`` 与 ``allow_credentials=True`` 共存, 但具体来源没有这个
+    限制 —— 收紧来源的人通常正是想用 cookie/凭据的那类部署。
+
+    不改成"默认只允许同源": 这是自托管面板, 用户常从局域网另一台机器开页面, 默认收紧
+    会让一大批现有部署的前端直接白屏。安全边界的收紧应当是显式动作, 不是升级副作用。
+    """
+    raw = os.environ.get("TSP_CORS_ORIGINS", "").strip()
+    if not raw:
+        return ["*"]
+    origins = _split_origins(raw)
+    return origins or ["*"]
+
+
+_CORS_ORIGINS = _cors_origins()
+
 app = FastAPI(
     title="Tick Stock Panel",
     version=__version__,
@@ -544,13 +573,14 @@ app = FastAPI(
     openapi_url="/openapi.json" if _DOCS_ON else None,
 )
 
-# CORS: 允许局域网访问 (自托管场景, 放开所有来源)
+# CORS: 默认放开所有来源 (自托管场景, 局域网访问)。
 # 注: allow_credentials=True 与 allow_origins=['*'] 不能共存 (浏览器规范),
-# 本项目认证走 header (API Key), 不依赖 cookie, 故关闭 credentials 换取通配来源。
+# 所以通配时关闭 credentials, 认证本就走 cookie/header 二选一 —— 需要凭据的部署
+# 请设 TSP_CORS_ORIGINS 收窄到具体来源, 那时 credentials 自动打开。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=_CORS_ORIGINS != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -567,12 +597,16 @@ app.add_middleware(
 _AUTH_WHITELIST_PREFIX = ("/api/auth/",)
 _AUTH_WHITELIST_EXACT = (
     "/health",
-    "/api/health",
     # SSE 事件流: EventSource 带不了 Authorization 头, 凭证即 query 里的
     # 一次性票据, 端点内校验 (api/events.py); POST /api/events/ticket 不在
     # 白名单, 仍走网关 Bearer 通道
     "/api/events",
 )
+# 注: `/api/health` 曾在这份白名单里, 但 main.py 从来没有注册过这条路由 ——
+# 它是一个"看起来放行了、其实不存在"的条目, 会让人误以为探活有两条路可走。
+# 各业务 router 的 `/api/<域>/health` 是另一回事, 它们走认证, 不该进白名单。
+# tests/test_unauthorized_surface.py 有一条测试要求白名单里的每一项都有真实路由。
+#
 # 注: /openapi.json、/api/openapi.json、/docs、/redoc 原先在这份白名单里, 为的是让
 # 未登录也能看交互式文档。现在文档默认不挂载 (见 `_api_docs_enabled`), 白名单随之清掉;
 # 用 TSP_ENABLE_API_DOCS=1 打开后它们仍可匿名访问, 开启文档就等于接受公开 schema。

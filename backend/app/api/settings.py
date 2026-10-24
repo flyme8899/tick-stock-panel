@@ -2037,6 +2037,23 @@ def api_tokens_revoke(token_id: str, request: Request) -> dict:
     return {"status": "revoked", "id": token_id}
 
 
+@router.get("/api-tokens/audit")
+def api_tokens_audit(request: Request) -> dict:
+    """Token 审计: 哪些该轮换、哪些长期没用过(只读, 不改任何存储)。
+
+    与 ``GET /api-tokens`` 的区别: 那个是"有哪些 Token", 这个是"该拿这些 Token
+    怎么办" —— 按 ``created_at`` 年龄与 ``last_used_at`` 空闲天数打标记。判据与
+    处置建议见 ``docs/api-token-audit.md``。
+
+    路由顺序注意: 本路径必须注册在 ``/api-tokens/{token_id}`` 的 DELETE 之前不合适
+    (方法不同不冲突), 但同前缀下新增 GET 时要确认不会吃掉别的 GET 子路径 ——
+    目前 ``/api-tokens`` 下只有这一个 GET 子路径。
+    """
+    from app.services import api_token_audit
+
+    return api_token_audit.audit_tokens(request.app.state.repo.store.data_dir)
+
+
 @router.get("/depth-intraday/status")
 def depth_intraday_status(request: Request) -> dict:
     """做T池盘中五档采集状态(只读): 开关、今日行数、最近错误。"""
