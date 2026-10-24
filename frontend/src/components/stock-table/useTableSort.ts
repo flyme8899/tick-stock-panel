@@ -39,7 +39,10 @@ export function useTableSort<T>(getSortValue: (r: T, col: ColumnConfig) => any =
       if (vb == null) return -1
       const na = typeof va === 'number' ? va : Number(va)
       const nb = typeof vb === 'number' ? vb : Number(vb)
-      if (!Number.isNaN(na) && !Number.isNaN(nb)) {
+      // 用 isFinite 而非 isNaN: 排序键里出现 Infinity 时, `nb - na` 是 NaN 或
+      // Infinity, 比较器不再满足全序, 数组顺序会变成引擎实现相关的乱序。归到
+      // 下面的字符串比较分支, 至少结果稳定可复现。
+      if (Number.isFinite(na) && Number.isFinite(nb)) {
         return dir === 'asc' ? na - nb : nb - na
       }
       const sa = String(va), sb = String(vb)

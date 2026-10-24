@@ -31,7 +31,7 @@ function addDays(date: string, days: number): string {
 }
 
 function fmtMoney(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(Number(v))) return '—'
+  if (v == null || !Number.isFinite(Number(v))) return '—'
   const n = Number(v)
   const abs = Math.abs(n)
   if (abs >= 100_000_000) return `${(n / 100_000_000).toFixed(2)}亿`
@@ -40,7 +40,7 @@ function fmtMoney(v: number | null | undefined): string {
 }
 
 function fmtSignedMoney(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(Number(v))) return '—'
+  if (v == null || !Number.isFinite(Number(v))) return '—'
   const prefix = Number(v) > 0 ? '+' : ''
   return `${prefix}${fmtMoney(v)}`
 }

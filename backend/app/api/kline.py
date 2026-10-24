@@ -13,6 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 
+from app.services.json_safe import json_safe
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.price_limits import is_no_limit_day, is_risk_warning_name, parse_listing_date, price_limit_pct
@@ -24,21 +25,6 @@ from app.services.price_basis import minute_prev_close, minute_reads_are_adjuste
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
-
-
-def _json_safe(obj):
-    """把 nan/inf 换成 None, 保证 JSON 合法。
-
-    gzip 路径原先 allow_nan=True, 会写出前端 JSON.parse 不能吃的 NaN/Infinity;
-    未压缩路径走 Starlette allow_nan=False, 遇到非有限浮点整段 500。
-    """
-    if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
-    if isinstance(obj, dict):
-        return {k: _json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_json_safe(v) for v in obj]
-    return obj
 
 
 def _gzip_payload(request: Request, payload: dict, *, pref_key: str) -> dict | Response:
@@ -61,7 +47,10 @@ def _gzip_payload(request: Request, payload: dict, *, pref_key: str) -> dict | R
             compress_on = bool(getter())
         except Exception:  # 偏好读取异常按不压缩返回原样
             compress_on = False
-    payload = _json_safe(payload)
+    # 统一走共享实现 (app.services.json_safe): 语义与原先本地的 _json_safe 一致,
+    # 只是多覆盖 numpy 标量与 datetime/Path —— gzip 分支仍然要自己消毒, 因为它是
+    # 手写 json.dumps 的 Response, 不经过默认响应类的 render。
+    payload = json_safe(payload)
     headers = getattr(request, "headers", None) or {}
     if compress_on and "gzip" in (headers.get("accept-encoding") or ""):
         raw = json.dumps(

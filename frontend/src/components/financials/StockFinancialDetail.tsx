@@ -112,7 +112,7 @@ const FIELD_DEFS: Record<TabKey, FieldDef[]> = {
 }
 
 function formatValue(v: number | null | undefined, fmt: FmtType): string {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || !Number.isFinite(v)) return '—'
   switch (fmt) {
     case 'pct':
       // 存储的是百分点(12.3 表示 12.3%),直接保留2位 + %
