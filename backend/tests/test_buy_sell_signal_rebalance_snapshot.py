@@ -46,12 +46,16 @@ def _ranked(scores: dict[str, int | None], missing: dict[str, bool] | None = Non
 
 
 def test_snapshot_counts_match_rank_result():
-    """4 只票, 1 只缺分 → scored 3, 其中 3 只的分位是 0 / .5 / 1, p40 过 2 只。"""
+    """4 只票, 1 只缺分 → scored 3, 分位 0 / .5 / 1; g2.1 起 p40 = 前 40% = >=0.60, 只过 1 只。"""
     res = _ranked({"A": 1, "B": 2, "C": 3, "D": None})
     snap = build_rebalance_snapshot(pit_asof=ASOF, universe=["A", "B", "C", "D"], rank_result=res)
     assert snap.universe_n == 4
     assert snap.scored_n == 3
-    assert snap.whitelist_n_p40 == 2
+    # B 的分位 0.5 在旧阈值 0.40 下会过, 在新阈值 0.60 下不过 —— 计数必须跟着收窄。
+    assert res.entries["B"].q_rank_within_ind == pytest.approx(0.5)
+    assert res.entries["B"].whitelist_pass is False
+    assert res.whitelist_symbols == ("C",)
+    assert snap.whitelist_n_p40 == 1
 
 
 def test_snapshot_id_and_asof():

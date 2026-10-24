@@ -238,7 +238,7 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 | 单票行业 | **missing**（`singleton_industry`） |
 
 为什么不用 `rank / n`：那个公式下最小值拿到 `1/n` 而不是 0，单票时恒为 1 —— 下游按
-`>= 0.40` 判，结果是"小行业里的票天然更容易进白名单"。
+`>= 0.60` 判，结果是"小行业里的票天然更容易进白名单"。
 
 为什么单票行业必须 missing：只有一只票时"行业分位"恒为 1，那个 1 是算术产物，不是相对
 位置。给它 rank 就是伪造一个不存在的比较。
@@ -258,17 +258,24 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 
 缺资格票**不进入别人的分母**：4 只票里 1 只缺分，剩下 3 只按 n=3 排名，不是 n=4。
 
-## 白名单试跑 `p40`：为什么反复强调"未锁定"
+## 白名单试跑 `p40`：行业前 40%，且反复强调"未锁定"
+
+> **语义（g2.1 写死）**：`p40` = 行业前 40%（分位越高越好，取分位上半部）
+> = `q_rank_within_ind >= (1 - 0.40) = 0.60`（**闭区间**）。
 
 ```python
-WHITELIST_PERCENTILE_TRIAL = "p40"      # 试跑阈值
+WHITELIST_PERCENTILE_TRIAL = "p40"      # 试跑档标签：行业前 40%
 WHITELIST_PERCENTILE_LOCKED = None      # 恒 None
-WHITELIST_TRIAL_QUANTILE = 0.40         # 判定用 >= 0.40（闭区间）
+WHITELIST_TRIAL_QUANTILE = 0.60         # 前 40% = 1 - 0.40，判定用 >= 0.60（闭区间）
 ```
 
-- 判定式是 `q_rank_within_ind >= 0.40`，**闭区间**。恰好落在 0.40 的票算通过 ——
+- 判定式是 `q_rank_within_ind >= 0.60`，**闭区间**。恰好落在 0.60 的票算通过 ——
   方向写反会静默砍掉一半，而且从名单上看不出来。
-- 没跑过 p30/p50 敏感性，所以不能说 0.40 比 0.30 或 0.50 好。
+- **批次 20261025g21 纠偏**：#202 / 旧 FIX_TASKS_g2 的示例 `>= 0.40` **已废弃**。
+  分位越高越好时，`>= 0.40` 留下的是行业**前 60%**，与纸面"行业前 40%"相反。
+  本批次只改阈值、文档与测例；标签仍叫 `p40`，`locked` 仍空，分位公式未动。
+  **禁止**把「`>=0.40` 即 p40」与现行「前 40% = `>=0.60`」混用。
+- 没跑过 p30/p50 敏感性，所以不能说 0.60 比其它档好。
 - `WHITELIST_PERCENTILE_LOCKED` 恒 `None`，且**没有任何代码路径**能写入它。
   `RebalanceSnapshot.__post_init__` 里还加了一条硬校验：传非空直接抛错。将来真锁定，
   必须连着改那里 —— 那是一次显式决定，不是改个赋值。
@@ -287,7 +294,8 @@ rebalance_id, pit_asof, score_version, universe_n, scored_n, whitelist_n_p40
 
 - **不挂 cron、不订阅事件、不看交易日历**
 - **不写盘**、不碰 `DiskSignalRegistryStore`、不接 `main.py` 日管道（有静态测试守着）
-- `whitelist_n_p40` 的字段名随试跑档位走 —— 换档之后新旧快照不会长得一模一样
+- `whitelist_n_p40` 的字段名随试跑档位走 —— 换档之后新旧快照不会长得一模一样。
+  g2.1 保留该字段名（不为改名而改名），但**计数走新阈值 `>= 0.60`**
 
 `score_version()` = `design_pin_v1+quality:design_pending`，引用已有的
 `SIGNAL_DESIGN_PIN` 与 `QUALITY_WEIGHT_STATUS`，不另造版本号。
