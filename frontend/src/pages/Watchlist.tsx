@@ -72,7 +72,7 @@ function getBoardType(symbol: string): BoardType | null {
 // ===== 换手率分档色（卡片/表格用） =====
 
 function turnoverColor(rate: number | null | undefined): string {
-  if (rate == null || Number.isNaN(rate)) return 'text-[#888]'
+  if (rate == null || !Number.isFinite(rate)) return 'text-[#888]'
   if (rate < 5)   return 'text-[#888]'
   if (rate < 10)  return 'text-[#d4a800]'
   if (rate < 20)  return 'text-[#f97316]'
@@ -94,7 +94,7 @@ function renderExtValue(
   inline?: boolean,
   onTagClick?: (tag: string) => void,
 ): React.ReactNode {
-  if (val == null || Number.isNaN(val)) return <span className="text-muted">—</span>
+  if (val == null || !Number.isFinite(val)) return <span className="text-muted">—</span>
   if (typeof val === 'number') {
     // 数字格式化: 千分位 + 单位换算 + 小数位(由列配置控制)
     const cfg = col.extDisplay
@@ -202,7 +202,7 @@ function renderExtCell(
   }
 
   // 根据值类型决定 td class
-  const tdClass = val == null || Number.isNaN(val)
+  const tdClass = val == null || !Number.isFinite(val)
     ? 'px-2 py-1.5 text-right num tabular-nums text-muted'
     : typeof val === 'number'
       ? 'px-2 py-1.5 text-right num tabular-nums'

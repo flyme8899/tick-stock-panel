@@ -45,12 +45,12 @@ function toOHLC(rows: KlineRow[]): OHLC[] {
 }
 
 function fmtPct(v: number | null | undefined) {
-  if (v == null || Number.isNaN(Number(v))) return '--'
+  if (v == null || !Number.isFinite(Number(v))) return '--'
   return `${Number(v).toFixed(2)}%`
 }
 
 function fmtNum(v: number | null | undefined, digits = 2) {
-  if (v == null || Number.isNaN(Number(v))) return '--'
+  if (v == null || !Number.isFinite(Number(v))) return '--'
   return Number(v).toFixed(digits)
 }
 

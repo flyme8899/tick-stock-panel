@@ -136,17 +136,17 @@ function ThemeToggle() {
 }
 
 function fmtIndexValue(v: number | null | undefined) {
-  if (v == null || Number.isNaN(Number(v))) return '--'
+  if (v == null || !Number.isFinite(Number(v))) return '--'
   return Number(v).toFixed(2)
 }
 
 function fmtIndexPct(v: number | null | undefined) {
-  if (v == null || Number.isNaN(Number(v))) return '--'
+  if (v == null || !Number.isFinite(Number(v))) return '--'
   return `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(2)}%`
 }
 
 function indexPctClass(v: number | null | undefined) {
-  if (v == null || Number.isNaN(Number(v))) return 'text-muted'
+  if (v == null || !Number.isFinite(Number(v))) return 'text-muted'
   const n = Number(v)
   if (n === 0) return 'text-foreground'
   return n > 0 ? 'text-bull' : 'text-bear'

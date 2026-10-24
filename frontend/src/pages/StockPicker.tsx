@@ -70,7 +70,7 @@ function optionalNumber(raw: string): number | undefined {
 }
 
 function fmtRatioPercent(value: number | null): string {
-  if (value == null || Number.isNaN(value)) return '—'
+  if (value == null || !Number.isFinite(value)) return '—'
   return `${value.toFixed(1)}%`
 }
 

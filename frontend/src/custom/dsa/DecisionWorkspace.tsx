@@ -749,7 +749,7 @@ function Screening({ sample, reachable }: { sample: boolean; reachable: boolean 
 }
 
 function formatEtfScore(kind: string | undefined, score: number | null) {
-  if (score == null || Number.isNaN(score)) return '—'
+  if (score == null || !Number.isFinite(score)) return '—'
   if (kind === 'momentum') return `${(score * 100).toFixed(1)}%`
   if (kind === 'none') return '—'
   return score.toFixed(2)
