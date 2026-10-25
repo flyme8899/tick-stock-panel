@@ -61,6 +61,19 @@ TSP_TOKEN=tsp_xxx uv run tsp-mcp-server   # stdio JSON-RPC, 供客户端拉起
 
 未包含: 模拟盘交易类端点 — 不建议把下单能力交给 AI, 需要时可自行在 `server.py` 里按同样模式补。
 
+### lookahead 前置契约 (fail-closed)
+
+对第三方开放 `run:backtest` 的结果、或在对外说明里宣称某策略「已过 lookahead 审计」之前,
+必须先有仓内 lookahead 夹具的通过记录 (`backend/tests/backtest/test_lookahead_fixture.py`,
+主门禁 = 仓内 CI)。**未过不得宣称; 无法判定同样不得宣称。**
+
+- **不在** `run_backtest` 热路径里重跑夹具 —— 每次调用现算一遍既是性能事故, 也会让"门禁"
+  变成"每次调用可能不同的结论"。主门禁在 CI。
+- 本拍只落前置契约与查询桩, 运行时拦截中间件为 `design_pending`。
+- 本服务器**不新增任何下单工具**, 也不开放模拟盘交易端点。
+
+方法与局限见 [docs/lookahead-fixture.md](../docs/lookahead-fixture.md)。
+
 ## 设计说明
 
 - **薄桥原则**: 所有权限/限流/契约由面板网关裁决, 本服务器不持有任何业务逻辑, 面板升级自动受益

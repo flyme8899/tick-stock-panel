@@ -3,6 +3,17 @@
 > 状态: V1/V2 已实现（0.3.2）—— Token + scope 网关 + 限流、五个 scope 全量 Tier A、`/api/openapi.json?tier=a` 契约视图、设置页 Token 管理（「设置 → 开放接口」）。V3+（钩子契约、SSE 票据、模拟盘拆分）仍为设计。使用说明见 [features.md → 开放接口](./features.md#-开放接口open-api--tier-a)。
 > 遵循 [CONTRIBUTING.md](../CONTRIBUTING.md) 的数据口径、插件化与测试矩阵要求; 扩展机制现状见 [secondary-development.md](./secondary-development.md)。
 
+> **lookahead 前置契约（fail-closed，批次 20261025glookahead）**
+>
+> 任何策略/入口在对外宣称「已过 lookahead 审计」、或对第三方开放 `run:backtest`
+> 的结果之前，**必须**有仓内 lookahead 夹具的通过记录
+> （`backend/tests/backtest/test_lookahead_fixture.py`，主门禁 = 仓内 CI）。
+> **未过不得宣称；无法判定同样不得宣称。**
+>
+> 本拍只落**前置契约**与查询桩（`app/backtest/lookahead_fixture/gate.py`，恒不放行），
+> **不含**运行时 API 拦截中间件（`design_pending`），**不在** MCP `run_backtest`
+> 热路径重跑夹具。方法与边界见 [lookahead-fixture.md](./lookahead-fixture.md)。
+
 ## 1. 目标与非目标
 
 **目标**
