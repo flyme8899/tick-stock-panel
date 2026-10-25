@@ -490,24 +490,263 @@ def test_cost_defaults_to_design_pending():
     assert out.cost_amount == 0.0
 
 
-def test_real_cost_tier_rejected_this_batch():
-    """本批次没有分档成本实测, 不许填实测档位。"""
-    with pytest.raises(TRoundValidationError, match="design_pending"):
-        complete_round(
-            _open_leg2(),
-            leg1_price=10.0, leg2_price=9.9, qty=100,
-            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
-            cost=RoundCost(cost_amount=5.0, cost_bp_tier="tier_a_measured"),
-        )
+def test_record_cost_tier_field_default_stays_none():
+    """`TRoundRecord.cost_bp_tier` 缺省仍是 `None`, 不是 `design_pending`。
+
+    两者语义不同: `None` = 还没结算(没到填成本那一步), `design_pending` = 结算了
+    但成本未实测。把缺省改成 `design_pending` 会让一条**还没开始**的轮次记录看起来
+    像"已经结算过且成本未测", 而 `complete_round` 之后才该有档位。
+    """
+    assert TRoundRecord.__dataclass_fields__["cost_bp_tier"].default is None
+    assert TRoundRecord.__dataclass_fields__["cost_amount"].default is None
+    # 造一条最小可用记录, 确认实例上确实是 None(不是被 __post_init__ 补过)
+    rec = _record()
+    assert rec.cost_bp_tier is None
+    assert rec.cost_amount is None
 
 
-def test_cost_deducted_from_net():
+
     out = complete_round(
         _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
         leg1_source_lot="old_lot", leg2_source_lot="old_lot",
         cost=RoundCost(cost_amount=3.0),
     )
     assert out.net_spread == pytest.approx(out.gross_spread - 3.0)
+
+
+# ============================================== 成本闸门 5b: 白名单 ∪ design_pending
+#
+# 批次 20261025gcost。
+#
+# 旧行为: 闸门写死 `if cost.cost_bp_tier != "design_pending": raise` —— 任何非
+# pending 的档位都拒。那时确实没有分档成本实测, 但这也意味着"5b 契约放开"没有
+# 落地位置: 想把一轮标成 `10bp` 都过不了闸, 只能去改 offline 绕, 而绕开的闸门
+# 等于没有闸门。
+#
+# 现在: 闸门 = 白名单成员资格(`C.COST_BP_TIERS`), 再叠加金额与档位的自洽规则。
+# 关键不是"放开了", 而是**放开的同时堵住了 silent 0**: 非零档位配 `amount=0` 必须
+# 拒 —— 否则一份"按 10bp 扣成本"的报告与"根本没扣"在数字上一模一样, 而前者会被
+# 当成已经考虑过成本的结论。
+#
+# 本拍只做契约(5b); 0/0.05%/0.10%/0.15%/0.20% 的敏感性跑表是 **5c**, 另一拍。
+# 所以这里断言的是"闸门怎么判", 不是"扣多少成本才合适"。
+
+
+def test_cost_tier_whitelist_is_the_pinned_six():
+    """白名单写死六个值, 且是 frozenset —— 两个名字指向同一对象, 不会有第二份漂移。"""
+    assert C.COST_BP_TIERS == frozenset(
+        {"design_pending", "0bp", "5bp", "10bp", "15bp", "20bp"}
+    )
+    assert isinstance(C.COST_BP_TIERS, frozenset)
+    # 别名必须是**同一个** frozenset: `is` 而非 `==`。用 `==` 的话, 把别名改成
+    # `frozenset(COST_BP_TIERS)`(拷贝)照样通过 —— 而拷贝正好是漂移的入口。
+    assert C.ALLOWED_COST_BP_TIERS is C.COST_BP_TIERS
+
+
+def test_cost_whitelist_source_has_exactly_one_definition():
+    """`constants.py` 里 `COST_BP_TIERS` 只被赋值**一次**, 别名不得另建集合。
+
+    这条比"值相等"更严: 有人在别名那行写 `frozenset({... })` 再抄一遍六个值,
+    值肯定相等, 但从此有了两份字面量 —— 下次加档位只改一处, 两份就分叉。
+    所以这里数赋值目标名, 而不比值。
+    """
+    tree = ast.parse((PKG_DIR / "constants.py").read_text(encoding="utf-8"))
+    assigned = [
+        node.target.id
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    ]
+    assert assigned.count("ALLOWED_COST_BP_TIERS") == 1
+    assert assigned.count("COST_BP_TIERS") == 1
+    # 别名那一行的值必须直接引用 COST_BP_TIERS, 不许是 frozenset(...) 之类的重新构造
+    alias = next(
+        node for node in tree.body
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "ALLOWED_COST_BP_TIERS"
+    )
+    assert isinstance(alias.value, ast.Name) and alias.value.id == "COST_BP_TIERS"
+
+
+def test_cost_tier_whitelist_is_exported():
+    """白名单必须进 `__all__` —— 靠 `from ... import *` 的调用方也要拿得到。"""
+    assert "COST_BP_TIERS" in C.__all__
+    assert "ALLOWED_COST_BP_TIERS" in C.__all__
+
+
+def test_cost_tier_whitelist_not_conflated_with_stamp_tax_refs():
+    """`STAMP_TAX_PRICE_REFS` 与 `COST_BP_TIERS` 是两回事, 别合并。
+
+    两者都含 `design_pending`, 但一个是"卖出价按哪个价算", 一个是"按几个 bp 扣成本"。
+    合并会让改印花税参照的人顺手改掉成本档位(或反过来)。这条断言把两个集合钉开:
+    印花税参照里有 `leg1_price`/`market`(成本档位不该有), 成本档位里有 `0bp`(价格
+    参照不该有)。
+    """
+    assert C.COST_BP_TIERS is not C.STAMP_TAX_PRICE_REFS
+    assert "leg1_price" not in C.COST_BP_TIERS
+    assert "market" not in C.COST_BP_TIERS
+    assert "0bp" not in C.STAMP_TAX_PRICE_REFS
+
+
+@pytest.mark.parametrize(
+    "tier",
+    ["tier_a_measured", "99bp", "bp_10", "10BP", "", "0", "pending"],
+)
+def test_illegal_cost_tier_rejected(tier):
+    """T1 —— 白名单之外的字符串一律拒, 包括拼写变体(`bp_10`/大写)和空串。
+
+    `bp_10` 单独列出来: 任务书允许等价拼写, 但要求"单一定义并全文一致"; 本拍坚持
+    `Nbp`, 于是 `bp_10` 就是非法值。它字面上极像合法档位, 所以必须有一条测例把它
+    钉死 —— 否则某天有人顺手加个别名, 白名单就有了两套拼写。
+    """
+    with pytest.raises(TRoundValidationError, match="白名单"):
+        complete_round(
+            _open_leg2(),
+            leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+            cost=RoundCost(cost_amount=5.0, cost_bp_tier=tier),
+        )
+
+
+def test_illegal_cost_tier_message_lists_the_whitelist():
+    """拒的时候要把白名单打出来 —— 只说"不合法"会让人去翻源码找合法值。"""
+    with pytest.raises(TRoundValidationError) as exc:
+        complete_round(
+            _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+            cost=RoundCost(cost_amount=5.0, cost_bp_tier="tier_a_measured"),
+        )
+    msg = str(exc.value)
+    for tier in C.COST_BP_TIERS:
+        assert tier in msg, f"报错里应列出白名单档位 {tier!r}"
+    assert "tier_a_measured" in msg
+
+
+@pytest.mark.parametrize("tier", ["10bp", "5bp", "15bp", "20bp"])
+def test_nonzero_cost_tier_accepts_positive_amount(tier):
+    """T6(参数化) —— 非零档位 + `amount > 0` 应通过, 且 `net = gross - amount`。"""
+    out = complete_round(
+        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+        cost=RoundCost(cost_amount=2.5, cost_bp_tier=tier),
+    )
+    assert out.cost_bp_tier == tier
+    assert out.cost_amount == pytest.approx(2.5)
+    # 公式形态不变: net = gross - cost_amount
+    assert out.net_spread == pytest.approx(out.gross_spread - 2.5)
+
+
+@pytest.mark.parametrize("tier", ["10bp", "5bp", "15bp", "20bp"])
+def test_nonzero_cost_tier_rejects_zero_amount(tier):
+    """T7(参数化) —— **禁 silent 0**: 非零档位配 `amount=0` 必须拒。
+
+    这是本拍最要紧的一条。允许它的话, 一份"按 10bp 扣成本"的报告与"根本没扣成本"
+    的报告在数字上完全一致, 而前者会被当成已经考虑过成本的结论 —— 错误不在数字里,
+    在标签里, 事后从结果上根本看不出来。
+    """
+    with pytest.raises(TRoundValidationError, match="必须 > 0"):
+        complete_round(
+            _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+            cost=RoundCost(cost_amount=0.0, cost_bp_tier=tier),
+        )
+
+
+def test_zero_cost_tier_accepts_zero_amount():
+    """T4 —— `0bp` + 0 是显式零成本, 合法(允许"已测零"这回事)。"""
+    out = complete_round(
+        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+        cost=RoundCost(cost_amount=0.0, cost_bp_tier="0bp"),
+    )
+    assert out.cost_bp_tier == "0bp"
+    assert out.cost_amount == 0.0
+    assert out.net_spread == pytest.approx(out.gross_spread)
+
+
+def test_zero_cost_tier_rejects_positive_amount():
+    """T5 —— 写着零成本却扣了钱, 自相矛盾, 拒。"""
+    with pytest.raises(TRoundValidationError, match="必须为 0"):
+        complete_round(
+            _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+            cost=RoundCost(cost_amount=1.0, cost_bp_tier="0bp"),
+        )
+
+
+def test_design_pending_allows_zero_amount():
+    """T2 —— 回归: `design_pending` + 0 仍绿(旧路径不许被弄红)。"""
+    out = complete_round(
+        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+        cost=RoundCost(cost_amount=0.0, cost_bp_tier="design_pending"),
+    )
+    assert out.cost_bp_tier == "design_pending"
+    assert out.cost_amount == 0.0
+
+
+def test_design_pending_allows_positive_amount():
+    """`design_pending` 是占位, **不**要求金额与费率一致 —— 填了正数也放行。
+
+    这条与"非零档位必须 > 0"是同一个意思的两半: 闸门只验"档位合法 + 金额不矛盾",
+    不做"费率 × 名义"的换算校验(那是 ALIGN G2, 可选的增强)。
+    """
+    out = complete_round(
+        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+        cost=RoundCost(cost_amount=7.0, cost_bp_tier="design_pending"),
+    )
+    assert out.net_spread == pytest.approx(out.gross_spread - 7.0)
+
+
+def test_default_round_cost_is_legal_and_pinned():
+    """T3 —— 缺省 `RoundCost()` = `design_pending` + 0.0; 不传 `cost` 也应绿。"""
+    assert RoundCost().cost_bp_tier == "design_pending"
+    assert RoundCost().cost_amount == 0.0
+    out = complete_round(
+        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+        cost=None,
+    )
+    assert out.cost_bp_tier == "design_pending"
+    assert out.cost_amount == 0.0
+
+
+@pytest.mark.parametrize("tier", sorted(C.COST_BP_TIERS))
+def test_negative_amount_rejected_for_every_whitelisted_tier(tier):
+    """负金额对**任何一个**合法档位都拒 —— 非负检查在档位检查之后仍然生效。"""
+    with pytest.raises(TRoundValidationError, match="非负"):
+        complete_round(
+            _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+            cost=RoundCost(cost_amount=-1.0, cost_bp_tier=tier),
+        )
+
+
+def test_zero_cost_excluded_tiers_derived_from_whitelist():
+    """`ZERO_COST_EXCLUDED_TIERS` 从白名单**减**出来, 不是另抄一份字面量。
+
+    另抄一份的后果: 将来白名单加个 `25bp`, 这条规则不会覆盖它, 新档位就默默变成
+    "金额随便填", 而它看起来和白名单里别的档位一模一样。
+    """
+    assert state_machine.ZERO_COST_EXCLUDED_TIERS == C.COST_BP_TIERS - {"design_pending", "0bp"}
+    assert "design_pending" not in state_machine.ZERO_COST_EXCLUDED_TIERS
+    assert "0bp" not in state_machine.ZERO_COST_EXCLUDED_TIERS
+
+
+def test_cost_gate_lives_in_state_machine_not_only_offline():
+    """契约必须落在 `state_machine`, 不能只改 `offline/` 绕闸。
+
+    只看源码形态: `complete_round` 里必须出现白名单判据, 且全包**只有一处**定义
+    `COST_BP_TIERS` 字面量。这条守的是"单一定义" —— 有第二份拷贝就会出现"某个档位
+    在一个入口能过、在另一个入口报错", 那比直接不支持更难查。
+    """
+    src = inspect.getsource(state_machine.complete_round)
+    assert "COST_BP_TIERS" in src, "complete_round 里必须有白名单判据"
+
+    copies = [
+        p for p in PKG_DIR.rglob("*.py")
+        if "COST_BP_TIERS: Final = frozenset(" in p.read_text(encoding="utf-8")
+    ]
+    assert copies == [PKG_DIR / "constants.py"], f"白名单只应有 constants 一处定义, 实际: {copies}"
 
 
 def test_bad_prices_rejected():

@@ -136,7 +136,16 @@ class TRoundRecord:
     # ---- 净价差 / KPI ---------------------------------------------------
     gross_spread: float | None = None
     cost_bp_tier: str | None = None
-    """[占位] 分档成本。本轮**不做**分档成本实测, 保持 None。"""
+    """成本档位。合法取值见 `constants.COST_BP_TIERS` —— 白名单 =
+    `design_pending` ∪ `{0bp, 5bp, 10bp, 15bp, 20bp}`(做 T 成本闸门 5b)。
+
+    **记录上仍可为 None**: 轮次还没结算时本来就没有成本档位, 用 None 表示"还没到
+    那一步", 与 `design_pending`("到那一步了, 但成本仍未实测")是两回事。结算后
+    `complete_round` 会把具体档位写进来。
+
+    白名单之外的字符串不会落库 —— `complete_round` 的闸门先拒。金额与档位必须
+    自洽: `0bp` 必须配 0, 非零档位必须配 > 0, 禁止非零档位 + 0 冒充已测。
+    """
     cost_amount: float | None = None
     net_spread: float | None = None
     net_spread_realized: bool = False
