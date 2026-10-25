@@ -54,7 +54,7 @@ PERSIST_ENV_NAME: Final = "BUY_SELL_SIGNALS_PERSIST"
 只认这一个名字(批次 20261025gp 引入)。未设或假 → `InMemorySignalRegistryStore`,
 不落盘。生产是否置 1 另等部署口令, 不得随合入默开。
 
-**落盘 ≠ 推送**: 开了也只是把注册表写进本地 JSON, 没有 SSE / 飞书 / `news.push`。
+**落盘 ≠ 推送**: 开了也只是把注册表写进本地 JSON, 没有 SSE / 钉钉 / `news.push`。
 """
 
 PERSIST_SUBDIR: Final = "buy_sell_signals"
@@ -86,9 +86,10 @@ PUSH_ENV_NAME: Final = "BUY_SELL_SIGNALS_PUSH"
 
 未设 → `try_push` 一行都不写。生产是否置 1 **另等部署口令**, 不得随合入默开。
 
-通道写死为 SSE + 站内告警(复用 `QuoteService.push_alerts` + `alert_store`)。
-飞书**下一拍** —— 本常量没有任何"通道选择"的开关位, 想加飞书请改代码评审,
-不要在这里加一个 `PUSH_CHANNELS` 之类的可配置项。
+站内/SSE 两路**写死**(复用 `QuoteService.push_alerts` + `alert_store`)。外部通道
+另由 `DINGTALK_ENV_NAME` 二次门控(批次 20261025gding), **不**内置在本门里。
+飞书**已取消**(批次 20261025gding 起从路线图去掉, 不再排期) —— 本常量没有任何
+"通道选择"的开关位, 不要在这里加一个 `PUSH_CHANNELS` 之类的可配置项。
 """
 
 MONITOR_EVENT_TYPE: Final = "buy_sell_signal_status_changed"
@@ -100,6 +101,23 @@ MONITOR_EVENT_TYPE: Final = "buy_sell_signal_status_changed"
 
 PUSH_PAYLOAD_SCHEMA_VERSION: Final = "1"
 """推送载荷格式版本(字符串, 理由同 `REGISTRY_SCHEMA_VERSION`)。"""
+
+# ---------------------------------------------------------------- 钉钉(可选)
+
+DINGTALK_ENV_NAME: Final = "BUY_SELL_SIGNALS_DINGTALK"
+"""钉钉**支路**的开关环境变量名(批次 20261025gding 引入)。真值集合同 persist / push。
+
+**与 `PUSH_ENV_NAME` 是"与"关系, 不是替代**:
+
+    真实外发到钉钉群 = push_env_enabled() and dingtalk_env_enabled() and webhook 非空
+
+为什么不把钉钉直接挂在 PUSH 门下: 生产 `BUY_SELL_SIGNALS_PUSH=1` 早已打开, 而
+`DINGTALK_WEBHOOK_URL` 多半也为资讯推送配好了。若钉钉只认 PUSH 门, 本批代码一合入、
+一重启, 就会**立刻**往既有群里外发 —— 站内消息发错了刷新一下就没了, 群里发错了收不回来。
+独立门把"外部副作用"与"站内/SSE"解耦: 想发钉钉, 必须显式再多开一道门。
+
+默认关。生产置 1 **另等部署口令**, 合入 ≠ 开钉钉。
+"""
 
 # ---------------------------------------------------------------- 设计钉版本
 
@@ -222,6 +240,7 @@ __all__ = [
     "BONFERRONI_FAMILY_ALPHA",
     "BONFERRONI_M",
     "BONFERRONI_SCHEME_ID",
+    "DINGTALK_ENV_NAME",
     "DISCLAIMER_KEY",
     "EVENT_CLASSES",
     "INDUSTRY_STANDARD_SW_L1",

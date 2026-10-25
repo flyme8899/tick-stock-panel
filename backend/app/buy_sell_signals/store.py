@@ -12,7 +12,7 @@
 - 生产是否置 `BUY_SELL_SIGNALS_PERSIST=1` 另等部署口令, 不得默认开。
 
 **落盘 ≠ 推送**。写进 `registry.json` 的记录不会因此进入推送链路: 没有 SSE、
-没有飞书、没有 `news.push` 接线, 状态机也没有任何通往 `publishable` 的自动边。
+没有钉钉、没有 `news.push` 接线, 状态机也没有任何通往 `publishable` 的自动边。
 
 `InMemorySignalRegistryStore` 仍是默认实现, 单测主路径走它, 进程退出即消失。
 

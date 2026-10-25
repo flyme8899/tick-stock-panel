@@ -6,7 +6,7 @@
 - `models`     `SignalRecord` 及其校验
 - `state_machine` 转移表 + 人工发布闸 + 硬禁自动晋升
 - `store`      `SignalRegistryStore` 协议 + 内存实现 + 落盘实现(env 门控) + 工厂
-- `push`       推送出口: env 门控的 `try_push`, 通道 = SSE + 站内告警(gpush)
+- `push`       推送出口: env 门控的 `try_push`, 通道 = SSE + 站内告警(gpush) + 钉钉(gding)
 - `sw_pit`     申万一级行业 PIT 只读查询(history × l1_map, valid_from/valid_to)
 - `quality_proxy` 日线质量代理(财务按 announce_date 做 PIT)
 - `quality_rank`  申万一级行业内的质量相对分位 + 白名单**试跑**判定(g2 窄化)
@@ -28,9 +28,19 @@
 (`alert_store.append_many` → `alerts.jsonl`)**, 复用既有通道, 不新建总线、不新建
 SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `push_eligible`;
 成功后写 `last_pushed_at` + 30 分钟冷却 + `push_gate=cooldown`。**gpush 没做**:
-飞书(下一拍)、`news.push`、日管道自动扫晋升、任何自动 `publishable`。
+`news.push`、日管道自动扫晋升、任何自动 `publishable`。
 
-现行口径: **落盘已开 · 推送可选(env) · 竞价/放量事件仍未接**。
+**gding 做了什么**: 在同一个 `try_push` 的资格门之后、写回冷却之前, 接上**既有**
+钉钉 webhook —— 条件是 `BUY_SELL_SIGNALS_PUSH` 开 **且** `BUY_SELL_SIGNALS_DINGTALK`
+开 **且** `settings.dingtalk_webhook_url` 非空(三者**与**关系, 钉钉门默认关)。
+发送只调既有的 `app.news.dingtalk.send_markdown`, 与资讯/ETF/价位提醒同一个机器人,
+不新建 webhook、不新建机器人、不复制加签实现。同一次状态变化可以 SSE + 站内 + 钉钉
+同时发, 但 `last_pushed_at` / `push_dedupe_cooldown_until` / `push_gate=cooldown`
+**只写一次**。钉钉是 best-effort: 发送失败只 warning, 不回滚已成功的站内/SSE,
+仍写一次冷却。**gding 没做**: 飞书(**已取消, 从路线图去掉, 不再排期**)、
+钉钉独立冷却、钉钉独立触发时钟、日管道自动扫晋升。
+
+现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接**。
 
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
@@ -38,7 +48,8 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 本包与 `app.services.trade_marks`、`app.news.push` **没有** import 关系, 也不共用
 任何提醒层常量(`VWAP_BAND` / `RANGE_BAND` / `T_COOLDOWN_MIN`); 与 `app.t_rounds`
 零符号耦合。理由见 `constants`。`push.py` 复用 `QuoteService.push_alerts` 与
-`alert_store` 这两个**通道**, 但不 import 它们的节流参数, 也不走飞书支路。
+`alert_store` 这两个**通道**、`app.news.dingtalk.send_markdown` 这个**发送函数**,
+但不 import 它们的节流参数, 也不走飞书支路(已取消)。
 
 仅供研究，不构成投资建议；执行须人工确认。
 """
@@ -47,6 +58,7 @@ from __future__ import annotations
 from .constants import (
     BONFERRONI_M,
     BONFERRONI_SCHEME_ID,
+    DINGTALK_ENV_NAME,
     DISCLAIMER_KEY,
     NAMESPACE,
     PERSIST_ENV_NAME,
@@ -63,6 +75,9 @@ from .push import (
     PushError,
     PushRejected,
     PushResult,
+    build_dingtalk_text,
+    dingtalk_env_enabled,
+    dingtalk_webhook_ready,
     push_env_enabled,
     try_push,
 )
@@ -101,6 +116,7 @@ from .store import (
 __all__ = [
     "BONFERRONI_M",
     "BONFERRONI_SCHEME_ID",
+    "DINGTALK_ENV_NAME",
     "DISCLAIMER_KEY",
     "DISCLAIMER_TEXT",
     "DiskSignalRegistryStore",
@@ -131,9 +147,12 @@ __all__ = [
     "WHITELIST_PERCENTILE_LOCKED",
     "WHITELIST_PERCENTILE_TRIAL",
     "WHITELIST_THRESHOLD_LOCKED",
+    "build_dingtalk_text",
     "build_rebalance_snapshot",
     "build_signal_registry_store",
     "design_version",
+    "dingtalk_env_enabled",
+    "dingtalk_webhook_ready",
     "make_rebalance_id",
     "manual_publish",
     "percentile_rank",
