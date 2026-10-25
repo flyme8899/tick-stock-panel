@@ -120,8 +120,19 @@ class SignalRecord:
     # ---- 竞价 / 开盘后噪声(分列, 不混桶) --------------------------------
     auction_rule_id: str | None = AUCTION_RULE_ID_NONE
     auction_stat_bucket: str | None = None
+    """09:25 竞价统计桶。**只有 `event_class == "auction"` 才能非 None。**
+
+    放量突破(`intraday_volume`)这类开盘后信号, 本字段必须为 `None` —— 见
+    `volume_breakout_stub.VOLUME_BREAKOUT_AUCTION_STAT_BUCKET`。写进去会被
+    `__post_init__` 拒掉: 竞价是离散撮合、开盘后是连续成交, 两段样本合在一起
+    算出来的均值没有解释意义(`NOISE_MIX_FORBIDDEN`)。
+    """
     post_open_noise_flag: bool = False
     post_open_noise_bucket: str | None = None
+    """开盘后噪声档。取值须 ∈ `POST_OPEN_NOISE_BUCKETS` 封闭集。
+
+    `event_class == "auction"` 的记录**不得**携带本字段 —— 那是混桶的入口。
+    """
 
     # ---- 健康 / 行业 / 环境挂点(本批次只落字段) --------------------------
     health_veto_rule_version: str = "design_pending"

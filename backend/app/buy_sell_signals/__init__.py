@@ -73,7 +73,30 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 锁定引擎(`whitelist_lock_engine.py` 之类)、把 `score_version` 升成"已锁"叙事。
 **质量/估值/健康零碰**(#208 行为字节未改)。
 
-现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接 · 估值/健康仍 pending · 白名单试跑未锁**。
+**gauction/gvol 做了什么(批次 20261025gauction · 放量窄开 · P1-3)**: **勿真开**,
+且**竞价整段不做**。
+
+- **身份钉**: 新建 `volume_breakout_stub.py`, 把 `signal_id="volume_breakout"` ·
+  `event_class="intraday_volume"` · `family="minute_event"` ·
+  `auction_stat_bucket=None`(恒) · `auction_rule_id=None` 写成可扫常量。
+- **分列契约**: 放量**不得**写入 `auction_0925`; `SignalRecord` 的混桶拒斥本就在 tip
+  生效, 本拍只显式覆盖放量路径并测下来。缺竞价包不得用放量回填竞价。
+- **空桩**: `evaluate_volume_breakout()` 恒返回 `data_pending`; `triggered` 恒 `None`
+  (**不是** `False` —— "不知道"与"没放量"是两件事); 量比 / 突破幅度恒 `None`, 不填假数。
+- **四条缺口**: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 覆盖本机分钟库 / 触发证据表 /
+  HTTP 凭证 / 阈值锁定, 全部 `data_pending`。
+- **既有反证**: 仓内 `app/custom/dsa/quant_evidence.yaml` 的 `volume_breakout` 四个口径
+  回测全为负(-23.86% / -32.44% / -13.80% / -19.81%, `strongly_negative`)。
+  开闸前要先解释这个负号 —— 见 `VOLUME_BREAKOUT_NEGATIVE_EVIDENCE`。
+- **竞价不做**: 无 09:25 真实包; **永久禁止**用 09:30 或任意开盘后 bar 冒充 09:25。
+  本拍不新建任何竞价引擎 / 回测 / 09:25 路径。
+
+**gauction 没做**: 放量触发引擎、阈值锁定(量比/突破幅度/窗口分钟数一个数值都没钉)、
+假量回测表、竞价实现(另等 09:25 包)、扩 `POST_OPEN_NOISE_BUCKETS`、改三 env、
+改 `push.py` / `store.py` / `main.py` / `t_rounds`。
+**质量/估值/健康/白名单零碰**(#208 / #209 行为字节未改)。
+
+现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价仍 blocked(无 09:25 包) · 放量身份/契约已钉、触发仍 pending · 估值/健康仍 pending · 白名单试跑未锁**。
 
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
@@ -159,6 +182,17 @@ from .store import (
     SignalRegistryStore,
     build_signal_registry_store,
 )
+from .volume_breakout_stub import (
+    VOLUME_BREAKOUT_EVENT_CLASS,
+    VOLUME_BREAKOUT_EVIDENCE,
+    VOLUME_BREAKOUT_EVIDENCE_PENDING,
+    VOLUME_BREAKOUT_NEGATIVE_EVIDENCE,
+    VOLUME_BREAKOUT_SIGNAL_ID,
+    VOLUME_BREAKOUT_STATUS,
+    VolumeBreakoutStub,
+    build_volume_breakout_record,
+    evaluate_volume_breakout,
+)
 
 __all__ = [
     "BONFERRONI_M",
@@ -197,6 +231,13 @@ __all__ = [
     "SignalStateError",
     "SignalTransitionError",
     "SignalValidationError",
+    "VOLUME_BREAKOUT_EVENT_CLASS",
+    "VOLUME_BREAKOUT_EVIDENCE",
+    "VOLUME_BREAKOUT_EVIDENCE_PENDING",
+    "VOLUME_BREAKOUT_NEGATIVE_EVIDENCE",
+    "VOLUME_BREAKOUT_SIGNAL_ID",
+    "VOLUME_BREAKOUT_STATUS",
+    "VolumeBreakoutStub",
     "WHITELIST_LOCK_EVIDENCE",
     "WHITELIST_LOCK_EVIDENCE_PENDING",
     "WHITELIST_PERCENTILE_LOCKED",
@@ -205,10 +246,12 @@ __all__ = [
     "build_dingtalk_text",
     "build_rebalance_snapshot",
     "build_signal_registry_store",
+    "build_volume_breakout_record",
     "design_version",
     "dingtalk_env_enabled",
     "dingtalk_webhook_ready",
     "evaluate_quality",
+    "evaluate_volume_breakout",
     "health_veto_asof",
     "make_rebalance_id",
     "manual_publish",
