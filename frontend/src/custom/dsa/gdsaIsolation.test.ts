@@ -116,9 +116,13 @@ function changedFiles(): string[] {
 it('改动文件清单非空，且包含本拍新增文件（防止 diff 类断言空转）', () => {
   const files = changedFiles()
   expect(files.length).toBeGreaterThan(0)
+  // 只列**本拍真的改到**的文件。
+  // 注意别再放 DsaNavReachableAccessory.tsx —— #211 改过它，但 gdsa2 没碰；
+  // 硬把它写进预期清单会让本用例永远红（这坑我踩过一次）。
   for (const expected of [
     'frontend/src/custom/dsa/funnelMetrics.ts',
-    'frontend/src/custom/dsa/DsaNavReachableAccessory.tsx',
+    'frontend/src/custom/dsa/DsaEnablementChecklist.tsx',
+    'frontend/src/custom/dsa/client.ts',
   ]) {
     expect(files, `改动清单里缺少 ${expected}，diff 类红线会静默空转`).toContain(expected)
   }
@@ -215,9 +219,12 @@ it('本拍 diff 不含 buy_sell_signals 行为文件', () => {
   expect(files.filter(file => file.startsWith('backend/app/buy_sell_signals/'))).toEqual([])
 })
 
-it('本拍不碰 DSA 后端的狙击/定时文件', () => {
+it('本拍不碰 DSA 后端的定时/代理/路由文件（只动 sniper_alerts 的文案）', () => {
   const files = changedFiles()
-  for (const banned of ['sniper_alerts.py', 'schedule.py', 'backend/app/custom/dsa/routes.py', 'backend/app/custom/dsa/proxy.py']) {
+  // 批次 20261025gdsa2：sniper_alerts.py 的 `alert_text` 加来源前缀是**本拍交付项**，
+  // 所以它从「禁碰」名单里移出。但 register / routes / proxy / schedule 的行为仍然零碰 ——
+  // 登记契约（SniperLineRequest、POST /sniper-lines 的返回语义）一个字节都不改。
+  for (const banned of ['schedule.py', 'backend/app/custom/dsa/routes.py', 'backend/app/custom/dsa/proxy.py']) {
     expect(files.filter(file => file.endsWith(banned))).toEqual([])
   }
 })
@@ -301,4 +308,33 @@ it('本拍改动不引用 #210 的放量桩（勿依赖未合字节）', () => {
 it('本拍不新增 backend/app/buy_sell_signals 下的文件', () => {
   const files = changedFiles()
   expect(files.filter(file => file.startsWith('backend/app/buy_sell_signals/'))).toEqual([])
+})
+
+// ── 7. 批次 20261025gdsa2：两个插槽必须真的降级（源码层） ──────────
+//
+// 这里只钉「降级分支存在且以 reachable 为准」这件事的结构证据；
+// 渲染层的三态行为在 gdsa2Isolation.test.ts 之外另有 DsaSlotDegraded 用例覆盖。
+
+it('两个插槽都用 reachable 判定，且都存在降级分支', () => {
+  const ext = codeOnly(read('src/custom/dsa/extension.tsx'))
+  // 判定源：只允许 reachable；enabled 不得参与（它恒真）
+  expect(ext).toContain('status.data?.reachable')
+  expect(ext).not.toMatch(/enabled\s*===?\s*true/)
+  // 三态齐全：true 正常 / false 未连接 / null 检测中
+  expect(ext).toContain('决策服务未连接')
+  expect(ext).toContain('检测中')
+  // 降级元素带可断言的标记
+  expect(ext).toMatch(/data-dsa-slot-degraded=/)
+  // 可达时仍进 reports+code
+  expect(ext).toContain("section: 'reports'")
+  expect(ext).toContain('code: symbol')
+})
+
+it('异动页没有挂 DSA 入口，也没被 import（本拍 design_pending）', () => {
+  // 异动页归核心包；核心包 import DSA 的检查在上面那条里已覆盖，
+  // 这里额外钉「没有异动专用 slot 名被注册」。
+  const ext = codeOnly(read('src/custom/dsa/extension.tsx'))
+  for (const banned of ['abnormal', 'AbnormalMove', 'abnormal-move']) {
+    expect(ext).not.toContain(banned)
+  }
 })

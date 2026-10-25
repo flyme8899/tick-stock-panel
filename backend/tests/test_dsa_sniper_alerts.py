@@ -167,3 +167,63 @@ def test_alert_sender_stays_off_the_evaluate_result(monkeypatch):
     sniper._queue.append({"symbol": "600519.SH", "name": "贵州茅台", "label": "止损", "line": 90, "price": 89, "analyzed_at": "t"})
     assert sniper.drain() == 1
     assert sent[0]["label"] == "止损"
+
+
+# ── 批次 20261025gdsa2：alert_text 来源前缀 ────────────────────────────
+#
+# 价位线和买卖信号共用同一个钉钉 webhook（`_dingtalk_send` → `send_markdown`），
+# 群里刷起来分不清来源。前缀是最小分流手段；限流合并是另一拍（design_pending）。
+
+
+def test_alert_text_title_carries_source_prefix():
+    """标题必须带来源前缀 —— 否则和 BSS「买卖信号」在同一个群里分不清。"""
+    title, text = sniper.alert_text({
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "label": "理想买入",
+        "price": 99.5,
+        "line": 100.0,
+        "analyzed_at": "2026-10-09T10:00:00+08:00",
+    })
+    assert title.startswith(sniper.ALERT_SOURCE_PREFIX)
+    assert "理想买入" in title
+    assert "贵州茅台" in title
+    # 正文首行也标来源，转发到别处时不会丢
+    assert sniper.ALERT_SOURCE_PREFIX in text
+
+
+def test_alert_text_prefix_is_the_nailed_wording():
+    """前缀措辞钉死，改它要同步改文档与本测例。"""
+    assert sniper.ALERT_SOURCE_PREFIX == "DSA价位"
+
+
+def test_alert_text_title_still_fits_dingtalk_limit_with_prefix():
+    """加了前缀也不能把标题顶爆 64 字符上限。"""
+    title, _text = sniper.alert_text({
+        "symbol": "600519.SH",
+        "name": "贵州茅台" * 20,
+        "label": "理想买入",
+        "price": 99.5,
+        "line": 100.0,
+    })
+    assert len(title) <= 64
+
+
+def test_alert_text_gap_wording_survives_the_prefix():
+    """前缀不能把「开盘跳空触及」这句判断信息挤掉。"""
+    _title, text = sniper.alert_text({
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "label": "理想买入",
+        "price": 99.5,
+        "line": 100.0,
+        "gap": True,
+    })
+    assert "开盘跳空触及理想买入" in text
+
+
+def test_alert_text_falls_back_when_name_and_label_missing():
+    """缺 name / label 时用兜底词，仍然带前缀（不能因为字段缺失就丢来源）。"""
+    title, _text = sniper.alert_text({"symbol": "600519.SH", "price": 1.0, "line": 2.0})
+    assert title.startswith(sniper.ALERT_SOURCE_PREFIX)
+    assert "600519.SH" in title

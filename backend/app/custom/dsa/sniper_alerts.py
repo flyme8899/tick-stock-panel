@@ -4,6 +4,8 @@
 超过 5 个自然日的线删掉。盘中只看实时行情线程已经拿到的原始价，
 触及后走现成的钉钉机器人。同一条线 30 分钟内不重复推。
 推送不在行情线程里发。
+
+仅供研究，不构成投资建议；执行须人工确认。
 """
 from __future__ import annotations
 
@@ -23,6 +25,19 @@ logger = logging.getLogger("tsp.dsa.sniper_alerts")
 COOLDOWN = timedelta(minutes=30)
 STALE_AFTER = timedelta(days=5)
 MAX_LINES = 200
+
+ALERT_SOURCE_PREFIX = "DSA价位"
+"""钉钉推送的**来源前缀**, 批次 20261025gdsa2 加。
+
+为什么加: 价位线提醒和买卖信号 (`buy_sell_signals`) 走的是**同一个**钉钉 webhook
+(`_dingtalk_send` → `app.news.dingtalk.send_markdown`)。两边都是"某只票到价了"的短消息,
+群里刷起来分不清是谁发的 —— 看到「理想买入 贵州茅台」根本不知道是 BSS 的信号还是
+DSA 的价位线。加个前缀至少能一眼分开。
+
+**这只做了分流, 没做限流。** 两套推送各自的频率控制、以及要不要合并去重,
+是独立的一拍 (design_pending, 材料不足: 需要真实的群里推送密度样本)。
+不挡本按钮合入 —— 前缀本身就是最小可用的一步。
+"""
 _LEVELS = (
     ("ideal_buy", "buy", "理想买入", "down"),
     ("stop_loss", "stop", "止损", "down"),
@@ -229,12 +244,16 @@ def observe_frame(frame, *, now: datetime | None = None, enqueue: bool = True, r
 
 
 def alert_text(item: dict) -> tuple[str, str]:
+    """价位线提醒的标题与正文。
+
+    **标题带来源前缀, 刻意为之** —— 见下方 `ALERT_SOURCE_PREFIX` 的说明。
+    """
     name = item.get("name") or item.get("symbol") or "股票"
     label = item.get("label") or "价位"
-    title = f"{label} {name}"
+    title = f"{ALERT_SOURCE_PREFIX} {label} {name}"
     how = "开盘跳空触及" if item.get("gap") else "触及"
     text = (
-        f"### {label}\n\n"
+        f"### {ALERT_SOURCE_PREFIX} · {label}\n\n"
         f"{name}（{item.get('symbol')}）现价 {_price(item.get('price'))}，"
         f"{how}{label} {_price(item.get('line'))}。\n\n"
         f"分析时间 {item.get('analyzed_at') or '未知'}。"

@@ -1,15 +1,23 @@
 // @vitest-environment jsdom
 /**
- * 漏斗计数契约测试（批次 20261025gdsa）。
+ * 漏斗计数契约测试（批次 20261025gdsa · 第 1 步；20261025gdsa2 · L4 钉死）。
  *
- * 只听契约：键名/前缀、L1–L3 读写、L4 只留槽 + design_pending、pending 标记、
+ * 只听契约：键名/前缀、L1–L4 读写、L4 动作枚举 + 成功路径自增、pending 标记、
  * 以及「不出现比率/已测通类肯定句」的红线。不测真实 sidecar，不联网。
+ *
+ * 批次 20261025gdsa2 的改动：
+ * - `DSA_FUNNEL_L4_STATUS` 由 `design_pending` → `nailed`，`PENDING.l4` 转 `false`；
+ * - 新增 `bumpCoreAction` / `DSA_FUNNEL_L4_ACTIONS` / `readActionCount`；
+ * - 原来那条「本拍没有任何动作会让它自增」的用例**语义反转**了：现在必须能自增。
+ *   直接改断言而不是删掉它 —— 它守的「L1–L3 的写入不会顺带污染 L4」这一半仍然有效。
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import {
   buildFunnelDiagnostics,
+  bumpCoreAction,
+  DSA_FUNNEL_KEY_ACTION_PREFIX,
   DSA_FUNNEL_KEY_CORE_ACTION_COUNT,
   DSA_FUNNEL_KEY_ENABLED_SEEN,
   DSA_FUNNEL_KEY_OPEN_WORKSPACE_COUNT,
@@ -17,6 +25,8 @@ import {
   DSA_FUNNEL_KEY_REACHABLE_FALSE_COUNT,
   DSA_FUNNEL_KEY_REACHABLE_TRUE_COUNT,
   DSA_FUNNEL_KEYS,
+  DSA_FUNNEL_L4_ACTION_NOTES,
+  DSA_FUNNEL_L4_ACTIONS,
   DSA_FUNNEL_L4_STATUS,
   DSA_FUNNEL_LAYERS,
   DSA_FUNNEL_PENDING,
@@ -26,6 +36,7 @@ import {
   incrementReachableFalse,
   incrementReachableTrue,
   markEnabledSeen,
+  readActionCount,
   readCoreActionCount,
   readFunnelCounts,
   recordStatusSample,
@@ -69,18 +80,21 @@ it('四层 L1–L4 都有登记（少一层就说明契约被削）', () => {
   ])
 })
 
-it('pending 标签：数据侧 data_pending，L4 侧 design_pending', () => {
+it('pending 标签：数据侧 data_pending，L4 侧已 nailed（不再 design_pending）', () => {
   expect(DSA_FUNNEL_STATUS).toBe('data_pending')
-  expect(DSA_FUNNEL_L4_STATUS).toBe('design_pending')
+  expect(DSA_FUNNEL_L4_STATUS).toBe('nailed')
   expect(DSA_FUNNEL_PENDING.production_sample_data_pending).toBe(true)
-  expect(DSA_FUNNEL_PENDING.l4_action_enum_design_pending).toBe(true)
+  // G3 解除：枚举钉死了，这个 pending 位必须转 false
+  expect(DSA_FUNNEL_PENDING.l4_action_enum_design_pending).toBe(false)
 })
 
-it('每个键都有 pending 说明，L4 的说明必须点出 design_pending', () => {
+it('每个键都有 pending 说明，L4 的说明已不含 design_pending', () => {
   for (const key of DSA_FUNNEL_KEYS) {
     expect(DSA_FUNNEL_PENDING_NOTES[key]).toBeTruthy()
   }
-  expect(DSA_FUNNEL_PENDING_NOTES[DSA_FUNNEL_KEY_CORE_ACTION_COUNT]).toContain('design_pending')
+  // 上一版这里断言的是「必须点出 design_pending」—— 现在语义反转，改成「必须不再说未钉」
+  expect(DSA_FUNNEL_PENDING_NOTES[DSA_FUNNEL_KEY_CORE_ACTION_COUNT]).not.toContain('design_pending')
+  expect(DSA_FUNNEL_PENDING_NOTES[DSA_FUNNEL_KEY_CORE_ACTION_COUNT]).toContain('nailed')
 })
 
 // ── L1–L3 本地计数 ────────────────────────────────────────────
@@ -129,7 +143,7 @@ it('坏值（非数字 / 负数）按 0 处理，不抛异常', () => {
 
 // ── L4 槽位 ──────────────────────────────────────────────────
 
-it('L4 槽位存在，但本拍没有任何动作会让它自增', () => {
+it('L1–L3 的写入不会顺带污染 L4（这条是原「不自增」用例的另一半，仍然有效）', () => {
   // 走遍 L1–L3 的全部写入入口
   markEnabledSeen()
   incrementReachableTrue()
@@ -141,11 +155,75 @@ it('L4 槽位存在，但本拍没有任何动作会让它自增', () => {
   expect(readFunnelCounts().coreActionCount).toBe(0)
 })
 
-it('L4 槽位可读写（保住键名，下一步不用迁移）', () => {
+it('L4 槽位可读写（保住键名，不用迁移）', () => {
   resetCoreActionCount()
   expect(readCoreActionCount()).toBe(0)
   localStorage.setItem(DSA_FUNNEL_KEY_CORE_ACTION_COUNT, '7')
   expect(readCoreActionCount()).toBe(7)
+})
+
+it('L4 动作枚举钉死为任务书那三个，不多不少', () => {
+  expect([...DSA_FUNNEL_L4_ACTIONS]).toEqual(['report_submit', 'chat_send', 'sniper_register'])
+  // 每个 action 都有人读说明，诊断区才不会出现裸 id
+  for (const action of DSA_FUNNEL_L4_ACTIONS) {
+    expect(DSA_FUNNEL_L4_ACTION_NOTES[action]).toBeTruthy()
+  }
+})
+
+it('bumpCoreAction 让总槽 +1，并返回新值', () => {
+  expect(readCoreActionCount()).toBe(0)
+  expect(bumpCoreAction('report_submit')).toBe(1)
+  expect(bumpCoreAction('report_submit')).toBe(2)
+  expect(readCoreActionCount()).toBe(2)
+  expect(readFunnelCounts().coreActionCount).toBe(2)
+})
+
+it('bumpCoreAction 三个 action 都让总槽 +1（枚举里没有死值）', () => {
+  for (const action of DSA_FUNNEL_L4_ACTIONS) {
+    resetCoreActionCount()
+    expect(bumpCoreAction(action)).toBe(1)
+    expect(readCoreActionCount()).toBe(1)
+  }
+})
+
+it('bumpCoreAction 同时写分动作键，互不串账', () => {
+  bumpCoreAction('report_submit')
+  bumpCoreAction('report_submit')
+  bumpCoreAction('chat_send')
+  expect(readActionCount('report_submit')).toBe(2)
+  expect(readActionCount('chat_send')).toBe(1)
+  expect(readActionCount('sniper_register')).toBe(0)
+  // 分键之和 == 总槽
+  const sum = DSA_FUNNEL_L4_ACTIONS.reduce((acc, action) => acc + readActionCount(action), 0)
+  expect(sum).toBe(readCoreActionCount())
+})
+
+it('分动作键挂在 tsp.dsa.funnel.action. 前缀下（不污染五键闭集）', () => {
+  expect(DSA_FUNNEL_KEY_ACTION_PREFIX).toBe('tsp.dsa.funnel.action.')
+  bumpCoreAction('sniper_register')
+  expect(localStorage.getItem(`${DSA_FUNNEL_KEY_ACTION_PREFIX}sniper_register`)).toBe('1')
+  // 五键清单不被分动作键撑大
+  expect(new Set(DSA_FUNNEL_KEYS).size).toBe(5)
+})
+
+it('resetCoreActionCount 同时清总槽与全部分动作键', () => {
+  bumpCoreAction('report_submit')
+  bumpCoreAction('chat_send')
+  resetCoreActionCount()
+  expect(readCoreActionCount()).toBe(0)
+  for (const action of DSA_FUNNEL_L4_ACTIONS) expect(readActionCount(action)).toBe(0)
+})
+
+it('resetFunnelCounts 也清掉分动作键（否则测试间会串）', () => {
+  bumpCoreAction('report_submit')
+  resetFunnelCounts()
+  expect(localStorage.getItem(`${DSA_FUNNEL_KEY_ACTION_PREFIX}report_submit`)).toBeNull()
+})
+
+it('坏值不把 L4 计数打挂', () => {
+  localStorage.setItem(DSA_FUNNEL_KEY_CORE_ACTION_COUNT, 'abc')
+  expect(readCoreActionCount()).toBe(0)
+  expect(bumpCoreAction('chat_send')).toBe(1)
 })
 
 // ── recordStatusSample 节流 / 去重 ────────────────────────────
@@ -211,9 +289,17 @@ it('诊断模型：status 恒为 data_pending，不给比率', () => {
   incrementReachableFalse()
   const diag = buildFunnelDiagnostics({ reachable: true })
   expect(diag.status).toBe('data_pending')
-  expect(diag.l4Status).toBe('design_pending')
+  expect(diag.l4Status).toBe('nailed')
   expect(diag.reachabilityLabel).toBe('已连接')
   expect(diag.counts.reachableTrueCount).toBe(1)
+})
+
+it('诊断模型：L4 次数如实反映本机累计，但 status 仍 data_pending', () => {
+  bumpCoreAction('sniper_register')
+  const diag = buildFunnelDiagnostics({ reachable: true })
+  expect(diag.counts.coreActionCount).toBe(1)
+  // 有次数 ≠ 有结论：分母还是没有
+  expect(diag.status).toBe('data_pending')
 })
 
 it('诊断模型：可达标签只三态，且以 reachable 为准', () => {
