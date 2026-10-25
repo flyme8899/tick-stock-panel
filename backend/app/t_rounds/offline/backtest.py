@@ -38,6 +38,22 @@
 - 成交价用的是**下一根 bar 的 `price`**，不是确认 bar 的 `price`，也不是 `vwap`。
   两条路径同一口径，A 与 B 的差别因此收敛到"信号怎么定义"，而不是"在哪儿成交"。
 
+### `price` 到底是什么：`price := 该 bar 的 close`
+
+`price` 这个字段不是本包算的，是 `build_feature_frame` 里直接由 `close` 赋过去的
+（`app/strategy/intraday_features.py` **L101**：
+`cols = {"price": pl.col("close").cast(pl.Float64)}`，**已核**）。
+
+所以"成交价 = bar[i+1]['price']" 这句话的完整读法是：
+
+> **以下一根 bar 的收盘价成交。**
+
+这一点必须写明：`price` 听起来像"成交价"或"中间价"，而它实际是**那根 bar 的收盘价**。
+两者在分钟线上差别不大，但在"什么时候能知道自己成交在什么价"上是两件事 ——
+收盘价要到那根 bar 走完才知道，而我们的成交假设本来就是"下一根走完才成交"，
+两者是自洽的。这个来源**已经核过**，不必再回去怀疑；也不必为它改
+`intraday_features.py` 的行为：那边一行既成事实，改的是本包的注释口径。
+
 ### A 与 B 的关系：A = B + `require_prior_cross` + 一根延迟
 
 修完之后 A **不是**与 B 平行的第二个信号，而是 B 的一个**更严的变体**：同样是
@@ -716,6 +732,10 @@ def _settle(
             leg1_price=fill_px,
             leg2_price=exit_px,
             qty=LOT_SIZE,
+            # 两条腿都显式传 `old_lot`: `sell_first` 的卖出腿是 leg1, 只传 leg2 等于
+            # 卖腿来源留白 —— 那是实盘上根本不可能成立的纸面记录。批次
+            # 20261025gtrounds_patch ③ 之后, 漏传会被 complete_round 直接拒绝。
+            leg1_source_lot="old_lot",
             leg2_source_lot="old_lot",
             cost=RoundCost(cost_amount=0.0, cost_bp_tier=COST_DESIGN_PENDING),
             leg1_ts=_as_cn(fill_ts) if fill_ts is not None else None,

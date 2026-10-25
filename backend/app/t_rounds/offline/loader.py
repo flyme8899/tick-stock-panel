@@ -438,6 +438,87 @@ def assert_no_market_open_impersonation(frame: pl.DataFrame) -> None:
         )
 
 
+def assert_end_of_bar_lunch_gap(frame: pl.DataFrame) -> None:
+    """断言帧里的午休结构是**结束标注**(11:30 → 13:01, 间隔 91 分钟)。
+
+    ## 为什么需要这条
+
+    bar 的 `datetime` 记的是**结束时刻**还是**开始时刻**, 从数值上完全看不出来。
+    若某一批导出用的是开始标注, 那 13:00 就会出现在本该 13:01 的位置, 于是:
+
+    - "下一根成交"整体前移一分钟, 回测拿到的成交价根本不是它以为的那一分钟;
+    - 午休被算成 90 分钟, 与在线补洞的 91 分钟口径不一致, 两边对不上还被当成
+      数据缺失。
+
+    两种错都不会报错, 只会让数字悄悄偏一点。所以从**数据侧**拦一次。
+
+    ## 与 K 线在线口径的关系
+
+    间隔 91 分钟取自 `backend/app/api/kline.py` 的 `_LUNCH_GAP_MIN = 91`, 同一个数。
+    本断言只核对**帧内午休结构像结束标注**, **不**代表本包离线 CSV.GZ 已与在线
+    `kline_minute` 同源同口径 —— 那件事仍是 `design_pending` 薄挂账(G1),
+    需要真去比对两侧来源才能结案, 这里不能替它下结论。
+
+    ## 残缺日: 只对"结构完整"的 symbol·日硬断言
+
+    盘中截断、半日休市、停牌复牌等情形下, 一个 `symbol·日` 本来就不该有完整午休。
+    对它们硬断言等于**误杀**: 数据没问题, 只是当天没走完。
+
+    所以判定范围收窄为: 该 `symbol·日` **同时**具备
+
+    - 11:30 那根(上午末段), 且
+    - 下午存在 bar(下午开段)
+
+    才做硬断言; 两者缺一就跳过。这个"缺一就跳过"是**刻意保守**的取舍 ——
+    漏检一个残缺日的标注错误, 好过把一个正常样本判死。精确的降级规则(按交易日历
+    机判半日市)仍是 `design_pending`, 见 `G2`; 在它落地前就用这条安全默认。
+
+    违规 → `ValueError`, 文案风格对齐 `assert_no_market_open_impersonation`。
+    """
+    if frame is None or frame.is_empty():
+        return
+    if "datetime" not in frame.columns or "symbol" not in frame.columns:
+        return
+
+    # 与 assert_no_market_open_impersonation 同理: 走 "HH:MM" 定长字符串比较,
+    # 不碰 dt.hour()/dt.minute() 的 Int8 溢出问题。
+    hhmm = pl.col("datetime").dt.strftime("%H:%M")
+    date_col = pl.col("datetime").dt.date()
+
+    has_morning = frame.filter(hhmm == C.LUNCH_LAST_MORNING_BAR).select(
+        pl.col("symbol"), date_col.alias("_d")
+    ).unique()
+    if has_morning.is_empty():
+        # 全帧没有一根 11:30 —— 当天没走完上午, 无从判定午休结构。跳过。
+        return
+
+    afternoon_first = (
+        frame.filter(hhmm > C.LUNCH_LAST_MORNING_BAR)
+        .group_by("symbol", date_col.alias("_d"))
+        .agg(hhmm.min().alias("_first_afternoon"))
+    )
+    if afternoon_first.is_empty():
+        # 有上午末段但没有下午 —— 只走完半天的符号日。跳过(残缺日不误杀)。
+        return
+
+    # 只检查"上午末段 + 下午开段"都齐的 symbol·日。
+    both = has_morning.join(afternoon_first, on=["symbol", "_d"], how="inner")
+    if both.is_empty():
+        return
+
+    bad = both.filter(pl.col("_first_afternoon") != C.LUNCH_FIRST_AFTERNOON_BAR)
+    if bad.is_empty():
+        return
+
+    sample = bad.head(3).to_dicts()
+    raise ValueError(
+        f"发现 {bad.height} 个 symbol·日 的午休结构异常: 上午末根 "
+        f"{C.LUNCH_LAST_MORNING_BAR} 之后的下午首根不是 "
+        f"{C.LUNCH_FIRST_AFTERNOON_BAR}(间隔应为 {C.LUNCH_GAP_MINUTES} 分钟)"
+        f" ({sample}); 疑似把 bar 记成了开始标注而不是结束标注"
+    )
+
+
 def shift_within_day(
     frame: pl.DataFrame, lag: int, *, column: str = "price"
 ) -> pl.Series | None:
@@ -476,6 +557,7 @@ __all__ = [
     "LoadedMinutes",
     "MixedCaliberError",
     "align_minute_frame",
+    "assert_end_of_bar_lunch_gap",
     "assert_no_market_open_impersonation",
     "assess_caliber",
     "load_minute_export",

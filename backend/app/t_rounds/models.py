@@ -463,6 +463,7 @@ def check_sell_leg_source_lot(
     leg2_side: str,
     leg2_source_lot: str | None,
     t_round_id: str = "<pending>",
+    require_filled: bool = False,
 ) -> None:
     """T+1 硬规则: **卖出腿**的份额来源必须是 `old_lot`。两种模式通用。
 
@@ -470,12 +471,32 @@ def check_sell_leg_source_lot(
     `_check_source_lot` / `complete_round`)都走它 —— 刻意重复调用, 单一定义, 于是
     不存在"三处各写一份、慢慢分叉"的可能。
 
-    只校验**已填写**的来源: `None` 表示还没填(开腿前本就不知道), 不拦。填了就必须
-    是 `old_lot` —— `same_day_buy` 是当日买入份额, 当日卖出违反 T+1。
+    ## `require_filled`: 开腿前可以不知道, 结算时必须知道
+
+    `None` 的含义是"还没填"。开腿前本来就不知道份额从哪来, 所以默认放行。
+
+    但**结算成 `completed` 时不能还是 `None`**。这一条是批次 20261025gtrounds_patch
+    补上的洞: `complete_round` 默认 `leg1_source_lot=None`, 而 `sell_first` 的卖出腿
+    恰恰是 leg1 —— 调用方只传 `leg2_source_lot` 时, 卖出腿的来源一直是构造时的
+    `None`, 被"是 None 就放行"直接跳过, 于是一轮**从没证明确实卖的是老底仓**的
+    T 也能标成 completed。纸面上它和真正合规的轮次长得一模一样。
+
+    离线回测不受影响: `offline/backtest.py` 在 `_settle` 里显式传 `old_lot`
+    (虚拟份额假设), 所以**今日数字不变**。接实盘 / API 时必须显式传来源,
+    否则这里会拒绝 —— 这正是要的效果。
+
+    填了就必须是 `old_lot`(两处统一) —— `same_day_buy` 是当日买入份额,
+    当日卖出违反 T+1。
     """
     leg_name = _sell_leg_name(leg1_side, leg2_side)
     source_lot = leg1_source_lot if leg_name == "leg1" else leg2_source_lot
     if source_lot is None:
+        if require_filled:
+            raise TRoundValidationError(
+                f"{t_round_id}: 结算为 completed 时, 卖出腿({leg_name}, mode={mode!r}) "
+                "的份额来源不能是 None —— 没填过就说明这一轮从没被确认过卖的是老底仓。"
+                " 开腿前可以不知道, 结算时必须知道(显式传 old_lot)。"
+            )
         return
     if source_lot not in C.SOURCE_LOTS:
         raise TRoundValidationError(f"未知 source_lot: {source_lot!r}")

@@ -41,7 +41,12 @@ from ...strategy.intraday_features import INTRADAY_FEATURES, build_feature_frame
 from ...strategy.intraday_signals import _legacy_builtin_definitions
 from .. import constants as C
 from . import gates
-from .loader import LoadedMinutes, assert_no_market_open_impersonation, assess_caliber
+from .loader import (
+    LoadedMinutes,
+    assert_end_of_bar_lunch_gap,
+    assert_no_market_open_impersonation,
+    assess_caliber,
+)
 
 # 路径 A 的两列（与 `intraday_signals.INTRADAY_SIGNAL_LABELS` 同名，列名写死）
 PATH_A_COLUMNS: tuple[str, ...] = (
@@ -139,7 +144,15 @@ def build_offline_feature_frame(
 
     _assert_caliber(loaded)
     assert_no_market_open_impersonation(loaded.frame)
+    # 午休结构断言(11:30 → 13:01 / 91 分钟)。**全包只在这一处调用** ——
+    # 逻辑本身定义在 `loader.assert_end_of_bar_lunch_gap`, 这里只接线, 不重复实现。
+    # 只护"帧内午休结构像结束标注"; 不代表离线 CSV.GZ 已与在线同源(G1 仍薄挂账)。
+    assert_end_of_bar_lunch_gap(loaded.frame)
 
+    # `price` 的来源: `build_feature_frame`(app/strategy/intraday_features.py **L101**)
+    # 里就一句 `cols = {"price": pl.col("close").cast(pl.Float64)}` ——
+    # 所以 **price := 该 bar 的 close**(已核)。下游 backtest 的成交价就是取这根 bar
+    # 的 `price`, 因此等价于"以下一根 bar 的收盘价成交"。此处不改策略行为, 只钉口径。
     frame = build_feature_frame(loaded.frame, prev_close=dict(prev_close) if prev_close else None)
     if frame.is_empty():
         raise ValueError("build_feature_frame 返回空帧; 输入可能缺 open/high/low/close 之一")
