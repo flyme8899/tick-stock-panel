@@ -16,7 +16,7 @@
  * | L1 启用 | `tsp.dsa.funnel.enabled_seen` | 曾见 `status.enabled === true` | 置位 `'1'`，不回退 |
  * | L2 可达 | `tsp.dsa.funnel.reachable_true_count` / `..._false_count` | 每次 status 拉取完成 +1（二选一） | 本地累计 |
  * | L3 打开 | `tsp.dsa.funnel.open_workspace_count` | 决策页 mount +1 | 本地累计 |
- * | L4 留存动作 | `tsp.dsa.funnel.core_action_count` | 核心动作（狙击/研报/问股）计数 | **只留槽**，`design_pending` |
+ * | L4 留存动作 | `tsp.dsa.funnel.core_action_count` | 核心动作（研报/问股/狙击）计数 | **已钉**：枚举 + 自增（`nailed`） |
  *
  * ## enabled ≠ reachable（软提醒 1）
  *
@@ -31,10 +31,16 @@
  * ## pending 与红线
  *
  * - 无生产多日采样 → {@link DSA_FUNNEL_STATUS} = `data_pending`；
- * - L4 动作枚举未钉 → {@link DSA_FUNNEL_L4_STATUS} = `design_pending`；
+ * - L4 动作枚举**本拍已钉死** → {@link DSA_FUNNEL_L4_STATUS} = `nailed`（批次 20261025gdsa2 解除）；
  * - **禁止**返回或展示「可达率 xx%」「使用率已测通」「打开率已达标」「DSA 正式可推」；
  * - **禁止**上报网络；**禁止**写入 `buy_sell_signals` 的 store/push（不进 BSS 三闸链路）；
  * - 与上游 LLM token 用量（`UsageSummary` / `data-usage-summary`）**分标题、不混名、不互相覆盖**。
+ *
+ * ## L4 为什么可以自增了，但**仍然不是「使用率」**
+ *
+ * 枚举钉死 ≠ 有结论。`core_action_count` 只回答「本机这台浏览器上，这三个动作成功过几次」。
+ * 它**没有分母**：不知道多少人装了、多少人看见过决策页，所以推不出任何比率。
+ * 把它当仪表读数看，别当 KPI 看（软提醒 2）。
  *
  * ## 节流
  *
@@ -54,8 +60,10 @@ export const DSA_FUNNEL_KEY_REACHABLE_TRUE_COUNT = `${DSA_FUNNEL_KEY_PREFIX}reac
 export const DSA_FUNNEL_KEY_REACHABLE_FALSE_COUNT = `${DSA_FUNNEL_KEY_PREFIX}reachable_false_count` as const
 /** L3：决策页 mount 次数。 */
 export const DSA_FUNNEL_KEY_OPEN_WORKSPACE_COUNT = `${DSA_FUNNEL_KEY_PREFIX}open_workspace_count` as const
-/** L4 槽：核心留存动作次数。本拍**不**因任何动作自增。 */
+/** L4 槽：核心留存动作次数。仅由 {@link bumpCoreAction} 在**成功路径**自增。 */
 export const DSA_FUNNEL_KEY_CORE_ACTION_COUNT = `${DSA_FUNNEL_KEY_PREFIX}core_action_count` as const
+/** L4 分动作计数前缀（软建议：按 action 分键，便于看是哪个动作真被用了）。 */
+export const DSA_FUNNEL_KEY_ACTION_PREFIX = `${DSA_FUNNEL_KEY_PREFIX}action.` as const
 
 /** 全部漏斗键（只读诊断区按此顺序渲染）。 */
 export const DSA_FUNNEL_KEYS = [
@@ -70,16 +78,49 @@ export type DsaFunnelKey = typeof DSA_FUNNEL_KEYS[number]
 
 /** 无生产多日采样：一切比率类结论都不成立。 */
 export const DSA_FUNNEL_STATUS = 'data_pending' as const
-/** L4 动作枚举未钉：只留槽，不实装自增。 */
-export const DSA_FUNNEL_L4_STATUS = 'design_pending' as const
+/**
+ * L4 动作枚举**已钉死**（批次 20261025gdsa2 解除 #211 的 `design_pending`）。
+ *
+ * `nailed` 的含义只是「枚举齐了、成功路径会自增」——**不是**「使用率已测通」。
+ * 见模块顶部「L4 为什么可以自增了，但仍然不是使用率」。
+ */
+export const DSA_FUNNEL_L4_STATUS = 'nailed' as const
+
+/**
+ * L4 核心动作枚举 —— **任务书钉死的三个**，不许自行增删。
+ *
+ * | action | 何时自增（**只在成功回调里**） |
+ * |---|---|
+ * | `report_submit` | Reports「生成研报」mutation 成功 |
+ * | `chat_send` | 问股「发送」mutation 成功（拿到回复） |
+ * | `sniper_register` | 登记狙击线成功（`replaced === true` 或返回 `lines.length > 0`） |
+ *
+ * 失败、被禁用、不可达时**一律不自增** —— 点了个灰按钮不算留存动作。
+ */
+export const DSA_FUNNEL_L4_ACTIONS = [
+  'report_submit',
+  'chat_send',
+  'sniper_register',
+] as const
+
+export type DsaFunnelL4Action = typeof DSA_FUNNEL_L4_ACTIONS[number]
+
+/** 每个 action 的人读说明（诊断区与文档共用一份措辞）。 */
+export const DSA_FUNNEL_L4_ACTION_NOTES: Record<DsaFunnelL4Action, string> = {
+  report_submit: '生成研报成功',
+  chat_send: '问股发出并收到回复',
+  sniper_register: '登记价位线成功',
+}
 
 /**
  * G1–G3 待办标记。全为 `true` 表示「这一层现在是空的/未定的」，不是「已完成」。
  * 展示时请照 {@link DSA_FUNNEL_PENDING_NOTES} 的原文，勿改写成肯定句。
+ *
+ * `l4_action_enum_design_pending` 本拍转 `false`（枚举已钉）；G1 仍 `true`（无生产采样）。
  */
 export const DSA_FUNNEL_PENDING = {
   production_sample_data_pending: true,
-  l4_action_enum_design_pending: true,
+  l4_action_enum_design_pending: false,
 } as const
 
 /** 四层人读名。顺序即漏斗顺序。 */
@@ -96,7 +137,7 @@ export const DSA_FUNNEL_PENDING_NOTES: Record<DsaFunnelKey, string> = {
   [DSA_FUNNEL_KEY_REACHABLE_TRUE_COUNT]: '本机累计，跟随 30s 状态轮询；无生产多日采样',
   [DSA_FUNNEL_KEY_REACHABLE_FALSE_COUNT]: '本机累计，跟随 30s 状态轮询；无生产多日采样',
   [DSA_FUNNEL_KEY_OPEN_WORKSPACE_COUNT]: '本机累计，每次打开决策页 +1',
-  [DSA_FUNNEL_KEY_CORE_ACTION_COUNT]: 'design_pending：动作枚举未钉，本拍不自增',
+  [DSA_FUNNEL_KEY_CORE_ACTION_COUNT]: '已钉枚举（nailed）：研报/问股/价位线三动作成功时 +1；仍无分母，不给比率',
 }
 
 /** 本地计数快照。`enabledSeen` 是布尔，其余是次数。 */
@@ -205,25 +246,81 @@ export function incrementOpenWorkspace(): number {
 }
 
 /**
- * L4 槽位读写。本拍**没有**任何调用方会让它自增 —— 动作枚举（狙击/研报/问股）
- * 尚未钉死，见 {@link DSA_FUNNEL_L4_STATUS}。保留读写是为了下一步不必改键名。
+ * L4 槽位读取。本拍起由 {@link bumpCoreAction} 在成功路径自增。
+ *
+ * 注意：它只是**本机累计次数**，没有分母，读出来不是比率。
  */
 export function readCoreActionCount(): number {
   return readCount(DSA_FUNNEL_KEY_CORE_ACTION_COUNT)
 }
 
-/** 仅供测试与将来的 L4 实装复位；本拍无生产调用方。 */
-export function resetCoreActionCount(): void {
-  writeCount(DSA_FUNNEL_KEY_CORE_ACTION_COUNT, 0)
+/**
+ * L4：核心动作成功一次，总槽 +1（并按 action 分键 +1）。返回新的总次数。
+ *
+ * **只许在成功回调里调用**。判据（任务书 ④）：
+ * - `report_submit`：研报 mutation 的 `onSuccess`；
+ * - `chat_send`：问股 mutation 的 `onSuccess`（拿到回复）；
+ * - `sniper_register`：登记响应 `replaced === true` **或** `lines.length > 0`。
+ *
+ * 不满足条件时**不要调用**，别在这里判 —— 这个函数只管计数，不管业务语义，
+ * 免得两处判据各写一份又分叉。
+ *
+ * 纯本地写入，**不发网络请求**（软提醒 2 / 硬约束 6）。
+ */
+export function bumpCoreAction(action: DsaFunnelL4Action): number {
+  const next = readCount(DSA_FUNNEL_KEY_CORE_ACTION_COUNT) + 1
+  writeCount(DSA_FUNNEL_KEY_CORE_ACTION_COUNT, next)
+  // 分键是软建议：写失败也不影响总槽，故单独 try（writeRaw 本身已静默）
+  const actionKey = `${DSA_FUNNEL_KEY_ACTION_PREFIX}${action}`
+  const actionCount = readLooseCount(actionKey) + 1
+  writeRaw(actionKey, String(actionCount))
+  return next
 }
 
-/** 清空全部漏斗键（只给测试 / 手工排障用）。 */
+/** 读某个 action 的分键计数（没有就是 0）。 */
+export function readActionCount(action: DsaFunnelL4Action): number {
+  return readLooseCount(`${DSA_FUNNEL_KEY_ACTION_PREFIX}${action}`)
+}
+
+/**
+ * 非枚举键的计数读取。
+ *
+ * `readCount` 的入参是 `DsaFunnelKey`（封闭联合），分动作键不在联合里，
+ * 所以单开一个宽松版本；坏值处理与 `readCount` 保持一致。
+ */
+function readLooseCount(key: string): number {
+  const raw = readRaw(key)
+  if (raw == null) return 0
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+}
+
+/** 仅供测试与手工排障复位；本拍无生产调用方。 */
+export function resetCoreActionCount(): void {
+  writeCount(DSA_FUNNEL_KEY_CORE_ACTION_COUNT, 0)
+  for (const action of DSA_FUNNEL_L4_ACTIONS) {
+    try {
+      storage()?.removeItem(`${DSA_FUNNEL_KEY_ACTION_PREFIX}${action}`)
+    } catch {
+      // 同上：清不掉不影响页面
+    }
+  }
+}
+
+/** 清空全部漏斗键（含 L4 分动作键；只给测试 / 手工排障用）。 */
 export function resetFunnelCounts(): void {
   for (const key of DSA_FUNNEL_KEYS) {
     try {
       storage()?.removeItem(key)
     } catch {
       // 同上：清不掉也不影响页面
+    }
+  }
+  for (const action of DSA_FUNNEL_L4_ACTIONS) {
+    try {
+      storage()?.removeItem(`${DSA_FUNNEL_KEY_ACTION_PREFIX}${action}`)
+    } catch {
+      // 同上
     }
   }
 }

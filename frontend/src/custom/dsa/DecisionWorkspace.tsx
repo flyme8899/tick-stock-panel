@@ -41,18 +41,26 @@ import {
   fetchDsaSchedule,
   fetchDsaStatus,
   fetchShareImage,
+  isSniperRegisterSuccess,
+  registerSniperLines,
   saveDsaSchedule,
   isRecord,
   textOf,
   type DsaError,
+  type SniperLineInput,
 } from './client'
 import { DashboardPanel } from './DashboardPanel'
+import { DsaEnablementChecklist } from './DsaEnablementChecklist'
 import { formatPercentPoints } from './dashboardHistory'
 import {
   buildFunnelDiagnostics,
+  bumpCoreAction,
+  DSA_FUNNEL_L4_ACTION_NOTES,
+  DSA_FUNNEL_L4_ACTIONS,
   DSA_FUNNEL_L4_STATUS,
   DSA_FUNNEL_PENDING_NOTES,
   incrementOpenWorkspace,
+  readActionCount,
   recordStatusSample,
 } from './funnelMetrics'
 import { PortfolioRiskView } from './portfolioRisk'
@@ -553,7 +561,7 @@ function MarketReview({ reachable }: { reachable: boolean }) {
   )
 }
 
-function Reports({ sample, reachable, initialCode }: { sample: boolean; reachable: boolean; initialCode: string }) {
+export function Reports({ sample, reachable, initialCode }: { sample: boolean; reachable: boolean; initialCode: string }) {
   const [code, setCode] = useState(initialCode || '600519')
   const [recordId, setRecordId] = useState<string>(sample ? '1' : '')
   const qc = useQueryClient()
@@ -569,7 +577,11 @@ function Reports({ sample, reachable, initialCode }: { sample: boolean; reachabl
         selection_source: 'manual',
       }),
     }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: QK.dsaUpstream('history') }) },
+    // L4 只认**成功**：mutation 的 onSuccess 才自增，失败/被 disabled 都不算留存动作
+    onSuccess: () => {
+      bumpCoreAction('report_submit')
+      qc.invalidateQueries({ queryKey: QK.dsaUpstream('history') })
+    },
   })
   const report = useQuery({
     queryKey: QK.dsaUpstream(`markdown:${recordId}`),
@@ -600,7 +612,171 @@ function Reports({ sample, reachable, initialCode }: { sample: boolean; reachabl
         {report.isError && <Failure error={report.error} onRetry={() => report.refetch()} />}
         {markdown ? <MarkdownRenderer content={markdown} /> : <Notice>输入记录编号后加载 Markdown。样例模式下编号 1 展示版式。</Notice>}
       </Panel>
+      <SniperRegisterPanel reachable={reachable} defaultSymbol={code} analysisId={recordId} />
     </div>
+  )
+}
+
+/**
+ * 「登记狙击线」—— 把三价（理想买入 / 止损 / 目标）写进 DSA 的价位线。
+ *
+ * 仅供研究，不构成投资建议；执行须人工确认。
+ *
+ * ## 这是价位线，不是监控规则引擎（软提醒 3）
+ *
+ * 它存的是**三个价格**，到价提醒。和「决策预警（alerts / rules）」那套规则引擎
+ * 完全是两回事 —— 后者能配条件、周期、组合逻辑。文案里两个词必须分开写，
+ * 混用会让人以为「登记了三价」等于「建了监控规则」。
+ *
+ * ## 什么时候按钮该灰
+ *
+ * `reachable !== true` 就灰。`enabled` 恒真，拿它门控等于没门控。
+ *
+ * ## 失败 / 「没生效」都要照实说
+ *
+ * 后端在**没有有效价位**时返回 `replaced: false` 并**保留旧线**（不是报错）。
+ * 这是预期行为，但 UI 必须明说「没生效，旧线还在」，绝不能渲染成成功。
+ * 三价全空时直接在前端拦住 —— 这种请求发出去注定 `replaced: false`，白跑一趟。
+ */
+function SniperRegisterPanel({
+  reachable,
+  defaultSymbol,
+  analysisId,
+}: {
+  reachable: boolean
+  defaultSymbol: string
+  analysisId: string
+}) {
+  const [symbol, setSymbol] = useState(defaultSymbol)
+  const [idealBuy, setIdealBuy] = useState('')
+  const [stopLoss, setStopLoss] = useState('')
+  const [takeProfit, setTakeProfit] = useState('')
+  const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'err'; text: string } | null>(null)
+
+  // 报告区的代码改了，登记区跟着走（用户不必手抄一遍代码）
+  useEffect(() => {
+    if (defaultSymbol) setSymbol(current => (current === '' ? defaultSymbol : current))
+  }, [defaultSymbol])
+
+  const mutation = useMutation({
+    mutationFn: (body: SniperLineInput) => registerSniperLines(body),
+    onSuccess: result => {
+      // L4 判据只在 client 里定义一处：replaced===true 或 lines.length>0
+      if (isSniperRegisterSuccess(result)) {
+        bumpCoreAction('sniper_register')
+        setMessage({ tone: 'ok', text: `已登记 ${result.symbol} 的价位线（${result.lines.length} 条）。这是价位线，不是监控规则。` })
+      } else {
+        setMessage({
+          tone: 'warn',
+          text: '没生效：没有解析出有效价位，服务端保留了原有价位线。请至少填一个价格后重试。',
+        })
+      }
+    },
+    onError: (error: Error) => setMessage({ tone: 'err', text: error.message }),
+  })
+
+  /** 空串 → null；非数字 → NaN（交给 parseFloat 后的 isFinite 判）。 */
+  const toPrice = (raw: string): number | null => {
+    const trimmed = raw.trim()
+    if (!trimmed) return null
+    const value = Number.parseFloat(trimmed)
+    return Number.isFinite(value) ? value : Number.NaN
+  }
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    setMessage(null)
+    const target = symbol.trim()
+    if (!target) {
+      setMessage({ tone: 'err', text: '请填股票代码。' })
+      return
+    }
+    const body: SniperLineInput = {
+      symbol: target,
+      ideal_buy: toPrice(idealBuy),
+      stop_loss: toPrice(stopLoss),
+      take_profit: toPrice(takeProfit),
+    }
+    if ([body.ideal_buy, body.stop_loss, body.take_profit].some(value => value !== null && Number.isNaN(value))) {
+      setMessage({ tone: 'err', text: '价格填的不是数字。' })
+      return
+    }
+    // 三价全空 → 后端必然 replaced=false，别发这一趟
+    if (body.ideal_buy == null && body.stop_loss == null && body.take_profit == null) {
+      setMessage({ tone: 'warn', text: '至少填一个价格（理想买入 / 止损 / 目标）才能登记。' })
+      return
+    }
+    if (analysisId && analysisId !== '1') body.analysis_id = analysisId
+    mutation.mutate(body)
+  }
+
+  return (
+    <Panel
+      title="登记狙击线"
+      hint="价位线：存理想买入 / 止损 / 目标三个价格，到价提醒。与「决策预警」的监控规则不是一回事。"
+    >
+      <form className="flex flex-wrap items-center gap-2" onSubmit={submit}>
+        <input
+          className={cn(fieldCls, 'w-32 font-mono')}
+          value={symbol}
+          onChange={event => setSymbol(event.target.value)}
+          placeholder="600519"
+          aria-label="狙击线股票代码"
+        />
+        <input
+          className={cn(fieldCls, 'w-24 font-mono')}
+          value={idealBuy}
+          onChange={event => setIdealBuy(event.target.value)}
+          placeholder="理想买入"
+          aria-label="理想买入价"
+          inputMode="decimal"
+        />
+        <input
+          className={cn(fieldCls, 'w-24 font-mono')}
+          value={stopLoss}
+          onChange={event => setStopLoss(event.target.value)}
+          placeholder="止损"
+          aria-label="止损价"
+          inputMode="decimal"
+        />
+        <input
+          className={cn(fieldCls, 'w-24 font-mono')}
+          value={takeProfit}
+          onChange={event => setTakeProfit(event.target.value)}
+          placeholder="目标"
+          aria-label="目标价"
+          inputMode="decimal"
+        />
+        <button
+          className={primaryBtn}
+          type="submit"
+          disabled={!reachable || mutation.isPending}
+          data-dsa-sniper-register
+        >
+          {mutation.isPending ? '登记中' : '登记狙击线'}
+        </button>
+        {!reachable && (
+          <span className="text-[11px] text-muted" data-dsa-sniper-gated>
+            决策服务未连接，无法登记
+          </span>
+        )}
+      </form>
+      <p className="mt-2 text-[11px] leading-relaxed text-muted">
+        价位从报告里自己填；本拍未做自动解析（自动解析属 design_pending）。
+        返回「未生效」时旧价位线仍在，不会把已有线索抹掉。
+      </p>
+      {message && (
+        <p
+          className={cn(
+            'mt-2 text-xs leading-relaxed',
+            message.tone === 'ok' ? 'text-bear' : message.tone === 'warn' ? 'text-warning' : 'text-bull',
+          )}
+          data-dsa-sniper-message={message.tone}
+        >
+          {message.text}
+        </p>
+      )}
+    </Panel>
   )
 }
 
@@ -915,7 +1091,7 @@ function EtfRotation() {
   )
 }
 
-function Chat({ reachable }: { reachable: boolean }) {
+export function Chat({ reachable }: { reachable: boolean }) {
   const [skill, setSkill] = useState('')
   const [input, setInput] = useState('')
   const [lines, setLines] = useState<{ role: 'user' | 'assistant'; text: string; raw?: unknown }[]>([])
@@ -925,6 +1101,8 @@ function Chat({ reachable }: { reachable: boolean }) {
       body: JSON.stringify({ message, skills: skill.trim() ? [skill.trim()] : undefined }),
     }),
     onSuccess: data => {
+      // L4 只认成功：拿到回复才算「留存动作」；onError 分支不自增
+      bumpCoreAction('chat_send')
       const text = ['reply', 'content', 'message', 'text'].map(key => data[key]).find(item => typeof item === 'string') as string | undefined
       setLines(current => [...current, { role: 'assistant', text: text || '没有可显示的回复。', raw: text ? undefined : data }])
     },
@@ -1531,11 +1709,18 @@ function ImportCodes({ reachable }: { reachable: boolean }) {
 function FunnelDiagnostics({ reachable }: { reachable: boolean }) {
   const diag = buildFunnelDiagnostics({ reachable })
   const counts = diag.counts
+  // L4 分动作明细：让「哪三个动作真的被用了」看得见，而不是只有一个总数。
+  // 读的是本地键，没有分母 —— 下面的脚注说清了它不构成比率。
+  const actionRows = DSA_FUNNEL_L4_ACTIONS.map(action => ({
+    action,
+    count: readActionCount(action),
+    note: DSA_FUNNEL_L4_ACTION_NOTES[action],
+  }))
   const rows: [string, string, string][] = [
     ['L1 启用', counts.enabledSeen ? '曾见启用' : '未见过', DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.enabled_seen']],
     ['L2 可达', `通 ${counts.reachableTrueCount} · 断 ${counts.reachableFalseCount}`, DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.reachable_true_count']],
     ['L3 打开', `${counts.openWorkspaceCount} 次`, DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.open_workspace_count']],
-    ['L4 留存动作', '槽位空', DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.core_action_count']],
+    ['L4 留存动作', `${counts.coreActionCount} 次`, DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.core_action_count']],
   ]
   return (
     <div data-dsa-funnel-diagnostics className="mt-2 space-y-2">
@@ -1561,10 +1746,22 @@ function FunnelDiagnostics({ reachable }: { reachable: boolean }) {
           </li>
         ))}
       </ul>
+      <div data-dsa-funnel-l4-actions className="rounded-lg border border-border bg-base px-3 py-2">
+        <p className="text-[11px] text-foreground">L4 动作明细（{DSA_FUNNEL_L4_STATUS}）</p>
+        <ul className="mt-1 space-y-0.5">
+          {actionRows.map(({ action, count, note }) => (
+            <li key={action} className="grid gap-1 text-[11px] sm:grid-cols-[112px_48px_1fr]">
+              <code className="font-mono text-accent">{action}</code>
+              <span className="num text-secondary">{count} 次</span>
+              <span className="text-muted">{note}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
       <p className="text-[10px] text-muted">
         计数只存本机（localStorage，前缀 <code className="font-mono">tsp.dsa.funnel.</code>），不上报、不进买卖信号链路。
-        无生产多日采样，故状态为 <code className="font-mono">{diag.status}</code>；L4 动作枚举未钉，故为{' '}
-        <code className="font-mono">{DSA_FUNNEL_L4_STATUS}</code>。此处不给任何比率结论。
+        无生产多日采样，故状态为 <code className="font-mono">{diag.status}</code>；L4 动作枚举已钉死，故为{' '}
+        <code className="font-mono">{DSA_FUNNEL_L4_STATUS}</code>。此处不给任何比率结论 —— 次数没有分母，推不出使用率。
       </p>
     </div>
   )
@@ -1613,6 +1810,9 @@ function SettingsPanel({
             </li>
           ))}
         </ul>
+      </Panel>
+      <Panel title="启用向导" hint="检查清单 · 四步 · 生产默认关（本清单不替你改 .env、不启容器）">
+        <DsaEnablementChecklist />
       </Panel>
       <Panel title="漏斗自诊断" hint="使用率漏斗第 1 步 · 只读 · 与本机 LLM 用量无关">
         <FunnelDiagnostics reachable={reachable} />

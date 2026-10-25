@@ -207,6 +207,65 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
+// ── 狙击价位线登记 ──────────────────────────────────────────────
+
+/**
+ * 登记狙击线（价位线）的入参。字段与后端 `SniperLineRequest`
+ * （`backend/app/custom/dsa/routes.py` L28–35）逐一对齐，名不再自创。
+ *
+ * **这是价位线，不是监控规则引擎**（软提醒 3）：它只存三个价格（理想买入 / 止损 / 目标），
+ * 到价时提醒。和「决策预警 alerts/rules」是两套东西，文案上必须分开写。
+ */
+export interface SniperLineInput {
+  symbol: string
+  name?: string
+  analysis_id?: string
+  analyzed_at?: string
+  ideal_buy?: number | null
+  stop_loss?: number | null
+  take_profit?: number | null
+}
+
+/**
+ * `POST /api/dsa/sniper-lines` 的响应。
+ *
+ * `replaced === false` **不是错误**：后端在没有有效价位时会保留旧线并如实返回
+ * （`sniper_alerts.register` 的两条 `replaced=False` 分支）。UI 必须照实提示，
+ * 别把它渲染成「登记成功」。
+ */
+export interface SniperLineResult {
+  symbol: string
+  lines: Record<string, unknown>[]
+  replaced: boolean
+}
+
+/**
+ * 这次登记算不算「成功动作」（用于 L4 自增）。任务书 ④ 的判据：
+ * `replaced === true` **或** `lines.length > 0`。
+ *
+ * 单独抽成函数是为了让「什么算成功」只有一处定义 —— 组件与测试用同一个判据。
+ */
+export function isSniperRegisterSuccess(result: SniperLineResult): boolean {
+  return result.replaced === true || result.lines.length > 0
+}
+
+/**
+ * 登记三价（理想买入 / 止损 / 目标）。
+ *
+ * **前置条件是 `reachable`**：不可达时调用方应禁用按钮，不要指望这里兜底
+ * （enabled ≠ reachable，见 `DsaNavReachableAccessory` 的说明）。
+ *
+ * 空值处理：三个价格都传 `null` 时后端会返回 `replaced: false` 并保留旧线 ——
+ * 这是**预期行为**，不是 bug。所以 UI 侧最好在提交前就拦住「三价全空」。
+ */
+export function registerSniperLines(body: SniperLineInput): Promise<SniperLineResult> {
+  return fetch('/api/dsa/sniper-lines', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(res => parse<SniperLineResult>(res))
+}
+
 export function sampleRecords(rows: readonly object[]): Record<string, unknown>[] {
   return rows.map(row => ({ ...row }))
 }

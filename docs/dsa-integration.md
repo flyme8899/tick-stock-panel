@@ -197,13 +197,14 @@ Docker 把 `analysis_bridge.py` 只读挂到 `/opt/tsp/analysis_bridge.py`。
 | L1 启用 | `tsp.dsa.funnel.enabled_seen` | 曾见 `status.enabled === true`，置 `'1'`，不回退 | 已实现 |
 | L2 可达 | `tsp.dsa.funnel.reachable_true_count` / `..._false_count` | 每次 status 拉取完成按 `reachable` 二选一 +1 | 已实现 |
 | L3 打开 | `tsp.dsa.funnel.open_workspace_count` | 打开决策页 +1（每个组件实例只计一次） | 已实现 |
-| L4 留存动作 | `tsp.dsa.funnel.core_action_count` | 狙击 / 研报 / 问股这类核心动作 | **只留槽**，`design_pending` |
+| L4 留存动作 | `tsp.dsa.funnel.core_action_count` | 研报 / 问股 / 狙击登记这类核心动作 | **已钉死**（`nailed`，见 gdsa2 节） |
 
 计数**只落本机**，不上报第三方，也不进买卖信号（`buy_sell_signals`）的 persist / push / dingtalk 链路。前缀统一 `tsp.dsa.funnel.`，清空只需删掉这一组键。
 
 节流口径：L2 只跟随既有 `refetchInterval: 30_000` 的 status 结果写入，按 `dataUpdatedAt` 去重 —— 同一份 fetch 结果重复渲染不会重复 +1，也不另开更密的循环。
 
-> L1 / L4 这两个键**不是**「各一层计数递进」。L1 是布尔置位，L4 是空槽；本拍没有任何动作会让 L4 自增。
+> L1 / L4 这两个键**不是**「各一层计数递进」。L1 是布尔置位（`'1'`，不回退），L4 是动作计数。
+> 批次 `20261025gdsa2` 起 L4 已钉死枚举并在成功路径自增（`nailed`），详见下文「使用率后排」一节。
 
 ### `enabled` ≠ `reachable`
 
@@ -246,6 +247,132 @@ Docker 把 `analysis_bridge.py` 只读挂到 `/opt/tsp/analysis_bridge.py`。
 
 - 后端 `GET /api/dsa/status`、`proxy.py`、`routes.py` **行为零改**；本拍只消费既有契约。
 - `sniper_alerts.py` / `schedule.py` **零碰**（另拍前置必读）。
+- 默认不部署；合入另等盘后口令。
+
+## 使用率后排（gdsa2）
+
+> 仅供研究，不构成投资建议；执行须人工确认。
+
+这一节对应批次 `20261025gdsa2`，在 #211（`gdsa` 第1步）之上做**窄开**：把上一拍留的
+四个 `design_pending` 里能落地的那个（L4 动作枚举）钉死，并把「怎么开」「开了看哪」
+「点哪个按钮」补成人能走通的路径。**不新增信息架构，不改 SECTIONS，不改推送语义。**
+
+### 一、启用向导 —— 检查清单，不是一键开关
+
+设置区「启用向导」面板（`DsaEnablementChecklist.tsx`）给四步：
+
+| # | 步骤 | 判定方式 |
+| --- | --- | --- |
+| ① | 配 `DSA_BASE_URL` | 人工确认（页面不回显密钥） |
+| ② | `docker compose --profile dsa up --build` | 人工确认；命令可一键复制 |
+| ③ | 看 `/api/dsa/status` 的 `reachable` | **由面板实时探活给出**（三态） |
+| ④ | （可选）定时 `18:00 Asia/Shanghai` | 与盘中 BSS 推送时段不同 |
+
+**为什么不做「一键开」按钮**：生产默认关是刻意的；前端也没有权限去改 `.env` 或跑
+compose（能跑才是事故）。检查清单 + 可复制命令就够过验收，真一键脚本属
+`design_pending`（形态待定）。
+
+**关掉之后会怎样** —— 文案钉死这一句：关掉 profile（容器不再起）、并清掉或停用
+`schedule.enabled` 之后，**不应再预期**收到 DSA 的定时研报或狙击价位提醒。
+措辞是「不应预期」而不是「保证不会」，因为页面读得到的 `schedule` 配置在服务不在时
+只是「看得见跑不了」，把它读成「还在推」是常见误判。
+
+`docker-compose.yml` 的 `profiles: ["dsa"]` **保留原样**，本拍没有、也不会去掉它。
+
+### 二、两个场景入口的降级
+
+`stock-preview.footer`（个股预览页脚）与 `watchlist.toolbar`（自选工具栏）现在按
+`reachable` 三态处理：
+
+| status | 表现 |
+| --- | --- |
+| `reachable === true` | 正常进入 `/dsa?section=reports&code=<symbol>` |
+| `reachable === false` | 灰字「决策服务未连接」，**无链接**；自选侧是 `disabled` 按钮 |
+| 未拿到结果 / 请求失败 | 灰字「检测中」，**不猜** |
+
+`enabled` **不参与判定**（恒真）。降级分支与正常分支形状等高，避免 status 到达前后页面抖动；
+插槽自身请求失败也只是降级成一行字，**绝不把宿主页面打白** —— 这两个是本仓最热的页面。
+
+### 三、登记狙击线（价位线，不是监控规则）
+
+Reports 区新增「登记狙击线」面板：填股票代码 + 三个价格（理想买入 / 止损 / 目标），
+`client.ts` 的 `registerSniperLines` 打 `POST /api/dsa/sniper-lines`。
+
+- 字段与后端 `SniperLineRequest` 逐一对齐（snake_case），路由与 `register` 的行为**零改**；
+- **`reachable` 门控**：不可达时按钮 `disabled` 并给旁注，不假装成功；
+- **与「决策预警（alerts / rules）」分名**：这是**价位线**（三个价格，到价提醒），
+  不是能配条件/周期的监控规则引擎。两者文案上不混用；
+- **三价全空时前端直接拦住**：那种请求发出去必然是 `replaced: false`，白跑一趟；
+- **`replaced: false` 不是错误**：后端在没解析出有效价位时会**保留旧线**并如实返回。
+  UI 必须明说「没生效，旧线还在」；渲染成「成功」是这拍最要防的谎。
+
+价位目前由用户手填；从报告里自动解析三价属 `design_pending`（G4）。
+
+### 四、L4 动作枚举 —— 已钉死（`nailed`）
+
+上一拍 `DSA_FUNNEL_L4_STATUS` 是 `design_pending`，L4 只留槽不自增。本拍解除：
+
+| action | 成功触发点 |
+| --- | --- |
+| `report_submit` | Reports「生成研报」mutation 的 `onSuccess` |
+| `chat_send` | 问股「发送」mutation 的 `onSuccess`（拿到回复） |
+| `sniper_register` | 登记响应 `replaced === true` **或** `lines.length > 0` |
+
+- `DSA_FUNNEL_L4_STATUS = 'nailed'`，`DSA_FUNNEL_PENDING.l4_action_enum_design_pending = false`；
+- `bumpCoreAction(action)` 让 `core_action_count` +1，并写分动作键
+  `tsp.dsa.funnel.action.<action>`；总槽恒等于分键之和；
+- **只在成功回调里 bump**：失败、被 `disabled`、不可达一律不计 —— 点了个灰按钮不是留存动作；
+- 设置区诊断区 L4 行显示**真实次数** + 三个 action 的明细与说明，不再写「槽位空」。
+
+> **`nailed` ≠ 「使用率已测通」。** 次数没有分母：不知道多少人装了、多少人看见过决策页，
+> 所以推不出任何比率。这一层现在能答的是「这台机器上这三个动作成功过几次」，
+> 不是「多少人用了」。G1（生产多日采样）仍然 `data_pending`。
+
+### 五、`alert_text` 来源前缀
+
+价位线提醒和买卖信号（`buy_sell_signals`）走的是**同一个**钉钉 webhook
+（`sniper_alerts._dingtalk_send` → `app.news.dingtalk.send_markdown`）。两边都是
+「某只票到价了」的短消息，群里刷起来分不清谁发的。
+
+本拍给 `alert_text` 的**标题与正文首行**加来源前缀 `ALERT_SOURCE_PREFIX = "DSA价位"`：
+
+```
+DSA价位 理想买入 贵州茅台          ← 标题（仍受 64 字符上限约束）
+### DSA价位 · 理想买入             ← 正文首行
+```
+
+**这只做了分流，没做限流。** 两套推送各自的频率控制、以及要不要合并去重，是独立的
+一拍（`design_pending`；缺真实的群里推送密度样本）。不挡本按钮合入。
+
+### 六、本拍不做（`design_pending`）
+
+| # | 项 | 为什么不在这拍 |
+| --- | --- | --- |
+| G2 | 异动详情「让 DSA 分析」 | 异动页（`AbnormalMoves`）没有挂载点，`FrontendSlotContextMap` 只有三个 slot 名。硬塞等于让核心页 import DSA —— 那条线不许越。**先另拍做通用 slot + 挂载点，再谈 DSA 注册** |
+| G4 | 从报告自动解析三价 | 最小可用是手填；自动解析要处理报告结构漂移 |
+| G5 | 狙击与 BSS 钉钉独立限流/合并 | 见上一节 |
+| G6 | 向导「一键开」真按钮 | 检查清单 + 可复制命令已够；见第一节 |
+
+### 七、软提醒（8 条，不降档）
+
+1. **`enabled` ≠ `reachable`**：入口与主按钮可用性以 `reachable` 为准；禁止用恒真 `enabled` 冒充就绪。
+2. **使用率 = 部署者自用漏斗诊断**，不是多租户增长看板；禁假百分比「已测通」。
+3. **alerts（决策预警）≠ sniper（价位线）**：文案分名；价位线（理想买入/止损/目标）≠ 监控规则引擎。
+4. **生产三 env 不动**；合入 ≠ 部署；飞书已取消，勿开新通道、勿宣传飞书为推荐通道。
+5. **异动无 slot 不空开**：本拍只加深既有两插槽；异动入口 `design_pending`。
+6. **钉钉前缀先于限流**：`alert_text` 来源前缀本拍做；限流合并策略大改另拍（`design_pending`）。
+7. **关闭 DSA 后预期**：关 profile / 停用 `schedule.enabled` 后不应再预期 DSA 定时/狙击推送；默认定时 `18:00 Asia/Shanghai` 与盘中 BSS 推送时段不同。
+8. **默不部署**；合入另等盘后口令（经 Grok Bot）。
+
+（继承 #211，保持不降档）**LLM `UsageSummary` ≠ 漏斗计数**：分标题，勿覆盖；
+**计数本地 only**，不进 BSS persist / push / dingtalk。
+
+### 八、边界
+
+- `POST /api/dsa/sniper-lines` 与 `SniperLineRequest`、`register` **行为零改**；本拍只加 `alert_text` 前缀。
+- `schedule.py`、`proxy.py`、`routes.py` **零改**；`docker-compose.yml` **零改**。
+- 生产三闸（`BUY_SELL_SIGNALS_PERSIST` / `PUSH` / `DINGTALK`）**零碰**；`buy_sell_signals/` 零碰。
+- 核心包（`components` / `pages` / `lib` / `extensions`）**不 import** `@/custom/dsa`。
 - 默认不部署；合入另等盘后口令。
 
 ## 分享图
