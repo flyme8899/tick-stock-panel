@@ -6,9 +6,13 @@
    `count_in_realized_kpi` 只能在 `completed` 时为 True。这是整本账的核心: 把没做成
    的轮次混进"已实现", 等于只统计赢的那部分 —— 而这类偏差从汇总数字上完全看不出来。
 
-2. **正 T 第二腿必须是老底仓**
-   `zheng_t` 是"先卖后买"。如果第二腿的份额来源是 `same_day_buy`, 那这一轮实际
-   变成了"卖掉今天买的票", 违反 T+1。纸面记录里它看不出来, 实盘上就是个废单。
+2. **卖出腿的份额必须是老底仓**
+   按 `side` 找**卖出**的那条腿(先卖后买是 leg1, 先买后卖是 leg2), 其份额来源必须
+   是 `old_lot`。取 `same_day_buy` 就等于"卖掉今天买的票", 违反 T+1 —— 纸面记录里
+   它看不出来, 实盘上就是个废单。
+
+   本批次改正: 旧实现只检查 `zheng_t` 的 leg2, 而那恰恰是**买入**腿。护栏装错了
+   腿, 真正的卖出腿(buy_first 的 leg2)完全无人校验。
 
 3. **唯一能进 KPI 的入口是 `complete_round()`**
    不允许直接 `transition(..., "completed")` —— 那个入口不知道净价差算没算完。
@@ -34,7 +38,7 @@ from typing import Final
 from app.market_time import cn_now
 
 from . import constants as C
-from .models import TRoundRecord, TRoundValidationError
+from .models import TRoundRecord, TRoundValidationError, check_sell_leg_source_lot
 
 
 class TRoundStateError(RuntimeError):
@@ -70,22 +74,34 @@ class RoundQuotaExceeded(TRoundStateError):
 ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     # 第一腿成交, 等第二腿。可以放弃, 也可以作废; **不能直接 completed**
     # (第二腿还没发生)。
-    "open_leg1": frozenset({"open_leg2", "abandoned", "void_data"}),
-    # 第二腿成交, 等结算。可以放弃 / 判为未完成 / 作废。
-    "open_leg2": frozenset({"incomplete", "abandoned", "void_data"}),
-    # 未完成 → 过期复核(等人工看), 或直接作废。
-    "incomplete": frozenset({"expired_review", "void_data"}),
+    "open_leg1": frozenset(
+        {"open_leg2", "unreverted_at_cutoff", "limit_locked", "void_data"}
+    ),
+    # 第二腿成交, 等结算。可以判为未回摆 / 数据截断 / 涨跌停锁死 / 作废。
+    "open_leg2": frozenset(
+        {"unreverted_at_cutoff", "data_truncated", "limit_locked", "void_data"}
+    ),
+    # 未回摆 → 过期复核(等人工看), 或直接作废。
+    "unreverted_at_cutoff": frozenset({"expired_review", "void_data"}),
+    # 数据截断 → 过期复核(补齐数据后人工看), 或作废。
+    "data_truncated": frozenset({"expired_review", "void_data"}),
+    # 涨跌停锁死 → 过期复核(等解锁后人工看), 或作废。**不能**转成 unreverted
+    # 再计 mtm —— 那个价位根本没有成交, 按它盯市等于凭空捏一个平仓价。
+    "limit_locked": frozenset({"expired_review", "void_data"}),
     # 终态之间不互相流转。
     "completed": frozenset(),
-    "abandoned": frozenset(),
     "expired_review": frozenset(),
     "void_data": frozenset(),
 }
 """合法转移表。
 
-注意 `incomplete → expired_review` 是唯一的"终态之后还能再走一步"的边 ——
-因为未完成本身已经是一个结论(第二腿没做成), 而过期复核是"这个结论需要人看一眼"。
-其余终态都没有出边。
+两个"没做成"的终态分开, 因为它们的事后处置完全不同:
+
+- `unreverted_at_cutoff`: 交易时段完整走完, 策略没等到回摆 → **可以计 mtm**
+  (按 `ts<=14:57:00` 最后一根 `price` 平掉), 数据本身没问题。
+- `data_truncated`: 交易时段没走完数据就断了 → 先查数据, 不能拿残缺数据算盈亏。
+
+`→ expired_review` 是唯一"终态之后还能再走一步"的边 —— 结论需要人看一眼。
 """
 
 STATUSES_CONSUMING_QUOTA: Final = frozenset(
@@ -136,24 +152,33 @@ def transition(
     note: str | None = None,
     leg1_status: str | None = None,
     leg2_status: str | None = None,
+    leg1_source_lot: str | None = None,
     leg2_source_lot: str | None = None,
 ) -> TRoundRecord:
     """推进到目标状态, 返回**新**记录。
 
-    `note` 用于 `abandoned` / `incomplete` / `void_data`: 这三类都必须留下原因,
-    否则下次看到这条记录的人不知道当时发生了什么。
+    `note` 用于 `unreverted_at_cutoff` / `data_truncated` / `void_data`: 这三类都必须
+    留下原因, 否则下次看到这条记录的人不知道当时发生了什么。
+
+    `leg1_source_lot` / `leg2_source_lot` 都可以传 —— 因为**卖出腿是哪一条取决于
+    `mode`**, 调用方不该自己先判断。两个都传也只是各自写值; T+1 校验统一走
+    `_check_source_lots()`, 按 `side` 找腿, 不管卖出腿叫 leg1 还是 leg2。
     """
     assert_transition_allowed(record, target)
 
-    if target in ("abandoned", "incomplete", "void_data") and not (note and note.strip()):
+    if target in ("unreverted_at_cutoff", "data_truncated", "limit_locked", "void_data") and not (
+        note and note.strip()
+    ):
         raise TRoundValidationError(f"转入 {target} 必须提供 note 说明原因")
 
     changes: dict[str, object] = {"round_status": target, "last_status_change_at": cn_now()}
-    if target == "abandoned":
-        changes["abandoned_reason"] = note.strip()
-    if target == "incomplete":
-        changes["incomplete_reason"] = note.strip()
+    if target == "unreverted_at_cutoff":
+        changes["unreverted_reason"] = note.strip()
+    if target == "data_truncated":
+        changes["truncated_reason"] = note.strip()
         changes["incomplete_flag"] = True
+    if target == "limit_locked":
+        changes["limit_locked_reason"] = note.strip()
     if note and target in ("void_data",):
         meta = dict(record.metadata)
         meta["last_void_reason"] = note.strip()
@@ -167,8 +192,11 @@ def transition(
         if leg2_status not in C.LEG_STATUSES:
             raise TRoundValidationError(f"未知 leg2_status: {leg2_status!r}")
         changes["leg2_status"] = leg2_status
+    if leg1_source_lot is not None or leg2_source_lot is not None:
+        _check_source_lots(record, leg1_source_lot=leg1_source_lot, leg2_source_lot=leg2_source_lot)
+    if leg1_source_lot is not None:
+        changes["leg1_source_lot"] = leg1_source_lot
     if leg2_source_lot is not None:
-        _check_source_lot(record.mode, leg2_source_lot)
         changes["leg2_source_lot"] = leg2_source_lot
 
     # 任何非 completed 的目标都必须把 KPI 标记清掉, 不能靠"反正构造时校验过"。
@@ -180,19 +208,45 @@ def transition(
     return record.with_fields(**changes)
 
 
-def _check_source_lot(mode: str, source_lot: str) -> None:
-    if source_lot not in C.SOURCE_LOTS:
-        raise TRoundValidationError(f"未知 leg2_source_lot: {source_lot!r}")
-    if mode == "zheng_t" and source_lot != "old_lot":
-        raise InvalidTRoundTransitionError(
-            t_round_id="<pending>",
-            source="open_leg2",
-            target="completed",
-            detail=(
-                f"zheng_t 的第二腿份额来源必须是 'old_lot', 收到 {source_lot!r}"
-                " —— same_day_buy 是当日买入份额, 当日卖出违反 T+1"
-            ),
+def _check_source_lots(
+    record: TRoundRecord,
+    *,
+    leg1_source_lot: str | None = None,
+    leg2_source_lot: str | None = None,
+) -> None:
+    """**卖出腿**份额校验 —— 两条腿的来源一起判。
+
+    位置在这里是为了在"开腿"当下就拦住, 不必等到结算。判定走
+    `models.check_sell_leg_source_lot()` —— 与 `__post_init__` / `complete_round()`
+    同一份定义(三处调用, 一处实现)。
+
+    为什么两个参数都收: `sell_first` 的卖出腿是 leg1, `buy_first` 的卖出腿是 leg2。
+    只收 `leg2_source_lot` 的话, `sell_first` 这条路径上 leg1 的来源永远是构造时的
+    `None`, 校验会被"来源为 None 就放行"直接跳过 —— 等于没查。批次
+    20261025gtrounds 的回归用例正是踩在这里。
+
+    传进来的 `None` 会退回记录上的已有值, 所以"只改 leg2"的旧调用方式行为不变。
+    """
+    for name, value in (("leg1_source_lot", leg1_source_lot), ("leg2_source_lot", leg2_source_lot)):
+        if value is not None and value not in C.SOURCE_LOTS:
+            raise TRoundValidationError(f"未知 {name}: {value!r}")
+
+    try:
+        check_sell_leg_source_lot(
+            mode=record.mode,
+            leg1_side=record.leg1_side,
+            leg1_source_lot=leg1_source_lot if leg1_source_lot is not None else record.leg1_source_lot,
+            leg2_side=record.leg2_side,
+            leg2_source_lot=leg2_source_lot if leg2_source_lot is not None else record.leg2_source_lot,
+            t_round_id=record.t_round_id,
         )
+    except TRoundValidationError as exc:
+        raise InvalidTRoundTransitionError(
+            t_round_id=record.t_round_id,
+            source=record.round_status,
+            target="open_leg2",
+            detail=str(exc),
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +273,7 @@ def complete_round(
     leg2_price: float,
     qty: int,
     leg2_source_lot: str,
+    leg1_source_lot: str | None = None,
     cost: RoundCost | None = None,
     leg1_ts: datetime | None = None,
     leg2_ts: datetime | None = None,
@@ -228,14 +283,17 @@ def complete_round(
     四道检查:
 
     1. 当前状态必须是 `open_leg2`(两腿都已成交才谈得上完成)
-    2. `zheng_t` 的 `leg2_source_lot` 必须是 `old_lot`
+    2. **卖出腿**的份额来源必须是 `old_lot`(按 `side` 找腿, 两种模式通用)
     3. 两腿价格 / 数量必须有限且为正
     4. 成本只能是 `design_pending`(本批次没有实测分档)
 
-    净价差按**方向**算, 不是简单相减:
+    `leg1_source_lot` 是可选参数: 只对 `sell_first`(卖出腿是 leg1)有意义。
+    不传就沿用记录上的值 —— 构造期已经填过并校验过的情况不必重复传。
 
-    - 正 T (先卖后买): `(leg1_price - leg2_price) * qty` 才是赚的
-    - 倒 T (先买后卖): `(leg2_price - leg1_price) * qty` 才是赚的
+    净价差 = `(卖出腿价 - 买入腿价) * qty`, 一条式子覆盖两种模式:
+
+    - 先卖后买(sell_first): 卖出腿是 leg1 → `(leg1 - leg2) * qty`
+    - 先买后卖(buy_first):  卖出腿是 leg2 → `(leg2 - leg1) * qty`
 
     写错方向的后果是全部符号反过来 —— 一个永远亏的策略看起来很诚实, 只是没人会
     注意到它其实是反的。
@@ -248,7 +306,7 @@ def complete_round(
             detail="只有 open_leg2(两腿均已成交)才能结算完成",
         )
 
-    _check_source_lot(record.mode, leg2_source_lot)
+    _check_source_lots(record, leg1_source_lot=leg1_source_lot, leg2_source_lot=leg2_source_lot)
 
     for name, value in (("leg1_price", leg1_price), ("leg2_price", leg2_price)):
         if not isinstance(value, (int, float)) or value <= 0:
@@ -267,10 +325,16 @@ def complete_round(
     if not isinstance(cost.cost_amount, (int, float)) or cost.cost_amount < 0:
         raise TRoundValidationError("cost_amount 必须是非负数")
 
-    if record.mode == "zheng_t":
-        gross = (float(leg1_price) - float(leg2_price)) * qty
-    else:
-        gross = (float(leg2_price) - float(leg1_price)) * qty
+    # 价差方向按「哪条腿是卖出腿」决定, 而不是按模式名字符串:
+    #   卖出腿在 leg1(先卖后买) → 卖得高才赚 → leg1 - leg2
+    #   卖出腿在 leg2(先买后卖) → 卖得高才赚 → leg2 - leg1
+    # 写成"卖出价 - 买入价"这一个式子, 就不存在两种模式各写一遍写反的可能。
+    sell_px, buy_px = (
+        (float(leg1_price), float(leg2_price))
+        if record.leg1_side == "sell"
+        else (float(leg2_price), float(leg1_price))
+    )
+    gross = (sell_px - buy_px) * qty
     net = gross - float(cost.cost_amount)
 
     now = cn_now()

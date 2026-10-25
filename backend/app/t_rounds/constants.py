@@ -112,28 +112,85 @@ FORBIDDEN_NAMES: Final = (
 
 # ---------------------------------------------------------------- 模式 / 状态
 
-T_MODES: Final = frozenset({"zheng_t", "dao_t"})
-"""正 T / 倒 T。
+T_MODES: Final = frozenset({"sell_first", "buy_first"})
+"""两种做 T 方向。**按「先卖」还是「先买」命名**，不按"正/倒"。
 
-- `zheng_t`(正 T): 先卖后买。第二腿买回, **必须**用当日之前就持有的老底仓
-  (`leg2_source_lot="old_lot"`)—— 否则就是把当日买入的票当日卖出, 那是 T+1 违规。
-- `dao_t`(倒 T): 先买后卖。第二腿卖出的是当日买入的份额, 受 T+1 约束, 只能做
-  纸面记录(`virtual_position_flag=True`)或等到次日。
+- `sell_first`(先卖后买, 旧名 `zheng_t`): 第一腿卖出, 第二腿买回。卖出的是当日
+  之前就持有的老底仓; 买回的份额来源无所谓。
+- `buy_first`(先买后卖, 旧名 `dao_t`): 第一腿买入, 第二腿卖出。**卖出腿**必须是
+  当日之前就持有的老底仓(`old_lot`)—— 当日买入的份额当日不能卖, 那是 T+1 违规。
+
+改名理由(批次 20261025gtrounds): 旧名的"正/倒"没有说清哪一腿受 T+1 约束, 于是
+校验被写在了 `zheng_t` 的第二腿(那是**买入**腿)上 —— 真正的卖出腿反而无人检查。
+按"先卖/先买"命名后, 约束指向"哪条腿是 sell"就一目了然。
 """
+
+T_MODE_ALIASES: Final[dict[str, str]] = {
+    "zheng_t": "sell_first",
+    "dao_t": "buy_first",
+}
+"""旧名 → 新名。**仅供迁移期调用方与历史记录读取**。
+
+新代码一律用 `sell_first` / `buy_first`。本包内部不读这张表, 它只给"读进一条
+历史记录"的场景用; 写入侧永远写新名。
+"""
+
+SELL_FIRST: Final = "sell_first"
+BUY_FIRST: Final = "buy_first"
 
 ROUND_STATUSES: Final = frozenset(
     {
-        "open_leg1",      # 第一腿已成交, 第二腿未完成
-        "open_leg2",      # 第二腿已成交, 轮次未结算
-        "completed",      # 两腿齐、净价差已算
-        "incomplete",     # 第二腿没做成(未达门禁 / 撤单)
-        "abandoned",      # 主动放弃
-        "expired_review", # 超时未结算, 等人工复核
-        "void_data",      # 数据异常, 整轮作废
+        "open_leg1",              # 第一腿已成交, 第二腿未完成
+        "open_leg2",              # 第二腿已成交, 轮次未结算
+        "completed",              # 两腿齐、净价差已算
+        "unreverted_at_cutoff",   # 到 14:57 仍没回摆(策略没等到) —— 可计 mtm
+        "data_truncated",         # 14:57 之前数据就断了(数据问题) —— 先分因
+        "limit_locked",           # 涨跌停锁死, 无法按收盘价平 —— 留分母, 不计 mtm
+        "expired_review",         # 超时未结算, 等人工复核
+        "void_data",              # 数据异常, 整轮作废
+    }
+)
+"""轮次状态。**终态名与语义必须一一对应**, 别按注释倒着理解。
+
+| 状态 | 语义 | 能不能计 mtm |
+|---|---|---|
+| `unreverted_at_cutoff` | 交易时段走完了, 策略没等到回摆 | ✅ 按 `ts<=14:57:00` 最后一根 `price` |
+| `data_truncated` | 交易时段**没走完**数据就断了 | ❌ 先分因; 有可靠收盘价再说 |
+| `limit_locked` | 走到截点仍涨跌停锁死, 平不掉 | ❌ **留在分母**; 不剔除、不算数据问题 |
+| `void_data` | 数据异常整轮作废 | ❌ |
+
+`limit_locked` 为什么单列而不是塞进 `data_truncated`: 数据是全的, 只是那个价位
+没有对手盘。把流动性问题记成数据问题, 后果是"卡在跌停板上出不来的亏损"被下次
+数据补齐时悄悄抹掉 —— 那正好是最该被看见的一类。它也**留在期望值分母里**。
+
+旧名 `incomplete` / `abandoned` 在 tip 上与 docstring **对调**过(见批次
+20261025gtrounds 的修法记录), 这正是"没等到回摆就被算成废弃、且不给 mtm"的
+根因 —— 只统计 `completed` 会系统性高估策略, 因为等不到回摆的那些轮次被当成
+"没发生"而不是"发生了但没赚到"。
+"""
+
+TERMINAL_STATUSES: Final = frozenset(
+    {
+        "completed",
+        "unreverted_at_cutoff",
+        "data_truncated",
+        "limit_locked",
+        "expired_review",
+        "void_data",
     }
 )
 
-TERMINAL_STATUSES: Final = frozenset({"completed", "incomplete", "abandoned", "expired_review", "void_data"})
+LEGACY_STATUS_ALIASES: Final[dict[str, str]] = {
+    "incomplete": "data_truncated",
+    "abandoned": "unreverted_at_cutoff",
+}
+"""旧终态名 → 新名。**仅供读取历史记录**, 含义按旧名当时的语义映射:
+
+- 旧 `incomplete` 的代码分支是"数据在 14:57 前就结束了" → `data_truncated`
+- 旧 `abandoned` 的代码分支是"走完了但没等到回摆" → `unreverted_at_cutoff`
+
+映射依据是**代码分支**而不是旧 docstring —— 两者在 tip 上是对调的, 以代码为准。
+"""
 
 REALIZED_KPI_ELIGIBLE_STATUS: Final = frozenset({"completed"})
 """**只有** `completed` 能进已实现 KPI。
@@ -142,15 +199,35 @@ REALIZED_KPI_ELIGIBLE_STATUS: Final = frozenset({"completed"})
 不改这里就不会误入 KPI。
 """
 
+LIMIT_LOCK_SOURCE_PENDING: Final = "data_pending"
+"""涨跌停判定的数据来源 —— **本批次没有**, 显式标 pending。
+
+判断"这一轮是不是停在涨跌停上"需要有每日涨跌停价, 或者至少"收盘价是否等于涨停/
+跌停价"的标记。当前特征表只有 `price` / `vwap`, **没有**这两样, 所以:
+
+- 本包**不猜**涨跌停(按百分比阈值反推属于编数据, 会把"刚好跌 10%"的普通下跌
+  错记成锁死);
+- 报告里 `limit_lock_source` 显式写 `data_pending`;
+- `limit_locked` 这个桶先建好、计数为 0, 等涨跌停数据接上就能直接填。
+
+不许因为"反正都是 0"就把这个桶删掉 —— 删掉之后接数据的人会以为从没考虑过。
+"""
+
 LEG_STATUSES: Final = frozenset({"pending", "filled", "cancelled", "rejected", "unfilled"})
 
 LEG_SIDES: Final = frozenset({"buy", "sell"})
 
 SOURCE_LOTS: Final = frozenset({"old_lot", "same_day_buy"})
-"""第二腿的份额来源。
+"""份额来源。
 
-`same_day_buy` 在 `zheng_t` 下是**违规**的: 正 T 第二腿是买回, 卖掉当日买入的
-份额再买回, 语义上就成了"用当天买的票做正 T", 而当天买的票本来就不能卖。
+**约束挂在卖出腿上, 不挂在"第二腿"上。** 哪种模式都通用: 两条腿里凡 `side=="sell"`
+的那条, 份额来源必须是 `old_lot` —— 当日买入的份额当日不能卖(T+1)。
+
+- `sell_first`: 卖出腿是 leg1 → leg1 来源约束(纸面底仓恒 `old_lot`)
+- `buy_first`:  卖出腿是 leg2 → leg2 来源约束
+
+旧实现只检查 `zheng_t` 的 `leg2`(那是**买入**腿), 真正的卖出腿无人校验 —— 等于
+把护栏装在了不承重的那条腿上。见批次 20261025gtrounds 修法记录。
 """
 
 # ---------------------------------------------------------------- T+1 / 可卖
@@ -172,7 +249,7 @@ STAMP_TAX_PRICE_REFS: Final = frozenset(
 
 POSITION_TAGS: Final = frozenset(
     {
-        "executable",    # 有可卖老底仓, 可执行正 T
+        "executable",    # 有可卖老底仓, 可执行 sell_first(先卖后买)
         "observe_only",  # 只能观察, 不能执行
         "tomorrow_ref",  # 当日买入, 次日才可卖
     }
@@ -222,13 +299,16 @@ MINUTE_EXPORT_EARLIEST: Final = "09:30"
 
 __all__ = [
     "AUCTION_IMPERSONATION_FORBIDDEN",
+    "BUY_FIRST",
     "EPSILON_DEFINITION",
     "EPSILON_LOCKED_IN_VERSION",
     "EPSILON_VALUE_PCT",
     "FORBIDDEN_NAMES",
     "FORMAL_PUSH_ALLOWED_DEFAULT",
+    "LEGACY_STATUS_ALIASES",
     "LEG_SIDES",
     "LEG_STATUSES",
+    "LIMIT_LOCK_SOURCE_PENDING",
     "MAX_ROUNDS_PER_DAY",
     "MINUTE_EXPORT_EARLIEST",
     "NAMESPACE",
@@ -238,11 +318,13 @@ __all__ = [
     "RESEARCH_WINDOW_START",
     "ROUNDS_CONSUMED_FIELD",
     "ROUND_STATUSES",
+    "SELL_FIRST",
     "SIGNAL_UNIVERSE_FILTERED_BY_POSITION",
     "SOURCE_LOTS",
     "STAMP_TAX_PRICE_REFS",
     "TERMINAL_STATUSES",
     "T_MODES",
+    "T_MODE_ALIASES",
     "T_MONITOR_EVENT_TYPE",
     "T_ROUND_DESIGN_PIN",
     "VWAP_SAME_BASIS_NOTE",

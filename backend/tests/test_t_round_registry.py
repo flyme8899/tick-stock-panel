@@ -5,7 +5,7 @@
 
 本文件守四件事:
 
-1. 状态机: 合法转移; **未完成/已放弃不得进已实现 KPI**; 正 T 第二腿必须 old_lot
+1. 状态机: 合法转移; **未完成/已放弃不得进已实现 KPI**; **卖出腿**必须 old_lot
 2. Store: 内存往返; 同日同票超 `max_rounds_per_day` 拒绝
 3. ε = 0.30 且 version 串含 pin + eps; 无提醒常量耦合
 4. 隔离: 不 import `buy_sell_signals`; 冷却/轮次字段名分列; 无「已测通」文案
@@ -56,16 +56,20 @@ def _record(**kwargs) -> TRoundRecord:
         "t_round_id": "tr.demo",
         "symbol": "600000.SH",
         "trade_date": TODAY,
-        "mode": "zheng_t",
+        "mode": "sell_first",
     }
     base.update(kwargs)
-    # incomplete / abandoned 必须带原因(模型层的硬校验)。夹具里默认补一句, 免得
-    # 每个"只想构造个处于该状态的记录"的用例都要重复写原因 —— 那会把测试的重点
-    # 从"转移是否合法"稀释成"记得填 reason"。
-    if base.get("round_status") == "incomplete":
-        base.setdefault("incomplete_reason", "夹具: 第二腿未达门禁")
-    if base.get("round_status") == "abandoned":
-        base.setdefault("abandoned_reason", "夹具: 主动放弃")
+    # 未完成的两个终态必须带原因(模型层的硬校验)。夹具里默认补一句, 免得每个
+    # "只想构造个处于该状态的记录"的用例都要重复写原因 —— 那会把测试的重点从
+    # "转移是否合法"稀释成"记得填 reason"。
+    #
+    # 两个状态名的含义(批次 20261025gtrounds ②):
+    #   unreverted_at_cutoff —— 走到 14:57 仍没回摆, 数据是全的, 可计 mtm
+    #   data_truncated       —— 14:57 之前数据就断了, 先分因, 不计 mtm
+    if base.get("round_status") == "data_truncated":
+        base.setdefault("truncated_reason", "夹具: 分钟数据在 13:00 后缺失")
+    if base.get("round_status") == "unreverted_at_cutoff":
+        base.setdefault("unreverted_reason", "夹具: 14:57 仍在水下")
     return TRoundRecord(**base)
 
 
@@ -112,10 +116,10 @@ def test_unknown_mode_or_status_rejected():
 
 
 def test_leg_sides_must_match_mode():
-    """正 T 必须 sell→buy, 倒 T 必须 buy→sell。"""
+    """`sell_first` 必须 sell→buy, `buy_first` 必须 buy→sell。"""
     with pytest.raises(TRoundValidationError, match="腿方向"):
-        _record(mode="zheng_t", leg1_side="buy", leg2_side="sell")
-    ok = _record(mode="dao_t", leg1_side="buy", leg2_side="sell")
+        _record(mode="sell_first", leg1_side="buy", leg2_side="sell")
+    ok = _record(mode="buy_first", leg1_side="buy", leg2_side="sell")
     assert (ok.leg1_side, ok.leg2_side) == ("buy", "sell")
 
 
@@ -150,26 +154,22 @@ def test_compliance_flags_hard_true():
 # =========================================================== KPI 硬禁
 
 
-@pytest.mark.parametrize("status", ["open_leg1", "open_leg2", "incomplete", "abandoned", "expired_review", "void_data"])
+@pytest.mark.parametrize(
+    "status",
+    ["open_leg1", "open_leg2", "unreverted_at_cutoff", "data_truncated", "expired_review", "void_data"],
+)
 def test_non_completed_cannot_count_in_realized_kpi(status):
-    kwargs = {"round_status": status}
-    if status in ("incomplete",):
-        kwargs["incomplete_reason"] = "第二腿未达门禁"
-    if status == "abandoned":
-        kwargs["abandoned_reason"] = "主动放弃"
     with pytest.raises(TRoundValidationError, match="count_in_realized_kpi"):
-        _record(count_in_realized_kpi=True, **kwargs)
+        _record(count_in_realized_kpi=True, round_status=status)
 
 
-@pytest.mark.parametrize("status", ["open_leg1", "incomplete", "abandoned", "expired_review", "void_data"])
+@pytest.mark.parametrize(
+    "status",
+    ["open_leg1", "unreverted_at_cutoff", "data_truncated", "expired_review", "void_data"],
+)
 def test_non_completed_cannot_mark_net_spread_realized(status):
-    kwargs = {"round_status": status}
-    if status == "incomplete":
-        kwargs["incomplete_reason"] = "x"
-    if status == "abandoned":
-        kwargs["abandoned_reason"] = "x"
     with pytest.raises(TRoundValidationError, match="net_spread_realized|count_in_realized_kpi"):
-        _record(net_spread_realized=True, **kwargs)
+        _record(net_spread_realized=True, round_status=status)
 
 
 def test_only_completed_is_kpi_eligible():
@@ -197,37 +197,150 @@ def test_transition_clears_kpi_flags():
         transition(completed, "void_data", note="数据源回滚")
 
 
-# =========================================================== 正 T 老底仓硬禁
+# =========================================================== T+1 按卖出腿硬禁
+#
+# 批次 20261025gtrounds ④: 旧的 4 条守的是**错腿**。
+#
+# 旧实现 `__post_init__` 写的是 `if mode == "zheng_t" and leg2_source_lot is not None`,
+# 而 `zheng_t` 的腿序是 sell→buy —— 第二腿是**买入**腿。于是:
+#   - `zheng_t` 的真实卖出腿(leg1)从来没被检查过;
+#   - `dao_t`(buy→sell)的真实卖出腿(leg2)也没被检查, 反而有一条
+#     `test_dao_t_allows_same_day_buy_source` 把这个漏洞当成"特性"锁住了。
+# 旧测试之所以全绿, 是因为离线 `_settle` 永远传 `old_lot`, 谁都没踩到过。
+#
+# 新口径: 按 `side` 找卖出腿, 不管它叫 leg1 还是 leg2, 来源都必须 `old_lot`。
 
 
-def test_zheng_t_rejects_same_day_buy_at_construction():
+def _sell_first() -> TRoundRecord:
+    """先卖后买, 卖出腿是 leg1。"""
+    return _record(mode="sell_first")
+
+
+def _buy_first() -> TRoundRecord:
+    """先买后卖, 卖出腿是 leg2。"""
+    return _record(mode="buy_first", leg1_side="buy", leg2_side="sell")
+
+
+def test_sell_leg_name_is_found_by_side_not_by_index():
+    from app.t_rounds.models import _sell_leg_name
+
+    assert _sell_leg_name("sell", "buy") == "leg1"
+    assert _sell_leg_name("buy", "sell") == "leg2"
+
+
+def test_sell_leg_name_requires_exactly_one_sell_leg():
+    from app.t_rounds.models import _sell_leg_name
+
+    for sides in (("buy", "buy"), ("sell", "sell")):
+        with pytest.raises(TRoundValidationError):
+            _sell_leg_name(*sides)
+
+
+def test_sell_first_rejects_same_day_buy_at_construction():
+    """构造期就要拒 —— 不能等到补第二腿时才拒。"""
     with pytest.raises(TRoundValidationError, match="old_lot"):
-        _record(leg2_source_lot="same_day_buy")
+        _record(mode="sell_first", leg1_side="sell", leg2_side="buy", leg1_source_lot="same_day_buy")
 
 
-def test_zheng_t_rejects_same_day_buy_on_transition():
+def test_sell_first_rejects_same_day_buy_on_its_sell_leg():
+    """`sell_first` 的卖出腿是 **leg1**, 所以要在 `leg1_source_lot` 上传当日买入才触达校验。
+
+    早期实现只收 `leg2_source_lot`, 于是这条路径上的 leg1 来源永远是构造时的 `None`,
+    「来源是 None 就放行」直接跳过 —— 卖出腿等于没查。
+    """
     with pytest.raises(InvalidTRoundTransitionError, match="old_lot"):
-        transition(_record(), "open_leg2", leg2_source_lot="same_day_buy")
+        transition(_record(), "open_leg2", leg1_source_lot="same_day_buy")
 
 
-def test_zheng_t_rejects_same_day_buy_on_complete():
+def test_sell_first_rejects_same_day_buy_on_complete():
     """即使绕过 transition 直接调 complete_round, 也要拒。"""
     with pytest.raises(InvalidTRoundTransitionError, match="old_lot"):
-        complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="same_day_buy")
+        complete_round(
+            _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="same_day_buy", leg2_source_lot="old_lot",
+        )
 
 
-def test_dao_t_allows_same_day_buy_source():
-    """倒 T 先买后卖, 第二腿来源可以是当日买入(受 T+1 约束, 只能纸面)。"""
-    dao = _record(mode="dao_t", leg1_side="buy", leg2_side="sell")
-    out = transition(dao, "open_leg2", leg2_source_lot="same_day_buy")
-    assert out.round_status == "open_leg2"
+def test_sell_first_buy_leg_same_day_buy_is_fine():
+    """`sell_first` 的**买入腿**是 leg2 —— 当日买入本来就正常, 不该被 T+1 拦。"""
+    out = transition(_record(), "open_leg2", leg2_source_lot="same_day_buy")
     assert out.leg2_source_lot == "same_day_buy"
 
 
+def test_sell_first_rejects_same_day_buy_passed_at_construction():
+    """构造期填 leg1 来源为当日买入, 也要在 transition 之后仍然被拒。
+
+    这一条守的是"构造期放过的东西不能在下一步悄悄生效": `__post_init__` 已经拦了
+    一次, `transition` 拿到记录后重判也要拦。
+    """
+    with pytest.raises(TRoundValidationError, match="old_lot"):
+        TRoundRecord(
+            t_round_id="tr.demo", symbol="600000.SH", trade_date=TODAY, mode="sell_first",
+            leg1_side="sell", leg2_side="buy", leg1_source_lot="same_day_buy",
+        )
+
+
+def test_buy_first_rejects_same_day_buy_on_its_sell_leg():
+    """**这是旧版漏掉的那条。**
+
+    `buy_first` 先买后卖, 卖出腿是 leg2。当日买入的份额当日不能卖(T+1), 所以要拒。
+    旧代码只看 `zheng_t`, 这条路径一路绿灯 —— 被
+    `test_dao_t_allows_same_day_buy_source` 当成"应该允许"锁住了。
+    """
+    with pytest.raises(InvalidTRoundTransitionError, match="old_lot"):
+        transition(_buy_first(), "open_leg2", leg2_source_lot="same_day_buy")
+
+
+def test_buy_first_rejects_same_day_buy_on_complete():
+    """绕过 transition 直接结算 —— complete_round 自己要能拦住。"""
+    open2 = transition(_buy_first(), "open_leg2", leg2_source_lot="old_lot")
+    with pytest.raises(InvalidTRoundTransitionError, match="old_lot"):
+        complete_round(open2, leg1_price=9.9, leg2_price=10.0, qty=100, leg2_source_lot="same_day_buy")
+
+
+def test_both_modes_accept_old_lot_on_sell_leg():
+    """两种模式的卖出腿来源是 `old_lot` 时都必须放行 —— 修错腿不能顺手把正路堵死。"""
+    sf = transition(_sell_first(), "open_leg2", leg2_source_lot="old_lot")
+    assert (sf.round_status, sf.leg2_source_lot) == ("open_leg2", "old_lot")
+
+    bf = transition(_buy_first(), "open_leg2", leg2_source_lot="old_lot")
+    assert (bf.round_status, bf.leg2_source_lot) == ("open_leg2", "old_lot")
+
+
+def test_buy_first_buy_leg_may_be_same_day_buy():
+    """`buy_first` 的**买入**腿(leg1)写 same_day_buy 不应报错 —— 它本来就可以是当日买入。"""
+    rec = _record(mode="buy_first", leg1_side="buy", leg2_side="sell", leg1_source_lot="same_day_buy")
+    assert rec.leg1_source_lot == "same_day_buy"
+
+
 def test_unknown_source_lot_rejected():
-    dao = _record(mode="dao_t", leg1_side="buy", leg2_side="sell")
+    """两层都要拦：`transition()` 的外层包装 + `models` 的单一定义。
+
+    只断言 `match="leg2_source_lot"` 靠的是外层标签，把 `models` 里那句
+    "未知来源"的判断删掉，这条照样绿 —— 所以下面直接打 `models` 那一层。
+    """
     with pytest.raises(TRoundValidationError, match="leg2_source_lot"):
-        transition(dao, "open_leg2", leg2_source_lot="borrowed")
+        transition(_buy_first(), "open_leg2", leg2_source_lot="borrowed")
+
+    # 单一定义本身：拼错的来源不能因为"不等于 old_lot 就报 T+1"而被掩盖 ——
+    # 报的必须是"未知", 否则运维会拿 `borrowed` 去查 T+1 文档, 永远查不到。
+    from app.t_rounds.models import check_sell_leg_source_lot
+
+    with pytest.raises(TRoundValidationError, match="未知 source_lot"):
+        check_sell_leg_source_lot(
+            mode="buy_first",
+            leg1_side="buy",
+            leg1_source_lot=None,
+            leg2_side="sell",
+            leg2_source_lot="borrowed",
+        )
+
+
+def test_zero_old_lot_qty_is_not_executable_for_either_mode():
+    """空底仓时两种模式都不可执行 —— 「能卖」的前提对两种模式是同一个。"""
+    tag = tag_position(old_lot_qty_available=0, same_day_buy_qty=1000)
+    assert tag.can_execute_sell_first is False
+    assert tag.can_execute_sell_first == tag.can_execute_zheng_t, "旧名必须是纯别名"
 
 
 # =========================================================== 状态机: 合法转移
@@ -237,19 +350,19 @@ def test_unknown_source_lot_rejected():
     ("source", "target"),
     [
         ("open_leg1", "open_leg2"),
-        ("open_leg1", "abandoned"),
+        ("open_leg1", "unreverted_at_cutoff"),
         ("open_leg1", "void_data"),
-        ("open_leg2", "incomplete"),
-        ("open_leg2", "abandoned"),
+        ("open_leg2", "unreverted_at_cutoff"),
+        ("open_leg2", "data_truncated"),
         ("open_leg2", "void_data"),
-        ("incomplete", "expired_review"),
-        ("incomplete", "void_data"),
+        ("unreverted_at_cutoff", "expired_review"),
+        ("unreverted_at_cutoff", "void_data"),
+        ("data_truncated", "expired_review"),
+        ("data_truncated", "void_data"),
     ],
 )
 def test_legal_transitions(source, target):
     rec = _record(round_status=source)
-    if source == "incomplete":
-        rec = _record(round_status="incomplete", incomplete_reason="已记录")
     out = transition(rec, target, note="原因")
     assert out.round_status == target
     assert rec.round_status == source, "transition 必须返回新记录"
@@ -266,34 +379,62 @@ def test_open_leg1_cannot_go_straight_to_completed():
         complete_round(_record(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot")
 
 
-@pytest.mark.parametrize("source", ["completed", "abandoned", "expired_review", "void_data"])
-def test_terminal_states_have_no_exit(source):
-    rec = _record(round_status=source) if source != "abandoned" else _record(round_status="abandoned", abandoned_reason="x")
+@pytest.mark.parametrize("source", ["completed", "expired_review", "void_data"])
+def test_true_terminal_states_have_no_exit(source):
+    """**真正**的终态没有出边。
+
+    注意 `unreverted_at_cutoff` / `data_truncated` **不在**这张表里: 它们是"未完成"
+    的落地状态, 但仍允许 `expired_review`(过复核期) 和 `void_data`(数据作废)。
+    把这两个当终态会挡住唯一一条合法纠错路径 —— 旧版把 `incomplete` 放进来, 靠的是
+    `incomplete` 当时恰好没有出边; 本批次给它补上了 `expired_review`/`void_data`,
+    所以这条测试必须同步拆开。
+    """
     if source == "completed":
         rec = complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot")
+    else:
+        rec = _record(round_status=source)
     for target in C.ROUND_STATUSES:
         with pytest.raises(InvalidTRoundTransitionError):
             transition(rec, target, note="x")
 
 
-def test_abandoned_and_incomplete_require_reason():
-    with pytest.raises(TRoundValidationError, match="note"):
-        transition(_record(), "abandoned")
-    with pytest.raises(TRoundValidationError, match="note"):
-        transition(_record(round_status="open_leg2"), "incomplete")
+@pytest.mark.parametrize("source", ["unreverted_at_cutoff", "data_truncated"])
+def test_non_completion_states_only_exit_to_review_or_void(source):
+    """未完成状态只能过复核期或作废, **不能**转回进行中, 更不能转成 completed。
 
-
-def test_constructing_abandoned_without_reason_rejected():
-    """绕过 `_record` 的自动补 reason, 直接构造 —— 模型层必须自己拒。"""
-    with pytest.raises(TRoundValidationError, match="abandoned_reason"):
-        TRoundRecord(
-            t_round_id="x", symbol="600000.SH", trade_date=TODAY, mode="zheng_t",
-            round_status="abandoned",
+    这是"已经认输的轮次不许复活"的守卫: 一旦标成 `unreverted_at_cutoff`(已经按 14:57
+    盯市算过亏了), 事后发现"其实后来又回摆了"也不能改回 `completed` —— 那等于事后挑
+    好看的时点。
+    """
+    rec = _record(round_status=source)
+    for target in C.ROUND_STATUSES:
+        try:
+            transition(rec, target, note="x")
+        except InvalidTRoundTransitionError:
+            continue
+        assert target in ("expired_review", "void_data"), (
+            f"{source} 不允许转到 {target} —— 未完成状态不得复活"
         )
-    with pytest.raises(TRoundValidationError, match="incomplete_reason"):
+
+
+def test_unreverted_and_truncated_require_reason():
+    with pytest.raises(TRoundValidationError, match="note"):
+        transition(_record(), "unreverted_at_cutoff")
+    with pytest.raises(TRoundValidationError, match="note"):
+        transition(_record(round_status="open_leg2"), "data_truncated")
+
+
+def test_constructing_unreverted_without_reason_rejected():
+    """绕过 `_record` 的自动补 reason, 直接构造 —— 模型层必须自己拒。"""
+    with pytest.raises(TRoundValidationError, match="unreverted_reason"):
         TRoundRecord(
-            t_round_id="x", symbol="600000.SH", trade_date=TODAY, mode="zheng_t",
-            round_status="incomplete",
+            t_round_id="x", symbol="600000.SH", trade_date=TODAY, mode="sell_first",
+            round_status="unreverted_at_cutoff",
+        )
+    with pytest.raises(TRoundValidationError, match="truncated_reason"):
+        TRoundRecord(
+            t_round_id="x", symbol="600000.SH", trade_date=TODAY, mode="sell_first",
+            round_status="data_truncated",
         )
 
 
@@ -310,8 +451,8 @@ def test_unknown_target_rejected():
 # =========================================================== 净价差方向
 
 
-def test_zheng_t_spread_direction():
-    """正 T 先卖后买: 卖价 > 买价才赚。"""
+def test_sell_first_spread_direction():
+    """先卖后买: 卖价 > 买价才赚。"""
     out = complete_round(
         _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot"
     )
@@ -320,14 +461,13 @@ def test_zheng_t_spread_direction():
     assert out.count_in_realized_kpi is True
 
 
-def test_dao_t_spread_direction():
-    """倒 T 先买后卖: 卖价 > 买价才赚 —— 腿序反了, 符号也必须反。"""
-    dao = _record(mode="dao_t", leg1_side="buy", leg2_side="sell")
-    open2 = transition(dao, "open_leg2", leg2_source_lot="same_day_buy")
+def test_buy_first_spread_direction():
+    """先买后卖: 卖价 > 买价才赚 —— 腿序反了, 符号也必须反。"""
     out = complete_round(
-        open2, leg1_price=9.9, leg2_price=10.0, qty=100, leg2_source_lot="same_day_buy"
+        transition(_buy_first(), "open_leg2", leg2_source_lot="old_lot"),
+        leg1_price=9.9, leg2_price=10.0, qty=100, leg2_source_lot="old_lot",
     )
-    assert out.gross_spread == pytest.approx(10.0), "倒 T 应算 (leg2 - leg1) * qty"
+    assert out.gross_spread == pytest.approx(10.0), "buy_first 应算 (leg2 - leg1) * qty"
 
 
 def test_losing_round_still_completes():
@@ -607,13 +747,13 @@ def test_tag_position_executable_when_old_lot_available():
     tag = tag_position(old_lot_qty_available=500)
     assert isinstance(tag, PositionTag)
     assert tag.tag == "executable"
-    assert tag.can_execute_zheng_t is True
+    assert tag.can_execute_sell_first is True
 
 
 def test_tag_position_tomorrow_ref_for_same_day_buy():
     tag = tag_position(old_lot_qty_available=0, same_day_buy_qty=300)
     assert tag.tag == "tomorrow_ref"
-    assert tag.can_execute_zheng_t is False
+    assert tag.can_execute_sell_first is False
 
 
 def test_tag_position_observe_only_when_empty():
@@ -634,7 +774,7 @@ def test_tag_position_prefers_old_lot():
 
 def test_tag_position_zero_lot_is_not_executable():
     tag = tag_position(old_lot_qty_available=0)
-    assert tag.can_execute_zheng_t is False
+    assert tag.can_execute_sell_first is False
 
 
 def test_tag_position_rejects_negative():
