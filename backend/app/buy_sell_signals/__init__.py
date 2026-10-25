@@ -1,4 +1,4 @@
-"""买卖信号注册表与状态机骨架 (批次 20261024g / 20261025g2 / 20261025gp)。
+"""买卖信号注册表与状态机骨架 (批次 g / g2 / gp / gpush)。
 
 模块边界:
 
@@ -6,6 +6,7 @@
 - `models`     `SignalRecord` 及其校验
 - `state_machine` 转移表 + 人工发布闸 + 硬禁自动晋升
 - `store`      `SignalRegistryStore` 协议 + 内存实现 + 落盘实现(env 门控) + 工厂
+- `push`       推送出口: env 门控的 `try_push`, 通道 = SSE + 站内告警(gpush)
 - `sw_pit`     申万一级行业 PIT 只读查询(history × l1_map, valid_from/valid_to)
 - `quality_proxy` 日线质量代理(财务按 announce_date 做 PIT)
 - `quality_rank`  申万一级行业内的质量相对分位 + 白名单**试跑**判定(g2 窄化)
@@ -14,20 +15,30 @@
 
 **g2 窄化做了什么**: `limit_reopen` 构造即 `observe`; 行业内相对分位; 白名单试跑
 `p40` 并明确**未锁定**。**没做**: 估值腿实装、健康规则引擎、权重标定、p30/p50
-敏感性、正式推送。
+敏感性。
 
 **gp 做了什么**: `DiskSignalRegistryStore` 真的能落盘了 —— 但只在
 `BUY_SELL_SIGNALS_PERSIST` 为真值时, 经 `build_signal_registry_store()` 工厂开启;
 默认仍是内存实现, 进程退出即消失。落盘写 `data/buy_sell_signals/registry.json`,
-不碰 `partition_writer` 的生产分区。**gp 没做**: 推送(SSE / 飞书 / `news.push`)、
-路由、日管道自动 upsert —— **落盘 ≠ 推送**。
+不碰 `partition_writer` 的生产分区。**gp 没做**: 推送、路由、日管道自动 upsert
+—— **落盘 ≠ 推送**。
+
+**gpush 做了什么**: 推送出口 `push.try_push()` —— 但只在 `BUY_SELL_SIGNALS_PUSH`
+为真值时真实扇出, 默认关。通道写死为 **SSE(`QuoteService.push_alerts`) + 站内
+(`alert_store.append_many` → `alerts.jsonl`)**, 复用既有通道, 不新建总线、不新建
+SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `push_eligible`;
+成功后写 `last_pushed_at` + 30 分钟冷却 + `push_gate=cooldown`。**gpush 没做**:
+飞书(下一拍)、`news.push`、日管道自动扫晋升、任何自动 `publishable`。
+
+现行口径: **落盘已开 · 推送可选(env) · 竞价/放量事件仍未接**。
 
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
 
 本包与 `app.services.trade_marks`、`app.news.push` **没有** import 关系, 也不共用
 任何提醒层常量(`VWAP_BAND` / `RANGE_BAND` / `T_COOLDOWN_MIN`); 与 `app.t_rounds`
-零符号耦合。理由见 `constants`。
+零符号耦合。理由见 `constants`。`push.py` 复用 `QuoteService.push_alerts` 与
+`alert_store` 这两个**通道**, 但不 import 它们的节流参数, 也不走飞书支路。
 
 仅供研究，不构成投资建议；执行须人工确认。
 """
@@ -40,12 +51,21 @@ from .constants import (
     NAMESPACE,
     PERSIST_ENV_NAME,
     PERSIST_SUBDIR,
+    PUSH_ENV_NAME,
     REGISTRY_FILENAME,
     SIGNAL_DESIGN_PIN,
     design_version,
 )
 from .disclaimer import DISCLAIMER_TEXT
 from .models import SignalRecord, SignalValidationError
+from .push import (
+    PushDisabled,
+    PushError,
+    PushRejected,
+    PushResult,
+    push_env_enabled,
+    try_push,
+)
 from .quality_rank import (
     WHITELIST_PERCENTILE_LOCKED,
     WHITELIST_PERCENTILE_TRIAL,
@@ -91,8 +111,13 @@ __all__ = [
     "NAMESPACE",
     "PERSIST_ENV_NAME",
     "PERSIST_SUBDIR",
+    "PUSH_ENV_NAME",
     "PersistDisabledError",
     "PublishPointerConflict",
+    "PushDisabled",
+    "PushError",
+    "PushRejected",
+    "PushResult",
     "REGISTRY_FILENAME",
     "RebalanceSnapshot",
     "SIGNAL_DESIGN_PIN",
@@ -112,6 +137,8 @@ __all__ = [
     "make_rebalance_id",
     "manual_publish",
     "percentile_rank",
+    "push_env_enabled",
     "rank_within_industry",
     "transition",
+    "try_push",
 ]

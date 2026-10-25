@@ -54,7 +54,12 @@ from app.market_time import cn_now
 PKG_DIR = Path(__file__).resolve().parents[1] / "app" / "buy_sell_signals"
 
 PUSH_MODULE_ROOTS = ("app.news.push", "sse_starlette", "app.services.feishu")
-"""推送栈的模块根。main.py 不得 import 它们 —— 本批次只开落盘, 不开推送。"""
+"""**禁止**被 main import 的推送栈模块根。
+
+gpush 起 main **可以** import `app.buy_sell_signals.push`(本包的推送出口), 但**仍然
+禁止** import 这三样: 新闻推送(另一套节流语义)、sse_starlette(SSE 走 QuoteService 的
+订阅者队列, 不需要 main 直接碰 ASGI 库)、飞书客户端(下一拍)。
+"""
 
 
 def _record(**kwargs) -> SignalRecord:
@@ -595,6 +600,13 @@ def test_disk_store_is_not_wired_into_app():
         hits = sorted(m for m in imported if m == root or m.startswith(root + "."))
         assert not hits, f"main 里出现了推送接线 import: {hits}"
 
+    # gpush: main 可以接本包 push, 但只许接 push_env_enabled / try_push 这两个名字。
+    push_imports = sorted(m for m in imported if m.startswith("app.buy_sell_signals"))
+    for module in push_imports:
+        assert module == "app.buy_sell_signals.push" or module.startswith("app.buy_sell_signals."), (
+            f"main 引入了非预期的 buy_sell_signals 子模块: {module}"
+        )
+
 
 def test_store_module_does_not_use_partition_writer():
     """磁盘空壳不得调用 partition_writer 去写生产分区。"""
@@ -806,6 +818,34 @@ def test_main_lifespan_uses_factory_and_env_gate():
     text = (backend / "app/main.py").read_text(encoding="utf-8")
     assert "build_signal_registry_store" in text, "main 应经工厂接线"
     assert "enable_persist=True" not in text, "main 不得绕过 env 直接打开落盘"
+
+
+def test_main_lifespan_never_auto_pushes():
+    """gpush: main 可以挂 push helper, 但**不得**在启动路径里自动调用 try_push。
+
+    这一条是给"顺手扫一遍全表推一下"设的闸。启动时自动推, 等于把"人工确认
+    后发布"这道闸绕掉了一半 —— 记录虽然是人工发布的, 推送却由重启触发。
+    """
+    backend = PKG_DIR.parents[1]
+    tree = ast.parse((backend / "app/main.py").read_text(encoding="utf-8"))
+
+    calls = [
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert "try_push" not in calls, "main 不得直接调用 try_push"
+
+    attrs = [
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    ]
+    assert "try_push" not in attrs, "main 不得通过 store/state 调用 try_push"
+
+    text = (backend / "app/main.py").read_text(encoding="utf-8")
+    assert "store.list()" not in text, "main 不得遍历注册表(会变成自动扫推)"
+    assert "for record in" not in text, "main 不得遍历记录"
 
 
 def test_disk_store_reload_is_lossless(tmp_path):

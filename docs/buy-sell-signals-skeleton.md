@@ -1,4 +1,4 @@
-# 买卖信号骨架（批次 20261024g + g2 窄化 20261025g2 + gp 可选落盘 20261025gp）
+# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送）
 
 > **仅供研究，不构成投资建议；执行须人工确认。**
 
@@ -6,7 +6,10 @@
 为什么几条硬约束写成了常量而不是配置项。
 
 > 20261025g2 的改动见文末 [g2 窄化](#g2-窄化批次-20261025g2) 一节；
-> 20261025gp 的改动见文末 [gp 可选落盘](#gp-可选落盘批次-20261025gp) 一节。
+> 20261025gp 的改动见文末 [gp 可选落盘](#gp-可选落盘批次-20261025gp) 一节；
+> 20261025gpush 的改动见文末 [gpush 可选推送](#gpush-可选推送批次-20261025gpush) 一节。
+
+**现行口径：落盘已开 · 推送可选（env）· 竞价/放量事件仍未接。**
 
 ## 一句话
 
@@ -14,10 +17,15 @@
 Store 默认用**内存实现**，置 `BUY_SELL_SIGNALS_PERSIST=1` 后改为**落盘到本地 JSON**；
 估值与健康只返回 `data_pending` / `design_pending`。
 
-**没有**接任何 HTTP 路由、**没有**接日管道、**没有**接推送。
+推送出口 `push.try_push()` 已就位，但**默认关**：置 `BUY_SELL_SIGNALS_PUSH=1` 才会真实
+扇出，通道 = **SSE（复用 `QuoteService.push_alerts`）+ 站内告警（`alerts.jsonl`）**。
+**飞书下一拍，本包不接。**
 
-**落盘 ≠ 推送**：开了落盘也只是把注册表写进 `data/buy_sell_signals/registry.json`，
-没有 SSE、没有飞书、没有 `news.push`。
+**没有**接任何 HTTP 路由、**没有**接日管道（不会自动扫全表晋升/推送）。
+
+**落盘与推送正交**：这是两个 env，互不推导。落盘管"记录活得比进程久"，推送管
+"状态变更播出去"。可以只落盘不推（生产当前状态），也可以只推不落盘（不建议，
+重启即失忆，但代码不拦）。
 
 ## 包结构
 
@@ -34,6 +42,7 @@ Store 默认用**内存实现**，置 `BUY_SELL_SIGNALS_PERSIST=1` 后改为**�
 | `valuation_stub.py` | 估值接口桩，恒返回 `data_pending` |
 | `health_veto_stub.py` | 健康 veto 接口桩，恒返回 `design_pending` / `hit=None` |
 | `disclaimer.py` | 合规脚注常量 |
+| `push.py` | **gpush**：`try_push` 推送出口（env 门控），通道 = SSE + 站内 |
 
 ## 三条硬约束，以及为什么它们是常量
 
@@ -201,7 +210,7 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 
 ## 本批次明确不做
 
-- 正式 SSE / 飞书推送
+- 飞书推送（SSE/站内已可选开启）
 - 默认落盘 / persist 开关默认开
 - 竞价回测、分钟放量、炸板回测
 - 做 T（旁支 h）轮次
@@ -368,8 +377,8 @@ rebalance_id, pit_asof, score_version, universe_n, scored_n, whitelist_n_p40
 
 ## gp 可选落盘（批次 20261025gp）
 
-**一句话**：`DiskSignalRegistryStore` 从"空壳"变成"真能落盘"，但**默认仍关**、
-**只开落盘不开推送**。
+**一句话**：`DiskSignalRegistryStore` 从"空壳"变成"真能落盘"，但**默认仍关**。
+（当时一并**没有**开推送；推送是下一个批次 gpush 才接的，两者是正交的两件事。）
 
 ### 改了什么
 
@@ -385,8 +394,9 @@ rebalance_id, pit_asof, score_version, universe_n, scored_n, whitelist_n_p40
 
 - **白名单阈值未动**：`WHITELIST_TRIAL_QUANTILE = 0.60`、`WHITELIST_PERCENTILE_TRIAL = "p40"`、
   `WHITELIST_PERCENTILE_LOCKED = None` 全部照旧。gp 不碰 g2.1 的口径
-- **推送仍未接**：`main.py` 不得 import `app.news.push` / `sse_starlette` / 飞书客户端，
-  有静态测试按 **import 语句**扫（不是裸子串 —— 注释里写"不接 news.push"是合法的）
+- **推送当时未接**（gpush 起改为 env 门控）：`main.py` **至今仍不得** import
+  `app.news.push` / `sse_starlette` / 飞书客户端，有静态测试按 **import 语句**扫
+  （不是裸子串 —— 注释里写"不接 news.push"是合法的）
 - **日管道仍未接**：`daily_pipeline.py` 里不得出现 `DiskSignalRegistryStore` 或
   `buy_sell_signals`
 - **`partition_writer` 仍禁**：AST 扫 `store.py`，名字不得出现
@@ -415,8 +425,109 @@ BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
 - [x] 非有限浮点 → 落盘为 `null`，`json.loads` 严格解析通过
 - [x] `from_dict` 丢弃派生键与免责声明快照；naive datetime 直接拒（不猜时区）
 - [x] 白名单口径回归：`0.60` / `p40` / `locked=None` 未变（g2.1 测试仍红-绿值守）
-- [x] 推送仍未接：`main.py` 无 `app.news.push` / `sse_starlette` / 飞书 import
+- [x] 推送当时未接（gpush 起为 env 门控）：`main.py` 至今无 `app.news.push` / `sse_starlette` / 飞书 import
 - [x] 单测全绿；不依赖网络 / Pro 分钟 / 真实 `/data`
 - [x] 文档脚注「仅供研究，不构成投资建议」
+
+*参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
+
+## gpush 可选推送（批次 20261025gpush）
+
+**一句话**：推送出口 `push.try_push()` 接上了，但**默认关**，**通道只有 SSE + 站内**，
+**飞书下一拍**。
+
+### 改了什么
+
+| 位置 | 变化 |
+|---|---|
+| `constants.py` | 新增 `PUSH_ENV_NAME` / `MONITOR_EVENT_TYPE` / `PUSH_PAYLOAD_SCHEMA_VERSION` |
+| `push.py` | **新建**：`push_env_enabled()`、`try_push()`、`evaluate_push()`、`build_push_payload()`、`PushResult` / `PushError` / `PushDisabled` / `PushRejected` |
+| `__init__.py` | 导出 `try_push` / `push_env_enabled` / `PUSH_ENV_NAME` / `Push*`；模块头补 gpush 段 |
+| `main.py` | lifespan 在 store 段之后：**仅当** `BUY_SELL_SIGNALS_PUSH` 开时挂 `app.state.buy_sell_signal_push`；不调用 `try_push` |
+| `docs` | 本节 + 上文口径改写 |
+
+### 通道（写死，不得扩）
+
+| 通道 | 实现 | 落点 |
+|---|---|---|
+| SSE | `QuoteService.push_alerts(list[dict])` → `_broadcast_alerts` → 各 `QuoteSubscriber` | 前端 toast / 订阅队列 |
+| 站内 | `alert_store.append_many(data_dir, [event])` | `data_dir/user_data/alerts.jsonl` |
+
+**不新建**推送总线、不新建 SSE 路由（`sse_starlette` 一行都不 import）、不接飞书
+（`send_feishu` / `_maybe_send_webhook` 都不调）。`monitor_rules` 里那段
+"落盘 → SSE → 飞书"的三步链条，本模块**只抄前两步**。
+
+**顺序：先站内、后 SSE**。站内是持久化的，SSE 队列满会丢最旧 —— 先写不会丢的那份。
+
+### 触发条件（全部满足才推）
+
+1. `status == "publishable"` —— 唯一入口仍是 `manual_publish()`
+2. `push_gate == "armed"`
+3. 按**入口时刻**判定冷却已过（不直接读 `push_eligible`，那个属性内部用系统时钟）
+4. `event_class != "limit_reopen"` —— 炸板/回封不推
+5. **状态变化**：`last_pushed_at is None` 或 `last_status_change_at > last_pushed_at`
+
+### 「同状态不推」优先于「冷却期满回 armed」
+
+这两条会撞车，优先级写死：
+
+- 冷却期满只把闸门从 `cooldown` **恢复**到 `armed`，恢复本身**不产生推送**
+- 恢复后仍要过第 5 条。状态没变 → 照样拒
+- 想让同一条信号再推一次，必须**先有新的状态变化**，再等冷却过点
+
+理由：冷却的语义是"别重复播报同一条消息"，不是"时间到了就再播一遍"。反过来做，
+用户会在没有任何新信息的情况下周期性收到同一条信号。
+
+### 成功后写回
+
+- `last_pushed_at = now`
+- `push_dedupe_cooldown_until = now + PUSH_DEDUPE_COOLDOWN_MIN`（30 分钟，包内既有常量）
+- `push_gate = "cooldown"`（经 `state_machine.set_push_gate`）
+
+**写回时机**：两个通道都发过之后才写。任一通道抛错 → 不写回，返回 `ok=False`。
+宁可下一次重复推一次，也不要出现"标记为已推、其实没人收到"。
+
+### 怎么开
+
+```bash
+# 默认: 推送关, try_push 一行都不写
+python -m app.main
+
+# 推送开: SSE + 站内
+BUY_SELL_SIGNALS_PUSH=1 python -m app.main
+
+# 落盘(与推送正交, 互不推导)
+BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
+```
+
+生产是否置 `BUY_SELL_SIGNALS_PUSH=1` **另等部署口令**，不随合入默开。
+（`BUY_SELL_SIGNALS_PERSIST=1` 已上，两者勿混为一谈。）
+
+### 没改什么（逐条钉住）
+
+- **白名单未动**：`WHITELIST_TRIAL_QUANTILE = 0.60`、`WHITELIST_PERCENTILE_LOCKED = None`
+- **persist 语义未动**：`PERSIST_*` / `registry.json` 路径 / 真值集合全部原样
+- **无自动晋升**：没新增状态机边；炸板仍禁 `publishable`
+- **日管道未接**：`daily_pipeline.py` 里仍无 `buy_sell_signals` / `try_push`
+- **无飞书**：`push.py` 的 AST 里连 `send_feishu` / `_maybe_send_webhook` / `webhook_adapter`
+  这些标识符都不许出现（有测试逐符号扫）
+- **无提醒层耦合**：不 import `trade_marks` / `news.push` 的 BAND 与 cooldown，
+  冷却只用包内 `PUSH_DEDUPE_COOLDOWN_MIN`
+
+### gpush 验收自检（ALIGN §5）
+
+- [x] 基线 tip = `08e0cb26…`
+- [x] 改动焦点在 `buy_sell_signals` + tests/docs；`main.py` 仅多一段 lifespan；无新建推送总线 / 独立 SSE 路由
+- [x] env 名 = `BUY_SELL_SIGNALS_PUSH`；未设 / 单测默认 → 不真实推送
+- [x] 仅 `publishable` + `armed` + 冷却已过 + 状态变化才推；同状态重算不推
+- [x] 成功后 `last_pushed_at` 有值；冷却 = now + 30 分钟；冷却期阻断
+- [x] 通道 = SSE + 站内（复用 `QuoteService.push_alerts`）；本派无飞书
+- [x] 载荷含合规脚注（`DISCLAIMER_TEXT`）与 `monitor_event_type`
+- [x] 无自动 `publishable`；炸板不可推；无日管道自动扫晋升
+- [x] 无 import `trade_marks` / `news.push` BAND·cooldown；与 `t_rounds` 零耦合
+- [x] 文档写清口径；脚注保留
+- [x] `WHITELIST_PERCENTILE_LOCKED is None`；`WHITELIST_TRIAL_QUANTILE == 0.60`
+- [x] 未接竞价/放量事件生成；未实装估值/健康；未开 MCP 交易
+- [x] 单测全绿
 
 *参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
