@@ -71,6 +71,14 @@ MCP 交易 · 任何生产 env 改动。
 from __future__ import annotations
 
 from .backtest import BacktestSummary, run_mode_a_backtest
+from .costs import (
+    COST_RATE_PCT_BY_TIER,
+    COST_TIERS_SENSITIVITY,
+    FOOTNOTE_RETAIL_ASSUMPTION,
+    RETAIL_ASSUMPTION_TIERS,
+    cost_amount_for_tier,
+    notional_avg_legs,
+)
 from .features import (
     OfflineFeatureResult,
     assert_version_matches_pin,
@@ -96,26 +104,46 @@ from .loader import (
     shift_within_day,
 )
 from .report import OfflineReport, write_offline_report
+from .sensitivity import (
+    SENSITIVITY_COLUMNS,
+    CostSensitivityRow,
+    RegimeReport,
+    build_cost_sensitivity,
+    build_regime_report,
+    build_sensitivity_payload,
+)
 
 __all__ = [
     "CALIBER_MIXED",
     "CALIBER_SINGLE",
+    "COST_RATE_PCT_BY_TIER",
+    "COST_TIERS_SENSITIVITY",
     "EPSILON_PCT_MAIN",
+    "FOOTNOTE_RETAIL_ASSUMPTION",
     "GATE_PATH_A",
     "GATE_PATH_B",
+    "RETAIL_ASSUMPTION_TIERS",
+    "SENSITIVITY_COLUMNS",
     "SENSITIVITY_EPSILON_PCT",
     "BacktestSummary",
     "CaliberReport",
+    "CostSensitivityRow",
     "LoadedMinutes",
     "OfflineFeatureResult",
     "OfflineReport",
+    "RegimeReport",
     "align_minute_frame",
     "assert_no_market_open_impersonation",
     "assert_version_matches_pin",
     "assess_caliber",
+    "build_cost_sensitivity",
     "build_offline_feature_frame",
+    "build_regime_report",
+    "build_sensitivity_payload",
+    "cost_amount_for_tier",
     "epsilon_fraction",
     "load_minute_export",
+    "notional_avg_legs",
     "run_mode_a_backtest",
     "sensitivity_columns",
     "shift_within_day",

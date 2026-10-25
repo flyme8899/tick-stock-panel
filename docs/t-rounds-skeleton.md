@@ -9,7 +9,8 @@
 
 实现了做 T 轮次的**记录字段 + 状态机 + 净价差结算 + 轮次上限 + 持仓三态标签**，
 Store 用**内存实现，默认不落盘**，成本档位按白名单 `design_pending` ∪ `{0bp, 5bp,
-10bp, 15bp, 20bp}` 登记（批次 20261025gcost 放开 5b 契约）。
+10bp, 15bp, 20bp}` 登记（批次 20261025gcost 放开 5b 契约；批次 20261025gcost5c
+把五档接进了离线跑表，见下文「成本敏感性跑表」）。
 
 **没有**接任何 HTTP 路由、**没有**接日管道、**没有**接推送、**没有**做分钟评估。
 
@@ -96,6 +97,30 @@ gross = (leg1_price - leg2_price) * qty if mode == "zheng_t" \
   成本的结论。错误不在数字里，在标签里。
 - **换算不在闸门里**：闸门只验「档位合法 + 金额不矛盾」，扣的是绝对额。「费率 ×
   名义金额」的换算与名义价口径留在调用方（离线跑表），免得闸门顺手替人选了口径。
+
+### 成本敏感性跑表（批次 20261025gcost5c）
+
+上面那条「换算留在调用方」现在有唯一的落点：`offline/costs.py`。
+
+| 项 | 口径 |
+|---|---|
+| 名义金额 | `((leg1_price + leg2_price) / 2.0) * qty`，**全仓一处实现** |
+| 成本金额 | `(cost_rate_pct / 100.0) * notional` |
+| 档位 → 费率 | `0bp`→0.0 · `5bp`→0.05 · `10bp`→0.10 · `15bp`→0.15 · `20bp`→0.20（单位：%） |
+| 扣在哪儿 | 只扣 `completed` 轮次，且**必须**经 `complete_round` 落账 —— 不改报告数字冒充扣费 |
+| 未完成轮次 | `mtm_pnl` 是「假想平仓」，**不扣成本**；它只进期望值分子的 mtm 项 |
+| 主表口径 | 仍是 `design_pending` + 0，**作为对照**保留，给老报告留可比性 |
+
+名义价取两腿均价而不是某一腿的成交价：用卖出腿会把方向偏置塞进成本项，正 T / 倒 T
+的成本就会系统性不同，敏感性表就变成方向比较了。「均价 × 数量」与 `complete_round`
+里毛价差的量纲一致，且对 mode 对称。
+
+`costs.py` 在 import 时跑 `assert_grid_matches_whitelist()`，保证本地费率表与
+`constants.COST_BP_TIERS` 不会飘开。
+
+另有一条**测试守着的唯一性**：`test_notional_has_exactly_one_implementation` 用 AST
+扫描 `offline/` 下所有 `Add` 除 `Constant(2)` 的写法，除 `costs.notional_avg_legs`
+之外一律报错。用 grep 守不住 —— 文档和字符串常量里也会出现同一个公式。
 
 ## ε = 0.30%，locked 进 version
 
@@ -197,6 +222,10 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 - 净价差方向（两个 mode 各测一次符号）
 - 成本档位白名单：非法串拒 / `design_pending`+0 绿 / `0bp`+0 绿 / `0bp`+>0 拒 /
   非零档 +>0 绿 / 非零档 +0 拒（禁 silent 0）/ 负金额全档位拒 / 白名单只此一处定义
+- 成本敏感性跑表（`tests/test_t_rounds_offline_costs.py`）：五档全绿 / 名义金额唯一实现
+  （AST）/ `_settle` 真走 `complete_round`（spy 断言）/ `10bp`+0 仍拒 / `pending`+0
+  对照仍绿 / 八列齐 / 脚注可见 / `gross - net == amount_sum / n_rounds` / Regime
+  缺数为 `data_pending` 且不挡主表
 - Store 往返与过滤；轮次上限 6 种场景（同日同票拒 / 异票放行 / 次日放行 /
   `completed` 仍占额 / `void_data` 不占 / 挪日重查）
 - 持仓三态、空仓不给 `executable`
@@ -224,8 +253,10 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 - 接线真实分钟评估、`build_feature_frame` 在线路径、`minute_replay` 生产评估
 - 用 09:30 开盘 1m **冒充** 09:25 竞价
 - 全量特征回测 / walk-forward、ε 重标定
-- 分档成本实测与成本敏感性跑表（批次 20261025gcost 只放开了 5b **契约**，
-  0 / 0.05% / 0.10% / 0.15% / 0.20% 的敏感性表是 **5c**，另一拍）
+- 分档成本实测与成本敏感性跑表：**5b 契约 + 5c 跑表已接**
+  （`offline/costs.py` 五档费率 / `offline/sensitivity.py` 八列敏感表），
+  但**费率本身仍是假设口径**，不是按成交额分档的滑点 + 印花税 + 冲击成本实测
+- 拆分费率表（G1）：**仍为 `design_pending`**，本拍没动
 - 可卖老股实盘字段（`virtual_position_flag` 只是占位）
 - Regime 产品规则标定、g2 质量代理加深
 
@@ -236,11 +267,12 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 
 1. **分钟评估路径**：接真实分钟数据，先解决「同尺后再 VWAP」（软提醒 1）
 2. **ε 重标定**：0.30% 是设计钉，不是标定结果
-3. **分档成本实测（5c）**：按成交额分档的滑点 + 印花税 + 冲击成本。
+3. **分档成本实测（5c 后续）**：按成交额分档的滑点 + 印花税 + 冲击成本。
    契约侧 5b 已放开白名单（`design_pending` ∪ `0bp`/`5bp`/`10bp`/`15bp`/`20bp`，
-   非零档必须配非零金额），但**跑表与结论属 5c**，本拍一行敏感性表都没跑。
-   散户双边成本 0.1%–0.15% 只是**假设口径**，不是唯一真实成本。
-   `max_rounds_per_day` 的放开仍要等 5c 结论，本拍未动。
+   非零档必须配非零金额），5c 已把五档接进离线跑表并按 `complete_round` 真扣，
+   但**费率仍是假设口径**：散户双边成本 0.1%–0.15% 不是唯一真实成本。
+   仍缺的是「按成交额分档的实测费率表」（G1 拆分费率表），它现在是
+   `design_pending`。`max_rounds_per_day` 的放开仍要等实测费率结论，本拍未动。
 4. **可卖老股实盘字段**：`tag_position` 目前吃的是外部给的 `old_lot_qty_available`，
    真实账户口径（含冻结、待交收）未接
 5. **磁盘 Store**：先单独设计（大概率单文件 + 版本号，或进 SQLite），不要硬套分区 parquet
