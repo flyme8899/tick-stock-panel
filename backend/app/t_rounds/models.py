@@ -11,12 +11,16 @@
 文档里的"应当"没有人执行。所以下面三件事在记录构造时就会**直接抛错**:
 
 1. 非 `completed` 状态不得 `count_in_realized_kpi=True` 或 `net_spread_realized=True`
-2. `zheng_t` 的第二腿不允许 `leg2_source_lot="same_day_buy"`
+2. **卖出腿**的份额来源不允许 `same_day_buy`(T+1); 按 `side` 找腿, 两种模式通用
 3. `formal_push_allowed` 恒 False, `signal_universe_filtered_by_position` 恒 False
 
-第 1 条是这本账的全部意义: `incomplete` / `abandoned` / `expired_review` 的轮次
-如果进了已实现 KPI, 结论一定会偏 —— 因为没做成的那一轮没有净价差, 而做成了的
-有; 把它们混进同一个"已实现"里, 等于只统计赢的那部分。
+第 1 条是这本账的全部意义: `unreverted_at_cutoff` / `data_truncated` /
+`expired_review` 的轮次如果进了已实现 KPI, 结论一定会偏 —— 因为没做成的那一轮
+没有净价差, 而做成了的有; 把它们混进同一个"已实现"里, 等于只统计赢的那部分。
+未回摆轮改走 `mtm_pnl` 单独计量, **不**进 `net_spread`。
+
+第 2 条在本批次(20261025gtrounds)被改正过: 旧实现检查的是 `zheng_t` 的
+**leg2**, 而正 T 的 leg2 是**买入**腿 —— 护栏装错了腿, 真正的卖出腿反而没人管。
 
 仅供研究，不构成投资建议；执行须人工确认。
 """
@@ -99,6 +103,9 @@ class TRoundRecord:
     leg1_qty: int | None = None
     leg1_price: float | None = None
     leg1_ts: datetime | None = None
+    leg1_source_lot: str | None = None
+    """第一腿的份额来源。只有 leg1 是**卖出**腿(先卖后买)时才有约束意义 ——
+    当日买入的份额当日不能卖(T+1)。leg1 是买入腿(先买后卖)时留 None 即可。"""
 
     leg2_side: str = "buy"
     leg2_status: str = "pending"
@@ -109,8 +116,18 @@ class TRoundRecord:
     leg1_same_feature_frame: bool = True
     """[占位] 两腿是否用同一特征帧。True = 同一帧, 便于事后对齐; 本批次不读帧。"""
 
-    abandoned_reason: str | None = None
-    incomplete_reason: str | None = None
+    unreverted_reason: str | None = None
+    """`unreverted_at_cutoff` 的原因: 走到 14:57 仍没回摆。旧名 `abandoned_reason`。"""
+
+    truncated_reason: str | None = None
+    """`data_truncated` 的原因: 交易时段没走完数据就断了。旧名 `incomplete_reason`。"""
+
+    limit_locked_reason: str | None = None
+    """`limit_locked` 的原因: 走到截点仍涨跌停锁死, 那个价位没有对手盘。
+
+    **不是数据问题** —— 数据是全的, 缺的是流动性。所以它不进 `data_problem`,
+    也不从期望值分母里剔除: 那一轮真实开出去了, 只是没能平掉。
+    """
 
     # ---- 轮次状态 -------------------------------------------------------
     round_status: str = "open_leg1"
@@ -125,7 +142,20 @@ class TRoundRecord:
     net_spread_realized: bool = False
     count_in_realized_kpi: bool = False
     incomplete_flag: bool = False
+    """[保留字段名] 「这一轮没走完两腿」。改名只动 `round_status` 与原因字段,
+    这个布尔标志沿用旧名, 以免破坏既有库表/下游读口径。"""
     abandoned_pnl: float | None = None
+    """[保留字段名] 未回摆轮的盯市盈亏(旧名沿用)。新字段见 `mtm_pnl`。"""
+    mtm_pnl: float | None = None
+    """未回摆轮的盯市盈亏: 按 `ts<=14:57:00` 最后一根 `price` 平掉这一轮的盈亏。
+
+    与 `net_spread`(只有 completed 才有)分开存 —— 未回摆轮**不**进已实现 KPI,
+    但它的盈亏必须可见。只统计 completed 等于只统计赢的那部分(幸存者偏差)。
+    """
+    mtm_price: float | None = None
+    """计 mtm 用的价格(14:57 前最后一根 `price`)。没有可靠价格时为 None。"""
+    mtm_ts: datetime | None = None
+    """计 mtm 用的那根 bar 的时刻。"""
     liquidity_tier: str | None = None
     threshold_mult_start: float = 2.0
     """设计起点倍率 2.0。这是一个**设计假设**, 不是实测结论。"""
@@ -237,19 +267,37 @@ class TRoundRecord:
                 f"round_status={self.round_status!r} 不得 net_spread_realized=True",
             )
 
-        # 硬规则 2: 正 T 第二腿必须是老底仓。
-        if self.mode == "zheng_t" and self.leg2_source_lot is not None:
-            _require(
-                self.leg2_source_lot == "old_lot",
-                f"zheng_t 的 leg2_source_lot 必须是 'old_lot', 收到 {self.leg2_source_lot!r}"
-                "(same_day_buy 是当日买入份额, 不能当日卖出)",
-            )
+        # 硬规则 2: **卖出腿**的份额必须来自老底仓(两种模式通用)。
+        #
+        # 旧实现写的是 `if self.mode == "zheng_t" and self.leg2_source_lot ...`:
+        # 它检查的是**第二腿**, 而 sell_first(旧 zheng_t) 的第二腿恰恰是**买入**腿,
+        # 真正的卖出腿是 leg1。于是护栏装在了不承重的那条腿上 —— buy_first(旧 dao_t)
+        # 的卖出腿(leg2)反而完全无人校验。改名 + 按 side 找腿之后这条才真正咬合。
+        check_sell_leg_source_lot(
+            mode=self.mode,
+            leg1_side=self.leg1_side,
+            leg1_source_lot=self.leg1_source_lot,
+            leg2_side=self.leg2_side,
+            leg2_source_lot=self.leg2_source_lot,
+            t_round_id=self.t_round_id,
+        )
 
-        # 结构性一致性: incomplete / abandoned 必须带原因, 否则事后没人知道发生了什么。
-        if self.round_status == "incomplete":
-            _require(bool((self.incomplete_reason or "").strip()), "round_status='incomplete' 必须提供 incomplete_reason")
-        if self.round_status == "abandoned":
-            _require(bool((self.abandoned_reason or "").strip()), "round_status='abandoned' 必须提供 abandoned_reason")
+        # 结构性一致性: 未完成的三个落地状态必须带原因, 否则事后没人知道发生了什么。
+        if self.round_status == "data_truncated":
+            _require(
+                bool((self.truncated_reason or "").strip()),
+                "round_status='data_truncated' 必须提供 truncated_reason",
+            )
+        if self.round_status == "unreverted_at_cutoff":
+            _require(
+                bool((self.unreverted_reason or "").strip()),
+                "round_status='unreverted_at_cutoff' 必须提供 unreverted_reason",
+            )
+        if self.round_status == "limit_locked":
+            _require(
+                bool((self.limit_locked_reason or "").strip()),
+                "round_status='limit_locked' 必须提供 limit_locked_reason",
+            )
 
         # 腿的方向必须与模式匹配。
         expected = _expected_leg_sides(self.mode)
@@ -303,6 +351,7 @@ class TRoundRecord:
                 "qty": self.leg1_qty,
                 "price": self.leg1_price,
                 "ts": _iso(self.leg1_ts),
+                "source_lot": self.leg1_source_lot,
             },
             "leg2": {
                 "side": self.leg2_side,
@@ -313,8 +362,9 @@ class TRoundRecord:
                 "source_lot": self.leg2_source_lot,
             },
             "leg1_same_feature_frame": self.leg1_same_feature_frame,
-            "abandoned_reason": self.abandoned_reason,
-            "incomplete_reason": self.incomplete_reason,
+            "unreverted_reason": self.unreverted_reason,
+            "truncated_reason": self.truncated_reason,
+            "limit_locked_reason": self.limit_locked_reason,
             "round_status": self.round_status,
             "last_status_change_at": self.last_status_change_at.isoformat(),
             "is_terminal": self.is_terminal,
@@ -327,6 +377,9 @@ class TRoundRecord:
             "count_in_realized_kpi": self.count_in_realized_kpi,
             "incomplete_flag": self.incomplete_flag,
             "abandoned_pnl": self.abandoned_pnl,
+            "mtm_pnl": self.mtm_pnl,
+            "mtm_price": self.mtm_price,
+            "mtm_ts": _iso(self.mtm_ts),
             "liquidity_tier": self.liquidity_tier,
             "threshold_mult_start": self.threshold_mult_start,
             "threshold_bp_locked": self.threshold_bp_locked,
@@ -369,14 +422,69 @@ class TRoundRecord:
 def _expected_leg_sides(mode: str) -> tuple[str, str]:
     """模式 → (leg1_side, leg2_side)。
 
-    正 T 先卖后买, 倒 T 先买后卖。写成函数而不是散落的判断, 因为这一条同时被
-    `__post_init__` 与 `state_machine` 用到, 两份一定会分叉。
+    `sell_first` 先卖后买, `buy_first` 先买后卖。写成函数而不是散落的判断, 因为
+    这一条同时被 `__post_init__` 与 `state_machine` 用到, 两份一定会分叉。
     """
-    if mode == "zheng_t":
+    if mode == C.SELL_FIRST:
         return "sell", "buy"
-    if mode == "dao_t":
+    if mode == C.BUY_FIRST:
         return "buy", "sell"
-    raise TRoundValidationError(f"未知 mode: {mode!r}")
+    raise TRoundValidationError(
+        f"未知 mode: {mode!r}; 合法值是 {sorted(C.T_MODES)}"
+        "(旧名 zheng_t/dao_t 见 C.T_MODE_ALIASES, 仅供读取历史记录)"
+    )
+
+
+def _sell_leg_name(leg1_side: str, leg2_side: str) -> str:
+    """哪条腿是**卖出**腿 → `"leg1"` 或 `"leg2"`。
+
+    T+1 只与"卖出"有关: 当日买入的份额当日不能卖。所以判定要按 `side` 找腿, 而不是
+    按"第几腿"。这也正是旧实现的病根 —— 旧代码写死 `zheng_t` 的 **leg2**, 而正 T
+    的 leg2 恰恰是**买入**腿, 真正的卖出腿(leg1)无人检查。
+
+    要求恰好一条卖出腿: 两条都卖或都不卖, 都不是一轮 T。
+    """
+    for side in (leg1_side, leg2_side):
+        if side not in C.LEG_SIDES:
+            raise TRoundValidationError(f"未知 leg side: {side!r}")
+    sells = [name for name, side in (("leg1", leg1_side), ("leg2", leg2_side)) if side == "sell"]
+    if len(sells) != 1:
+        raise TRoundValidationError(
+            f"一轮 T 必须恰好有一条卖出腿, 收到 leg1={leg1_side!r} / leg2={leg2_side!r}"
+        )
+    return sells[0]
+
+
+def check_sell_leg_source_lot(
+    *,
+    mode: str,
+    leg1_side: str,
+    leg1_source_lot: str | None,
+    leg2_side: str,
+    leg2_source_lot: str | None,
+    t_round_id: str = "<pending>",
+) -> None:
+    """T+1 硬规则: **卖出腿**的份额来源必须是 `old_lot`。两种模式通用。
+
+    本包**唯一**一处定义。三处调用点(`__post_init__` / `open_leg2` 的
+    `_check_source_lot` / `complete_round`)都走它 —— 刻意重复调用, 单一定义, 于是
+    不存在"三处各写一份、慢慢分叉"的可能。
+
+    只校验**已填写**的来源: `None` 表示还没填(开腿前本就不知道), 不拦。填了就必须
+    是 `old_lot` —— `same_day_buy` 是当日买入份额, 当日卖出违反 T+1。
+    """
+    leg_name = _sell_leg_name(leg1_side, leg2_side)
+    source_lot = leg1_source_lot if leg_name == "leg1" else leg2_source_lot
+    if source_lot is None:
+        return
+    if source_lot not in C.SOURCE_LOTS:
+        raise TRoundValidationError(f"未知 source_lot: {source_lot!r}")
+    if source_lot != "old_lot":
+        raise TRoundValidationError(
+            f"{t_round_id}: mode={mode!r} 的卖出腿是 {leg_name}, 其份额来源必须是 "
+            f"'old_lot', 收到 {source_lot!r} —— same_day_buy 是当日买入份额, "
+            "当日卖出违反 T+1"
+        )
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -393,5 +501,6 @@ __all__ = [
     "LegState",
     "TRoundRecord",
     "TRoundValidationError",
+    "check_sell_leg_source_lot",
     "make_leg",
 ]

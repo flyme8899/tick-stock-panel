@@ -33,6 +33,19 @@
 - `caliber_note`：同尺判定的结论（逐日 ratio 的最坏偏离 / 混尺日数）
 - `virtual_lot_assumption`：虚拟底仓的假设说明（用了虚拟底仓就必须写）
 - `disclaimer`：合规脚注
+
+## 本批次（20261025gtrounds ⑥）新增的四条口径说明
+
+1. `path_a_definition` —— 路径 A = B + `require_prior_cross` + 一根延迟。A **不是**
+   与 B 平行的第二个信号；A 与 B 的盈亏差是**敏感度开关**，不是信号优劣的结论。
+   不写这条，读者会把"A 比 B 少赚"当成"这个信号不行"，而真实原因只是样本少。
+2. `expectancy_definition` —— 期望值 = (Σ completed 净价差 + Σ 盯市) / 实际开出轮次，
+   分母含 `limit_locked`、不含 `skipped_quota`。与 `realized_avg_net_spread`
+   （只数赢的那部分）必须分清：两个分母不同的平均数混用会得出相反结论。
+3. `limit_locked` —— 涨跌停锁死平不掉的轮次**留在分母**，不算数据问题。
+   数据来源本批次没有，显式写 `limit_lock_source: data_pending`，**不猜**。
+4. `cost_bp_tier` —— 仍是 `design_pending`。成本闸门与成本敏感性是**另一拍**的事，
+   本批次一行没动。
 """
 from __future__ import annotations
 
@@ -46,7 +59,12 @@ import polars as pl
 
 from .. import constants as C
 from ..disclaimer import DISCLAIMER_TEXT
-from .backtest import VIRTUAL_LOT_ASSUMPTION, BacktestSummary
+from .backtest import (
+    EXPECTANCY_DEFINITION,
+    PATH_A_DEFINITION,
+    VIRTUAL_LOT_ASSUMPTION,
+    BacktestSummary,
+)
 from .loader import CaliberReport
 
 FEATURES_PARQUET: Final = "features.parquet"
@@ -132,10 +150,32 @@ def build_report_meta(
         ),
         "vwap_same_basis_note": C.VWAP_SAME_BASIS_NOTE,
         "virtual_lot_assumption": VIRTUAL_LOT_ASSUMPTION,
+        # ---- 本批次 ⑥: 口径说明必须进 JSON, 不能只躺在 docstring 里 ----
+        "path_a_definition": PATH_A_DEFINITION,
+        "require_prior_cross": summary.require_prior_cross,
+        "expectancy_definition": EXPECTANCY_DEFINITION,
+        "expectancy_is_the_only_strategy_level_number": True,
+        "limit_locked_policy": (
+            "涨跌停锁死平不掉的轮次留在期望值分母里, 不计盯市, 也不算数据问题"
+            "(那是流动性问题, 数据本身是完整的)"
+        ),
+        "limit_lock_source": C.LIMIT_LOCK_SOURCE_PENDING,
+        "cost_gate_scope": (
+            "成本闸门与成本敏感性不在本批次范围内; cost_bp_tier 仍为 design_pending, "
+            "净价差 = 毛价差, 未扣任何成本"
+        ),
         "not_claimed_verified": (
-            "本报告仅为离线同尺特征回测; ε 门禁、可卖老股实盘、分档成本、正式推送闸均未测通"
+            "本报告仅为离线同尺特征回测; ε 门禁、可卖老股实盘、分档成本、正式推送闸均未测通; "
+            "涨跌停(limit_locked)缺数据来源, 涨跌停锁死的轮次尚未识别; "
+            "修完路径前视之后 A/B 的盈亏差仍不能当成信号优劣的结论"
         ),
         "disclaimer": DISCLAIMER_TEXT,
+        "footnote": (
+            "仅供研究, 不构成投资建议; 执行须人工确认。"
+            "所有轮次建在纸面虚拟底仓上, 未建模真实持仓/冻结/T+1 可用量; "
+            "「已实现」一栏只含两腿都成交的轮次, 不能当策略成绩; "
+            "谈策略本身请看 expectancy(已含未回摆轮的盯市盈亏)。"
+        ),
     }
     if extra:
         meta.update(extra)

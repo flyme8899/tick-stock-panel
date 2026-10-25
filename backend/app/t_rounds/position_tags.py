@@ -2,11 +2,16 @@
 
 ## 三态各自的意思
 
-| tag | 含义 | 能不能执行正 T |
+| tag | 含义 | 能不能执行 `sell_first`(先卖后买) |
 |---|---|---|
 | `executable` | 有可卖老底仓(当日之前持有、已过 T+1) | 能 |
 | `observe_only` | 只能观察 —— 没有底仓, 或数据不足无法判断 | 不能 |
 | `tomorrow_ref` | 当日买入, 次日才可卖 | 不能(当天) |
+
+注意这张表回答的是「**卖出腿**有没有老底仓可卖」, 不是「能不能做 T」。`buy_first`
+(先买后卖) 的**卖出腿同样**必须有老底仓 —— 当日买入的份额当日卖不掉(T+1)。所以
+`can_execute_sell_first` 对两种模式都是必要条件, 只是 `buy_first` 还多一个「先买」的
+资金约束, 本批次没有接。
 
 ## 这一层为什么只做标签, 不做判定
 
@@ -42,13 +47,27 @@ class PositionTag:
             raise TRoundValidationError(f"未知 position_tag: {self.tag!r}")
 
     @property
-    def can_execute_zheng_t(self) -> bool:
-        """能不能做正 T(先卖后买)。
+    def can_execute_sell_first(self) -> bool:
+        """**卖出腿**是否有老底仓可卖 —— 两种模式通用。
 
         必须同时满足: 标签是 `executable` 且可卖老底仓 > 0。两个条件都查一遍是
         刻意的 —— 单看标签会漏掉"标签对但数量是 0"的边界。
+
+        为什么名字里不带模式: 这个判断只回答"卖出腿能不能卖", 而 `sell_first` 与
+        `buy_first` 的卖出腿受同一条 T+1 约束。旧名 `can_execute_zheng_t` 把约束
+        绑在了 `zheng_t` 上, 于是 `dao_t` 被默认"不需要老底仓" —— 批次
+        20261025gtrounds 修的就是这个错腿。
         """
         return self.tag == "executable" and bool(self.sellable_old_qty)
+
+    @property
+    def can_execute_zheng_t(self) -> bool:
+        """**仅兼容旧名**, 等价于 `can_execute_sell_first`。
+
+        保留它是因为本仓库之外可能还有调用点; 内部一律用新名。不要在新增代码里用它
+        —— 这个名字会诱导出"`dao_t` 不需要老底仓"的错误推理。
+        """
+        return self.can_execute_sell_first
 
     def to_dict(self) -> dict[str, object]:
         return {
