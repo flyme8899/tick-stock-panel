@@ -58,7 +58,22 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 **gval 没做**: 逐日 PE/PB 采集、任何 `v_score` 实装、健康规则引擎(`hit=true/false`)、
 白名单锁定、p30/p50 敏感性、竞价/放量、改 PERSIST/PUSH/DINGTALK、日管道接线。
 
-现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接 · 估值/健康仍 pending**。
+**gwlist 做了什么(批次 20261025gwlist · 白名单锁定窄开 · P1-2)**: **勿真锁**。
+
+- **口径复核**: `WHITELIST_PERCENTILE_TRIAL == "p40"`(标签, 行业前 40%) ·
+  `WHITELIST_TRIAL_QUANTILE == 0.60`(阈值 = `1 - 0.40`) · 判定 `>= 0.60`(闭区间)。
+  **已齐, 仅复核** —— 三个数值与判定式一个字节没改。
+- **空桩复核**: `WHITELIST_PERCENTILE_LOCKED is None`、`WHITELIST_THRESHOLD_LOCKED is
+  False`。本拍不加任何能写非空的路径。
+- **缺口钉死**: 新增 `WHITELIST_LOCK_EVIDENCE_PENDING`(四条标签)与
+  `WHITELIST_LOCK_EVIDENCE`(人读表), 把真锁还缺的 A 敏感性 / B 样本外 /
+  C 成本 18.2bp 实测 / D 显著性 p 值写成代码里可扫的事实。**四条全 `data_pending`**。
+
+**gwlist 没做**: 真锁(另拍)、敏感性实测、样本外回放、成本实测回填、Bonferroni p 值实测、
+锁定引擎(`whitelist_lock_engine.py` 之类)、把 `score_version` 升成"已锁"叙事。
+**质量/估值/健康零碰**(#208 行为字节未改)。
+
+现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接 · 估值/健康仍 pending · 白名单试跑未锁**。
 
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
@@ -112,6 +127,8 @@ from .quality_proxy import (
     evaluate_quality,
 )
 from .quality_rank import (
+    WHITELIST_LOCK_EVIDENCE,
+    WHITELIST_LOCK_EVIDENCE_PENDING,
     WHITELIST_PERCENTILE_LOCKED,
     WHITELIST_PERCENTILE_TRIAL,
     WHITELIST_THRESHOLD_LOCKED,
@@ -180,6 +197,8 @@ __all__ = [
     "SignalStateError",
     "SignalTransitionError",
     "SignalValidationError",
+    "WHITELIST_LOCK_EVIDENCE",
+    "WHITELIST_LOCK_EVIDENCE_PENDING",
     "WHITELIST_PERCENTILE_LOCKED",
     "WHITELIST_PERCENTILE_TRIAL",
     "WHITELIST_THRESHOLD_LOCKED",
