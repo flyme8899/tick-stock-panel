@@ -50,6 +50,9 @@ WHITELIST_COLUMN_TRIAL: Final = f"whitelist_n_{WHITELIST_PERCENTILE_TRIAL}"
 
 把标签拼进字段名, 是为了让"这份快照用的是哪一档"写在数据本身上。字段名叫
 `whitelist_n` 的话, 换一档阈值之后新旧快照会长得一模一样。
+
+g2.1 保留字段名 `whitelist_n_p40`(不为改名而改名), 但计数走 `quality_rank` 的
+现行试跑阈值: `p40` = 行业前 40% = `q_rank_within_ind >= 0.60`(闭区间, 未锁定)。
 """
 
 

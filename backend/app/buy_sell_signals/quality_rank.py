@@ -1,4 +1,4 @@
-"""申万一级行业内的质量相对分位 + 白名单试跑判定(批次 20261025g2 ②)。
+"""申万一级行业内的质量相对分位 + 白名单试跑判定(批次 20261025g2 ②, g2.1 纠偏)。
 
 ## 这一层回答什么
 
@@ -23,10 +23,19 @@
 
 ## 白名单试跑: 未锁定
 
-`WHITELIST_PERCENTILE_TRIAL = "p40"` 表示**试跑**阈值, 判定式为
-`q_rank_within_ind >= 0.40`(≥, 闭区间)。之所以反复强调是"试跑":
+`WHITELIST_PERCENTILE_TRIAL = "p40"` 是**试跑档标签**, 语义为**行业前 40%**。
+分位 `q_rank_within_ind` 越高越好, 因此"前 40%"取的是分位的**上半部**, 判定式为
 
-- 没有做过 p30/p50 敏感性, 所以不能说 0.40 比 0.30 或 0.50 好;
+    p40 = top 40% of industry by rank
+        = q_rank_within_ind >= (1 - 0.40) = 0.60    (闭区间)
+
+**批次 20261025g21 纠偏**: #202 / 旧 FIX_TASKS_g2 曾把判定写成 `>= 0.40`, 那对应的是
+"行业前 60%", 与纸面"行业前 40%"相反。旧示例 `>= 0.40` **已废弃**, 禁止与现行约定混用。
+标签仍叫 `p40`(前 40% 试跑档), 改的是阈值与文案, 不是标签名。
+
+之所以反复强调是"试跑":
+
+- 没有做过 p30/p50 敏感性, 所以不能说 0.60 比其它档好;
 - `WHITELIST_PERCENTILE_LOCKED` 恒为 `None`, 且**没有任何代码路径**能把它写成非空;
 - 判定结果里带 `whitelist_threshold_locked=False`, 下游即便只读一个字段也能看出来。
 
@@ -52,8 +61,9 @@ from .models import asof_date
 from .quality_proxy import QUALITY_WEIGHT_STATUS, QualityProxy
 
 WHITELIST_PERCENTILE_TRIAL: Final = "p40"
-"""白名单**试跑**阈值。`p40` 即百分位 40。
+"""白名单**试跑**档标签。`p40` = **行业前 40%**(越高越好取分位上半部)。
 
+不是"百分位 40": 前 40% 对应 `q_rank_within_ind >= 1 - 0.40 = 0.60`。
 未锁定。见模块 docstring 与 `WHITELIST_PERCENTILE_LOCKED`。
 """
 
@@ -64,9 +74,11 @@ WHITELIST_PERCENTILE_LOCKED: Final = None
 "锁定"。把这里改成 `"p40"` 不是一次配置调整, 是一次没有依据的结论声明。
 """
 
-WHITELIST_TRIAL_QUANTILE: Final = 0.40
-"""由 `WHITELIST_PERCENTILE_TRIAL` 解析出的数值, 判定用 `>=`。
+WHITELIST_TRIAL_QUANTILE: Final = 0.60
+"""`p40`(行业前 40%)对应的判定下界, 判定用 `>=`(闭区间): `q_rank_within_ind >= 0.60`。
 
+换算只有一处定义: 前 40% = 分位上半部 = `1 - 0.40 = 0.60`。越高越好的分位上,
+"前 40%"绝不可能写成 `>= 0.40`(那是前 60%, #202 旧写法, 已废弃)。
 单独写出来是为了让不等式方向只有一处定义。与 `WHITELIST_PERCENTILE_TRIAL` 的一致
 性由 `test_trial_quantile_matches_trial_label` 守着。
 """
@@ -196,7 +208,7 @@ def percentile_rank(values: list[float]) -> list[float]:
     - `n == 1` → 调用方应判为 singleton, 这里返回 [0.5] 只是不让它炸
 
     之所以不用 `rank / n`: 那个公式下最小值拿到 `1/n` 而不是 0, 单票时恒为 1,
-    下游按 `>= 0.40` 判定会得到"小行业里的票天然更容易过"的偏差。
+    下游按 `>= 0.60` 判定会得到"小行业里的票天然更容易过"的偏差。
     """
     n = len(values)
     if n == 0:

@@ -206,9 +206,14 @@ def test_missing_reason_codes_are_closed_set():
 
 
 def test_trial_quantile_matches_trial_label():
-    """`p40` 与 0.40 必须对得上 —— 两处定义分叉是最典型的静默 bug。"""
+    """`p40` = 行业前 40% = 分位上半部 `1 - 0.40 = 0.60`。
+
+    标签与阈值的关系必须锁死: 只断言 `== 0.60` 的话, 有人把两处一起改回 0.40
+    测试照样绿 —— 那正是 #202 的静默 bug(前 40% 被写成了前 60%)。
+    """
     assert WHITELIST_PERCENTILE_TRIAL == "p40"
-    assert WHITELIST_TRIAL_QUANTILE == 0.40
+    assert WHITELIST_TRIAL_QUANTILE == 0.60
+    assert WHITELIST_TRIAL_QUANTILE == pytest.approx(1.0 - 0.40)
 
 
 def test_whitelist_threshold_is_not_locked():
@@ -217,20 +222,44 @@ def test_whitelist_threshold_is_not_locked():
 
 
 def test_whitelist_pass_is_inclusive_ge():
-    """判定式是 `>= 0.40`(闭区间)。恰好 0.40 的票必须过 —— 方向写反会静默砍掉一半。"""
-    # 6 只等距分布: 分位 0, .2, .4, .6, .8, 1.0 —— 恰有一只落在 0.40
+    """判定式是 `>= 0.60`(闭区间)。恰好 0.60 的票必须过 —— 方向写反会静默砍掉一半。"""
+    # 6 只等距分布: 分位 0, .2, .4, .6, .8, 1.0 —— 恰有一只落在 0.60
     proxies = [_proxy(f"X{i}", i) for i in range(6)]
     inds = {p.symbol: "801010" for p in proxies}
     r = rank_within_industry(proxies, inds)
-    on_boundary = r.entries["X2"]
-    assert on_boundary.q_rank_within_ind == pytest.approx(0.40)
+    on_boundary = r.entries["X3"]
+    assert on_boundary.q_rank_within_ind == pytest.approx(0.60)
     assert on_boundary.whitelist_pass is True
+
+
+def test_whitelist_pass_rejects_just_below_boundary():
+    """略低于 0.60 必须不过 —— 只测"边界过"会把 `>` 与 `>=` 之外的阈值漂移放过去。
+
+    同一组 6 只等距票里, X2 的分位恰为 0.40(#202 旧阈值), X1 为 0.20。
+    它们在"前 40%"语义下都属于行业后段, 必须被排除。
+    """
+    proxies = [_proxy(f"X{i}", i) for i in range(6)]
+    inds = {p.symbol: "801010" for p in proxies}
+    r = rank_within_industry(proxies, inds)
+
+    below = r.entries["X2"]
+    assert below.q_rank_within_ind == pytest.approx(0.40)
+    assert below.q_rank_within_ind < WHITELIST_TRIAL_QUANTILE
+    assert below.whitelist_pass is False
+    assert r.entries["X1"].whitelist_pass is False
+    # 通过名单恰好是分位 0.60 / 0.80 / 1.00 的三只, 即 6 只里的前 40%(2.4 → 3 只含边界)
+    assert r.whitelist_symbols == ("X3", "X4", "X5")
 
 
 def test_whitelist_lists_only_ranked_and_above_threshold():
     proxies = [_proxy("P1", 1), _proxy("P2", 2), _proxy("P3", 3), _proxy("P4", 4), _proxy("P5", None)]
     inds = {p.symbol: "801010" for p in proxies}
     r = rank_within_industry(proxies, inds)
+    # 缺分票不进分母 → n=4, 分位依次 0, 1/3, 2/3, 1。>= 0.60 只有 P3 / P4。
+    assert r.entries["P2"].q_rank_within_ind == pytest.approx(1 / 3)
+    assert r.entries["P2"].whitelist_pass is False
+    assert r.entries["P3"].q_rank_within_ind == pytest.approx(2 / 3)
+    assert r.entries["P3"].whitelist_pass is True
     assert r.whitelist_symbols == ("P3", "P4")
     assert "P5" not in r.whitelist_symbols
     assert "P5" in r.missing_symbols
@@ -350,6 +379,26 @@ def test_quality_rank_has_no_t_cooldown_semantics():
     body = "\n".join(lines)
     for forbidden in ("cooldown", "rounds_consumed"):
         assert forbidden not in body
+
+
+def test_no_retired_040_threshold_as_current_rule():
+    """现行约定里不得残留「判定 >= 0.40」(#202 旧写法, g2.1 已废弃)。
+
+    历史对比句必须自带「已废弃」标注才放行 —— 否则护栏句本身会被判违规,
+    结果就是有人把护栏删掉(与「已锁定」扫描同一思路)。历史语境看前后两行,
+    因为一句废弃说明常被折成多行。
+    """
+    # 模式串拼接书写, 避免扫描器匹配到自己的源码行
+    retired = (">=" + " 0.40", ">=" + "0.40")
+    for path in (PKG_DIR / "quality_rank.py", Path(__file__)):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for idx, line in enumerate(lines):
+            if not any(p in line for p in retired):
+                continue
+            context = "\n".join(lines[max(0, idx - 2): idx + 3])
+            if any(marker in context for marker in ("已废弃", "旧写法", "旧 FIX", "不得残留")):
+                continue
+            pytest.fail(f"{path.name}:{idx + 1} 把已废弃的 >= 0.40 当成现行约定: {line.strip()}")
 
 
 def test_no_locked_claim_in_text():
