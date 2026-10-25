@@ -282,6 +282,25 @@ def _check_source_lots(
 
 
 # ---------------------------------------------------------------------------
+# 成本档位: 非零档位必须配非零金额
+# ---------------------------------------------------------------------------
+
+ZERO_COST_EXCLUDED_TIERS: Final = C.COST_BP_TIERS - {"design_pending", "0bp"}
+"""白名单里**排除** `design_pending` 与 `0bp` 之后的那些档位 —— 必须配 `cost_amount > 0`。
+
+从白名单**减去**而不是另写一份字面量: 将来在 `constants.COST_BP_TIERS` 里加一个
+`25bp`, 这条规则自动覆盖它, 不需要有人记得回来改第二处。另写一份的话, 新档位会
+默默变成"金额随便填", 而它看起来和白名单里别的档位一模一样。
+
+两个被排除的档位理由不同:
+- `design_pending` 是占位, 允许 0(缺省 `RoundCost()` 就是它 + 0.0);
+- `0bp` 是显式零成本, **必须** 0, 由上面单独一条检查管。
+
+仅供研究, 不构成投资建议; 执行须人工确认。
+"""
+
+
+# ---------------------------------------------------------------------------
 # 唯一完成入口
 # ---------------------------------------------------------------------------
 
@@ -290,8 +309,24 @@ def _check_source_lots(
 class RoundCost:
     """一轮的成本明细。
 
-    **[占位]** 本批次不做分档成本实测, 所以 `cost_bp_tier` 只能填
-    `design_pending`。要填真实分档, 得先有分档成本实测数据。
+    `cost_bp_tier` 取 `constants.COST_BP_TIERS` 里的值, 缺省 `design_pending`:
+
+    | 档位 | 含义 | `cost_amount` |
+    |---|---|---|
+    | `design_pending` | 占位, **不**宣称已按费率扣过成本 | `>= 0`(含 0) |
+    | `0bp` | 显式零成本 | **必须 == 0** |
+    | `5bp`/`10bp`/`15bp`/`20bp` | 按该档扣 | **必须 > 0** |
+
+    缺省 `RoundCost()` 是 `design_pending` + `0.0` —— 这是"没测成本"的诚实默认值,
+    也是绝大多数尚未做敏感性跑表的轮次该用的值。白名单之外一律拒绝, 所以随手
+    填一个 `"15bp"` 或 `"tier_a_measured"` 都不会静默通过。
+
+    为什么要卡"非零档位必须 > 0": 若 `10bp` 允许 `cost_amount=0`, 一份"按 10bp
+    扣成本"的报告与"根本没扣成本"的报告在数字上完全一致, 而前者会被当成已经考虑
+    过成本的结论。宁可报错。
+
+    注意这里**不**做"费率 × 名义金额"的换算 —— 闸门只验档位合法 + 金额不矛盾,
+    扣的是绝对额。换算口径(用哪个价当名义)留在调用方, 免得闸门顺手替人选了口径。
     """
 
     cost_amount: float = 0.0
@@ -317,7 +352,9 @@ def complete_round(
     1. 当前状态必须是 `open_leg2`(两腿都已成交才谈得上完成)
     2. **卖出腿**的份额来源必须是 `old_lot`(按 `side` 找腿, 两种模式通用)
     3. 两腿价格 / 数量必须有限且为正
-    4. 成本只能是 `design_pending`(本批次没有实测分档)
+    4. 成本档位须 ∈ `C.COST_BP_TIERS` 白名单, 且 `cost_amount` 按档位规则:
+       恒非负; `design_pending` 允许 0; `0bp` 必须 == 0; `5bp`/`10bp`/`15bp`/
+       `20bp` 必须 > 0(禁 silent 0 冒充已测)
 
     `leg1_source_lot` 是可选参数: 只对 `sell_first`(卖出腿是 leg1)有意义。
     不传就沿用记录上的值 —— 构造期已经填过并校验过的情况不必重复传。
@@ -354,15 +391,31 @@ def complete_round(
         raise TRoundValidationError("qty 必须是正整数")
 
     cost = cost or RoundCost()
-    # 本批次没有分档成本实测: 允许的档位只有 design_pending。真要填实测档位,
-    # 得先有成本实测数据, 并在 constants 里登记合法取值 —— 不是随便写个字符串。
-    if cost.cost_bp_tier != "design_pending":
+    # 闸门 = 白名单成员资格。合法取值单一定义在 constants.COST_BP_TIERS, 这里不
+    # 另抄一份字面量 —— 抄出来的第二份迟早与 constants 漂移, 而漂移的表现是
+    # "某个档位在一个入口能过、在另一个入口报错"。拼错的新档位(比如 'bp_10')
+    # 也会落在这里被拒, 不会当成"未知但先放行"。
+    if cost.cost_bp_tier not in C.COST_BP_TIERS:
         raise TRoundValidationError(
-            f"cost_bp_tier 本批次只允许 'design_pending', 收到 {cost.cost_bp_tier!r}"
-            "(分档成本实测本轮不做)"
+            f"cost_bp_tier 必须属于白名单 {sorted(C.COST_BP_TIERS)}, "
+            f"收到 {cost.cost_bp_tier!r}"
         )
     if not isinstance(cost.cost_amount, (int, float)) or cost.cost_amount < 0:
         raise TRoundValidationError("cost_amount 必须是非负数")
+    # 金额必须与档位自洽, 否则档位就只是个标签。两条规则方向相反:
+    #   0bp   → 写着零成本却扣了钱, 自相矛盾 → 拒
+    #   非零档 → 写着按 N bp 扣却一分没扣, 等于"已测"的假象 → 拒
+    # 后一条是本拍最要紧的: 允许它, 一份 10bp 的报告与"根本没扣"在数字上一模一样,
+    # 而前者会被当成已经考虑过成本的结论。见 constants.COST_BP_TIERS 注释。
+    if cost.cost_bp_tier == "0bp" and cost.cost_amount != 0:
+        raise TRoundValidationError(
+            f"cost_bp_tier='0bp' 时 cost_amount 必须为 0, 收到 {cost.cost_amount!r}"
+        )
+    if cost.cost_bp_tier in ZERO_COST_EXCLUDED_TIERS and not (cost.cost_amount > 0):
+        raise TRoundValidationError(
+            f"cost_bp_tier={cost.cost_bp_tier!r} 时 cost_amount 必须 > 0, "
+            f"收到 {cost.cost_amount!r}(禁止 silent 0 冒充已测)"
+        )
 
     # 价差方向按「哪条腿是卖出腿」决定, 而不是按模式名字符串:
     #   卖出腿在 leg1(先卖后买) → 卖得高才赚 → leg1 - leg2
@@ -435,6 +488,7 @@ __all__ = [
     "RoundQuotaExceeded",
     "STATUSES_CONSUMING_QUOTA",
     "TRoundStateError",
+    "ZERO_COST_EXCLUDED_TIERS",
     "assert_transition_allowed",
     "check_round_quota",
     "complete_round",

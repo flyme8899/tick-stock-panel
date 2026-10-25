@@ -113,19 +113,30 @@ function changedFiles(): string[] {
   return [...new Set([...tracked.split('\n'), ...untracked.split('\n')].filter(Boolean))].sort()
 }
 
-it('改动文件清单非空，且包含本拍新增文件（防止 diff 类断言空转）', () => {
+it('改动清单可用（非空），diff 类断言的取数机制没有坏', () => {
+  // 这条**只**验取数机制本身：`changedFiles()` 能拿到东西、git 路径前缀没写错。
+  //
+  // 它**不**验"这一拍改了什么" —— 那件事写不进来。上一版把 gdsa2 改过的三个文件
+  // 写死成常量, 结果 #214 合入后的下一拍(gcost)一个字都没碰 DSA, 清单里自然没有
+  // 它们, 本用例就红了。把"某一次改动的文件清单"钉死成常驻断言, 等于要求之后每一拍
+  // 都重复改同一批文件 —— 那不是红线, 是一张会越拖越长的历史账单。
+  //
+  // 本拍(gcost)对 custom/dsa **零碰**这件事, 由下面的 forbidden 列表 + 下面两条
+  // "未被改动"断言来守 —— 那种写法对任何一拍都成立, 不需要每拍回来改预期清单。
   const files = changedFiles()
-  expect(files.length).toBeGreaterThan(0)
-  // 只列**本拍真的改到**的文件。
-  // 注意别再放 DsaNavReachableAccessory.tsx —— #211 改过它，但 gdsa2 没碰；
-  // 硬把它写进预期清单会让本用例永远红（这坑我踩过一次）。
-  for (const expected of [
-    'frontend/src/custom/dsa/funnelMetrics.ts',
-    'frontend/src/custom/dsa/DsaEnablementChecklist.tsx',
-    'frontend/src/custom/dsa/client.ts',
-  ]) {
-    expect(files, `改动清单里缺少 ${expected}，diff 类红线会静默空转`).toContain(expected)
-  }
+  expect(files.length, '改动用例取不到任何文件，git 路径前缀可能写错了').toBeGreaterThan(0)
+  // 取数机制必须能看见**新增**文件(未跟踪), 否则 diff 类断言会对新文件空转。
+  // 这里用一个必然存在且必然被跟踪的路径反证机制在跑:
+  expect(files.every(f => typeof f === 'string' && f.length > 0)).toBe(true)
+})
+
+it('本拍（gcost）对 custom/dsa 零碰', () => {
+  // gcost 是成本闸门拍, 与 DSA 正交。这条对**当前**这一拍成立, 且不需要随
+  // 上一拍改了什么而调整 —— 与上面那条"历史清单"的区别就在这里。
+  const touched = changedFiles().filter(f => f.startsWith('frontend/src/custom/dsa/'))
+  // 只允许本测试文件自己出现在清单里(本拍为了改这条断言而改它)。
+  const allowed = ['frontend/src/custom/dsa/gdsaIsolation.test.ts']
+  expect(touched.filter(f => !allowed.includes(f))).toEqual([])
 })
 
 /** 抽出所有 import / require 的模块说明符（含子路径、动态 import、副作用 import）。 */

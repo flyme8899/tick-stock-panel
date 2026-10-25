@@ -44,8 +44,10 @@
    （只数赢的那部分）必须分清：两个分母不同的平均数混用会得出相反结论。
 3. `limit_locked` —— 涨跌停锁死平不掉的轮次**留在分母**，不算数据问题。
    数据来源本批次没有，显式写 `limit_lock_source: data_pending`，**不猜**。
-4. `cost_bp_tier` —— 仍是 `design_pending`。成本闸门与成本敏感性是**另一拍**的事，
-   本批次一行没动。
+4. `cost_bp_tier` —— 本离线回测仍走 `design_pending` + `0.0`，即**未扣成本**。
+   契约侧（批次 20261025gcost，5b）已放开白名单 `design_pending` ∪
+   `{0bp, 5bp, 10bp, 15bp, 20bp}`，非零档位必须配非零金额；但**敏感性跑表属 5c**，
+   另一拍。所以这里报出的净价差一律是毛价差口径，不能当成"扣过成本之后的结论"。
 """
 from __future__ import annotations
 
@@ -161,8 +163,9 @@ def build_report_meta(
         ),
         "limit_lock_source": C.LIMIT_LOCK_SOURCE_PENDING,
         "cost_gate_scope": (
-            "成本闸门与成本敏感性不在本批次范围内; cost_bp_tier 仍为 design_pending, "
-            "净价差 = 毛价差, 未扣任何成本"
+            "5b 契约已放开: cost_bp_tier 白名单 = design_pending ∪ {0bp,5bp,10bp,15bp,20bp}, "
+            "非零档位必须配 cost_amount>0 (禁 silent 0); 但成本敏感性跑表属 5c 另一拍, "
+            "本报告的净价差 = 毛价差, 未扣任何成本 (cost_bp_tier 仍为 design_pending)"
         ),
         "not_claimed_verified": (
             "本报告仅为离线同尺特征回测; ε 门禁、可卖老股实盘、分档成本、正式推送闸均未测通; "

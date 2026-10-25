@@ -1121,7 +1121,15 @@ def test_report_contains_required_metadata(tmp_path: Path) -> None:
     assert "require_prior_cross" in meta["path_a_definition"]
     assert "敏感度" in meta["path_a_definition"], "A 必须写明是敏感度开关, 不是平行信号"
     assert "expectancy" in meta["expectancy_definition"]
-    assert meta["cost_gate_scope"] and "不在本批次范围" in meta["cost_gate_scope"]
+    # 5b 契约放开后, 这句声明必须同时说清两件事: 白名单已放开(闸门改了),
+    # 但敏感性跑表属 5c 另一拍(结论没变)。只写其中一半都会误导:
+    #   只写"白名单已放开" → 读者以为成本已经被扣过;
+    #   只写"不在本批次范围" → 与代码里的白名单对不上。
+    scope = meta["cost_gate_scope"]
+    assert scope
+    assert "5b" in scope and "白名单" in scope, "必须说明 5b 契约已放开"
+    assert "5c" in scope, "必须说明敏感性跑表属 5c 另一拍"
+    assert "未扣" in scope, "必须说清本报告净价差仍是未扣成本口径"
     assert meta["limit_lock_source"] == "data_pending"
     assert meta["limit_locked_policy"]
     assert meta["footnote"]

@@ -8,7 +8,8 @@
 ## 一句话
 
 实现了做 T 轮次的**记录字段 + 状态机 + 净价差结算 + 轮次上限 + 持仓三态标签**，
-Store 用**内存实现，默认不落盘**，成本档位恒为 `design_pending`。
+Store 用**内存实现，默认不落盘**，成本档位按白名单 `design_pending` ∪ `{0bp, 5bp,
+10bp, 15bp, 20bp}` 登记（批次 20261025gcost 放开 5b 契约）。
 
 **没有**接任何 HTTP 路由、**没有**接日管道、**没有**接推送、**没有**做分钟评估。
 
@@ -79,8 +80,22 @@ gross = (leg1_price - leg2_price) * qty if mode == "zheng_t" \
 写错方向的话全部符号反过来，一个**永远亏**的策略会看起来很诚实。测试里两个方向各断言
 一次符号，不只测绝对值。
 
-`net = gross - cost.cost_amount`。`cost_bp_tier` 本批次**只允许** `"design_pending"`，
-传别的直接抛错——分档成本实测本轮不做，随手填一个 15 bp 之后所有人都会把它当结论。
+`net = gross - cost.cost_amount`。`cost_bp_tier` 取值由 `constants.COST_BP_TIERS`
+单一定义（批次 20261025gcost 放开 5b 契约），白名单之外一律抛错：
+
+| 档位 | 含义 | `cost_amount` |
+|---|---|---|
+| `design_pending` | 占位，**不**宣称已按费率扣成本 | `>= 0`（含 0） |
+| `0bp` | 显式零成本 | **必须 == 0** |
+| `5bp` / `10bp` / `15bp` / `20bp` | 按该档扣 | **必须 > 0** |
+
+两条容易忽略的地方：
+
+- **禁 silent 0**：非零档位配 `cost_amount=0` 直接拒。允许它的话，一份「按 10bp
+  扣成本」的报告与「根本没扣成本」的报告数字完全一致，而前者会被当成已经考虑过
+  成本的结论。错误不在数字里，在标签里。
+- **换算不在闸门里**：闸门只验「档位合法 + 金额不矛盾」，扣的是绝对额。「费率 ×
+  名义金额」的换算与名义价口径留在调用方（离线跑表），免得闸门顺手替人选了口径。
 
 ## ε = 0.30%，locked 进 version
 
@@ -180,7 +195,8 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 - KPI 硬禁（6 个非 `completed` 状态参数化）
 - 正 T 老底仓（构造期 / transition / complete 三处）
 - 净价差方向（两个 mode 各测一次符号）
-- 成本档位只认 `design_pending`
+- 成本档位白名单：非法串拒 / `design_pending`+0 绿 / `0bp`+0 绿 / `0bp`+>0 拒 /
+  非零档 +>0 绿 / 非零档 +0 拒（禁 silent 0）/ 负金额全档位拒 / 白名单只此一处定义
 - Store 往返与过滤；轮次上限 6 种场景（同日同票拒 / 异票放行 / 次日放行 /
   `completed` 仍占额 / `void_data` 不占 / 挪日重查）
 - 持仓三态、空仓不给 `executable`
@@ -208,7 +224,8 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 - 接线真实分钟评估、`build_feature_frame` 在线路径、`minute_replay` 生产评估
 - 用 09:30 开盘 1m **冒充** 09:25 竞价
 - 全量特征回测 / walk-forward、ε 重标定
-- 分档成本实测（`cost_bp_tier` 恒 `design_pending`）
+- 分档成本实测与成本敏感性跑表（批次 20261025gcost 只放开了 5b **契约**，
+  0 / 0.05% / 0.10% / 0.15% / 0.20% 的敏感性表是 **5c**，另一拍）
 - 可卖老股实盘字段（`virtual_position_flag` 只是占位）
 - Regime 产品规则标定、g2 质量代理加深
 
@@ -219,8 +236,11 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 
 1. **分钟评估路径**：接真实分钟数据，先解决「同尺后再 VWAP」（软提醒 1）
 2. **ε 重标定**：0.30% 是设计钉，不是标定结果
-3. **分档成本实测**：按成交额分档的滑点 + 印花税 + 冲击成本，实测后才能放开
-   `cost_bp_tier` 与 `max_rounds_per_day`
+3. **分档成本实测（5c）**：按成交额分档的滑点 + 印花税 + 冲击成本。
+   契约侧 5b 已放开白名单（`design_pending` ∪ `0bp`/`5bp`/`10bp`/`15bp`/`20bp`，
+   非零档必须配非零金额），但**跑表与结论属 5c**，本拍一行敏感性表都没跑。
+   散户双边成本 0.1%–0.15% 只是**假设口径**，不是唯一真实成本。
+   `max_rounds_per_day` 的放开仍要等 5c 结论，本拍未动。
 4. **可卖老股实盘字段**：`tag_position` 目前吃的是外部给的 `old_lot_qty_available`，
    真实账户口径（含冻结、待交收）未接
 5. **磁盘 Store**：先单独设计（大概率单文件 + 版本号，或进 SQLite），不要硬套分区 parquet
