@@ -1,0 +1,217 @@
+"""离线报告写出：特征表 Parquet + 摘要 JSON + 元数据（批次 20261025hfeat）。
+
+**仅供研究，不构成投资建议；执行须人工确认。**
+
+## 写到哪里
+
+**只写调用方显式给定的目录**（`out_dir` 必填，没有默认值）。
+
+没有默认值是有意的：这个模块一旦有 `out_dir="data/..."` 这样的默认，就会有人
+在日管道或脚本里不带参数地调它，于是回测产物落进生产数据目录，跟真实分区混在
+一起。那时候"哪份文件是回测、哪份是生产"只能靠文件名猜。
+
+也**不调** `partition_writer`：本包不往生产分区写一个字节。
+
+## 三份产物
+
+| 文件 | 内容 |
+|---|---|
+| `features.parquet` | 特征表（主产物，`astype` 不做任何隐式转换） |
+| `summary.json` | 指标摘要 + 元数据（`dates` / `inputs` / `version` / `caliber_note` / 脚注） |
+| `features.csv` | 可选；`write_csv=True` 时写同内容 CSV，方便人眼扫 |
+
+摘要与元数据写**同一个** JSON：拆成两个文件的结果是总有一个被忘在外发包里，
+而缺了 `version` 的指标摘要等于没有口径。
+
+## 元数据里必须有什么（少一项这份报告就不可复现）
+
+- `dates`：实际参与计算的交易日清单
+- `inputs`：读到的输入文件清单（缺日/跳过的原因另列 `skipped`）
+- `version`：`design_pin_v1+eps_pct:0.30` —— **从 `constants.design_version()` 取**，
+  不在这里拼字符串
+- `epsilon_value_pct`：0.30
+- `caliber_note`：同尺判定的结论（逐日 ratio 的最坏偏离 / 混尺日数）
+- `virtual_lot_assumption`：虚拟底仓的假设说明（用了虚拟底仓就必须写）
+- `disclaimer`：合规脚注
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any, Final
+
+import polars as pl
+
+from .. import constants as C
+from ..disclaimer import DISCLAIMER_TEXT
+from .backtest import VIRTUAL_LOT_ASSUMPTION, BacktestSummary
+from .loader import CaliberReport
+
+FEATURES_PARQUET: Final = "features.parquet"
+FEATURES_CSV: Final = "features.csv"
+SUMMARY_JSON: Final = "summary.json"
+
+REPORT_SCHEMA_VERSION: Final = "1"
+"""报告格式版本（字符串，理由同 g 侧 `REGISTRY_SCHEMA_VERSION`）。
+
+格式将来变了要升这个号，让旧报告能被识别 —— 否则读报告的人会拿两套字段名去对齐。
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class OfflineReport:
+    """一次写出的产物路径与其中的元数据（便于调用方在日志/PR 里引用）。"""
+
+    out_dir: Path
+    features_path: Path
+    summary_path: Path
+    csv_path: Path | None
+    meta: dict[str, Any]
+
+
+def _json_safe(value: Any) -> Any:
+    """把 date / Path / NaN 转成 JSON 能吃的形状。
+
+    `NaN` 必须转 `None`，不能留 `NaN` —— `json.dumps` 默认会写出字面量 `NaN`，
+    那不是合法 JSON，下游 `json.loads` 在严格模式下会拒。
+    """
+    if isinstance(value, (date,)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, float):
+        return None if value != value else value
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def build_report_meta(
+    *,
+    summary: BacktestSummary,
+    caliber: CaliberReport | None,
+    inputs: tuple[str, ...],
+    skipped: tuple[str, ...] = (),
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """组报告元数据。**唯一**的元数据组装处，报告与测试都走这里。"""
+    meta: dict[str, Any] = {
+        "namespace": C.NAMESPACE,
+        "package": "t_rounds.offline",
+        "report_schema_version": REPORT_SCHEMA_VERSION,
+        "version": summary.version,
+        "expected_version": C.design_version(),
+        "epsilon_value_pct": summary.epsilon_pct,
+        "epsilon_definition": C.EPSILON_DEFINITION,
+        "research_window_start": C.RESEARCH_WINDOW_START,
+        "minute_export_earliest": C.MINUTE_EXPORT_EARLIEST,
+        "auction_impersonation_forbidden": C.AUCTION_IMPERSONATION_FORBIDDEN,
+        "dates": [d.isoformat() for d in summary.dates],
+        "inputs": list(inputs),
+        "skipped": list(skipped),
+        "caliber_note": (
+            caliber.note() if caliber is not None else "未提供同尺判定; 本报告口径未确认"
+        ),
+        "caliber_days": (
+            [
+                {
+                    "symbol": d.symbol,
+                    "trade_date": d.trade_date.isoformat(),
+                    "ratio": d.ratio,
+                    "bars": d.bars,
+                    "caliber": d.caliber,
+                }
+                for d in caliber.days
+            ]
+            if caliber is not None
+            else []
+        ),
+        "vwap_same_basis_note": C.VWAP_SAME_BASIS_NOTE,
+        "virtual_lot_assumption": VIRTUAL_LOT_ASSUMPTION,
+        "not_claimed_verified": (
+            "本报告仅为离线同尺特征回测; ε 门禁、可卖老股实盘、分档成本、正式推送闸均未测通"
+        ),
+        "disclaimer": DISCLAIMER_TEXT,
+    }
+    if extra:
+        meta.update(extra)
+    return _json_safe(meta)
+
+
+def write_offline_report(
+    *,
+    out_dir: Path | str,
+    feature_frame: pl.DataFrame,
+    summary: BacktestSummary,
+    caliber: CaliberReport | None = None,
+    inputs: tuple[str, ...] = (),
+    skipped: tuple[str, ...] = (),
+    write_csv: bool = False,
+    extra_meta: dict[str, Any] | None = None,
+) -> OfflineReport:
+    """把特征表与摘要写到 `out_dir`。**调用方必须显式给目录。**
+
+    参数:
+      out_dir: 输出目录。不存在则创建（只创建这一层，不猜父路径）。
+      feature_frame: 特征表。
+      summary: `run_mode_a_backtest()` 的产物。
+      caliber: 同尺判定报告，写进 `caliber_note` 与逐日明细。
+      inputs / skipped: 读到的与跳过的输入清单。
+      write_csv: 是否额外写一份同内容 CSV。
+      extra_meta: 追加到元数据的字段（会被 `_json_safe` 处理）。
+
+    返回 `OfflineReport`（含三份产物的绝对路径与元数据）。
+
+    **不做的事**：不写生产分区、不调 `partition_writer`、不推送、不改任何 env。
+    """
+    if not str(out_dir):
+        raise ValueError("out_dir 必填: 本模块不提供默认输出目录(避免回测产物落到生产数据目录)")
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+
+    features_path = target / FEATURES_PARQUET
+    feature_frame.write_parquet(features_path)
+
+    csv_path: Path | None = None
+    if write_csv:
+        csv_path = target / FEATURES_CSV
+        feature_frame.write_csv(csv_path)
+
+    payload = dict(summary.as_dict())
+    payload.update(
+        build_report_meta(
+            summary=summary,
+            caliber=caliber,
+            inputs=inputs,
+            skipped=skipped,
+            extra=extra_meta,
+        )
+    )
+    summary_path = target / SUMMARY_JSON
+    summary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+
+    return OfflineReport(
+        out_dir=target,
+        features_path=features_path,
+        summary_path=summary_path,
+        csv_path=csv_path,
+        meta=payload,
+    )
+
+
+__all__ = [
+    "FEATURES_CSV",
+    "FEATURES_PARQUET",
+    "REPORT_SCHEMA_VERSION",
+    "SUMMARY_JSON",
+    "OfflineReport",
+    "build_report_meta",
+    "write_offline_report",
+]
