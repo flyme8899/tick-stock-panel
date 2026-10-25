@@ -64,8 +64,9 @@ def test_required_scope_mapping():
     assert f("GET", "/api/backtest/candidates") == "read:analysis"
     assert f("POST", "/api/backtest/run") == "run:backtest"
     assert f("POST", "/api/backtest/strategy/run") == "run:backtest"
-    assert f("GET", "/api/paper/overview") == "paper:trade"
-    assert f("POST", "/api/paper/orders") == "paper:trade"
+    assert f("GET", "/api/paper/overview") is None             # 模拟盘不开放给 Token
+    assert f("POST", "/api/paper/orders") is None
+    assert f("DELETE", "/api/paper/orders/o_1") is None
     assert f("GET", "/api/settings/api-tokens") is None          # Token 管理本身不开放
     assert f("GET", "/api/monitor-rules") is None                # V1 最小面外
     # 前缀混淆不误伤: /api/paperback 不得命中 /api/paper
@@ -102,6 +103,18 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     @app.post("/api/paper/orders")
     def paper():
+        return {"ok": True}
+
+    @app.delete("/api/paper/orders/{order_id}")
+    def paper_cancel(order_id: str):
+        return {"ok": True}
+
+    @app.get("/api/paper/overview")
+    def paper_overview():
+        return {"ok": True}
+
+    @app.get("/api/paper/positions")
+    def paper_positions():
         return {"ok": True}
 
     @app.get("/api/settings/api-tokens")
@@ -156,9 +169,28 @@ def test_gateway_401_403_200_matrix(client: TestClient, tmp_path: Path):
 
 
 def test_gateway_scope_grants_endpoint(client: TestClient, tmp_path: Path):
-    _, paper_token = api_tokens.create_token(tmp_path, "模拟盘", ["paper:trade"])
-    r = client.post("/api/paper/orders", headers={"Authorization": f"Bearer {paper_token}"})
+    """scope 命中即放行 (非交易类) — 保留一条正向断言, 防止整体退化成全拒。"""
+    _, market_token = api_tokens.create_token(tmp_path, "只读行情", ["read:market"])
+    r = client.get("/api/kline/daily", headers={"Authorization": f"Bearer {market_token}"})
     assert r.status_code == 200
+    assert r.headers.get("X-RateLimit-Limit") == "120"
+
+
+def test_gateway_rejects_paper_with_any_token(client: TestClient, tmp_path: Path):
+    """模拟盘端点不对 Token 通道开放 — 任何 scope 组合 + 任何方法均 403。"""
+    _, tok = api_tokens.create_token(
+        tmp_path, "只读全家桶", ["read:market", "read:ext", "read:analysis", "run:backtest"],
+    )
+    hdr = {"Authorization": f"Bearer {tok}"}
+    for method, path in (
+        ("GET", "/api/paper/overview"),
+        ("GET", "/api/paper/positions"),
+        ("POST", "/api/paper/orders"),
+        ("DELETE", "/api/paper/orders/o_1"),
+    ):
+        r = client.request(method, path, headers=hdr)
+        assert r.status_code == 403, f"{method} {path} 应被拒, 实际 {r.status_code}"
+        assert "未对外开放" in r.json()["detail"]
 
 
 def test_gateway_write_ext_ingest(client: TestClient, tmp_path: Path):

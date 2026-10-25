@@ -1,6 +1,6 @@
 # 核心能力开放与插件化改造设计方案
 
-> 状态: V1/V2 已实现（0.3.2）—— Token + scope 网关 + 限流、五个 scope 全量 Tier A、`/api/openapi.json?tier=a` 契约视图、设置页 Token 管理（「设置 → 开放接口」）。V3+（钩子契约、SSE 票据、模拟盘拆分）仍为设计。使用说明见 [features.md → 开放接口](./features.md#-开放接口open-api--tier-a)。
+> 状态: V1/V2 已实现（0.3.2）—— Token + scope 网关 + 限流、五个 scope 全量 Tier A、`/api/openapi.json?tier=a` 契约视图、设置页 Token 管理（「设置 → 开放接口」）。**P3 收口**: 交易类 scope 已从 Token 通道整体移除（模拟盘仅 UI 会话）。V3+（钩子契约、SSE 票据）仍为设计。使用说明见 [features.md → 开放接口](./features.md#-开放接口open-api--tier-a)。
 > 遵循 [CONTRIBUTING.md](../CONTRIBUTING.md) 的数据口径、插件化与测试矩阵要求; 扩展机制现状见 [secondary-development.md](./secondary-development.md)。
 
 > **lookahead 前置契约（fail-closed，批次 20261025glookahead）**
@@ -91,10 +91,18 @@
 | `read:ext` | 扩展数据 rows/values/schema 读取 | ❌ 显式勾选 |
 | `write:ext` | 扩展表**行数据**程序化写入（`POST /api/ext-data/{id}/ingest`, 0.3.2 增） | ❌ 显式勾选 |
 | `run:backtest` | 触发回测/挖掘任务（受重活并发器约束） | ❌ 显式勾选 |
-| `paper:trade` | 模拟盘下单/撤单/建户（写操作, 最高敏感级） | ❌ 显式勾选 |
+| `paper:trade` | **已废除 — 不再存在此 scope, 签发与访问双侧拒绝** | — |
 | `admin` | 管理接口 | ❌ **永不签发给 Token**, 仅 UI 会话可用 |
 
-结构管理端点（扩展表建表/字段/上传/拉取/回补/删除、数据同步、设置）一律不进 Token scope —— 外部可读 + 三类受控写（扩展表**行数据**、回测任务、模拟盘）; 行数据写入复用管理端同一校验与落盘路径, 表结构不可被外部改写。
+**推荐组合（只读默开）**: `read:market,read:analysis,read:ext` —— 覆盖"读数据"全部诉求, 不含任何写能力。绝大多数二开场景只需要这一档; `write:ext` / `run:backtest` 按需显式追加。
+
+**模拟盘仅面板 UI 会话, 不经 Token。** Token 通道不承载任何下单/撤单能力:
+
+- 签发侧: `api_tokens.create_token` 对 `paper:*` / `trade:*` / `order:*` 一律 `ValueError`（即使未来有人往白名单里加, 这一层也兜住）。
+- 访问侧: 网关规则表已剥离 `/api/paper*`, Bearer 请求一律 403（fail-closed）。**历史上已签发且仍带 `paper:trade` 的 Token 同样 403** —— 拒绝来自规则表, 不依赖吊销。
+- 契约侧: `/api/openapi.json?tier=a` 不再列出任何 `/api/paper*` 端点。
+
+结构管理端点（扩展表建表/字段/上传/拉取/回补/删除、数据同步、设置）一律不进 Token scope —— 外部可读 + 两类受控写（扩展表**行数据**、回测任务）; 行数据写入复用管理端同一校验与落盘路径, 表结构不可被外部改写。
 
 ### 4.3 限流与 CORS
 
@@ -147,13 +155,20 @@
 | `GET /api/events/stream`（SSE） | 实时事件流（告警/成交/系统事件）; Token 以 query 参数短期票据接入（SSE 无法带 header） |
 | Webhook 订阅注册 | **V2 再做**: 按 Token 注册回调 URL + 事件类型 + 签名密钥（复用现有 custom webhook 通道能力） |
 
-### 5.5 模拟盘（paper:trade）
+### 5.5 模拟盘 — **不在开放面（仅 UI 会话）**
 
-| 端点 | 说明 |
+> **Token 通道无交易 scope。** 模拟盘全部端点（账户/持仓/下单/撤单/成交）已从 Tier A
+> 开放面移除, Bearer 访问一律 403（fail-closed）。模拟盘产品本身不变, 但只在面板 UI 会话内使用。
+
+历史记录（供对照, **已废止**）:
+
+| 端点 | 现状态 |
 |---|---|
-| `GET /api/paper/accounts` `/overview` `/positions` `/nav` `/stats` `/compare` | 账户与账务读取 |
-| `POST /api/paper/orders` `DELETE /api/paper/orders/{id}` | 下单/撤单（写） |
-| `GET /api/paper/trades` | 成交台账（append-only 事实源） |
+| `GET /api/paper/accounts` `/overview` `/positions` `/nav` `/stats` `/compare` | 403 · 不对 Token 开放 |
+| `POST /api/paper/orders` `DELETE /api/paper/orders/{id}` | 403 · 不对 Token 开放 |
+| `GET /api/paper/trades` | 403 · 不对 Token 开放 |
+
+存量的 `paper:trade` Tokens 无需吊销 —— 规则表已剥离, 其模拟盘访问权即刻失效; 其余只读 scope 不受影响。
 
 ### 5.6 系统
 
@@ -176,7 +191,7 @@
 
 - ✅ Token 存储/创建/吊销 + 设置页管理 UI（「设置 → 开放接口」，`services/api_tokens.py`）。
 - ✅ 中间件: Bearer 识别 → scope 校验 → 限流（`services/api_gateway.py`，CORS 原本已全开）。
-- ✅ Tier A: 直接覆盖全部五个 scope（`api_gateway._RULES` 规则表）。
+- ✅ Tier A: 覆盖只读与数据写入档 scope（`api_gateway._RULES` 规则表）; 交易类 scope 已剔除。
 - ✅ 测试矩阵: `backend/tests/test_api_gateway.py`（401/403/429/吊销即拒/前缀混淆防护）。
 
 ### V2 契约化 + 示例仓库
@@ -195,7 +210,7 @@
 
 ## 7. 风险与守住的边界
 
-- **Token 泄漏 = 面板数据泄漏**: 默认只读 scope、可随时吊销、创建时明文只显一次; paper:trade 永不默认。
+- **Token 泄漏 = 面板数据泄漏**: 默认只读 scope、可随时吊销、创建时明文只显一次; 交易类 scope 不存在（不是"默认关闭", 是签发与访问双侧拒绝）。
 - **契约冻结过早**: Tier A 从最小两组起步, 按二开反馈逐域升级, 未验证的端点留在 Tier B。
 - **限流误伤本机 UI**: Token 限流只作用于 Bearer 路径; UI 会话不受 Token 桶约束。
 - **不因开放破坏内部演进**: 开放面是「视图 + 网关」, 不重写内部路由; 内部 API 与开放 API 解耦, 由标注层衔接。
