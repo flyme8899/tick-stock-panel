@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import date, datetime
 from typing import Any, Final
 
@@ -144,6 +144,13 @@ class SignalRecord:
 
     # ---- 自由扩展 ------------------------------------------------------
     metadata: dict[str, Any] = field(default_factory=dict)
+    """自由扩展字典。**不做数值校验**, 但落盘时非有限浮点会被转成 null。
+
+    刻意留一个不受校验的口子: 将来挂新旧指标不必每次改 `SignalRecord`。代价是
+    脏值(如 NaN)能进到这里, 因此 `store._flush` 用 `json_safe(coerce=True)`
+    兜一层 —— 否则 `json.dumps(allow_nan=False)` 会在写盘时抛异常, 把一次
+    upsert 变成 500。
+    """
 
     # ================================================================ 校验
 
@@ -250,6 +257,15 @@ class SignalRecord:
 
     # ================================================================ 变换
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> SignalRecord:
+        """从 `to_dict` 的产物重建。
+
+        派生键与合规文案快照一律丢弃(见 `_DERIVED_KEYS`), 其余字段原样喂给构造器,
+        所以 `__post_init__` 的校验照常生效 —— 反序列化不是"绕过校验的后门"。
+        """
+        return signal_record_from_dict(payload)
+
     def with_fields(self, **changes: Any) -> SignalRecord:
         """返回改了若干字段的新记录, 顺带把 `updated_at` 推到当前时间。
 
@@ -313,6 +329,72 @@ def _iso_or_none(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
 
 
+#: `to_dict` 写入但**不**属于构造参数的键: 派生值、口径快照、合规文案。
+#: 反序列化时一律丢弃 —— 其中 `disclaimer` 是文案快照, 若允许回灌, 有人改一行
+#: JSON 就能伪造合规措辞; 合规文本只能由 `DISCLAIMER_TEXT` 提供。
+_DERIVED_KEYS: Final = frozenset(
+    {
+        "namespace",
+        "push_eligible",
+        "push_dedupe_cooldown_min",
+        "noise_mix_forbidden",
+        "disclaimer",
+        "w_value",
+        "w_quality",
+    }
+)
+
+_DATETIME_FIELDS: Final = frozenset({"created_at", "updated_at", "last_status_change_at"})
+_OPTIONAL_DATETIME_FIELDS: Final = frozenset(
+    {"manual_published_at", "last_pushed_at", "push_dedupe_cooldown_until"}
+)
+
+
+def _parse_dt(value: Any, name: str, *, optional: bool) -> datetime | None:
+    """带时区解析。裸字符串没有时区 → 拒绝, 不猜是不是北京时间。
+
+    猜时区是最容易埋雷的一类兼容: 同一个文件在不同机器上解析出不同的绝对时刻,
+    而且 diff 里看不出来。
+    """
+    if value is None:
+        if optional:
+            return None
+        raise SignalValidationError(f"{name} 不能为 None")
+    if not isinstance(value, str):
+        raise SignalValidationError(f"{name} 必须是 ISO8601 字符串, 收到 {type(value).__name__}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise SignalValidationError(f"{name} 不是合法的 ISO8601: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise SignalValidationError(f"{name} 缺少时区: {value!r}")
+    return parsed
+
+
+def signal_record_from_dict(payload: dict[str, Any]) -> SignalRecord:
+    """从 `to_dict` 的产物重建 `SignalRecord`。
+
+    只喂**已知字段**, 派生键与文案快照一律丢弃(见 `_DERIVED_KEYS`); 未知键同样丢弃,
+    这样以后加字段再回滚不会因为旧文件多一个键就整表读不出来。丢弃之后仍走构造器,
+    所以 `__post_init__` 的全部校验(含 publishable 必须有人签字)照常生效。
+    """
+    if not isinstance(payload, dict):
+        raise SignalValidationError(f"from_dict 需要 dict, 收到 {type(payload).__name__}")
+
+    known = {f.name for f in fields(SignalRecord)}
+    kwargs: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in _DERIVED_KEYS or key not in known:
+            continue
+        if key in _DATETIME_FIELDS:
+            kwargs[key] = _parse_dt(value, key, optional=False)
+        elif key in _OPTIONAL_DATETIME_FIELDS:
+            kwargs[key] = _parse_dt(value, key, optional=True)
+        else:
+            kwargs[key] = value
+    return SignalRecord(**kwargs)
+
+
 def asof_date(value: date | datetime) -> date:
     """把 asof 归一到北京时间下的日期。
 
@@ -334,4 +416,5 @@ __all__ = [
     "SignalRecord",
     "SignalValidationError",
     "asof_date",
+    "signal_record_from_dict",
 ]

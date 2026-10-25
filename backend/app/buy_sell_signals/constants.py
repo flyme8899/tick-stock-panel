@@ -46,6 +46,34 @@ NAMESPACE: Final = "buy_sell_signals"
 不允许出现裸的 `signal_registry` 之类可能撞车的名字。
 """
 
+# ---------------------------------------------------------------- 落盘(可选)
+
+PERSIST_ENV_NAME: Final = "BUY_SELL_SIGNALS_PERSIST"
+"""开启落盘的**唯一**环境变量名。
+
+只认这一个名字(批次 20261025gp 引入)。未设或假 → `InMemorySignalRegistryStore`,
+不落盘。生产是否置 1 另等部署口令, 不得随合入默开。
+
+**落盘 ≠ 推送**: 开了也只是把注册表写进本地 JSON, 没有 SSE / 飞书 / `news.push`。
+"""
+
+PERSIST_SUBDIR: Final = "buy_sell_signals"
+"""落盘子目录名(写死), 挂在 `settings.data_dir` 之下。
+
+不写 `partition_writer` 的生产分区, 也不碰 `/data/tsp-reports`。
+"""
+
+REGISTRY_FILENAME: Final = "registry.json"
+"""注册表主文件名(写死)。与 lock 等旁路文件同目录, 不散落。"""
+
+REGISTRY_SCHEMA_VERSION: Final = "1"
+"""`registry.json` 的格式版本(字符串)。改动文件结构时 bump, 供 reload 将来做迁移。
+
+用字符串而非 int 是有意的: 数值型常量会落进「本包常量不得与 t_rounds 门禁同值」
+那条静态扫描, 而 `"1"` 与 `t_rounds.MAX_ROUNDS_PER_DAY = 1` 毫无关系 —— 版本号
+是文件格式标签, 不是阈值。写成 int 会长期误报, 逼后人给版本乱跳数字。
+"""
+
 # ---------------------------------------------------------------- 设计钉版本
 
 SIGNAL_DESIGN_PIN: Final = "design_pin_v1"
@@ -173,9 +201,13 @@ __all__ = [
     "INDUSTRY_STANDARD_THS_CURRENT",
     "NAMESPACE",
     "NOISE_MIX_FORBIDDEN",
+    "PERSIST_ENV_NAME",
+    "PERSIST_SUBDIR",
     "POST_OPEN_NOISE_BUCKETS",
     "PUSH_DEDUPE_COOLDOWN_FIELD",
     "PUSH_DEDUPE_COOLDOWN_MIN",
+    "REGISTRY_FILENAME",
+    "REGISTRY_SCHEMA_VERSION",
     "SIGNAL_DESIGN_PIN",
     "SIGNAL_FAMILIES",
     "design_version",
