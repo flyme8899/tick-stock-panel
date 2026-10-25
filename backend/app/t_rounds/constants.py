@@ -297,6 +297,23 @@ AUCTION_IMPERSONATION_FORBIDDEN: Final = True
 MINUTE_EXPORT_EARLIEST: Final = "09:30"
 """分钟导出最早时间。任何声称有 09:25 数据的路径都必须先证明来源, 见上。"""
 
+LUNCH_LAST_MORNING_BAR: Final = "11:30"
+"""上午末根(连续竞价结束那根)。午休从这一根之后开始。"""
+
+LUNCH_FIRST_AFTERNOON_BAR: Final = "13:01"
+"""下午首根。
+
+**不是 13:00** —— 13:00 是开市时刻, 第一根 **1 分钟** K 的结束标注是 13:01
+(bar 记的是结束时刻)。写成 13:00 会让每一份正常数据都报错。
+"""
+
+LUNCH_GAP_MINUTES: Final = 91
+"""11:30 → 13:01 的分钟差。
+
+与在线 `backend/app/api/kline.py` 的 `_LUNCH_GAP_MIN = 91` **同一口径**, 刻意取同一个数,
+免得离线判定和在线补洞对"午休多长"各持一词。11:30 + 91 分钟 = 13:01。
+"""
+
 __all__ = [
     "AUCTION_IMPERSONATION_FORBIDDEN",
     "BUY_FIRST",
@@ -309,6 +326,9 @@ __all__ = [
     "LEG_SIDES",
     "LEG_STATUSES",
     "LIMIT_LOCK_SOURCE_PENDING",
+    "LUNCH_FIRST_AFTERNOON_BAR",
+    "LUNCH_GAP_MINUTES",
+    "LUNCH_LAST_MORNING_BAR",
     "MAX_ROUNDS_PER_DAY",
     "MINUTE_EXPORT_EARLIEST",
     "NAMESPACE",

@@ -140,6 +140,145 @@ def test_offline_package_does_not_redefine_epsilon() -> None:
 # ---------------------------------------------------------------- 可复现
 
 
+# ---------------------------------------------------------------- price := close
+#
+# 批次 20261025gtrounds_patch ②。
+#
+# 回测的成交价取 bar 的 `price`。这个字段不是本包算的 —— 它是
+# `app/strategy/intraday_features.py` L101 里 `{"price": pl.col("close")}` 赋过来的。
+# 所以"成交价 = bar[i+1]['price']"等价于"以下一根 bar 的收盘价成交"。
+# 这条测试把生成处的这层赋值钉住: 哪天那边把 price 改成 mid 或典型价, 这里立刻红。
+
+
+STRATEGY_FEATURES_SRC = (
+    Path(__file__).resolve().parents[1] / "app" / "strategy" / "intraday_features.py"
+)
+
+
+def test_price_is_assigned_from_close_at_the_generation_site() -> None:
+    """生成处 `price` 必须就是 `close`(源码级核对, 不用跑策略)。"""
+    src = STRATEGY_FEATURES_SRC.read_text(encoding="utf-8")
+    assert 'pl.col("close")' in src, "生成处不见了 close 赋值, price 口径可能已改"
+    # 允许有空白差异, 但必须是 "price" 映射到 close
+    compact = "".join(src.split())
+    assert '"price":pl.col("close")' in compact, (
+        "生成处 price 不再等于 close —— 回测的'下一根收盘价成交'口径随之失效"
+    )
+
+
+def test_built_frame_price_equals_close() -> None:
+    """端到端: 建出来的特征帧里, 每一行 `price == close`。"""
+    from app.strategy.intraday_features import build_feature_frame
+
+    d = date(2026, 1, 5)
+    rows = []
+    for i in range(5):
+        c = 10.0 + i * 0.03
+        rows.append(
+            {
+                "symbol": SYMBOL,
+                "date": d,
+                "datetime": datetime(d.year, d.month, d.day, 9, 30) + timedelta(minutes=i),
+                "open": c - 0.02,
+                "high": c + 0.05,
+                "low": c - 0.05,
+                "close": c,
+                "volume": 1000.0,
+                "amount": c * 1000.0 * 100,
+            }
+        )
+    raw = pl.DataFrame(rows)
+    out = build_feature_frame(raw)
+    assert "price" in out.columns
+    # `build_feature_frame` 不保留 `close` 列, 所以按 `datetime` 对齐回原始帧比较,
+    # 而不是指望输出里还有 close 可比。
+    joined = out.select("datetime", "price").join(
+        raw.select("datetime", "close"), on="datetime", how="inner"
+    )
+    assert joined.height == out.height, "有行没对上原始 close"
+    diffs = (joined["price"] - joined["close"]).abs().max()
+    assert diffs == pytest.approx(0.0), (
+        f"price 与 close 不一致(最大偏差 {diffs}); 生成处可能已改口径"
+    )
+
+
+# ---------------------------------------------------------------- D-assert 接线
+#
+# 批次 20261025gtrounds_patch ①。
+#
+# 断言定义在 loader, 但只有被 `build_offline_feature_frame` **真的调用**才算数。
+# 光测 loader 那个函数是测不到"接线断了"的 —— 把调用行删掉, 那些用例照样全绿。
+
+
+def _lunch_packed(*, afternoon_first_hhmm: tuple[int, int]) -> object:
+    """造一个"上午末段 + 下午开段"的 `LoadedMinutes`, 下午首根时刻可调。"""
+    from app.t_rounds.offline.loader import LoadedMinutes, assess_caliber
+
+    d = date(2026, 1, 5)
+    stamps = [
+        datetime(d.year, d.month, d.day, 11, 28),
+        datetime(d.year, d.month, d.day, 11, 29),
+        datetime(d.year, d.month, d.day, 11, 30),
+        # 下午首根 —— 正确应是 13:01; 传 (13,0) 就是"开始标注"那种错
+        datetime(d.year, d.month, d.day, *afternoon_first_hhmm),
+        datetime(d.year, d.month, d.day, afternoon_first_hhmm[0], afternoon_first_hhmm[1] + 1),
+    ]
+    rows = [
+        {
+            "symbol": SYMBOL,
+            "datetime": ts,
+            "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+            "volume": 1000.0, "amount": 10.0 * 1000.0 * 100,
+        }
+        for ts in stamps
+    ]
+    frame = pl.DataFrame(rows)
+    return LoadedMinutes(
+        frame=frame,
+        caliber=assess_caliber(frame),
+        inputs=("inline",),
+        skipped=(),
+        aligned=False,
+    )
+
+
+def test_build_offline_feature_frame_runs_the_lunch_assert() -> None:
+    """接线测试: 坏午休结构必须在 `build_offline_feature_frame` 里被拦下。
+
+    把 `features.py` 里那行 `assert_end_of_bar_lunch_gap(loaded.frame)` 删掉,
+    这条就会失败 —— 这才是"接线没断"的证据。
+    """
+    good = _lunch_packed(afternoon_first_hhmm=(13, 1))
+    out = build_offline_feature_frame(good)  # 不抛
+    assert out.bars == 5
+
+    bad = _lunch_packed(afternoon_first_hhmm=(13, 0))
+    with pytest.raises(ValueError, match="午休结构异常"):
+        build_offline_feature_frame(bad)
+
+
+def test_docs_and_backtest_state_price_equals_close() -> None:
+    """三处钉注必须在: backtest docstring / features 调用点 / docs。"""
+    backtest_src = (OFFLINE_DIR / "backtest.py").read_text(encoding="utf-8")
+    features_src = FEATURES_SRC.read_text(encoding="utf-8")
+    # OFFLINE_DIR = <repo>/backend/app/t_rounds/offline
+    #   parents[0]=t_rounds  [1]=app  [2]=backend  [3]=<repo>
+    repo_root = OFFLINE_DIR.parents[3]
+    docs_path = repo_root / "docs" / "t-rounds-offline-hfeat.md"
+    assert docs_path.exists(), f"docs 不存在: {docs_path}"
+    docs = docs_path.read_text(encoding="utf-8")
+
+    assert "price := 该 bar 的 close" in backtest_src, "backtest.py docstring 未钉 price:=close"
+    assert "price := 该 bar 的 close" in features_src, "features.py 调用点未钉 price:=close"
+    assert "price := 该 bar 的 close" in docs, "docs 未钉 price:=close"
+    # 引用生成处; 且不得再出现"生成处还没核过"那类旧表述
+    # (拼起来写, 免得这行断言本身把那个词带进源码扫描)
+    stale_phrase = "未" + "核实"
+    for name, text in (("backtest.py", backtest_src), ("features.py", features_src)):
+        assert "L101" in text, f"{name} 未引用生成处 L101"
+        assert stale_phrase not in text, f"{name} 仍含旧的不确定表述"
+
+
 def test_feature_derivation_is_reproducible() -> None:
     """同输入跑两次 → 逐列逐值相同（浮点按 1e-9 相对容差）。"""
     prices = [10.00, 10.02, 10.06, 10.05, 10.01, 9.98, 9.96, 10.00]

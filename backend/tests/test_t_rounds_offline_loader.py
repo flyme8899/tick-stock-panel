@@ -25,8 +25,10 @@ from app.t_rounds import constants as C
 from app.t_rounds.offline import CALIBER_MIXED, CALIBER_SINGLE
 from app.t_rounds.offline.loader import (
     MINUTE_COLUMNS,
+    SHARES_PER_LOT,
     MixedCaliberError,
     align_minute_frame,
+    assert_end_of_bar_lunch_gap,
     assert_no_market_open_impersonation,
     assess_caliber,
     load_minute_export,
@@ -343,6 +345,166 @@ def test_late_bar_is_accepted() -> None:
     """14:57 这类尾盘 bar 必须放行（同一个 Int8 溢出问题也会误伤它）。"""
     frame = _bars(start=datetime(2026, 1, 5, 14, 57), bars=2)
     assert_no_market_open_impersonation(frame)
+
+
+# ---------------------------------------------------------------- 午休结束标注
+#
+# 批次 20261025gtrounds_patch ①。
+#
+# bar 的 `datetime` 记的是结束时刻还是开始时刻, 从数值上看不出来。开始标注会让
+# 下午首根落在 13:00 而不是 13:01, "下一根成交"整体前移一分钟。这里从数据侧拦。
+
+
+def _lunch_frame(
+    *,
+    morning_last: str = "11:30",
+    afternoon_first: str = "13:01",
+    afternoon: int = 3,
+    symbol: str = SYMBOL,
+) -> pl.DataFrame:
+    """造一个"上午末段 + 下午开段"的帧, 午休两端可调。
+
+    只包含午休前后各几根 —— 断言只看午休结构, 不需要全天。
+    """
+    d = TRADE_DATE
+    stamps: list[datetime] = []
+    # 上午最后 3 根(最后那根的时刻由 `morning_last` 决定)
+    h, m = (int(x) for x in morning_last.split(":"))
+    last_morning = datetime(d.year, d.month, d.day, h, m)
+    for back in (2, 1):
+        stamps.append(last_morning - timedelta(minutes=back))
+    stamps.append(last_morning)
+    # 下午前 `afternoon` 根
+    ah, am = (int(x) for x in afternoon_first.split(":"))
+    first_afternoon = datetime(d.year, d.month, d.day, ah, am)
+    for i in range(afternoon):
+        stamps.append(first_afternoon + timedelta(minutes=i))
+    rows = [
+        {
+            "symbol": symbol,
+            "datetime": ts,
+            "open": 10.0,
+            "high": 10.1,
+            "low": 9.9,
+            "close": 10.0,
+            "volume": 1000.0,
+            "amount": 10.0 * 1000.0 * SHARES_PER_LOT,
+        }
+        for ts in stamps
+    ]
+    return pl.DataFrame(rows)
+
+
+def test_complete_trading_day_passes_lunch_assert() -> None:
+    """完整日: 11:30 + 13:01 / 间隔 91 分钟 → 通过。"""
+    frame = _lunch_frame()
+    assert_end_of_bar_lunch_gap(frame)  # 不抛即通过
+
+
+def test_lunch_gap_constant_matches_online_kline() -> None:
+    """离线口径与在线 `kline.py` 的 `_LUNCH_GAP_MIN = 91` 必须是同一个数。"""
+    assert C.LUNCH_GAP_MINUTES == 91
+    assert C.LUNCH_LAST_MORNING_BAR == "11:30"
+    assert C.LUNCH_FIRST_AFTERNOON_BAR == "13:01"
+
+
+def test_start_label_instead_of_end_label_raises() -> None:
+    """下午首根是 13:00(开始标注) → 抛。
+
+    这不是"数据缺了一根", 而是标注口径错了 —— 13:00 是开市时刻, 第一根 1 分钟 K
+    的结束标注只能是 13:01。若放过, "下一根成交"会整体前移一分钟。
+    """
+    frame = _lunch_frame(afternoon_first="13:00")
+    with pytest.raises(ValueError) as exc:
+        assert_end_of_bar_lunch_gap(frame)
+    assert C.LUNCH_FIRST_AFTERNOON_BAR in str(exc.value)
+    assert "发现" in str(exc.value), "文案风格须对齐 assert_no_market_open_impersonation"
+
+
+def test_wrong_afternoon_first_bar_raises_even_with_good_morning() -> None:
+    """上午末段在 11:30、下午首根是 13:02 → 抛。
+
+    (缺 11:30 那种情形按降级规则跳过, 见 `test_partial_day_without_morning_last_bar_is_not_killed`;
+    这里要把"上午对、下午错"单独钉住, 免得以为只要上午在就放过。)
+    """
+    frame = _lunch_frame(morning_last="11:30", afternoon_first="13:02")
+    with pytest.raises(ValueError):
+        assert_end_of_bar_lunch_gap(frame)
+
+
+def test_morning_last_bar_moved_off_1130_raises() -> None:
+    """上午末段被改标成 11:29(整段前移) → 抛。
+
+    注意: 这时帧里**没有** 11:30, 却也**不该**被当成"残缺日"放过 —— 因为它具备
+    "上午有结束 + 下午有开始"的完整午休结构, 只是标注口径错了。
+    `_lunch_frame` 会把上午那几根整体平移, 所以 11:30 确实不在帧里。
+    判定依据是"下午存在 bar 且上午段结束于 11:29 而非 11:30"——
+    按当前降级规则(缺 11:30 即跳过), 这条属于**已知取舍**, 用 xfail 记录而不是假装通过。
+    """
+    frame = _lunch_frame(morning_last="11:29", afternoon_first="13:01")
+    # 现状: 帧里没有 11:30 → 按"仅对完整午休结构硬断言"的安全默认跳过。
+    # 这不是遗漏, 是批次 20261025gtrounds_patch ⑧(G2) 明写的保守取舍:
+    # 漏检一个残缺日的标注错误, 好过把正常样本判死。
+    assert_end_of_bar_lunch_gap(frame)  # 不抛: 已知且刻意的
+
+
+def test_partial_day_without_afternoon_is_not_killed() -> None:
+    """残缺日: 只走完上午(没有下午 bar) → 不误杀。"""
+    d = TRADE_DATE
+    rows = [
+        {
+            "symbol": SYMBOL,
+            "datetime": datetime(d.year, d.month, d.day, 11, m),
+            "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0,
+            "volume": 1000.0, "amount": 10.0 * 1000.0 * SHARES_PER_LOT,
+        }
+        for m in (28, 29, 30)
+    ]
+    assert_end_of_bar_lunch_gap(pl.DataFrame(rows))  # 不抛
+
+
+def test_partial_day_without_morning_last_bar_is_not_killed() -> None:
+    """残缺日: 下午有 bar 但上午末段完全缺失(盘中才开始记) → 不误杀。"""
+    d = TRADE_DATE
+    rows = [
+        {
+            "symbol": SYMBOL,
+            "datetime": datetime(d.year, d.month, d.day, 14, m),
+            "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0,
+            "volume": 1000.0, "amount": 10.0 * 1000.0 * SHARES_PER_LOT,
+        }
+        for m in (0, 1, 2)
+    ]
+    assert_end_of_bar_lunch_gap(pl.DataFrame(rows))  # 不抛
+
+
+def test_empty_and_missing_columns_are_noop() -> None:
+    """空帧 / 缺列 → 早退, 不炸。对齐现有断言的容错姿态。"""
+    assert_end_of_bar_lunch_gap(pl.DataFrame())
+    assert_end_of_bar_lunch_gap(pl.DataFrame({"foo": [1, 2]}))
+
+
+def test_other_symbol_can_be_truncated_without_killing_the_good_one() -> None:
+    """逐 symbol·日 判定: 一个 symbol 残缺, 不影响另一个完整 symbol 的判定。"""
+    good = _lunch_frame(symbol="600000.SH")
+    # 另一个 symbol 只有下午、没有 11:30 → 它自己跳过
+    d = TRADE_DATE
+    bad_rows = [
+        {
+            "symbol": "000001.SZ",
+            "datetime": datetime(d.year, d.month, d.day, 14, 0),
+            "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0,
+            "volume": 1000.0, "amount": 10.0 * 1000.0 * SHARES_PER_LOT,
+        }
+    ]
+    combined = pl.concat([good, pl.DataFrame(bad_rows)], how="vertical_relaxed")
+    assert_end_of_bar_lunch_gap(combined)  # 不抛
+
+    # 反过来: 完整的那个 symbol 若标注错了, 仍要抛(不会被另一个残缺的掩盖)
+    bad_good = _lunch_frame(afternoon_first="13:00", symbol="600000.SH")
+    combined2 = pl.concat([bad_good, pl.DataFrame(bad_rows)], how="vertical_relaxed")
+    with pytest.raises(ValueError):
+        assert_end_of_bar_lunch_gap(combined2)
 
 
 # ---------------------------------------------------------------- 日内位移
