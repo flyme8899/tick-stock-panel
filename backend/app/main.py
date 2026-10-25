@@ -248,8 +248,8 @@ async def _application_lifespan(app: FastAPI):
 
     # 买卖信号注册表 (批次 20261025gp): 只经工厂建 store 并存进 app.state。
     # 未设 BUY_SELL_SIGNALS_PERSIST → 内存实现; 设了才落 data/buy_sell_signals/。
-    # 这里不挂任何路由、不接 SSE / 飞书 / 新闻推送, 也不在日管道里自动 upsert ——
-    # 落盘不等于推送。失败只警告, 不影响启动。
+    # 这里不挂任何路由, 也不在日管道里自动 upsert。
+    # 失败只警告, 不影响启动。
     try:
         from app.buy_sell_signals.store import build_signal_registry_store, persist_env_enabled
 
@@ -261,6 +261,25 @@ async def _application_lifespan(app: FastAPI):
             )
     except Exception as e:  # noqa: BLE001
         logger.warning("buy_sell_signals 注册表初始化失败 (不影响启动): %s", e)
+
+    # 买卖信号推送出口 (批次 20261025gpush): 只在 BUY_SELL_SIGNALS_PUSH 开时挂 helper。
+    # 通道 = SSE(QuoteService.push_alerts) + 站内(alert_store); 飞书下一拍。
+    # 这里**不调用** try_push —— 启动路径零真实推送, 也没有任何"扫全表自动推"的逻辑。
+    # 与上面的 persist env 正交: 落盘管"活得久", 推送管"播出去", 互不推导。
+    # 未开时不挂该属性(而不是挂一个 enabled=False), 让"没开"这件事在 state 上直接可见。
+    try:
+        from app.buy_sell_signals.push import push_env_enabled, try_push
+
+        if push_env_enabled():
+            app.state.buy_sell_signal_push = {
+                "enabled": True,
+                "try_push": try_push,
+                "quote_service": getattr(app.state, "quote_service", None),
+                "data_dir": store.data_dir,
+            }
+            logger.info("buy_sell_signals 推送门已开(SSE/站内; 飞书下一拍)")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("buy_sell_signals 推送门初始化失败 (不影响启动): %s", e)
 
     # 内置扩展表 (概念/行业): 先创建 config (含拉取配置), 默认开启定时拉取。
     # 必须在 pull_scheduler.refresh() 之前执行, 否则全新部署时 scheduler 读不到

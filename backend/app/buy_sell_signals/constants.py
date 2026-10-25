@@ -74,6 +74,33 @@ REGISTRY_SCHEMA_VERSION: Final = "1"
 是文件格式标签, 不是阈值。写成 int 会长期误报, 逼后人给版本乱跳数字。
 """
 
+# ---------------------------------------------------------------- 推送(可选, 20261025gpush)
+
+PUSH_ENV_NAME: Final = "BUY_SELL_SIGNALS_PUSH"
+"""开启推送的**唯一**环境变量名(批次 20261025gpush 引入)。
+
+真值集合与 `PERSIST_ENV_NAME` 完全一致(`1` / `true` / `yes` / `on`, 大小写与首尾
+空白归一), 但**两个 env 互不推导**:
+- `BUY_SELL_SIGNALS_PERSIST` 管记录活得比进程久
+- `BUY_SELL_SIGNALS_PUSH` 管状态变更播出去
+
+未设 → `try_push` 一行都不写。生产是否置 1 **另等部署口令**, 不得随合入默开。
+
+通道写死为 SSE + 站内告警(复用 `QuoteService.push_alerts` + `alert_store`)。
+飞书**下一拍** —— 本常量没有任何"通道选择"的开关位, 想加飞书请改代码评审,
+不要在这里加一个 `PUSH_CHANNELS` 之类的可配置项。
+"""
+
+MONITOR_EVENT_TYPE: Final = "buy_sell_signal_status_changed"
+"""写进告警事件的 `monitor_event_type`, 供前端/订阅者按类型分流。
+
+与既有告警的 `type` 字段并存: `type` 用同一个值, `monitor_event_type` 是更明确的
+检索键。不与管理中心既有规则的事件类型撞名。
+"""
+
+PUSH_PAYLOAD_SCHEMA_VERSION: Final = "1"
+"""推送载荷格式版本(字符串, 理由同 `REGISTRY_SCHEMA_VERSION`)。"""
+
 # ---------------------------------------------------------------- 设计钉版本
 
 SIGNAL_DESIGN_PIN: Final = "design_pin_v1"
@@ -199,6 +226,7 @@ __all__ = [
     "EVENT_CLASSES",
     "INDUSTRY_STANDARD_SW_L1",
     "INDUSTRY_STANDARD_THS_CURRENT",
+    "MONITOR_EVENT_TYPE",
     "NAMESPACE",
     "NOISE_MIX_FORBIDDEN",
     "PERSIST_ENV_NAME",
@@ -206,6 +234,8 @@ __all__ = [
     "POST_OPEN_NOISE_BUCKETS",
     "PUSH_DEDUPE_COOLDOWN_FIELD",
     "PUSH_DEDUPE_COOLDOWN_MIN",
+    "PUSH_ENV_NAME",
+    "PUSH_PAYLOAD_SCHEMA_VERSION",
     "REGISTRY_FILENAME",
     "REGISTRY_SCHEMA_VERSION",
     "SIGNAL_DESIGN_PIN",
