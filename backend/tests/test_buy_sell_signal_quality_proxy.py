@@ -411,3 +411,255 @@ def test_no_auction_backtest_code_path():
         text = path.read_text(encoding="utf-8")
         for banned in ("auction_backtest", "pre_open_1m", "open_1m_as_auction"):
             assert banned not in text, f"{path.name} 出现 {banned}"
+
+
+# ============================================ gval 契约加深(批次 20261025gval)
+#
+# 这一段的测例全部用**显式夹具**, 不读本机 `financials_metrics` parquet ——
+# 本机有没有那份文件不该影响结论, 而且夹具不得被写成"生产已测通"。
+
+
+def test_valuation_required_inputs_are_exactly_four():
+    """四项缺一不可, 且顺序有意义(先价后股本再 EPS/BPS)。"""
+    from app.buy_sell_signals.valuation_stub import VALUATION_REQUIRED_INPUTS
+
+    assert VALUATION_REQUIRED_INPUTS == (
+        "daily_close_series",
+        "shares_outstanding_pit",
+        "eps_ttm_pit",
+        "bps_pit",
+    )
+
+
+def test_valuation_missing_inputs_covers_all_required():
+    """`missing_inputs` 必须列全, 否则读的人会以为"只缺那一项"。"""
+    from app.buy_sell_signals.valuation_stub import VALUATION_REQUIRED_INPUTS
+
+    stub = valuation_asof("600000.SH", date(2024, 11, 1))
+    assert stub.missing_inputs == VALUATION_REQUIRED_INPUTS
+    assert stub.to_dict()["missing_inputs"] == list(VALUATION_REQUIRED_INPUTS)
+
+
+def test_valuation_serialized_shape_carries_pending_markers():
+    payload = valuation_asof("600000.SH", date(2024, 11, 1)).to_dict()
+    assert payload["status"] == "data_pending"
+    assert payload["tested_status"] == "untested"
+    assert payload["data_pending"] is True
+    assert payload["v_score"] is None
+    assert payload["score_emitted"] is False
+
+
+def test_valuation_stub_ignores_any_dataframe():
+    """签名里没有 DataFrame —— 结构上不可能读到某张表的 pe 列。"""
+    import inspect
+
+    params = inspect.signature(valuation_asof).parameters
+    assert set(params) == {"symbol", "asof"}, params
+
+
+def test_health_reason_catalog_contains_phase2_codes():
+    from app.buy_sell_signals.health_veto_stub import (
+        HEALTH_REASON_CATALOG_STATUS,
+        HEALTH_VETO_REASON_CATALOG_DRAFT,
+    )
+
+    assert set(HEALTH_VETO_REASON_CATALOG_DRAFT) == {
+        "audit_opinion_bad",
+        "leverage_stress",
+        "cashflow_stress",
+        "regulatory_risk",
+        "other_rule",
+    }
+    assert HEALTH_REASON_CATALOG_STATUS == "draft", "草稿不得被当成定稿"
+
+
+def test_health_reason_catalog_excludes_pass_codes():
+    """`data_insufficient_treat_as_pass` 绝不能作为合法原因码出现。
+
+    它的语义是"缺数据 → 当通过", 与 `hit=None` 的整套设计意图相冲突。
+    """
+    from app.buy_sell_signals.health_veto_stub import (
+        HEALTH_VETO_FORBIDDEN_PASS_CODES,
+        HEALTH_VETO_REASON_CATALOG_DRAFT,
+    )
+
+    for code in HEALTH_VETO_FORBIDDEN_PASS_CODES:
+        assert code not in HEALTH_VETO_REASON_CATALOG_DRAFT, code
+    assert "data_insufficient_treat_as_pass" in HEALTH_VETO_FORBIDDEN_PASS_CODES
+
+
+def test_health_hit_is_never_false_for_the_stub():
+    """`False` 是"查过没命中"的结论。没有规则, 就给不出这个结论。"""
+    stub = health_veto_asof("600000.SH", date(2024, 11, 1))
+    assert stub.health_veto_hit is None
+    assert stub.health_veto_hit is not False
+    assert stub.passed is False
+
+
+def test_health_if_hit_is_falsy_but_that_is_not_passing():
+    """软提醒第 3 条, 用代码把语义钉死, 而不是只写在文档里。
+
+    `if hit:` 不成立 ⇒ 行为是"不阻止"; 它**不**等于"已健康通过"。
+    唯一的通过判据是 `hit is False`, 而桩永不返回 False。
+    """
+    stub = health_veto_asof("600000.SH", date(2024, 11, 1))
+    hit = stub.health_veto_hit
+
+    blocked = bool(hit)                 # if hit: → False → 不阻止
+    passed = hit is False               # 唯一合法的"通过"
+    unknown = hit is None               # 唯一的"未知"
+
+    assert blocked is False, "None 是假值, if hit: 不进分支"
+    assert passed is False, "未查过不等于健康通过"
+    assert unknown is True, "当前状态是未知"
+    assert not (blocked is False and passed), "'不阻止' 与 '已通过' 必须分开"
+
+
+def test_health_reason_codes_empty_and_serialized():
+    stub = health_veto_asof("600000.SH", date(2024, 11, 1))
+    assert stub.reason_codes == ()
+    payload = stub.to_dict()
+    assert payload["health_veto_hit"] is None
+    assert payload["reason_codes"] == []
+    assert payload["passed"] is False
+
+
+def test_quality_pit_never_peeks_at_unannounced_period():
+    """公告日之后才能用那一期。用 `period_end` 判就会偷看。"""
+    fin = _financials(
+        [
+            {"symbol": "600000.SH", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 28),
+             **HEALTHY},
+        ]
+    )
+    # 10-27: 还没公告, 一个数都不该有
+    before = evaluate_quality("600000.SH", date(2024, 10, 27), financials=fin, kline=None)
+    assert before.q_score is None
+    assert all(v is None for v in before.metrics.values())
+    assert "no_financials_known_at_asof" in before.q_missing_reasons
+    assert before.metrics_asof_announce is None
+
+    # 10-28 当天: 公告日当天即已知(<= 而不是 <)
+    on_day = evaluate_quality("600000.SH", date(2024, 10, 28), financials=fin, kline=None)
+    assert on_day.metrics_asof_announce == date(2024, 10, 28)
+    assert on_day.metrics["roe"] == 18.0
+
+
+def test_quality_null_metric_stays_none_and_is_not_zeroed():
+    """null 保持 None, 不进 0 —— 0 会被读成"ROE 为零", 那是另一件事。"""
+    fin = _financials(
+        [
+            {"symbol": "600000.SH", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 28),
+             **{**HEALTHY, "roe": None}},
+        ]
+    )
+    result = evaluate_quality("600000.SH", date(2024, 11, 1), financials=fin, kline=None)
+    assert result.metrics["roe"] is None
+    assert result.metrics["roe"] != 0
+    assert "null_metric:roe" in result.q_missing_reasons
+    assert result.q_missing_flag is True
+    # 其余指标仍然可用, 分照样出 —— 缺失是按列的, 不是整条腿作废
+    assert result.metrics["gross_margin"] == 42.0
+
+
+def test_all_null_metrics_produce_no_score():
+    fin = _financials(
+        [
+            {"symbol": "600000.SH", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 28)},
+        ]
+    )
+    result = evaluate_quality("600000.SH", date(2024, 11, 1), financials=fin, kline=None)
+    assert result.q_score is None
+    assert result.score_emitted is False
+    assert all(v is None for v in result.metrics.values())
+    assert any(r.startswith("null_metric:") for r in result.q_missing_reasons)
+
+
+def test_quality_missing_reason_codes_are_a_closed_set():
+    """出现闭集之外的码, 说明有人加了新的缺失分支却没登记。"""
+    result = evaluate_quality("600000.SH", date(2024, 1, 1), financials=None, kline=None)
+    assert set(result.q_missing_reasons) <= qp.QUALITY_MISSING_REASON_CODES
+
+    fin = _financials(
+        [
+            {"symbol": "600000.SH", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 28),
+             **{**HEALTHY, "roe": None}},
+        ]
+    )
+    with_null = evaluate_quality("600000.SH", date(2024, 11, 1), financials=fin, kline=None)
+    for code in with_null.q_missing_reasons:
+        if code in qp.QUALITY_MISSING_REASON_CODES:
+            continue
+        assert any(code.startswith(p) for p in qp.QUALITY_MISSING_REASON_PREFIXES), code
+
+
+def test_quality_proxy_carries_w_value_none():
+    """`to_dict` 里 `w_value` 也是 None, 免得下游读到一个"缺失的键"。"""
+    result = evaluate_quality("600000.SH", date(2024, 11, 1), financials=None, kline=None)
+    assert result.w_value is None
+    assert result.to_dict()["w_value"] is None
+    assert result.to_dict()["weighting_status"] == "design_pending"
+
+
+def test_quality_q_score_is_a_count_not_a_magnitude():
+    """q_score 是"取值为正的项数", 幅度不影响计数 —— 防止有人拿它当强度排序。
+
+    七列全正 → 7 分。把每个正数放大几千倍, 计数一分不变。
+    """
+    small = _financials(
+        [{"symbol": "X", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 1),
+          "roe": 0.01, "gross_margin": 0.01, "debt_to_asset_ratio": 1.0, "net_income_yoy": 0.01,
+          "revenue_yoy": 0.01, "eps": 0.001, "bps": 0.001}]
+    )
+    big = _financials(
+        [{"symbol": "X", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 1),
+          "roe": 80.0, "gross_margin": 95.0, "debt_to_asset_ratio": 60.0, "net_income_yoy": 300.0,
+          "revenue_yoy": 200.0, "eps": 9.0, "bps": 50.0}]
+    )
+    a = evaluate_quality("X", date(2024, 11, 1), financials=small, kline=None)
+    b = evaluate_quality("X", date(2024, 11, 1), financials=big, kline=None)
+    assert a.q_score == b.q_score == len(QUALITY_METRIC_COLUMNS) == 7
+
+
+def test_quality_requires_at_least_half_the_metrics():
+    """只有一两个指标可用时**不给分**, 并给出原因。
+
+    只拿到 `eps` 一个数字就打出 q_score, 那个分只反映"有一项是正的", 与
+    "七项里有几项为正"完全是两回事 —— 一旦出分, 下游就会拿它去比较, 而它比的是
+    数据覆盖度, 不是公司质量。所以门槛是"至少一半"。
+    """
+    fin = _financials(
+        [
+            {"symbol": "600000.SH", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 28),
+             "eps": 1.8},  # 只有 eps 一项, 其余列全 null
+        ]
+    )
+    result = evaluate_quality("600000.SH", date(2024, 11, 1), financials=fin, kline=None)
+    assert result.q_score is None, "指标不足一半不得出分"
+    assert result.score_emitted is False
+    assert result.q_missing_flag is True
+    assert result.metrics["eps"] == 1.8, "已知的那一项仍要如实保留"
+    assert any(r.startswith("null_metric:") for r in result.q_missing_reasons)
+
+
+def test_quality_scores_once_half_the_metrics_are_present():
+    """刚好一半(七列里 4 项可用)就可以出分 —— 门槛是 `>= len/2`, 闭区间。"""
+    fin = _financials(
+        [
+            {"symbol": "600000.SH", "period_end": date(2024, 9, 30), "announce_date": date(2024, 10, 28),
+             "roe": 12.0, "gross_margin": 30.0, "eps": 1.2, "bps": 8.0},
+        ]
+    )
+    result = evaluate_quality("600000.SH", date(2024, 11, 1), financials=fin, kline=None)
+    assert result.q_score == 4
+    assert result.score_emitted is True
+
+
+def test_quality_does_not_depend_on_local_metrics_file():
+    """本段所有结论来自夹具, 与本机有没有 financials_metrics 无关。"""
+    from app.buy_sell_signals import quality_proxy
+
+    empty = evaluate_quality("600000.SH", date(2024, 11, 1), financials=pl.DataFrame(), kline=None)
+    assert empty.q_score is None
+    assert "no_financials_known_at_asof" in empty.q_missing_reasons
+    assert quality_proxy.QUALITY_WEIGHT_STATUS == "design_pending"

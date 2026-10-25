@@ -40,7 +40,25 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 仍写一次冷却。**gding 没做**: 飞书(**已取消, 从路线图去掉, 不再排期**)、
 钉钉独立冷却、钉钉独立触发时钟、日管道自动扫晋升。
 
-现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接**。
+**gval 做了什么(批次 20261025gval · 估值/健康窄开)**: 只做**契约加固 + 设计钉 +
+测例/文档**, 一行打分逻辑都没有。
+
+- **估值**: `VALUATION_REQUIRED_INPUTS` 四项写死可见; `v_score` 恒 `None`;
+  `tested_status` 恒 `untested`; 新增 `VALUATION_SNAPSHOT_PE_FORBIDDEN` 把"禁快照
+  pe"从注释变成可被扫描的符号; `ValuationStub.score_emitted` 恒 `False`。
+- **健康**: 新增**草稿**原因码目录 `HEALTH_VETO_REASON_CATALOG_DRAFT`(PHASE2 §3.3
+  五码)与禁止码集 `HEALTH_VETO_FORBIDDEN_PASS_CODES`(`data_insufficient_treat_as_pass`);
+  `health_veto_hit` 仍恒 `None`; `health_veto_rule_version` 仍 `design_pending`;
+  新增 `HealthVetoStub.passed`, 定义只有 `hit is False` 才算通过(当前恒 `False`)。
+  文档写死 `hit=None` 在 `if hit:` 下是"**不阻止**", **不是**"已健康通过"。
+- **质量**: 字段契约表进 docstring(`q_score` 是计数不是因子值); 原因码闭集
+  (`QUALITY_MISSING_REASON_CODES` / `..._PREFIXES`)落地; `w_value` 进 `to_dict`;
+  把过时的"0–5"改成实际的 0–7。**七列没有增删, 权重仍 `None` + `design_pending`**。
+
+**gval 没做**: 逐日 PE/PB 采集、任何 `v_score` 实装、健康规则引擎(`hit=true/false`)、
+白名单锁定、p30/p50 敏感性、竞价/放量、改 PERSIST/PUSH/DINGTALK、日管道接线。
+
+现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接 · 估值/健康仍 pending**。
 
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
@@ -69,6 +87,11 @@ from .constants import (
     design_version,
 )
 from .disclaimer import DISCLAIMER_TEXT
+from .health_veto_stub import (
+    HEALTH_VETO_REASON_CATALOG_DRAFT,
+    HealthVetoStub,
+    health_veto_asof,
+)
 from .models import SignalRecord, SignalValidationError
 from .push import (
     PushDisabled,
@@ -80,6 +103,13 @@ from .push import (
     dingtalk_webhook_ready,
     push_env_enabled,
     try_push,
+)
+from .quality_proxy import (
+    QUALITY_METRIC_COLUMNS,
+    QUALITY_MISSING_REASON_CODES,
+    QUALITY_MISSING_REASON_PREFIXES,
+    QualityProxy,
+    evaluate_quality,
 )
 from .quality_rank import (
     WHITELIST_PERCENTILE_LOCKED,
@@ -120,6 +150,8 @@ __all__ = [
     "DISCLAIMER_KEY",
     "DISCLAIMER_TEXT",
     "DiskSignalRegistryStore",
+    "HEALTH_VETO_REASON_CATALOG_DRAFT",
+    "HealthVetoStub",
     "InMemorySignalRegistryStore",
     "IndustryRankResult",
     "MANUAL_PUBLISH_CHECKLIST",
@@ -134,6 +166,10 @@ __all__ = [
     "PushError",
     "PushRejected",
     "PushResult",
+    "QUALITY_METRIC_COLUMNS",
+    "QUALITY_MISSING_REASON_CODES",
+    "QUALITY_MISSING_REASON_PREFIXES",
+    "QualityProxy",
     "REGISTRY_FILENAME",
     "RebalanceSnapshot",
     "SIGNAL_DESIGN_PIN",
@@ -153,6 +189,8 @@ __all__ = [
     "design_version",
     "dingtalk_env_enabled",
     "dingtalk_webhook_ready",
+    "evaluate_quality",
+    "health_veto_asof",
     "make_rebalance_id",
     "manual_publish",
     "percentile_rank",

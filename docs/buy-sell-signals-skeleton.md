@@ -1,4 +1,4 @@
-# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送 + gding 可选钉钉）
+# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送 + gding 可选钉钉 + gval 估值健康窄开）
 
 > **仅供研究，不构成投资建议；执行须人工确认。**
 
@@ -8,9 +8,10 @@
 > 20261025g2 的改动见文末 [g2 窄化](#g2-窄化批次-20261025g2) 一节；
 > 20261025gp 的改动见文末 [gp 可选落盘](#gp-可选落盘批次-20261025gp) 一节；
 > 20261025gpush 的改动见文末 [gpush 可选推送](#gpush-可选推送批次-20261025gpush) 一节；
-> 20261025gding 的改动见文末 [gding 可选钉钉](#gding-可选钉钉批次-20261025gding) 一节。
+> 20261025gding 的改动见文末 [gding 可选钉钉](#gding-可选钉钉批次-20261025gding) 一节；
+> 20261025gval 的改动见文末 [gval 估值/健康窄开](#gval-估值健康窄开批次-20261025gval) 一节。
 
-**现行口径：落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接。**
+**现行口径：落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接 · 估值/健康仍 pending。**
 
 ## 一句话
 
@@ -267,7 +268,7 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 
 ## ② 行业内相对分位：约定写死
 
-绝对分 `q_score`（0–5）没有基准：银行里 q=3 和计算机里 q=3 不是一回事。这一层补"同日、
+绝对分 `q_score`（0–7，七列里取值为正的项数）没有基准：银行里 q=3 和计算机里 q=3 不是一回事。这一层补"同日、
 同申万一级行业内的相对位置"。
 
 **只在同一天、同一 L1 内部比较**，不跨行业、不跨日。跨行业比较要先证明行业间可比，
@@ -651,5 +652,171 @@ BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
 - [x] `WHITELIST_PERCENTILE_LOCKED is None`；`WHITELIST_TRIAL_QUANTILE == 0.60`
 - [x] 未接竞价/放量事件生成；未实装估值/健康；未开 MCP 交易
 - [x] 单测全绿
+
+*参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
+
+---
+
+## gval 估值/健康窄开（批次 20261025gval）
+
+> 基线 tip `cd0b7406bc2d9d6b0f51f5196f1a27ac70010b8f`（含 #207 hfeat squash）。
+> 本拍只在 `buy_sell_signals/`（+ tests/docs）落改动，**未部署**。
+
+### 这一拍到底改了什么
+
+一句话：**它几乎没改行为，只把契约钉死了。** 估值与健康在 g / g2 阶段就已经是桩，
+这一拍不把桩变成引擎，而是让"桩该是什么形状"从注释里的约定变成**可被测例扫描的符号**。
+
+| 文件 | 改了什么 | 没改什么 |
+|---|---|---|
+| `valuation_stub.py` | 新增 `VALUATION_SNAPSHOT_PE_FORBIDDEN` / `VALUATION_SNAPSHOT_SOURCE_PREFIXES` / `score_emitted`；REQUIRED_INPUTS 逐项说明缺什么 | `v_score` 仍恒 `None`；签名不变 |
+| `health_veto_stub.py` | 新增草稿原因码目录 + 禁止码集 + `passed` 属性；`if hit:` 语义写成表 | `hit` 仍恒 `None`；版本仍 `design_pending` |
+| `quality_proxy.py` | 字段契约表 + 原因码闭集常量；`w_value` 进 `to_dict`；0–5 校正为 0–7 | 七列未增删；PIT 判据未动；权重仍 `None` |
+| `quality_rank.py` | 一行 docstring（0–5 → 0–7） | `0.60` / `p40` / `locked=None` 一个字节没动 |
+| `__init__.py` | gval 说明 + 导出 7 个新符号 | 三 env 导出原样 |
+
+### 软提醒 5 条（原样保留，不降档）
+
+1. **picker / `selection_fields` 的 `pe` 是当日快照，不是历史估值 PIT。** 它没有随日线
+   滚动的价格，也没有 price_date × announce_date 的配对。拿它做 PIT 会得到一条"能跑完、
+   每个数字都对不上"的序列，而且**不报错**。本拍把这条禁令落成常量
+   `VALUATION_SNAPSHOT_PE_FORBIDDEN = True`，并有用例扫"`v_score` 从未被赋值"。
+2. **股本 PIT 本机有 ≠ 估值表齐。** 还缺价 × EPS/BPS 的逐日配对，所以 `data_pending`
+   仍是对的。四个必需输入缺任何一项都不足以去桩。
+3. **`hit=None` 被 `if hit:` 当成假值时，语义是"不阻止"，不是"已健康通过"。**
+   见下一节，这是本拍最要紧的一条。
+4. **默认不自动部署。** 合入另等盘后口令；本拍默认可不部署。
+5. **合入 ≠ 开新闸。** 本拍不要求、也不接受改 `DINGTALK` / `PUSH` / `PERSIST`。
+
+### `if hit:` 到底是什么（写成表，别靠记）
+
+```python
+hit = health_veto_asof(sym, asof).health_veto_hit   # 当前恒 None
+```
+
+| 表达式 | 当前取值 | 语义 |
+|---|---|---|
+| `if hit:` | 不进分支 | **不阻止**（因为未知），**不是**"已健康通过" |
+| `if not hit:` | 进分支 | 把"未知"当成"健康" —— **误用** |
+| `if hit is False:` | 不成立 | 唯一合法的"健康通过"判据，当前永不成立 |
+| `if hit is None:` | 成立 | "未知"的唯一正确判据 |
+
+`False` 是一个**结论**（"查过，没命中"）。没有任何规则就返回 `False`，等于向调用方保证
+一件我们并不知道的事，而调用方极可能把它当"健康预警已通过"写进日志或界面。所以：
+
+- `health_veto_hit` **恒 `None`**，`blocks_publish` 也返回 `None`；
+- 新增 `HealthVetoStub.passed`，实现是 `self.health_veto_hit is False` ——
+  刻意的 `is False`，不是 `not ...`；当前恒 `False`；
+- 有测例同时断言 `blocked is False`、`passed is False`、`unknown is True`，
+  把"不阻止 ≠ 已通过"钉在代码里，而不是只写在文档里。
+
+### 健康原因码草稿（PHASE2 §3.3，本拍钉入常量）
+
+`HEALTH_VETO_REASON_CATALOG_DRAFT`（**草稿**，`HEALTH_REASON_CATALOG_STATUS = "draft"`）：
+
+| 原因码 | 含义（示意） | 触发需要的数据 |
+|---|---|---|
+| `audit_opinion_bad` | 审计非标 / 无法表示意见 | 审计意见字段（本机未确认可得） |
+| `leverage_stress` | 杠杆 / 偿债预警 | `debt_to_asset_ratio` 的跨行业阈值 |
+| `cashflow_stress` | 现金流恶化 | 经营现金流序列（阈值未定） |
+| `regulatory_risk` | 监管 / 立案 | 公告事件（本机未确认可得） |
+| `other_rule` | 升版后扩展 | — |
+
+这五码是**拦下码**，不是通过码：语义是"发现了这个问题"。理解反了，门禁方向就整个翻转。
+
+**禁止码**：`HEALTH_VETO_FORBIDDEN_PASS_CODES = {"data_insufficient_treat_as_pass"}`。
+
+它的意思是"数据不足 → 当成通过"，把未知当健康，与 `hit=None` 的整套设计意图正相反。
+缺数据的正确映射是**未知**（`hit=None`）或 `data_abnormal`，**绝不是** pass。本拍不实装
+映射，只把禁令落成常量，由两条测例守着（草稿目录里不含它 + 禁止集里含它）。
+
+落地前仍缺三件事，缺一件就不能产出 `hit=true/false`：`rule_catalog` 评审定稿 ·
+`historical_replay` · `threshold_calibration`（`HEALTH_RULE_DESIGN_REQUIRED`）。
+
+**健康不进权重**：包里没有 `w_health` 这个字段，也不允许出现 —— 健康是 veto（一票否决），
+把否决权摊成权重等于允许"用高估值抵消财务异常"。有 AST 扫描守着。
+
+### 质量契约：字段是什么，不是什么
+
+`q_score` 是**计数**不是强度：判据是"取值为正"，`roe=0.1%` 与 `roe=80%` 都只贡献 1 分。
+所以它能做粗筛，不能做排序。本拍把这条写成测例（幅度放大几千倍，`q_score` 不变）。
+
+| 字段 | 是什么 | **不是**什么 |
+|---|---|---|
+| `q_score` | 七列里取值为正的项数，0–7 | 不是质量因子值，不能当 alpha |
+| `score_emitted` | `q_score is not None` | 不表示"分数可用" |
+| `q_missing_flag` | 有任一原因码，**或** `q_score is None` | 不表示"质量差" |
+| `q_missing_reasons` | 闭集原因码 | 不是自然语言说明 |
+| `metrics_asof_announce` | 那期财报的**公告日** | 不是报告期末 |
+| `metrics_period_end` | 那期财报的**报告期末** | 不是可知日 —— 二者不可互换 |
+| `w_quality` / `w_value` | 恒 `None` | 不是"待填的 0" |
+
+原因码闭集（`QUALITY_MISSING_REASON_CODES` + `QUALITY_MISSING_REASON_PREFIXES`）：
+
+`no_financials_known_at_asof` · `missing_column:<col>` · `null_metric:<col>` ·
+`bad_metric:<col>` · `no_kline_source` · `no_kline_rows` · `kline_coverage_low:<x>`
+
+PIT 与 null 口径这一拍**没有改动**，只是补了覆盖：公告日前一天 → 全部 `None` 且
+`q_missing_reasons` 含 `no_financials_known_at_asof`；公告日**当天**即已知（`<=` 而非 `<`）；
+单列 null 保持 `None`、不进 0，其余列照常出分（缺失按列，不是整条腿作废）。
+
+### 隔离：本拍什么都没动
+
+| 约束 | 守它的手段 |
+|---|---|
+| 三 env 名与语义不改 | 断言 `PERSIST` / `PUSH` / `DINGTALK` 字面量；扫源码无 `os.environ[...]=` / `putenv` |
+| 真值集合不变 | 从 `store._TRUTHY` 与 `push._TRUTHY` 各取一份，断言都等于 `{1,true,yes,on}` |
+| 冷却不变 | `PUSH_DEDUPE_COOLDOWN_MIN == 30` |
+| 白名单未锁 | `WHITELIST_PERCENTILE_LOCKED is None`、`THRESHOLD_LOCKED is False`、`== 0.60`；扫全包无别处给它赋值 |
+| 无假 `v_score` | AST 扫 `v_score` 的 `AnnAssign` 默认值必须 `None`，且无运行期赋值 |
+| 无 `hit=False` 伪装 | AST 扫 `health_veto_hit` 不被赋 `False` |
+| 无 `w_health` | 扫去掉字符串后的代码 |
+| 无竞价冒充 | 扫 `auction_backtest` / `pre_open_1m` / `as_auction`；`AUCTION_STAT_BUCKET_0925 == "auction_0925"` |
+| 无提醒层耦合 | 扫 import：`app.services.trade_marks` / `app.news.push` / `VWAP_BAND` / `RANGE_BAND` / `T_COOLDOWN_MIN` |
+| 与 `t_rounds` 正交 | 扫 import 与 `EPSILON_VALUE_PCT` |
+| 文案红线 | 扫「估值已测通 / 健康门禁已验证 / 白名单已锁定 / 正式可推」 |
+
+> 静态扫的一个坑：**不能直接搜文本**。`valuation_stub` 的文档里必须能写"`pe_ttm` 不准用"，
+> `quality_proxy` 的文档里必须能写"没有 `w_health` 这个字段" —— 全文搜索会把正当的
+> 解释判成违规。做法是把 AST 里所有字符串字面量换掉再 dump，再扫代码部分。
+
+### 测试
+
+```bash
+cd backend && python -m pytest \
+  tests/test_buy_sell_signal_quality_proxy.py \
+  tests/test_buy_sell_signal_quality_rank.py \
+  tests/test_buy_sell_signal_gval_isolation.py \
+  -q
+```
+
+三条文件共 120 条。全部用**显式夹具**（小 DataFrame），**不读**本机 `financials_metrics`
+parquet，不联网、不带凭证。夹具不得被写成"生产已测通"的结论。
+
+### gval 明确不做
+
+- 逐日 PE/PB 采集任务；任何 `v_score` 实装打分
+- 健康规则引擎（`hit=true/false`）、阈值校准、历史回放
+- 白名单锁定与 p30/p50 敏感性（P1-2）
+- 竞价 / 放量事件（P1-3）
+- 改生产 `PERSIST` / `PUSH` / `DINGTALK`；日管道接线；MCP 交易
+
+### gval 验收自检（ALIGN §5）
+
+- [x] 基线 tip = `cd0b7406bc2d9d6b0f51f5196f1a27ac70010b8f`（`main` 未前移，无偏差）；纯增量于 `buy_sell_signals`（+tests/docs）
+- [x] `valuation_asof` → `data_pending=True`，`v_score is None`；无 pe 快照冒充 PIT
+- [x] `VALUATION_REQUIRED_INPUTS` 单测可见（四项逐字断言）；`tested_status == "untested"`
+- [x] `health_veto_asof` → `hit is None`，`rule_version == "design_pending"`；无 `hit=False` 伪装
+- [x] 原因码草稿含 PHASE2 五码；`data_insufficient_treat_as_pass` 不在草稿里、在禁止集里
+- [x] 文档写清：`hit=None` + `if hit:` ⇒「不阻止」≠「已健康通过」
+- [x] 健康不进权重（无 `w_health`）；`w_quality` / `w_value` 仍 `None` + `design_pending`
+- [x] 质量：PIT = `announce_date <= asof`；null ≠ 0；未新造因子；夹具不依赖真实 metrics 文件
+- [x] 白名单 `locked is None`；试跑 `0.60` / `p40` 未被本拍改写
+- [x] 未改 PERSIST / PUSH / DINGTALK env 语义或生产值；冷却 `30` 未动
+- [x] 无竞价/放量事件；无 09:30 冒充 09:25
+- [x] 单测不依赖真实 PE/PB 表；缺表路径显式 `data_pending`
+- [x] 文案无「已测通 / 已锁定 / 正式可推」；脚注可见
+- [x] 软提醒 5 条写入本节
+- [x] 默认不自动部署；合入另等盘后口令
 
 *参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*

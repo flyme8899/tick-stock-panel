@@ -6,8 +6,8 @@
   `debt_to_asset_ratio` / `net_income_yoy` / `revenue_yoy` / `eps` / `bps`)。
 - 不定权重。`w_quality` / `w_value` 留 `None` + `weighting_status="design_pending"`。
   权重是要靠回测定的, 骨架阶段随手填一个 0.3 / 0.7, 之后所有人都会把它当成结论。
-- 不打分。只产出一个 `q_score` 的**原始分**(0–5, 满足几项), 并明示它是代理而非
-  质量因子。
+- 不打分。只产出一个 `q_score` 的**原始分**(0–7, 七列里取值为正的项数), 并明示
+  它是代理而非质量因子。
 
 ## 这一层必须做对的事: 财务的 PIT
 
@@ -26,6 +26,51 @@
 日线只用于判断"有没有可用的行情"和取 `asof` 当天收盘。行情缺失同样标
 `q_missing_flag`, 而不是用 0 或前值补 —— 停牌与数据缺口是两回事, 而这一层
 分不清就不要假装分得清。
+
+## 字段契约(批次 20261025gval 对齐 PHASE2 §3.3)
+
+本批次**只加深契约, 不新造因子**。`QUALITY_METRIC_COLUMNS` 七列一列未加,
+权重仍 `None` + `design_pending`。下表把每个字段"是什么 / 不是什么都"钉死,
+免得下游拿它当质量因子:
+
+| 字段 | 是什么 | **不是**什么 |
+|---|---|---|
+| `q_score` | 七项指标里"为正"的项数, 0–7 的计数 | **不是**质量因子值, 不能排序、不能当 alpha |
+| `score_emitted` | `q_score is not None` | 不表示"分数可用", 只表示"算出来了" |
+| `q_missing_flag` | 有任一原因码, **或**`q_score is None` | 不表示"质量差", 只表示"数据不足以判断" |
+| `q_missing_reasons` | 缺失/异常的**闭集**原因码(见下) | 不是自然语言说明, 不做文案展示 |
+| `metrics` | 七列在 `asof` 的值, 不可知为 `None` | **不是**填过默认值的完整向量 |
+| `metrics_asof_announce` | 取到的那期财报的公告日 | 不是报告期(`period_end`) |
+| `metrics_period_end` | 取到的那期财报的报告期末 | 不是可知日 —— 二者不可互换 |
+| `price_coverage` | 近窗口工作日里有收盘价的比例 | 不是动量、不是波动率 |
+| `last_close` | 窗口内最后一根收盘价 | 不是 `asof` 复权后的可比价 |
+| `w_quality` / `w_value` | 恒 `None` | 不是"待填的 0", 不是暂定 0.5 |
+| `weighting_status` | 恒 `design_pending` | 不是 `draft` / `trial` 之类的中间态 |
+
+`q_missing_reasons` 是**闭集**, 新增码要同时改这里的文档与测例:
+
+| 原因码 | 触发条件 |
+|---|---|
+| `no_financials_known_at_asof` | `announce_date <= asof` 的行一行都没有 |
+| `missing_column:<col>` | 表里根本没有这一列 |
+| `null_metric:<col>` | 有这一列, 但这期为 `None` |
+| `bad_metric:<col>` | 有值但不能转成 float |
+| `no_kline_source` | 调用方没给 kline(或给了空表) |
+| `no_kline_rows` | 有来源, 但窗口内一个收盘价都没有 |
+| `kline_coverage_low:<x>` | 窗口覆盖率 < `MIN_PRICE_COVERAGE` |
+
+注意 `q_missing_flag` 与 `score_emitted` 是**两个方向**的标记: 前者说"数据够不够",
+后者说"分出来没有"。二者可能同时为真(数据缺失导致没出分), 但不能互相推导 ——
+所以分开存, 不要用一个字段兼表两件事。
+
+## 这一层**不能**做的事
+
+- **不能**在没有 `announce_date` 的表上跑 PIT。缺列直接返回空表, 不退回按
+  `period_end` 近似 —— 那是偷看, 而且偷看的方向永远对策略有利。
+- **不能**把 `metrics` 里缺失的值补成行业均值 / 中位数再算 `q_score`。补完之后
+  `q_missing_flag` 就永远是 False, 这一层也就没有存在的意义了。
+- **不能**用 `q_score` 直接排序选股。它是计数不是强度: `roe=0.1%` 与 `roe=80%`
+  都只贡献 1 分, 拿它排序等于把所有正数当成一样好。
 
 仅供研究，不构成投资建议；执行须人工确认。
 """
@@ -52,13 +97,48 @@ QUALITY_METRIC_COLUMNS: Final[tuple[str, ...]] = (
     "eps",
     "bps",
 )
-"""参与质量代理的财务列。全部来自 `financials_metrics` 现有列, 不新增因子。"""
+"""参与质量代理的财务列。全部来自 `financials_metrics` 现有列, 不新增因子。
+
+**批次 20261025gval 一列未加。** 想加列之前先回答"它的 PIT 怎么做": 没有
+`announce_date` 的列加进来, 整条腿的 PIT 就漏了。
+"""
+
+QUALITY_MISSING_REASON_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "no_financials_known_at_asof",
+        "no_kline_source",
+        "no_kline_rows",
+    }
+)
+"""`q_missing_reasons` 里**不带参数**的原因码(闭集的一部分)。
+
+带参数的两类(`missing_column:<col>` / `null_metric:<col>` / `bad_metric:<col>` /
+`kline_coverage_low:<x>`)前缀也在这里列一次, 便于测例按前缀断言:
+
+- `missing_column:`
+- `null_metric:`
+- `bad_metric:`
+- `kline_coverage_low:`
+
+新增原因码必须同时改这份集合、`QUALITY_MISSING_REASON_PREFIXES` 与文档表。
+"""
+
+QUALITY_MISSING_REASON_PREFIXES: Final[tuple[str, ...]] = (
+    "missing_column:",
+    "null_metric:",
+    "bad_metric:",
+    "kline_coverage_low:",
+)
+"""带参数的原因码前缀。与 `QUALITY_MISSING_REASON_CODES` 合起来才是全闭集。"""
 
 QUALITY_WEIGHT_STATUS: Final = "design_pending"
 """质量/估值权重状态。
 
 本批次**不定权重**。任何把 `w_quality` / `w_value` 填成具体数字的改动, 都应该先有
 回测支撑, 并把这里改成对应的已定版标识。
+
+「健康不进权重」同理: 没有 `w_health` 这个字段, 也不允许出现 —— 健康是 veto
+(一票否决), 不是加权项。把否决权摊成权重, 等于允许"用高估值抵消财务异常"。
 """
 
 PRICE_LOOKBACK_DAYS: Final = 20
@@ -74,7 +154,10 @@ MIN_PRICE_COVERAGE: Final = 0.6
 
 @dataclass(frozen=True, slots=True)
 class QualityProxy:
-    """一只票在 `asof` 的质量代理结果。"""
+    """一只票在 `asof` 的质量代理结果。
+
+    字段语义见模块 docstring 的「字段契约」表。**`q_score` 是计数不是因子值。**
+    """
 
     symbol: str
     asof: date
@@ -82,15 +165,27 @@ class QualityProxy:
     """满足的质量项数量(0–len(QUALITY_METRIC_COLUMNS)), 未评分时为 None。
 
     **不是**质量因子值, 不要拿它当 alpha。要看的是 `q_missing_flag` 与各项明细。
+
+    判据是"为正"而不是"多高": `roe=0.1%` 与 `roe=80%` 都算 1 分。所以这个数
+    只能用来做粗筛, 排序是它做不到的事。
     """
     metrics: dict[str, float | None] = field(default_factory=dict)
+    """七列在 `asof` 的值。不可知一律 `None`, **绝不填 0 / 行业均值 / 中位数**。"""
     metrics_asof_announce: date | None = None
+    """取到的那期财报的**公告日**。`None` 表示当期没有已知财报。"""
     metrics_period_end: date | None = None
+    """取到的那期财报的**报告期末**。与公告日不是一回事, 不可互换。"""
     q_missing_flag: bool = True
+    """数据是否不足以判断。默认 True —— 没跑过的对象不默认健康。"""
     q_missing_reasons: tuple[str, ...] = ()
+    """闭集原因码, 见 `QUALITY_MISSING_REASON_CODES` + `QUALITY_MISSING_REASON_PREFIXES`。"""
     price_coverage: float | None = None
+    """窗口覆盖率。`None` = 没有行情来源; `0.0` = 有来源但窗口内没数据。"""
     last_close: float | None = None
     w_quality: float | None = None
+    """质量权重。**恒 None** —— 权重未标定(`QUALITY_WEIGHT_STATUS`)。"""
+    w_value: float | None = None
+    """估值权重。**恒 None** —— 估值腿仍 `data_pending`, 没有可加权的东西。"""
     weighting_status: str = QUALITY_WEIGHT_STATUS
 
     @property
@@ -112,6 +207,7 @@ class QualityProxy:
             "price_coverage": self.price_coverage,
             "last_close": self.last_close,
             "w_quality": self.w_quality,
+            "w_value": self.w_value,
             "weighting_status": self.weighting_status,
         }
 
@@ -285,7 +381,7 @@ def evaluate_quality(
                 reasons.append(f"bad_metric:{col}")
                 continue
         present = [col for col, value in metrics.items() if value is not None]
-        # 至少一半指标可用才给分。只有 eps 一个数字就打出 0–5 的分, 那个分没有意义。
+        # 至少一半指标可用才给分。只有 eps 一个数字就打出 0–7 的分, 那个分没有意义。
         if len(present) * 2 >= len(QUALITY_METRIC_COLUMNS):
             q_score = sum(1 for col in present if metrics[col] > 0)  # type: ignore[operator]
 
@@ -356,6 +452,8 @@ __all__ = [
     "MIN_PRICE_COVERAGE",
     "PRICE_LOOKBACK_DAYS",
     "QUALITY_METRIC_COLUMNS",
+    "QUALITY_MISSING_REASON_CODES",
+    "QUALITY_MISSING_REASON_PREFIXES",
     "QUALITY_WEIGHT_STATUS",
     "QualityProxy",
     "evaluate_quality",
