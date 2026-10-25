@@ -164,6 +164,7 @@ from app.market_time import CN_TZ
 from .. import constants as C
 from ..models import TRoundRecord
 from ..state_machine import RoundCost, complete_round, transition
+from . import costs as costs_mod
 
 LOT_SIZE: Final = 100
 """纸面每轮的股数。1 手，够表达价差又不制造"大仓位"的错觉。"""
@@ -704,11 +705,28 @@ def _settle(
     exit_ts: datetime | None,
     mtm_px: float | None = None,
     mtm_ts: datetime | None = None,
+    cost_bp_tier: str = COST_DESIGN_PENDING,
 ) -> TRoundRecord:
     """把一轮推到终态。`completed` 一律经 `complete_round()`，不绕过。
 
     `fill_ts` 是**成交时刻**（确认 bar 的下一根），不是确认时刻。记录上写的
     `leg1_ts` 必须是真实成交的时刻 —— 写确认时刻会让审计的人以为下单早了一根。
+
+    ## 成本（批次 20261025gcost5c · 5c）
+
+    `cost_bp_tier` 缺省 `design_pending` + `0.0`，即**旧对照路径**：不扣任何成本。
+    传敏感性档位（`0bp`/`5bp`/`10bp`/`15bp`/`20bp`）时，金额由
+    `costs.cost_amount_for_tier()` 按「两腿均价 × qty」算出，**照样经**
+    `complete_round` 登记 —— 这里不自己算 `net = gross - cost`，也不改记录上的
+    净价差。理由很直接：绕过 `complete_round` 就等于绕过 5b 闸门（非零档 + 0 的
+    silent 0 正是闸门拦下的那个），而"只改报告数字"的假扣成本比不扣更糟 ——
+    它看起来像扣过。
+
+    `unreverted_at_cutoff` / `data_truncated` 两个终态**不受**档位影响：它们没有
+    实现净价差（`net_spread` 为 None），没有已实现盈亏可扣。未回摆轮的盯市盈亏
+    `mtm_pnl` 是"如果按 14:57 价格平掉"的假设值，也**不扣**成本 —— 它不是一次
+    真实平仓，扣了会把"假设平仓"和"真实平仓"的成本口径混在一起。这一点在报告的
+    `cost_gate_scope` 里明写，别让读者以为 mtm 也扣了。
     """
     if fill_px is None:
         raise ValueError("_settle 不接受无成交的轮次: no_fill 不该建记录(见 _simulate_one docstring)")
@@ -727,6 +745,17 @@ def _settle(
             leg2_status="filled",
             leg2_source_lot="old_lot",
         ).with_fields(leg2_price=exit_px, leg2_qty=LOT_SIZE)
+        # 成本金额: pending 对照走 0.0(旧口径), 敏感性档走费率×名义。
+        # 两种情况都**必须**经 complete_round 登记, 由 5b 闸门复核。
+        if cost_bp_tier == COST_DESIGN_PENDING:
+            cost = RoundCost(cost_amount=0.0, cost_bp_tier=COST_DESIGN_PENDING)
+        else:
+            cost = RoundCost(
+                cost_amount=costs_mod.cost_amount_for_tier(
+                    cost_bp_tier, leg1_price=fill_px, leg2_price=exit_px, qty=LOT_SIZE
+                ),
+                cost_bp_tier=cost_bp_tier,
+            )
         return complete_round(
             leg2_ok,
             leg1_price=fill_px,
@@ -737,7 +766,7 @@ def _settle(
             # 20261025gtrounds_patch ③ 之后, 漏传会被 complete_round 直接拒绝。
             leg1_source_lot="old_lot",
             leg2_source_lot="old_lot",
-            cost=RoundCost(cost_amount=0.0, cost_bp_tier=COST_DESIGN_PENDING),
+            cost=cost,
             leg1_ts=_as_cn(fill_ts) if fill_ts is not None else None,
             leg2_ts=_as_cn(exit_ts) if exit_ts is not None else None,
         )
@@ -974,6 +1003,11 @@ __all__ = [
     "VIRTUAL_LOT_ASSUMPTION",
     "BacktestSummary",
     "BucketCounts",
+    "CostSensitivityRow",
     "GroupSummary",
+    "RegimeCell",
+    "RegimeReport",
+    "build_cost_sensitivity",
+    "build_regime_report",
     "run_mode_a_backtest",
 ]

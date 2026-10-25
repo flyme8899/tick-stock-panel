@@ -6,11 +6,14 @@
 > 合入本批次 **不等于** 任何生产能力上线，也**不等于**「ε 门禁 / 可卖老股 /
 > 分档成本 / 正式推送闸」被验证通过 —— 这四项**都还没测通**。
 >
-> **成本侧更新（批次 20261025gcost，5b）**：`cost_bp_tier` 的契约已放开为白名单
-> `design_pending` ∪ `{0bp, 5bp, 10bp, 15bp, 20bp}`，非零档位必须配非零金额。
-> 这改的是**闸门**，不是**结论**：0 / 0.05% / 0.10% / 0.15% / 0.20% 的成本敏感性
-> 跑表属 **5c**，另一拍，**本文件里的任何数字都不是在扣成本之后得到的**。
-> 散户双边成本 0.1%–0.15% 只是**假设口径**，不是唯一真实成本。
+> **成本侧更新（批次 20261025gcost5c）**：`cost_bp_tier` 的契约在 5b 放开为白名单
+> `design_pending` ∪ `{0bp, 5bp, 10bp, 15bp, 20bp}`；5c 把五档接进了本包的跑表
+> （`offline/costs.py` + `offline/sensitivity.py`），按 `complete_round` 真扣。
+> **但费率仍是假设口径**：0 / 0.05% / 0.10% / 0.15% / 0.20% 是**设定档位**，
+> 不是按成交额分档的实测费率；散户双边成本 0.1%–0.15% 只是假设，不是唯一真实成本。
+> 主摘要仍走 `design_pending` + 0（**未扣成本**的对照口径），敏感性表是**另加**的
+> `cost_sensitivity` 块，两者并列，谁都没被替换掉。
+> 拆分费率表（G1）仍为 `design_pending`，本拍没动。
 
 ---
 
@@ -25,6 +28,8 @@ offline/
   loader.py       同尺判定 → 对齐 → 读导出（含 09:25 竞价守门）
   features.py     调 build_feature_frame + 路径 A 边沿 + 路径 B 进带标记
   gates.py        ε 主钉 + 敏感性分档（`_sens_` 前缀，不进主判定）
+  costs.py        成本档位 → 费率 + 名义金额（唯一实现）（5c）
+  sensitivity.py  五档成本敏感性表 + Regime 分格（5c）
   backtest.py     sell_first / buy_first × 路径 A / B 的纸面配对与分桶
   report.py       特征表 Parquet + 摘要 JSON + 元数据
 ```
@@ -347,16 +352,22 @@ polars 的 `dt.hour()` / `dt.minute()` 返回 `Int8`，`9*60 = 540` 在 Int8 里
 正式推送闸 · 竞价 / 放量事件 · 估值 / 健康实装 · 白名单锁定 · 计划表 17–19 ·
 MCP 交易 · **任何生产 env 改动**。
 
-其中「分档成本实测」细分一下（批次 20261025gcost）：
+其中「分档成本实测」细分一下（批次 20261025gcost / gcost5c）：
 
 | 项 | 状态 |
 |---|---|
 | 5b 契约放开（白名单 + 金额规则 + 拒非法档位） | **已做**（`constants.COST_BP_TIERS` / `complete_round`） |
-| 5c 成本敏感性表（0 / 0.05% / 0.10% / 0.15% / 0.20%） | **未做**，另一拍 |
-| offline `_settle` 接实测档 | **未做**，属 5c；仍走 `design_pending` + `0.0` |
+| 5c 成本敏感性表（0 / 0.05% / 0.10% / 0.15% / 0.20%） | **已做**（`offline/sensitivity.py`） |
+| offline `_settle` 接实测档 | **已接**：按档算金额，经 `complete_round` 真扣 |
+| 拆分费率表（G1，按成交额分档的实测费率） | **未做**，仍 `design_pending` |
+| 费率数值本身是实测还是假设 | **假设口径**（散户 0.1%–0.15%） |
 
-所以本批回测的所有净价差仍然是「未扣成本」的口径。闸门能拒非法档位，**不等于**
-成本已经被测过 —— 这两件事差一整个 5c。
+所以：主摘要的净价差仍是「未扣成本」的对照口径（`design_pending` + 0），
+这是**故意的**——换掉它，老报告就不可比了。扣成本的结果单独放在 `cost_sensitivity`
+块里，八列（`cost_bp_tier` / `cost_rate_pct` / `cost_amount_sum` / `expectancy_gross` /
+`expectancy_net` / `n_rounds_opened` / `completed_rate` / `footnote_retail_assumption`）。
+闸门能拒非法档位、跑表能按档真扣，**都还是不等于**成本已经被实测过 —— 差的正是
+G1 那张拆分费率表。
 
 ## 12. 跑测试
 
@@ -366,6 +377,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest \
   tests/test_t_rounds_offline_loader.py \
   tests/test_t_rounds_offline_features.py \
   tests/test_t_rounds_offline_backtest.py \
+  tests/test_t_rounds_offline_costs.py \
   tests/test_t_rounds_offline_isolation.py \
   -p no:pylama -p asyncio -q
 ```

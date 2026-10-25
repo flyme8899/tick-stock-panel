@@ -44,10 +44,18 @@
    （只数赢的那部分）必须分清：两个分母不同的平均数混用会得出相反结论。
 3. `limit_locked` —— 涨跌停锁死平不掉的轮次**留在分母**，不算数据问题。
    数据来源本批次没有，显式写 `limit_lock_source: data_pending`，**不猜**。
-4. `cost_bp_tier` —— 本离线回测仍走 `design_pending` + `0.0`，即**未扣成本**。
-   契约侧（批次 20261025gcost，5b）已放开白名单 `design_pending` ∪
-   `{0bp, 5bp, 10bp, 15bp, 20bp}`，非零档位必须配非零金额；但**敏感性跑表属 5c**，
-   另一拍。所以这里报出的净价差一律是毛价差口径，不能当成"扣过成本之后的结论"。
+4. `cost_bp_tier` / `cost_sensitivity` —— **两套口径并存，且必须分得清**：
+   - 主摘要（`groups` / `expectancy`）仍走 `design_pending` + `0.0`，即**不扣成本**。
+     这是对照基准，本拍（5c）**没有**改它 —— 改了等于把主口径偷偷换成扣成本口径，
+     读旧报告的人不会知道。
+   - `cost_sensitivity` 段是**同一批轮次**在五档成本假设下的重放（批次
+     20261025gcost5c）：`0bp`/`5bp`/`10bp`/`15bp`/`20bp`，每档经 `complete_round`
+     真扣。`expectancy_gross` = 主口径（不扣成本），`expectancy_net` = 扣该档后。
+   两套口径同在一份报告里，正是为了让读者一眼看出「成本假设换一个，期望值差多少」，
+   而不是拿一个扣成本数去和旧报告的毛数比。
+   - `cost_gate_scope` 明写这条边界，并明写**仍然禁止**「信号可做 / ε 最优 / 可交易」。
+   - 精确**拆分费率表**（佣金/印花税/滑点各占多少，G1）仍是 `design_pending`：
+     本拍给的是「如果双边成本是 X」的敏感性曲线，不是「真实成本是 X」的断言。
 """
 from __future__ import annotations
 
@@ -68,6 +76,8 @@ from .backtest import (
     BacktestSummary,
 )
 from .loader import CaliberReport
+from .costs import FOOTNOTE_RETAIL_ASSUMPTION
+from .sensitivity import build_sensitivity_payload
 
 FEATURES_PARQUET: Final = "features.parquet"
 FEATURES_CSV: Final = "features.csv"
@@ -163,10 +173,20 @@ def build_report_meta(
         ),
         "limit_lock_source": C.LIMIT_LOCK_SOURCE_PENDING,
         "cost_gate_scope": (
-            "5b 契约已放开: cost_bp_tier 白名单 = design_pending ∪ {0bp,5bp,10bp,15bp,20bp}, "
-            "非零档位必须配 cost_amount>0 (禁 silent 0); 但成本敏感性跑表属 5c 另一拍, "
-            "本报告的净价差 = 毛价差, 未扣任何成本 (cost_bp_tier 仍为 design_pending)"
+            "5b 契约: cost_bp_tier 白名单 = design_pending ∪ {0bp,5bp,10bp,15bp,20bp}, "
+            "非零档位必须配 cost_amount>0 (禁 silent 0)。"
+            "5c 已接档: cost_sensitivity 段为同一批轮次在 0bp/5bp/10bp/15bp/20bp 五档下"
+            "的重放, 每档经 complete_round 真扣; 名义口径 = "
+            "((leg1_price + leg2_price) / 2.0) * qty, cost_amount = (cost_rate_pct/100)*notional。"
+            "主摘要 groups/expectancy 仍为 design_pending + 0 = 未扣任何成本的对照口径, "
+            "与 cost_sensitivity 的 expectancy_net 不可混用。"
+            "成本只对 completed 轮扣减(有已实现价差); 未回摆轮的盯市盈亏 mtm_pnl 不扣成本。"
+            "精确拆分费率表(佣金/印花税/滑点, G1)仍为 design_pending: "
+            "本表是「若双边成本为 X」的敏感性曲线, 不是「真实成本为 X」的断言; "
+            + FOOTNOTE_RETAIL_ASSUMPTION
+            + "。仍禁止据此宣称信号可做 / ε 最优 / 可交易。"
         ),
+        "cost_sensitivity": build_sensitivity_payload(summary),
         "not_claimed_verified": (
             "本报告仅为离线同尺特征回测; ε 门禁、可卖老股实盘、分档成本、正式推送闸均未测通; "
             "涨跌停(limit_locked)缺数据来源, 涨跌停锁死的轮次尚未识别; "
