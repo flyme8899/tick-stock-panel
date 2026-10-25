@@ -47,6 +47,14 @@ export interface FrontendExtensionNavigation {
   icon: LucideIcon
   order?: number
   badge?: string
+  /**
+   * 导航项尾部的可选状态装饰（状态点、迷你徽标等）。
+   *
+   * 通用扩展 API：Layout 只按 `ComponentType` 渲染，**不感知**任何具体扩展包，
+   * 因此扩展自己的数据获取/判定逻辑可以留在扩展内，不必让核心包反向依赖它。
+   * 动态状态（如服务可达性）应走这里，而不是把结论写进静态 `badge` 字符串。
+   */
+  accessory?: ComponentType
 }
 
 export interface FrontendExtension {

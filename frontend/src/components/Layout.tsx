@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, Suspense, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, Suspense, type ComponentType, type ReactNode } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -570,7 +570,7 @@ export function Layout() {
 
   // 合并内置页面 + 可见的扩展分析菜单
   type NavIcon = (props: BrandIconProps) => ReactNode
-  type NavItem = { to: string; label: string; icon: NavIcon; badge?: string }
+  type NavItem = { to: string; label: string; icon: NavIcon; badge?: string; accessory?: ComponentType }
   const analysisNav: NavItem[] = (analysisMenus?.items ?? [])
     .filter(m => m.visible)
     .map(m => ({ to: `/analysis/${m.id}`, label: m.label, icon: m.icon === 'tags' ? Tags : BarChart3 }))
@@ -579,6 +579,8 @@ export function Layout() {
     label: item.label,
     icon: item.icon,
     badge: item.badge,
+    // 通用状态装饰由扩展自带, Layout 只当 ComponentType 渲染, 不感知具体扩展
+    accessory: item.accessory,
   }))
 
   const allNav: NavItem[] = [...nav, ...analysisNav, ...extensionNav]
@@ -765,7 +767,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map(({ to, label, icon: Icon, badge }) => {
+          {visibleNavItems.map(({ to, label, icon: Icon, badge, accessory: Accessory }) => {
             // 「自选」项 — 开启分组侧栏且未整体收起时, 渲染为可展开父项 + 二级分组
             const isWatchlistExpandable = to === '/watchlist' && groupsInNav && !railMode && watchlistGroups.length > 0
             return (
@@ -834,6 +836,8 @@ export function Layout() {
                         )}
                         {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
                         {to === '/monitor' && !railMode && <MonitorBadge active={isActive} />}
+                        {/* 扩展自带的状态装饰 (如 DSA 服务可达点): 通用渲染, 核心不 import 具体扩展 */}
+                        {Accessory && !railMode && <Accessory />}
                       </>
                     )}
                   </NavLink>
