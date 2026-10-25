@@ -487,8 +487,8 @@ def run_mode_a_backtest(
         (m, p): 0.0 for m in ("zheng_t", "dao_t") for p in PATHS
     }
 
-    # 配额（`MAX_ROUNDS_PER_DAY = 1`）是**按票按日**算的, 不是按 (模式, 路径) 算的。
-    # 配额按 (模式, 路径, symbol, 交易日) 计数 —— **四个格子各是独立世界**。
+    # 配额（`MAX_ROUNDS_PER_DAY = 1`）按 (模式, 路径, symbol, 交易日) 计数 ——
+    # **四个格子各是独立世界**。
     #
     # 为什么不共享一个 `(symbol, 交易日)` 名额：那样四个格子就会互相抢，抢的顺序
     # （谁先扫到谁拿走）直接写进 A/B 的比较里，等于给路径 A 一个系统性优势。而
