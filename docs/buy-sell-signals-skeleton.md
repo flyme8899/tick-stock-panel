@@ -1,4 +1,4 @@
-# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送 + gding 可选钉钉 + gval 估值健康窄开 + gwlist 白名单未锁）
+# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送 + gding 可选钉钉 + gval 估值健康窄开 + gwlist 白名单未锁 + gauction 放量未开）
 
 > **仅供研究，不构成投资建议；执行须人工确认。**
 
@@ -969,3 +969,168 @@ cd backend && python -m pytest \
 
 *参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
 
+---
+
+## 放量窄开（gauction / gvol）（批次 20261025gauction · P1-3）
+
+> 基线 tip `9dfba4ed2bff1ea8fe7300fb36b295828563fed1`（含 #209 gwlist squash）。
+> 本拍只在 `buy_sell_signals/`（+ tests/docs）落改动，**未部署**。
+
+### 一句话：窄开 = 勿真开，且竞价整段不做
+
+**这一拍不建触发引擎、不钉任何阈值，只把「放量突破长什么样」钉成可扫常量，
+并写清它为什么还不能跑。** 新增 `volume_breakout_stub.py` 一个空桩文件；
+`models.py` 只加 docstring、`constants.py` 只加注释，**行为字节零改**。
+
+### 身份钉（PHASE3 §3）
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| `signal_id` | `"volume_breakout"` | 注册表唯一键 |
+| `event_class` | `"intraday_volume"` | ∈ `EVENT_CLASSES`，**不是** `auction` |
+| `family` | `"minute_event"` | ∈ `SIGNAL_FAMILIES`，意味着必须有分钟级证据 |
+| `auction_stat_bucket` | `None`（恒） | 放量永不进竞价桶 |
+| `auction_rule_id` | `None` | 沿用 `AUCTION_RULE_ID_NONE`：根本不经过竞价规则 |
+
+**一个容易混的地方**：评估态与生命周期态是两个域。
+
+| 域 | 取值 | 语义 |
+|---|---|---|
+| `VOLUME_BREAKOUT_STATUS`（评估） | `data_pending` | 数据没到，无法判断 |
+| `SignalRecord.status`（生命周期） | `candidate` / `observe` / `publishable` / `retired` / `data_abnormal` | 在注册表里走到哪一步 |
+
+`data_pending` **不在** `SIGNAL_STATUSES` 里，也**不应该**加进去 —— 往生命周期
+取值域塞一个评估态，状态机会多出一条谁都不知道怎么迁移的状态。构造记录时用
+`candidate`（还没验证），评估态走 `metadata` 带过去。
+
+### 分列契约：放量不得写入 `auction_0925`
+
+竞价是 09:25 集合竞价的**离散撮合**，放量是开盘后的**连续成交**。两者信息集不同，
+合在一起算出来的均值 / 命中率没有解释意义（`NOISE_MIX_FORBIDDEN = True`）。
+
+`SignalRecord` 在 tip 上已经有通用拒绝规则（非 `auction` 类不得带竞价桶），
+本拍只是**显式覆盖放量这条路径**并测下来：`event_class="intraday_volume"` +
+`auction_stat_bucket="auction_0925"` → **构造即抛 `SignalValidationError`**。
+
+**缺竞价包不得用放量回填竞价。** 「09:25 那个桶空着，先用开盘后第一根 1 分钟 K 线
+顶上」是**永久禁止**的做法：冒充不会报错，只会让竞价类信号的统计全部失真。
+
+### 噪声档：可空桩，但不扩封闭集
+
+`post_open_noise_bucket` 的合法取值是封闭集（`POST_OPEN_NOISE_BUCKETS`：
+`open_0930_1000` / `intraday_1000_1430` / `close_1430_1500`）。
+
+PHASE3 §3 的示意名 `post_open_15m` **尚未入集**，本拍**不扩集**。扩集等于悄悄修改
+一个封闭取值域，而封闭域的意义正是"不让人随手往里加"。噪声档本拍只作空桩
+（`False` / `None`）。
+
+### 四条证据缺口：全 `data_pending`
+
+| 缺口 | 现状 |
+|---|---|
+| `local_minute_lib_data_pending` | 本机既没挂载也没落盘分钟数据；远端 SSH 历史有源 **≠** 本机可跑 |
+| `trigger_evidence_table_data_pending` | 没有放量突破的回测 / 触发表，量比与突破幅度**没有任何标定依据** |
+| `http_minute_listing_auth_pending` | 取分钟数据的 HTTP 入口 **401**，凭证未交；本仓不写、也不该写任何密码或 token |
+| `threshold_lock_data_pending` | 量比 / 突破幅度 / 窗口分钟数均未锁定，**一个数值都没钉** |
+
+### 仓内已有的反证（本拍最该被看见的一条）
+
+`app/custom/dsa/quant_evidence.yaml` 里的 `volume_breakout` 条目记录了四个近似口径的
+回测结论：
+
+| 口径 | 收益率 | 样本 |
+|---|---|---|
+| 放量创60日新高 | **−23.86%** | 78 |
+| 趋势突破 | **−32.44%** | 77（夏普 −4.09） |
+| 平台整理突破 | **−13.80%** | 79 |
+| 布林突破 | **−19.81%** | 110 |
+
+四个口径**全为负**，`verdict: strongly_negative`。这不是本拍造的数，是从既有文件抄来的，
+并用测例核对源文件（`test_negative_evidence_matches_the_source_file`）。
+
+所以这一拍更准确的说法不是「数据还没到，等到了就能跑」，而是
+**「已有证据指向负期望，开闸前必须先解释这个负号」**。阈值可以标定，负号解释不了就不能开。
+
+### 空桩语义：`triggered` 恒 `None`，不是 `False`
+
+```python
+stub = evaluate_volume_breakout("600000")   # 当前恒 data_pending
+```
+
+| 表达式 | 当前取值 | 语义 |
+|---|---|---|
+| `if stub.triggered:` | 不进分支 | **无法判断**，**不是**"没放量" |
+| `if not stub.triggered:` | 进分支 | 把"不知道"当成"没放量" —— **误用** |
+| `stub.triggered is False` | 不成立 | 唯一合法的"确认没放量"，当前永不成立 |
+| `stub.passed` | `False` | 实现是 `triggered is True`，刻意的 `is True` |
+
+`False` 是一个结论（"查过，没放量"）。没有阈值、没有分钟数据、没有触发表就返回
+`False`，等于向调用方保证一件我们并不知道的事。量比与突破幅度同理，**恒 `None`** ——
+填任何数都是假数。
+
+### 软提醒 7 条（原样保留，不降档）
+
+1. **竞价高阻塞已坐实**：无 09:25 包；分钟最早 09:30；**禁冒充**（永久）。
+2. **放量有远端分钟源 ≠ 本机可跑**：本机无挂载 / 401 → 只 pending，不假装触达。
+3. **MINUTE_CALIBER**：导出是混合复权；离线 VWAP / 量比**勿直接宣称门禁已测**。
+4. **18.2bp 是成本锚不是已实测回填**；分档滑点仍缺口。
+5. **Bonferroni 分母已钉 ≠ 显著性已测**；本派不跑 p（m=6，`independent_family_v1` 仅元数据）。
+6. **默认不自动部署**；合入另等盘后口令；**合入 ≠ 改三 env**。
+7. **飞书已取消**；**红涨绿跌不进假设族**；炸板仍观察。
+
+### 本拍与另拍的边界（写进文档，免得下次重新讨论）
+
+| 项 | 本拍 | 另拍条件 |
+|---|---|---|
+| 竞价 `auction_0925` 实现 / 回测 / 晨报计数 | **禁止** | 真实 09:25 定价包 + 字段可映射 PHASE3 §2 |
+| 09:30 冒充 09:25 | **永久禁止** | —— |
+| 放量触发引擎 + 阈值锁定 | **禁止**（仅 pending 桩） | 本机分钟证据 + 触发表 + **负号解释** |
+| 真锁白名单 | **禁止** | A–D 证据齐（#209 另拍） |
+| 估值打分 / 健康引擎 | **禁止** | #208 解 pending 另拍 |
+
+### 测试
+
+```bash
+cd backend && python -m pytest \
+  tests/test_buy_sell_signal_registry.py \
+  tests/test_buy_sell_signal_gwlist_isolation.py \
+  tests/test_buy_sell_signal_gval_isolation.py \
+  tests/test_buy_sell_signal_gvol_isolation.py \
+  -q
+```
+
+`test_buy_sell_signal_gvol_isolation.py` 是本拍新增主体。与 gwlist 同理：
+本拍代码几乎没变，风险全在"将来某一次顺手"。
+
+> 静态扫的同一个坑：**不能直接搜文本**。本包的文档必须能写"禁止把
+> `volume_breakout` 写进 `auction_0925`"，全文搜索会把正当禁令判成违规。
+> 做法仍是把 AST 字符串字面量换占位符再扫代码部分。
+
+### gauction 明确不做
+
+- 放量触发引擎、量比 / 突破幅度 / 窗口分钟数阈值（一个数值都没钉）
+- 假量触发表、假胜率表、"放量已测通"叙事
+- **竞价整段**：引擎 / 回测 / 晨报计数 / 09:25 路径（另等 09:25 真实包）
+- 扩 `POST_OPEN_NOISE_BUCKETS`；削弱 `models` 混桶拒斥
+- 改 `push.py` / `store.py` / `main.py` lifespan / `jobs/daily_pipeline.py` / `t_rounds`
+- 改三 env；质量 / 估值 / 健康 / 白名单行为（#208 / #209 字节未改）
+
+### gauction 验收自检（ALIGN §6）
+
+- [x] 基线 tip `9dfba4ed…`（`main` 未前移）；纯增量于 `buy_sell_signals`（+tests/docs）
+- [x] **竞价不在 diff 实现范围**（无 auction 引擎 / 回测 / 09:25 冒充路径）
+- [x] 放量仅定义 / 契约 / 桩 + `data_pending`；无假量触发表
+- [x] `auction_stat_bucket` 对放量路径为 `None`；混桶测例**构造即抛错**
+- [x] 身份常量可见：`volume_breakout` / `intraday_volume` / bucket `None`
+- [x] pending 四条（本机分钟库 / 触发表 / HTTP 凭证 / 阈值锁定）单测可见
+- [x] 未回退 #208 估值 / 健康 pending；未回退 #209 `LOCKED=None` / `0.60` / `p40`
+- [x] 未改 PERSIST / PUSH / DINGTALK；未碰 `t_rounds` / 飞书 / DSA / 17–19
+- [x] 质量 / 估值 / 健康 / 白名单行为本拍零碰（#208 / #209 字节未改）
+- [x] 文案无「竞价已就绪 / 放量正式可推 / 放量已测通 / 白名单已锁定」；脚注可见
+- [x] 无假数填回测表；阈值未钉死为「已锁」
+- [x] 未扩 `POST_OPEN_NOISE_BUCKETS`；未削弱 `models` 混桶拒斥
+- [x] 单测全绿；gwlist / registry 回归仍绿
+- [x] 软提醒 **7** 条写入本节
+- [x] 默认不自动部署；合入另等盘后口令
+
+*参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
