@@ -41,6 +41,25 @@
 
 如果将来真要做敏感性, 那条线也不是"改一个常量": 它要求先有成本实测与样本外验证。
 
+## 批次 20261025gwlist: 口径复核 + 证据缺口钉死(勿真锁)
+
+这一拍**只做三件事, 数值零改**:
+
+1. **口径复核**: `WHITELIST_PERCENTILE_TRIAL == "p40"`(标签) · `WHITELIST_TRIAL_QUANTILE
+   == 0.60`(阈值 = `1 - 0.40`) · 判定 `q_rank_within_ind >= 0.60`(闭区间)。标签与阈值
+   都**未被本拍改写**。复核结论: **已齐, 仅复核**。
+2. **空桩复核**: `WHITELIST_PERCENTILE_LOCKED is None`、`WHITELIST_THRESHOLD_LOCKED is
+   False`。本拍不加任何能写非空的路径。
+3. **缺口钉死**: `WHITELIST_LOCK_EVIDENCE_PENDING`(四条标签)+ `WHITELIST_LOCK_EVIDENCE`
+   (人读表)把"真锁还缺什么"写成代码里的事实 —— A 敏感性 / B 样本外 / C 成本 18.2bp 实测
+   / D 显著性 p 值, 四条**全 `data_pending`**。
+
+`p40` 是**标签**不是阈值。阈值只有一处定义: `1 - 0.40 = 0.60`。回退成"`>= 0.40` 即
+p40"的写法(#202 旧式)**已废弃**, 它把"行业前 40%"读成了"行业前 60%", 方向正好相反。
+
+**真锁另拍**: A–D 四条齐了、且择定阈值之后, 才谈写入 `LOCKED` 并同时升 `score_version` /
+`signal_registry.version`。本拍不做, 也不预留"先锁后补依据"的口子。
+
 ## 与其它包的关系
 
 只吃 `sw_pit.IndustryPit` 与 `quality_proxy.QualityProxy` 的形状, 不读盘、不联网、
@@ -72,6 +91,76 @@ WHITELIST_PERCENTILE_LOCKED: Final = None
 
 本批次没有跑过 p30/p40/p50 敏感性, 也没有样本外验证, 因此没有任何阈值可以被称作
 "锁定"。把这里改成 `"p40"` 不是一次配置调整, 是一次没有依据的结论声明。
+
+## 批次 20261025gwlist: 空桩复核 + A–D 证据缺口钉死
+
+这一拍**没有**、也不打算把它写成非空。做的是把"为什么还不能锁"写得可查、可测:
+
+- 缺口列在 `WHITELIST_LOCK_EVIDENCE_PENDING`(紧邻下方), 四条一项不少;
+- 缺口的**内容**写在 `WHITELIST_LOCK_EVIDENCE` 表里, 逐条说明"缺的是什么证据";
+- 有测例扫"除 `= None` 这一处定义外, 全包没有任何地方给它赋值非空";
+- 有测例扫"A–D 四条 pending 标签一个都不能少、一个都不能被悄悄删掉"。
+
+**禁止**把试跑值(`"p40"` / `0.60`)写进这里。试跑值写进锁定字段, 不会让门槛变可信,
+只会让"未锁定"这件事从此不可见 —— 下游读到非空 `LOCKED` 就会当成已有依据, 而依据
+其实一条都没有。要锁, 先把 A–D 四条补齐并另开一拍。
+"""
+
+WHITELIST_LOCK_EVIDENCE_PENDING: Final = frozenset(
+    {
+        "A_sensitivity_data_pending",      # 0.55/0.60/0.65 或 p30/p40/p50；训练/验证同号
+        "B_oos_data_pending",              # 逐年 + 近3年 + drop5
+        "C_cost_18_2bp_measured_pending",  # 18.2bp 仅锚, 非实测回填
+        "D_significance_m6_p_pending",     # Bonferroni m=6 分母已钉 != p 已测
+    }
+)
+"""真锁之前必须补齐、而当前**一条都没有**的四类证据(ALIGN §2.2 的 A–D)。
+
+缺任一条 → 禁止实装真锁。本批次四条全 `data_pending`:
+
+| # | 门槛 | 本拍状态 |
+|---|---|---|
+| A | 敏感性: 分位附近同尺对照(0.55/0.60/0.65, 或纸面 p30/p40/p50), 训练/验证同号 | 未跑 / 无报告 |
+| B | 样本外: 逐年 + 近 3 年, 去前 5 日稳健(drop5) | 未跑 / 无报告 |
+| C | 成本: 来回 **18.2bp 实测**(不是口头锚); 分档滑点实测仍缺口 | 仅锚, 无实测回填 |
+| D | 显著性: 买入日聚类 t + Bonferroni(**m=6** · `independent_family_v1`) | m 已钉, p 值未实测 |
+
+D 尤其容易被误读: `constants.BONFERRONI_M = 6` 与 `BONFERRONI_FAMILY_ALPHA` 是
+**分母先钉好**, 它让"将来算 p 值时该除几"有唯一答案, 但它本身**不含任何 p 值**。
+分母已钉 ≠ 显著性已测, 两者之间差着一整轮回测。
+
+这个 frozenset 是**清单不是开关**: 它不参与任何判定, 删空它也不会让 `LOCKED` 变成
+非空。它的作用是让"还缺什么"成为代码里可被扫描的事实, 而不是散落在几份文档里。
+
+清空本 frozenset 之后宣称"已锁"是**禁止**的 —— `WHITELIST_PERCENTILE_LOCKED` 仍是
+`None`, 任何"已锁"叙事都与它直接矛盾, 有测例守着这个矛盾。
+"""
+
+WHITELIST_LOCK_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
+    "A_sensitivity_data_pending": (
+        "敏感性",
+        "分位附近同尺对照(0.55/0.60/0.65, 或纸面 p30/p40/p50), 训练/验证同号; 本次未跑, 无报告",
+    ),
+    "B_oos_data_pending": (
+        "样本外",
+        "逐年 + 近 3 年, 去前 5 日稳健(drop5); 本次未跑, 无报告",
+    ),
+    "C_cost_18_2bp_measured_pending": (
+        "成本",
+        "来回 18.2bp 实测回填; 18.2bp 目前仅作锚, 分档滑点实测仍缺口",
+    ),
+    "D_significance_m6_p_pending": (
+        "显著性",
+        "买入日聚类 t + Bonferroni 的 p 值实测; m=6 分母已钉(constants), 但 p 值未测",
+    ),
+}
+"""A–D 的**人读版本**: 键是 pending 标签, 值是 (门槛名, 缺什么证据)。
+
+与 `WHITELIST_LOCK_EVIDENCE_PENDING` 的键集合必须完全一致 —— 有测例比对两边的键,
+免得只改一处、另一处悄悄过期。放在常量里而不是只写文档, 是为了让报告生成时可以直接
+把"缺什么"打印出来, 不必人手抄。
+
+仅供研究，不构成投资建议；执行须人工确认。
 """
 
 WHITELIST_TRIAL_QUANTILE: Final = 0.60
@@ -84,7 +173,12 @@ WHITELIST_TRIAL_QUANTILE: Final = 0.60
 """
 
 WHITELIST_THRESHOLD_LOCKED: Final = WHITELIST_PERCENTILE_LOCKED is not None
-"""派生常量: 阈值是否已锁定。当前恒 False —— 即从未锁定过。"""
+"""派生常量: 阈值是否已锁定。当前恒 False —— 即从未锁定过。
+
+刻意做成**派生**而不是独立的布尔: 如果它是一份手写的 `False`, 就存在"LOCKED 已非空
+但 THRESHOLD_LOCKED 还写着 False"这种互相矛盾的状态, 而且要改两处才能一致。派生之后,
+两者在结构上不可能分叉 —— 这是本批次唯一想加的"加固", 数值一个字节没动。
+"""
 
 RANK_MISSING_REASONS: Final = frozenset(
     {
@@ -332,6 +426,8 @@ __all__ = [
     "IndustryRankResult",
     "QualityRankError",
     "RANK_MISSING_REASONS",
+    "WHITELIST_LOCK_EVIDENCE",
+    "WHITELIST_LOCK_EVIDENCE_PENDING",
     "WHITELIST_PERCENTILE_LOCKED",
     "WHITELIST_PERCENTILE_TRIAL",
     "WHITELIST_THRESHOLD_LOCKED",
