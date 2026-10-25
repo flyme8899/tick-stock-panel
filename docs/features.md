@@ -248,6 +248,8 @@ APScheduler 默认 15:35 CST 自动:拉日 K → 重算 enriched 表 → 跑监�
 
 外部程序(自己的看板/脚本/量化服务)无需面板密码,凭 **API Token** 直接调用核心读取、写入与任务接口 —— 「核心能力开放」的出口层。总体设计与后续 Tier 见 [open-platform-plan.md](./open-platform-plan.md),可运行示例见 [examples/open-api](../examples/open-api/README.md)。
 
+> **lookahead 前置契约**: 任何策略在对外宣称「已过 lookahead 审计」、或对第三方开放 `run:backtest` 的结果之前,必须先有仓内 lookahead 夹具的通过记录(`backend/tests/backtest/test_lookahead_fixture.py`,主门禁=仓内 CI)。**未过不得宣称;无法判定同样不得宣称(fail-closed)。** 本拍只落前置契约与查询桩,**不含**运行时拦截中间件,**不在** MCP 热路径重跑夹具。方法与局限见 [lookahead-fixture.md](./lookahead-fixture.md)。
+
 ### Token 管理
 
 **设置 → 开放接口**: 新建 Token(名称 + 权限勾选),明文 `tsp_` 前缀只显示一次;可随时吊销,吊销立即生效。服务端只存 SHA-256 哈希(`data/user_data/api_tokens.json`,权限 0600)。
