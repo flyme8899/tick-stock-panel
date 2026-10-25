@@ -246,6 +246,22 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("wecom_bot_service init failed: %s", e)
 
+    # 买卖信号注册表 (批次 20261025gp): 只经工厂建 store 并存进 app.state。
+    # 未设 BUY_SELL_SIGNALS_PERSIST → 内存实现; 设了才落 data/buy_sell_signals/。
+    # 这里不挂任何路由、不接 SSE / 飞书 / 新闻推送, 也不在日管道里自动 upsert ——
+    # 落盘不等于推送。失败只警告, 不影响启动。
+    try:
+        from app.buy_sell_signals.store import build_signal_registry_store, persist_env_enabled
+
+        app.state.buy_sell_signal_store = build_signal_registry_store(store.data_dir)
+        if persist_env_enabled():
+            logger.info(
+                "buy_sell_signals 注册表已落盘(可选开启): %s",
+                getattr(app.state.buy_sell_signal_store, "path", "?"),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("buy_sell_signals 注册表初始化失败 (不影响启动): %s", e)
+
     # 内置扩展表 (概念/行业): 先创建 config (含拉取配置), 默认开启定时拉取。
     # 必须在 pull_scheduler.refresh() 之前执行, 否则全新部署时 scheduler 读不到
     # 刚创建的预设, 定时任务不会启动。

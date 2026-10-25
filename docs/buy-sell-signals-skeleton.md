@@ -1,18 +1,23 @@
-# 买卖信号骨架（批次 20261024g + g2 窄化 20261025g2）
+# 买卖信号骨架（批次 20261024g + g2 窄化 20261025g2 + gp 可选落盘 20261025gp）
 
 > **仅供研究，不构成投资建议；执行须人工确认。**
 
 本文说明 `backend/app/buy_sell_signals/` 这个包**做了什么**、**明确不做什么**，以及
 为什么几条硬约束写成了常量而不是配置项。
 
-> 20261025g2 的改动见文末 [g2 窄化](#g2-窄化批次-20261025g2) 一节。
+> 20261025g2 的改动见文末 [g2 窄化](#g2-窄化批次-20261025g2) 一节；
+> 20261025gp 的改动见文末 [gp 可选落盘](#gp-可选落盘批次-20261025gp) 一节。
 
 ## 一句话
 
 实现了买卖信号的**注册表字段 + 状态机骨架 + 日线质量代理挂点 + 申万一级 PIT 只读查询**，
-Store 用**内存实现，默认不落盘**，估值与健康只返回 `data_pending` / `design_pending`。
+Store 默认用**内存实现**，置 `BUY_SELL_SIGNALS_PERSIST=1` 后改为**落盘到本地 JSON**；
+估值与健康只返回 `data_pending` / `design_pending`。
 
 **没有**接任何 HTTP 路由、**没有**接日管道、**没有**接推送。
+
+**落盘 ≠ 推送**：开了落盘也只是把注册表写进 `data/buy_sell_signals/registry.json`，
+没有 SSE、没有飞书、没有 `news.push`。
 
 ## 包结构
 
@@ -21,7 +26,7 @@ Store 用**内存实现，默认不落盘**，估值与健康只返回 `data_pen
 | `constants.py` | 元数据 / Bonferroni 口径 / 与提醒层分家的冷却字段名 |
 | `models.py` | `SignalRecord`（frozen dataclass）+ 字段校验 |
 | `state_machine.py` | 转移表 + 人工发布闸 + 硬禁自动晋升 |
-| `store.py` | `SignalRegistryStore` 协议 + `InMemorySignalRegistryStore` + 默认不可用的磁盘空壳 |
+| `store.py` | `SignalRegistryStore` 协议 + `InMemorySignalRegistryStore` + `DiskSignalRegistryStore`（env 门控，批次 gp 起真落盘）+ `build_signal_registry_store` 工厂 |
 | `sw_pit.py` | 申万一级 PIT：`history × l1_map`，按 `valid_from`/`valid_to` 取当时归属 |
 | `quality_proxy.py` | 日线质量代理：财务按 `announce_date` 做 PIT |
 | `quality_rank.py` | **g2**：申万一级行业内的质量相对分位 + 白名单试跑判定 |
@@ -130,16 +135,43 @@ import `VWAP_BAND` / `RANGE_BAND` / `T_COOLDOWN_MIN`。
 没有随日线滚动的价格，也没有与公告日的配对关系。用它当逐日估值序列，回测能跑完，
 只是每个数字都对不上。
 
-## 存储：默认不落盘，且要落盘得先过两道门
+## 存储：默认不落盘，落盘由 env 门控（批次 gp 起真落盘）
 
-- `InMemorySignalRegistryStore` 是默认实现，进程退出即消失
-- `DiskSignalRegistryStore` 构造时 `enable_persist=False`（默认）→ `PersistDisabledError`
-- 即便显式 `enable_persist=True`，本批次也只是 `NotImplementedError`
+三道门，任何一道没开都退化成内存实现：
 
-`main.py` / `daily_pipeline.py` 里**没有**任何 `buy_sell_signals` 引用，有测试守着。
+1. **构造门**：`DiskSignalRegistryStore(..., enable_persist=False)`（默认）直接抛
+   `PersistDisabledError`。这条自 g 轮就有，没有放宽。
+2. **工厂门**：`build_signal_registry_store(data_dir=None)` 是**唯一**的正常入口。
+   它读 `BUY_SELL_SIGNALS_PERSIST`（真值集合 `{"1","true","yes","on"}`，大小写与空白
+   都归一）。未设 / 空 / 假值 → 返回 `InMemorySignalRegistryStore`。
+3. **接线门**：`main.py` 的 lifespan 只调工厂，且**只存到 `app.state.buy_sell_signal_store`**，
+   不挂路由、不订阅事件、不接日管道。`main.py` 里出现 `DiskSignalRegistryStore(` 会被
+   静态测试拦下（防有人绕过工厂硬开）。
 
-磁盘空壳**不调用** `partition_writer`：注册表是"少量记录、按 id 查"，与分区 parquet
-的形状不符。硬套会得到一个既慢又难查的实现，还会在 `data/` 下多出一批无人认领的分区。
+落盘位置写死为 `settings.data_dir / "buy_sell_signals" / "registry.json"`，不写
+`partition_writer` 的生产分区，也不碰 `/data/tsp-reports`：注册表是"少量记录、按 id 查"，
+与分区 parquet 的形状不符。硬套会得到一个既慢又难查的实现，还会在 `data/` 下多出一批
+无人认领的分区。
+
+### 落盘格式与不变式
+
+```json
+{ "namespace": "...", "schema_version": "1",
+  "records": [ { "signal_id": "...", "version": "...", "...": "..." } ] }
+```
+
+- **原子写**：走 `fs_utils.atomic_write_text`（临时文件 + rename），不会留半个文件
+- **非有限浮点 → `null`**：序列化前过 `json_safe(..., coerce=True)`，`allow_nan=False`
+  落盘。`metadata` 是不校验的自由字典，脏 NaN 能进来，因此必须有这层兜底
+- **文档是坏的 → 报错，不重建**：JSON 解析失败 / 缺 `records` / 元素不是 dict /
+  `from_dict` 校验失败 / 同一 `signal_id` 出现两条 `publish_pointer=True`，一律抛
+  `SignalRegistryCorruptError`。**不自动重建空表** —— 「文件坏了」和「表是空的」必须区分，
+  否则一次解析事故就静默抹掉整份注册表
+- **空目录/文件不存在 → 合法空表**：首次启动不报错
+- `schema_version` 是**字符串** `"1"`，不是 int。写成 int 会落进「本包常量不得与
+  `t_rounds` 门禁同值」那条静态扫描（撞 `MAX_ROUNDS_PER_DAY = 1`），逼后人给版本号乱跳
+- 指针互斥：同一 `signal_id` 至多一条 `publish_pointer=True`，`upsert` 与
+  `set_publish_pointer` 都会先查后写
 
 ## 测试
 
@@ -153,13 +185,13 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
   tests/test_buy_sell_signal_rebalance_snapshot.py -q
 ```
 
-196 条（g 轮 130 + g2 轮 66），不依赖网络 / Pro 分钟 capability / 真实 `/data/tsp-reports`。
-夹具全部在 `tmp_path` 里现造。
+225 条（g 轮 130 + g2 轮 66 + gp 轮 29），不依赖网络 / Pro 分钟 capability / 真实 `/data/tsp-reports`。
+夹具全部在 `tmp_path` 里现造；落盘测试只写 `tmp_path`，不碰 `settings.data_dir` 之外的地方。
 
 ## ALIGN §4 自检
 
 - [x] 状态机：`candidate → … → publishable` 禁止自动晋升；`manual_publish_required` 默认 true
-- [x] Store：接口与内存实现分离；默认不落盘
+- [x] Store：接口与内存实现分离；默认不落盘（gp 起落盘为 env 门控的可选项，默认仍关）
 - [x] 竞价与开盘后噪声字段分列；无混桶 API
 - [x] 行业：申万 PIT 路径；禁同花顺当前态 silent 复用（抛错而非降级）
 - [x] 健康/估值：pending 标记可见；无「已测通」文案
@@ -326,9 +358,65 @@ rebalance_id, pit_asof, score_version, universe_n, scored_n, whitelist_n_p40
 - [x] `whitelist_percentile_trial=p40` 可见；`locked` 为空；无「已锁定」文案（否定语境放过）
 - [x] 估值/健康 stub 未假装有表；`health_veto_hit` 非 `False` 伪装通过
 - [x] 权重仍 `design_pending`；无假权重数字当结论
-- [x] Store 默认不落盘；未接线 main/日管道 persist/push
+- [x] Store 默认不落盘（未设 `BUY_SELL_SIGNALS_PERSIST` → `InMemory`）；main 只经工厂写
+      `app.state`，未接路由 / 日管道 / push
 - [x] 与 `t_rounds` / `trade_marks` / `news.push` 无数值或符号耦合（静态检查）
 - [x] 单测全绿；不依赖 Pro 分钟 / 竞价包
+- [x] 文档脚注「仅供研究，不构成投资建议」
+
+*参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
+
+## gp 可选落盘（批次 20261025gp）
+
+**一句话**：`DiskSignalRegistryStore` 从"空壳"变成"真能落盘"，但**默认仍关**、
+**只开落盘不开推送**。
+
+### 改了什么
+
+| 位置 | 变化 |
+|---|---|
+| `constants.py` | 新增 `PERSIST_ENV_NAME` / `PERSIST_SUBDIR` / `REGISTRY_FILENAME` / `REGISTRY_SCHEMA_VERSION` |
+| `models.py` | 新增 `SignalRecord.from_dict` 与模块级 `signal_record_from_dict`：过滤派生键、解析时区、仍走 `__post_init__` 校验 |
+| `store.py` | `DiskSignalRegistryStore` 实装 `_load` / `_flush` 与全套读写；新增 `SignalRegistryCorruptError`、`persist_env_enabled()`、`build_signal_registry_store()` |
+| `main.py` | lifespan 里经工厂建 store 存到 `app.state`；**不挂路由、不建任务、不订阅事件** |
+| `docs` | 本节 + 上文存储章节重写 |
+
+### 没改什么（逐条钉住）
+
+- **白名单阈值未动**：`WHITELIST_TRIAL_QUANTILE = 0.60`、`WHITELIST_PERCENTILE_TRIAL = "p40"`、
+  `WHITELIST_PERCENTILE_LOCKED = None` 全部照旧。gp 不碰 g2.1 的口径
+- **推送仍未接**：`main.py` 不得 import `app.news.push` / `sse_starlette` / 飞书客户端，
+  有静态测试按 **import 语句**扫（不是裸子串 —— 注释里写"不接 news.push"是合法的）
+- **日管道仍未接**：`daily_pipeline.py` 里不得出现 `DiskSignalRegistryStore` 或
+  `buy_sell_signals`
+- **`partition_writer` 仍禁**：AST 扫 `store.py`，名字不得出现
+- **`t_rounds` 仍不 import**：静态测试逐文件扫
+
+### 怎么开
+
+```bash
+# 默认: 内存, 进程退出即消失
+python -m app.main
+
+# 落盘: 写 data/buy_sell_signals/registry.json
+BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
+```
+
+生产是否置 1 **另等部署口令**，不随合入默开。
+
+### gp 验收自检（ALIGN §5）
+
+- [x] 基线 tip = `c6adb0bf…`；改动落在 `buy_sell_signals` + `tests/` + `docs/`，`main.py` 只有 lifespan 一段
+- [x] 未设 env → `InMemorySignalRegistryStore`，且**不创建任何目录**（测试断言 `tmp_path` 为空）
+- [x] 设 env → 写 `buy_sell_signals/registry.json`，重开进程能还原记录，往返无损
+- [x] env 名写死为 `BUY_SELL_SIGNALS_PERSIST`，真值集合固定，无第二个开关
+- [x] 落盘文件损坏 → `SignalRegistryCorruptError`，**不自动重建空表**，原文件保留
+- [x] 同一 `signal_id` 两条 `publish_pointer=True`（磁盘上被人改过）→ 报错
+- [x] 非有限浮点 → 落盘为 `null`，`json.loads` 严格解析通过
+- [x] `from_dict` 丢弃派生键与免责声明快照；naive datetime 直接拒（不猜时区）
+- [x] 白名单口径回归：`0.60` / `p40` / `locked=None` 未变（g2.1 测试仍红-绿值守）
+- [x] 推送仍未接：`main.py` 无 `app.news.push` / `sse_starlette` / 飞书 import
+- [x] 单测全绿；不依赖网络 / Pro 分钟 / 真实 `/data`
 - [x] 文档脚注「仅供研究，不构成投资建议」
 
 *参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*

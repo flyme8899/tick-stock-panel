@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -20,6 +21,7 @@ import pytest
 from app.buy_sell_signals import (
     BONFERRONI_M,
     BONFERRONI_SCHEME_ID,
+    DISCLAIMER_KEY,
     DISCLAIMER_TEXT,
     MANUAL_PUBLISH_CHECKLIST,
     DiskSignalRegistryStore,
@@ -28,6 +30,7 @@ from app.buy_sell_signals import (
     PersistDisabledError,
     PublishPointerConflict,
     SignalRecord,
+    SignalRegistryCorruptError,
     SignalRegistryError,
     SignalStateError,
     SignalTransitionError,
@@ -39,9 +42,19 @@ from app.buy_sell_signals import (
 from app.buy_sell_signals import state_machine
 from app.buy_sell_signals import store as store_module
 from app.buy_sell_signals import models as models_module
+from app.buy_sell_signals.constants import (
+    PERSIST_ENV_NAME,
+    PERSIST_SUBDIR,
+    REGISTRY_FILENAME,
+    REGISTRY_SCHEMA_VERSION,
+)
+from app.buy_sell_signals.store import build_signal_registry_store, persist_env_enabled
 from app.market_time import cn_now
 
 PKG_DIR = Path(__file__).resolve().parents[1] / "app" / "buy_sell_signals"
+
+PUSH_MODULE_ROOTS = ("app.news.push", "sse_starlette", "app.services.feishu")
+"""推送栈的模块根。main.py 不得 import 它们 —— 本批次只开落盘, 不开推送。"""
 
 
 def _record(**kwargs) -> SignalRecord:
@@ -536,20 +549,51 @@ def test_disk_store_requires_explicit_opt_in(tmp_path):
         DiskSignalRegistryStore(tmp_path)
 
 
-def test_disk_store_even_when_enabled_is_not_implemented(tmp_path):
-    """显式打开也只是拿到 NotImplementedError —— 本批次没有落盘实现。"""
-    with pytest.raises(NotImplementedError):
-        DiskSignalRegistryStore(tmp_path, enable_persist=True)
-    assert list(tmp_path.iterdir()) == [], "不得写任何文件"
+def test_disk_store_persists_and_reloads_when_enabled(tmp_path):
+    """显式打开后可读写: upsert 落盘 → 新实例 reload 能读回。
+
+    (20261025gp 前这里是「打开也只是 NotImplementedError」, 本派把空壳换成了真落盘。
+    默认仍然关 —— 见上一个测例。)
+    """
+    target = tmp_path / "buy_sell_signals"
+    store = DiskSignalRegistryStore(target, enable_persist=True)
+    store.upsert(_record(signal_id="sig.a", version="v1"))
+
+    assert (target / "registry.json").exists(), "开启后必须真的写出 registry.json"
+
+    reopened = DiskSignalRegistryStore(target, enable_persist=True)
+    restored = reopened.get("sig.a", "v1")
+    assert restored is not None
+    assert restored.display_name == "演示信号"
+    assert restored.version == "v1"
+    assert [r.signal_id for r in reopened.list()] == ["sig.a"]
 
 
 def test_disk_store_is_not_wired_into_app():
-    """本批次禁止接线: main.py / daily_pipeline 不得引用磁盘 Store。"""
+    """未设 env 时不得默认走 Disk; 日管道仍不得自动写盘。
+
+    (20261025gp 起 main.py **允许**调用工厂做可选 persist 接线, 但禁止无条件
+    `DiskSignalRegistryStore(..., enable_persist=True)`, 也禁止 push 路由。)
+    """
     backend = PKG_DIR.parents[1]
-    for rel in ("app/main.py", "app/jobs/daily_pipeline.py"):
-        text = (backend / rel).read_text(encoding="utf-8")
-        assert "DiskSignalRegistryStore" not in text, f"{rel} 不应引用磁盘 Store"
-        assert "buy_sell_signals" not in text, f"{rel} 本批次不应接线 buy_sell_signals"
+
+    daily = (backend / "app/jobs/daily_pipeline.py").read_text(encoding="utf-8")
+    assert "DiskSignalRegistryStore" not in daily, "日管道不应直接引用磁盘 Store"
+    assert "buy_sell_signals" not in daily, "日管道不得自动 upsert 买卖信号"
+
+    main_text = (backend / "app/main.py").read_text(encoding="utf-8")
+    assert "DiskSignalRegistryStore" not in main_text, "main 必须经工厂, 不得直接 new Disk"
+
+    # 只查真实 import, 不查裸子串: 注释里写"不接 news.push / SSE / 飞书"是合法表达。
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(main_text)):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+        elif isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+    for root in PUSH_MODULE_ROOTS:
+        hits = sorted(m for m in imported if m == root or m.startswith(root + "."))
+        assert not hits, f"main 里出现了推送接线 import: {hits}"
 
 
 def test_store_module_does_not_use_partition_writer():
@@ -679,13 +723,29 @@ def test_buy_sell_signals_shares_no_constants_with_t_rounds():
 
 
 def test_buy_sell_signals_numeric_gate_constants_absent_from_t_rounds():
-    """反向: t_rounds 的门禁数值也不许出现在本包常量里。"""
+    """反向: t_rounds 的门禁数值也不许出现在本包常量里。
+
+    `REGISTRY_SCHEMA_VERSION` 是**文件格式版本号**, 不是门禁阈值, 与
+    `t_rounds.MAX_ROUNDS_PER_DAY=1` 同值纯属巧合。它已改成字符串常量
+    (`"1"`), 在这条按数值比对的扫描里天然不参与 —— 否则"版本 1"会一直
+    撞"每天最多 1 轮", 逼后人给版本号乱跳数字。故显式从扫描集合里排除,
+    并断言它确实不是数值类型, 避免将来被改回 int 而悄悄恢复误报。
+    """
     import importlib
 
     from app.buy_sell_signals import constants as g_const
 
+    assert not isinstance(g_const.REGISTRY_SCHEMA_VERSION, (int, float)), (
+        "REGISTRY_SCHEMA_VERSION 必须是字符串, 否则会撞上 t_rounds 的数值门禁"
+    )
+
     tr_const = importlib.import_module("app.t_rounds.constants")
-    ours = {n: v for n, v in vars(g_const).items() if n.isupper() and isinstance(v, (int, float)) and not isinstance(v, bool)}
+    non_gate = {"REGISTRY_SCHEMA_VERSION"}
+    ours = {
+        n: v
+        for n, v in vars(g_const).items()
+        if n.isupper() and n not in non_gate and isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
     theirs = {n: v for n, v in vars(tr_const).items() if n.isupper() and isinstance(v, (int, float)) and not isinstance(v, bool)}
     for name, value in theirs.items():
         collisions = [gname for gname, gvalue in ours.items() if gvalue == value]
@@ -693,13 +753,196 @@ def test_buy_sell_signals_numeric_gate_constants_absent_from_t_rounds():
 
 
 def test_buy_sell_signals_not_wired_into_main_or_store_defaults():
-    """本包不得接线到 `main.py` / 日管道; Store 默认不落盘的状态也不因本派改变。"""
-    backend = PKG_DIR.parents[1]
-    main_py = backend / "app" / "main.py"
-    assert "buy_sell_signals" not in main_py.read_text(encoding="utf-8")
+    """Store 默认仍关; 工厂未设 env 时返回内存实现。
 
+    (20261025gp 起 main.py **允许**可选 persist 接线 —— 见下一个测例, 这里不再断言
+    main 里没有 buy_sell_signals。)
+    """
     with pytest.raises(PersistDisabledError):
-        DiskSignalRegistryStore(Path("/tmp/should-not-be-created-g2"))
+        DiskSignalRegistryStore(Path("/tmp/should-not-be-created-gp"))
+
+
+def test_factory_defaults_to_memory_without_env(tmp_path, monkeypatch):
+    """未设 env → InMemory, 且不创建任何落盘目录。"""
+    monkeypatch.delenv(PERSIST_ENV_NAME, raising=False)
+    store = build_signal_registry_store(tmp_path)
+    assert isinstance(store, InMemorySignalRegistryStore)
+    store.upsert(_record(signal_id="sig.a"))
+    assert list(tmp_path.iterdir()) == [], "默认关时不得写盘"
+
+
+def test_factory_env_opens_disk_under_fixed_subdir(tmp_path, monkeypatch):
+    """env 真 → Disk, 路径钉在 `<data_dir>/buy_sell_signals/registry.json`。"""
+    monkeypatch.setenv(PERSIST_ENV_NAME, "1")
+    store = build_signal_registry_store(tmp_path)
+    assert isinstance(store, DiskSignalRegistryStore)
+    assert store.path == tmp_path / PERSIST_SUBDIR / REGISTRY_FILENAME
+
+    store.upsert(_record(signal_id="sig.a"))
+    reopened = build_signal_registry_store(tmp_path)
+    assert reopened.get("sig.a") is not None
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", " yes ", "on"])
+def test_persist_env_truthy_forms(monkeypatch, raw):
+    monkeypatch.setenv(PERSIST_ENV_NAME, raw)
+    assert persist_env_enabled() is True
+
+
+@pytest.mark.parametrize("raw", ["", "0", "false", "no", "off", "2", "enabled"])
+def test_persist_env_falsey_forms(monkeypatch, raw):
+    monkeypatch.setenv(PERSIST_ENV_NAME, raw)
+    assert persist_env_enabled() is False
+
+
+def test_persist_env_name_is_the_only_switch():
+    """只认一个开关名 —— 两个开关意味着"到底开没开"取决于谁后读。"""
+    assert PERSIST_ENV_NAME == "BUY_SELL_SIGNALS_PERSIST"
+
+
+def test_main_lifespan_uses_factory_and_env_gate():
+    """main 只经工厂 + env 门接线, 不得自己传 enable_persist=True。"""
+    backend = PKG_DIR.parents[1]
+    text = (backend / "app/main.py").read_text(encoding="utf-8")
+    assert "build_signal_registry_store" in text, "main 应经工厂接线"
+    assert "enable_persist=True" not in text, "main 不得绕过 env 直接打开落盘"
+
+
+def test_disk_store_reload_is_lossless(tmp_path):
+    """落盘 → reload 后 to_dict 完全一致(含 datetime 时区、None 字段)。"""
+    target = tmp_path / PERSIST_SUBDIR
+    original = _record(signal_id="sig.rt", version="v3")
+    DiskSignalRegistryStore(target, enable_persist=True).upsert(original)
+
+    restored = DiskSignalRegistryStore(target, enable_persist=True).get("sig.rt", "v3")
+    assert restored is not None
+    assert restored.to_dict() == original.to_dict()
+
+
+def test_disk_store_pointer_is_mutually_exclusive(tmp_path):
+    """指针互斥与内存实现同语义: 换版本必须把旧指针摘掉, 且落盘。"""
+    target = tmp_path / PERSIST_SUBDIR
+    store = DiskSignalRegistryStore(target, enable_persist=True)
+    store.upsert(_record(signal_id="sig.a", version="v1"))
+    store.upsert(_record(signal_id="sig.a", version="v2"))
+
+    store.set_publish_pointer("sig.a", "v1")
+    store.set_publish_pointer("sig.a", "v2")
+    assert store.get("sig.a", "v1").publish_pointer is False
+    assert store.get("sig.a", "v2").publish_pointer is True
+
+    reopened = DiskSignalRegistryStore(target, enable_persist=True)
+    pointers = [r for r in reopened.list() if r.publish_pointer]
+    assert len(pointers) == 1, "reload 后同一 signal_id 仍至多一条指针"
+    assert pointers[0].version == "v2"
+
+
+def test_disk_store_rejects_second_pointer_via_upsert(tmp_path):
+    store = DiskSignalRegistryStore(tmp_path / PERSIST_SUBDIR, enable_persist=True)
+    store.upsert(_record(signal_id="sig.a", version="v1", publish_pointer=True))
+    with pytest.raises(PublishPointerConflict):
+        store.upsert(_record(signal_id="sig.a", version="v2", publish_pointer=True))
+
+
+def test_disk_store_clear_publish_pointer_persists(tmp_path):
+    target = tmp_path / PERSIST_SUBDIR
+    store = DiskSignalRegistryStore(target, enable_persist=True)
+    store.upsert(_record(signal_id="sig.a", version="v1"))
+    store.set_publish_pointer("sig.a", "v1")
+    store.clear_publish_pointer("sig.a")
+
+    reopened = DiskSignalRegistryStore(target, enable_persist=True)
+    assert reopened.get("sig.a", "v1").publish_pointer is False
+
+
+def test_disk_store_corrupt_json_raises_and_keeps_file(tmp_path):
+    """坏 JSON 必须显式失败, 且**不**把原文件清掉 —— 清空等于丢光生产记录。"""
+    target = tmp_path / PERSIST_SUBDIR
+    target.mkdir(parents=True)
+    bad = target / REGISTRY_FILENAME
+    bad.write_text('{"records": [', encoding="utf-8")
+
+    with pytest.raises(SignalRegistryCorruptError):
+        DiskSignalRegistryStore(target, enable_persist=True)
+    assert bad.exists(), "损坏文件必须原样留着供人工排查"
+    assert bad.read_text(encoding="utf-8") == '{"records": [', "不得被静默覆盖"
+
+
+def test_disk_store_missing_records_key_is_corrupt(tmp_path):
+    target = tmp_path / PERSIST_SUBDIR
+    target.mkdir(parents=True)
+    (target / REGISTRY_FILENAME).write_text('{"namespace": "buy_sell_signals"}', encoding="utf-8")
+    with pytest.raises(SignalRegistryCorruptError):
+        DiskSignalRegistryStore(target, enable_persist=True)
+
+
+def test_disk_store_double_pointer_on_disk_is_corrupt(tmp_path):
+    """文件被外部改成两条指针 → 报错, 不猜哪条对。"""
+    target = tmp_path / PERSIST_SUBDIR
+    store = DiskSignalRegistryStore(target, enable_persist=True)
+    store.upsert(_record(signal_id="sig.a", version="v1"))
+    # 绕过 store 直接改文件
+    path = target / REGISTRY_FILENAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for item in payload["records"]:
+        item["publish_pointer"] = True
+    payload["records"].append(dict(payload["records"][0], version="v2"))
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(SignalRegistryCorruptError, match="publish_pointer"):
+        DiskSignalRegistryStore(target, enable_persist=True)
+
+
+def test_disk_store_empty_dir_is_legal(tmp_path):
+    """文件不存在 → 空注册表, 这是合法状态, 不是损坏。"""
+    store = DiskSignalRegistryStore(tmp_path / PERSIST_SUBDIR, enable_persist=True)
+    assert store.list() == []
+    assert len(store) == 0
+
+
+def test_disk_store_writes_non_finite_float_as_null(tmp_path):
+    """非有限浮点 → null, 不让 allow_nan=False 炸在读侧。
+
+    走 `metadata`(不校验的自由字段)注入 NaN/Inf, 而不是 `w_quality`: 后者在
+    `__post_init__` 就被挡下("必须是有限数或 None"), 根本到不了序列化那一步。
+    这里要验的是**落盘层的兜底**, 即外部传进来的脏值不会产出非法 JSON。
+    """
+    target = tmp_path / PERSIST_SUBDIR
+    store = DiskSignalRegistryStore(target, enable_persist=True)
+    record = _record(signal_id="sig.nan", version="v1").with_fields(
+        metadata={"shadow": float("nan"), "cap": float("inf")}
+    )
+    store.upsert(record)
+
+    raw = (target / REGISTRY_FILENAME).read_text(encoding="utf-8")
+    assert "NaN" not in raw and "Infinity" not in raw, "落盘内容必须是合法 JSON"
+    payload = json.loads(raw)  # 严格解析: 不允许 NaN/Infinity 字面量
+    assert payload["records"][0]["metadata"]["shadow"] is None
+    assert payload["records"][0]["metadata"]["cap"] is None
+    assert payload["schema_version"] == REGISTRY_SCHEMA_VERSION
+
+    reopened = DiskSignalRegistryStore(target, enable_persist=True)
+    assert reopened.get("sig.nan", "v1") is not None
+
+
+def test_from_dict_ignores_derived_and_disclaimer_keys():
+    """派生字段与合规文案快照不得从 JSON 回灌。"""
+    record = _record(signal_id="sig.fd", version="v1")
+    payload = record.to_dict()
+    payload["disclaimer"] = "随便写的免责声明"
+    payload["push_eligible"] = True
+
+    restored = SignalRecord.from_dict(payload)
+    assert restored.to_dict() == record.to_dict()
+    assert restored.disclaimer_key == DISCLAIMER_KEY
+
+
+def test_from_dict_rejects_naive_datetime():
+    """裸字符串无时区 → 拒绝, 不猜是不是北京时间。"""
+    payload = _record(signal_id="sig.naive", version="v1").to_dict()
+    payload["created_at"] = "2026-10-25T09:30:00"
+    with pytest.raises(SignalValidationError, match="时区"):
+        SignalRecord.from_dict(payload)
 
 
 
