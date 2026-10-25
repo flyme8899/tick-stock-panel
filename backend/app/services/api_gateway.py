@@ -4,7 +4,8 @@ evaluate() 是唯一入口: 认证中间件把 Bearer 明文交给它, 得到
 放行 / 401 / 403 / 429 的裁决与响应头。UI 会话完全不经过本模块。
 
 规则表按顺序匹配 (方法 + 路径前缀); 未命中 = 不对外开放 (403)。
-刻意不放进规则表的: SSE 流端点 (EventSource 无法带 Authorization 头,
+刻意不放进规则表的: 模拟盘全部端点 (paper 写操作不开放给 Token, 只走 UI 会话)、
+SSE 流端点 (EventSource 无法带 Authorization 头,
 V2 用短期票据解决)、watchlist/监控规则管理、数据同步、设置 —— 保持最小开放面。
 """
 from __future__ import annotations
@@ -63,8 +64,9 @@ _RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/backtest/factor/run", "run:backtest"),
     ("POST", "/api/backtest/factor/batch", "run:backtest"),
     ("POST", "/api/backtest/strategy/run", "run:backtest"),
-    # paper:trade — 模拟盘全部 (读+写一体, 单一 scope 简化心智)
-    ("*", "/api/paper", "paper:trade"),
+    # paper:trade — 已整体剥离: 模拟盘 (读+写) 仅面板 UI 会话可用, 不经 Token。
+    # 未列入规则表 = 不对外开放 → Bearer 访问 /api/paper* 一律 403 (fail-closed),
+    # 即使历史 Token 记录里仍残留 paper:trade scope 也不放行。
     # events — 换取 SSE 短期票据: 任意有效 Token 即可 (票据只继承已有 scope,
     # 不放大权限, 故此处用 "*" 表示"仅需认证", 不做 scope 校验)
     ("POST", "/api/events/ticket", "*"),

@@ -13,6 +13,10 @@
    | `03_run_backtest.py` | `read:analysis` + `run:backtest` |
    | `04_events_stream.py` | 任意 (票据继承 scope) |
 
+> **边界**: 本目录只示例「读数据 + 写扩展数据 + 跑回测」。模拟盘（paper）端点不在开放面,
+> Bearer 访问 `/api/paper/*` 一律 403 —— 需要模拟盘请在面板 UI 里操作。推荐最小组合
+> `read:market` 起步, 够用就别追加写权限。
+
 2. 设置环境变量后运行:
 
    ```bash

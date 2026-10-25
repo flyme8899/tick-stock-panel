@@ -5,14 +5,17 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 
-/** 对外开放 scope 清单 (与后端 api_tokens.SCOPES 同步) */
+/** 对外开放 scope 清单 (与后端 api_tokens.SCOPES 同步)
+ *
+ * 刻意不含交易类 scope: Token 通道只承载"读数据 + 写扩展数据"。
+ * 模拟盘下单/撤单仅在面板 UI 会话内可用, 不经 Token。
+ */
 const SCOPES: { key: string; label: string; desc: string; default: boolean }[] = [
   { key: 'read:market', label: '行情读取', desc: '标的搜索 / 日K / 分时 / 指数 / 市场快照', default: true },
   { key: 'read:ext', label: '扩展数据读取', desc: '扩展表 rows / values / schema 查询', default: false },
   { key: 'write:ext', label: '扩展数据写入', desc: '向已配置的扩展表程序化写入行数据 (会进入策略/回测数据面, 谨慎授予)', default: false },
   { key: 'read:analysis', label: '分析结果读取', desc: '策略清单与结果 / 回测报告 / 市场环境 / 告警', default: false },
   { key: 'run:backtest', label: '触发回测', desc: '提交回测 / 选股 / 因子检验任务 (受并发约束)', default: false },
-  { key: 'paper:trade', label: '模拟盘交易', desc: '模拟盘读取与下单/撤单 (写操作, 最高敏感)', default: false },
 ]
 
 export function SettingsApiTokensPanel() {
@@ -93,7 +96,10 @@ export function SettingsApiTokensPanel() {
                 </label>
               ))}
               <div className="text-[10px] text-muted">
-                扩展表的结构配置/上传/拉取、数据同步、设置等管理接口永不开放给 Token (行数据写入走 write:ext)。调用方式: <span className="font-mono">Authorization: Bearer tsp_...</span>, 默认限流 120 次/分钟, 契约文档 <span className="font-mono text-accent/80">/api/openapi.json?tier=a</span>
+                扩展表的结构配置/上传/拉取、数据同步、设置等管理接口永不开放给 Token (行数据写入走 write:ext)。<br />
+                <span className="text-warning/90">模拟盘仅限面板 UI 会话, 不经 Token</span> —— Token 通道不提供任何下单/撤单能力,
+                访问 <span className="font-mono">/api/paper/*</span> 一律 403 (含历史上已授予模拟盘权限的旧 Token)。
+                调用方式: <span className="font-mono">Authorization: Bearer tsp_...</span>, 默认限流 120 次/分钟, 契约文档 <span className="font-mono text-accent/80">/api/openapi.json?tier=a</span>
               </div>
             </div>
             <div className="flex gap-2">

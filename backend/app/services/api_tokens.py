@@ -3,7 +3,8 @@
 设计 (docs/open-platform-plan.md §4.1):
   - 存储: data/user_data/api_tokens.json (0600), 只存 SHA-256 哈希;
     明文 Token (tsp_ + 32B hex) 仅在创建响应中出现一次。
-  - scope: 固定五档, 见 SCOPES; 管理接口无对应 scope, Token 永远进不去。
+  - scope: 固定只读 + 数据写入档, 见 SCOPES; 管理接口与交易类 scope 均不开放,
+    Token 永远进不去模拟盘下单通道。
   - last_used_at 节流落盘 (≥60s 才写一次), 避免热路径每请求写文件。
 进程内写互斥沿用域模块惯例 (PAPER_LOCK 模式); 读取无锁 (json 小文件)。
 """
@@ -25,14 +26,27 @@ from app.services.fs_utils import atomic_write_text
 logger = logging.getLogger(__name__)
 
 # 对外开放的 scope 全集 (admin 刻意不存在 — 管理面永不开放给 Token)
+# 交易类 scope 不在其列: Token 通道不承载任何下单能力, 模拟盘只走 UI 会话。
 SCOPES = (
     "read:market",
     "read:ext",
     "write:ext",
     "read:analysis",
     "run:backtest",
-    "paper:trade",
 )
+
+# 永久禁用的 scope — 即使未来有人往 SCOPES 里加, 这几个也不会被签发。
+# 前缀命中即拒, 兜住 trade:xxx / order:xxx 一类"扩展时不小心放开"的口子。
+FORBIDDEN_SCOPE_PREFIXES = ("paper:", "trade:", "order:")
+FORBIDDEN_SCOPES = ("paper:trade",)
+
+
+def _forbidden(scopes: list[str]) -> list[str]:
+    """命中禁用集合的 scope 列表 (精确名或前缀任一命中)。"""
+    return [
+        s for s in scopes
+        if s in FORBIDDEN_SCOPES or any(s.startswith(p) for p in FORBIDDEN_SCOPE_PREFIXES)
+    ]
 
 TOKEN_PREFIX = "tsp_"
 
@@ -86,7 +100,16 @@ def list_tokens(data_dir: Path) -> list[dict]:
 
 
 def create_token(data_dir: Path, name: str, scopes: list[str]) -> tuple[dict, str]:
-    """创建 Token。返回 (记录视图, 明文) — 明文只此一次, 调用方负责展示。"""
+    """创建 Token。返回 (记录视图, 明文) — 明文只此一次, 调用方负责展示。
+
+    交易类 scope (paper:* / trade:* / order:*) 一律拒绝: Token 通道只读 + 数据写入,
+    模拟盘下单/撤单仅限面板 UI 会话。
+    """
+    banned = _forbidden(scopes)
+    if banned:
+        raise ValueError(
+            f"scope 不可用于 Token 通道: {banned} — 模拟盘仅面板 UI 会话可用, 不经 Token"
+        )
     bad = [s for s in scopes if s not in SCOPES]
     if bad:
         raise ValueError(f"未知 scope: {bad} (可用: {list(SCOPES)})")

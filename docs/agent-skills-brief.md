@@ -93,7 +93,7 @@ AI 宿主 (Claude / CodeBuddy / Cursor …)
 
 ### 4.1 对外表述的硬约束
 
-任何「该策略已过前视偏差审计 / 已无前视 / 信号可做 / 可以实盘」的说法，**必须先有仓内夹具的
+任何「该策略已过前视偏差审计 / 已无前视 / 该信号可直接执行 / 可以实盘」的说法，**必须先有仓内夹具的
 通过记录**。没有就**不许说**——包括「大概没有前视吧」这种软说法。
 
 正确句式：「这是历史回测指标，前视偏差审计的判定需要在仓内 CI 跑夹具；本 skill 不提供
@@ -112,6 +112,10 @@ export TSP_SCOPES="read:market,read:analysis,read:ext"
 ```
 
 `run:backtest`、`write:ext` 都是**额外**才会加上的受控 scope，不在默认值里。
+
+面板侧（P3 起）与此对齐：Token 签发白名单只有 `read:market` / `read:analysis` / `read:ext` /
+`write:ext` / `run:backtest` 五档，推荐组合即上面那三档只读。**交易类 scope 已不存在**——
+不是「默认关闭」，而是签发侧报错、访问侧 403 的双层拒绝（见 §5.4、§7 G3）。
 
 ### 5.2 写操作确认门（`write_ext_rows`）
 
@@ -186,7 +190,7 @@ Markdown 正文。`metadata.*` 是本仓给 CI 用的机读字段，宿主不认
 |---|---|---|---|
 | G1 | 各宿主 frontmatter 扩展字段不完全统一 | `design_pending` | 只钉 `name` + `description`；扩展字段可选、不赌 |
 | G2 | marketplace 上架 / 签名分发 | 另拍 | 本拍只做仓内文件夹骨架 + 安装说明 |
-| G3 | 只读 Token 真开放 + 拒交易 scope 网关加固 | 另口令 | 示例用现有 Token 模型，不真开放 |
+| G3 | 只读 Token 真开放 + 拒交易 scope 网关加固 | **本拍收口** | Token 通道已无交易 scope：签发侧拒 `paper:*`/`trade:*`/`order:*`，访问侧 Bearer 打 `/api/paper/*` 一律 403，Tier A 契约已移除全部 paper 端点。模拟盘仅面板 UI 会话 |
 | G4 | `run_backtest` 对第三方真开放 + 策略入口全量注册 lookahead | 另拍 / #217 延续 | 文档衔接，不重做夹具 |
 | G5 | DSA 经 skill 面**实调用**接线 | P5 邻近 | 只引用形态 |
 | G6 | OpenBB / Kronos | P4 / P6 另口令 | 不塞 |
@@ -235,10 +239,10 @@ cd backend && python -m pytest tests/skills/test_skills_boundary.py -q
 
 ## 10. 明确未做
 
-- P3 Token 真落地 / 拒交易 scope 网关加固
+- ~~P3 Token 真落地 / 拒交易 scope 网关加固~~ → 已收口（见 §7 G3）
 - P4 OpenBB≥5 sidecar · P6 Kronos 接旧实装
 - P5 DSA 升级与实调用接线
-- MCP / skill 下单；`paper:trade`；开放交易 scope
+- MCP / skill 下单；开放交易 scope（`paper:trade` 已不存在，签发与访问双侧拒绝）
 - marketplace 上架 / 签名分发
 - 对第三方真开放 `run:backtest` 的落地
 - 重做 lookahead 夹具；改 walkforward / 5b / 5c / `buy_sell_signals` 行为

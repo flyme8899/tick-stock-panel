@@ -59,7 +59,7 @@ TSP_TOKEN=tsp_xxx uv run tsp-mcp-server   # stdio JSON-RPC, 供客户端拉起
 | `write:ext` | `write_ext_rows` | 写入扩展表 (进入策略数据面, 慎授) |
 | `run:backtest` | `run_backtest` | 策略回测 (纯 Polars 引擎) |
 
-未包含: 模拟盘交易类端点 — 不建议把下单能力交给 AI, 需要时可自行在 `server.py` 里按同样模式补。
+未包含: 模拟盘交易类端点 — 面板侧已整体关闭该通道（模拟盘仅 UI 会话, Bearer 打 `/api/paper/*` 一律 403）, 故也不存在可包装的下单工具。
 
 ### lookahead 前置契约 (fail-closed)
 
