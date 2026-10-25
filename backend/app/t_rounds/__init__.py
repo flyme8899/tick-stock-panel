@@ -8,6 +8,10 @@
 - `store`           `TRoundRegistryStore` 协议 + 内存实现 + 默认不可用的磁盘空壳
 - `position_tags`   持仓三态(信号宇宙不按持仓过滤)
 - `disclaimer`      合规脚注
+- `offline/`        离线同尺特征派生 + 模式 A 纸面回测(批次 20261025hfeat)。
+                    **不进包级 `__init__` 导出** —— 它有 IO(读 CSV、写 Parquet)，
+                    一旦被默认 import，`t_rounds` 就不再是"纯定义 + 无副作用"。
+                    要用请显式 `from app.t_rounds.offline import ...`。
 
 **与 `app.buy_sell_signals` 全面隔离**: 不 import、不共享 Store、不共用命名空间。
 本包记录**不得**写入买卖信号表或那个包的 Store。
@@ -17,11 +21,14 @@
 `push_dedupe_cooldown_until`, 也不叫 `cooldown`。
 
 **本批次不做**: 真实分钟评估接线、`build_feature_frame` 在线路径、`minute_replay`
-生产评估、全量特征回测、ε 重标定、分档成本实测、可卖老股实盘字段、正式推送、
-默认落盘、竞价回测。
+生产评估、ε 重标定、分档成本实测、可卖老股实盘字段、正式推送、默认落盘、竞价回测。
+
+`offline/`(批次 20261025hfeat)已交付**离线纸面**的特征派生与模式 A 回测, 但那是
+离线产物: 它不改本包任何生产模块, 不接 lifespan / 日管道, 不推送, 不默认落盘。
+**合入不等于部署**, 也**不等于**上面那些项被验证。
 
 ε = **0.30%**(`pct_of_vwap_or_mean`, PARAM_NAIL `design_pin_v1`)**只入常量与
-version 元数据**, 本批次不跑门禁。特征回测 / ε 门禁 / 可卖老股实盘**均未测通**。
+version 元数据**。特征回测 / ε 门禁 / 可卖老股实盘**均未测通**。
 
 六条软提醒(详见 `constants` 模块 docstring):
 同尺后再 VWAP · 禁拷提醒常量 · 冷却分列 · virtual 占位 · 研究窗 ≥2025-07-25 ·
