@@ -184,6 +184,70 @@ Docker 把 `analysis_bridge.py` 只读挂到 `/opt/tsp/analysis_bridge.py`。
 
 卡片本身存在 DSA 的 `analysis_history`。移出是软删除（`dismissed_at`），列表和详情不再返回，回测关联仍留在库里。同一天重复生成的大盘复盘，列表只给最新一条。`POST /api/v1/history/read` 标已读，`POST /api/v1/history/dismiss` 按主键、已读或早于 N 天移出。浏览器只打 TSP 的 `/api/dsa/upstream/...`，要有面板登录；转发层再带 DSA 会话访问上游。
 
+## 使用率漏斗第1步（gdsa）
+
+> 仅供研究，不构成投资建议；执行须人工确认。
+
+这一节对应批次 `20261025gdsa`：把「DSA 有没有人用、卡在哪一层」做成**本机可见的计数**，并让侧栏「决策」项显示服务到底通不通。**只做计数与展示**，向导、场景入口、狙击主按钮、定时推送语义都不在本拍。
+
+### 四层漏斗
+
+| 层 | 键（`localStorage`） | 语义 | 本拍状态 |
+| --- | --- | --- | --- |
+| L1 启用 | `tsp.dsa.funnel.enabled_seen` | 曾见 `status.enabled === true`，置 `'1'`，不回退 | 已实现 |
+| L2 可达 | `tsp.dsa.funnel.reachable_true_count` / `..._false_count` | 每次 status 拉取完成按 `reachable` 二选一 +1 | 已实现 |
+| L3 打开 | `tsp.dsa.funnel.open_workspace_count` | 打开决策页 +1（每个组件实例只计一次） | 已实现 |
+| L4 留存动作 | `tsp.dsa.funnel.core_action_count` | 狙击 / 研报 / 问股这类核心动作 | **只留槽**，`design_pending` |
+
+计数**只落本机**，不上报第三方，也不进买卖信号（`buy_sell_signals`）的 persist / push / dingtalk 链路。前缀统一 `tsp.dsa.funnel.`，清空只需删掉这一组键。
+
+节流口径：L2 只跟随既有 `refetchInterval: 30_000` 的 status 结果写入，按 `dataUpdatedAt` 去重 —— 同一份 fetch 结果重复渲染不会重复 +1，也不另开更密的循环。
+
+> L1 / L4 这两个键**不是**「各一层计数递进」。L1 是布尔置位，L4 是空槽；本拍没有任何动作会让 L4 自增。
+
+### `enabled` ≠ `reachable`
+
+后端的 `enabled()` 约等于 `bool(DSA_BASE_URL)`（`backend/app/custom/dsa/proxy.py`）。只要 `.env` 写了 `DSA_BASE_URL`，它就**近乎恒真**；真正代表服务活着的是 `health()` 撑起来的 `reachable`。
+
+所以：
+
+- 侧栏「决策」项尾部的状态点、页内徽标、设置区诊断，**一律以 `reachable` 为准**；
+- `reachable === true` → 已连接；`false` → 未连接（悬停显示 `detail`）；还没拿到结果 → 「检测中」，不给结论；
+- **禁止**把 `enabled === true` 画成「已就绪 / 已连接」——那会把人送进一页看起来坏掉的决策页。
+
+侧栏状态点走的是扩展通用 API：`extensions/types.ts` 的 `FrontendExtensionNavigation.accessory?: ComponentType`。`Layout.tsx` 只把它当 `ComponentType` 渲染（与 `MonitorBadge` 同一种旁路），**核心包不 import `@/custom/dsa`**。原来那个静态 `badge: 'AI'` 保留 —— 它只表示「这是 AI 决策区」，不表示服务可用。
+
+### 设置区「漏斗自诊断」
+
+「用量配置」页新增一个独立标题的面板，展示当前 `enabled` / `reachable` / `detail` 与上面四层计数。
+
+它与上游 LLM token 用量（`UsageSummary`，`data-usage-summary`）**分标题、分容器**：token 用量仍归 `UsageSummary`，漏斗诊断用自己的 `data-dsa-funnel-diagnostics`。两者不混名、不互相覆盖。
+
+### pending 与红线
+
+| 标记 | 含义 |
+| --- | --- |
+| `data_pending` | 没有生产多日采样，任何比率结论都不成立 |
+| `design_pending` | L4 动作枚举未钉，只留槽 |
+
+明确不做、也不许写进文案的：**可达率 xx%**、**打开率已达标**、**使用率已测通**、**DSA 正式可推**。本机计数只能说明「这台机器上发生过什么」，推不出使用率。
+
+### 软提醒（7 条，不降档）
+
+1. **`enabled` ≈ 恒真**：默认 `DSA_BASE_URL` 下 `enabled()` 常为真，导航与「是否可用」文案必须以 `reachable` 为准。
+2. **使用率是部署者自用的漏斗诊断**，不是多租户增长看板；禁假百分比「已测通」。
+3. **LLM `UsageSummary` ≠ 漏斗计数**：设置区必须分标题，不得覆盖或冒充上游 token 用量。
+4. **#210 勿抢合**：本拍相对 `9dfba4ed…` 开工，不依赖放量 PR 的字节。
+5. **生产三 env 不动**（`BUY_SELL_SIGNALS_PERSIST` / `PUSH` / `DINGTALK`）；合入 ≠ 部署；飞书已取消，勿开新通道。
+6. **向导 / 场景 / 狙击未补读三文件前不开**（`DecisionWorkspace.tsx` / `sniper_alerts.py` / `schedule.py`）。
+7. **计数本地 only**：不进 BSS persist / push / dingtalk；DSA 定时与狙击的钉钉复用另拍。
+
+### 边界
+
+- 后端 `GET /api/dsa/status`、`proxy.py`、`routes.py` **行为零改**；本拍只消费既有契约。
+- `sniper_alerts.py` / `schedule.py` **零碰**（另拍前置必读）。
+- 默认不部署；合入另等盘后口令。
+
 ## 分享图
 
 `docker compose --profile dsa up --build` 使用的镜像安装了 `wkhtmltopdf`（含 `wkhtmltoimage`）和 `fonts-noto-cjk`，并执行 `fc-cache`。个股研报里的「分享图」在页内生成 PNG。工具缺失或渲染失败时，按钮下方显示上游返回的原因，不会把浏览器带到一份 JSON。

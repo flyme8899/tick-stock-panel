@@ -48,6 +48,13 @@ import {
 } from './client'
 import { DashboardPanel } from './DashboardPanel'
 import { formatPercentPoints } from './dashboardHistory'
+import {
+  buildFunnelDiagnostics,
+  DSA_FUNNEL_L4_STATUS,
+  DSA_FUNNEL_PENDING_NOTES,
+  incrementOpenWorkspace,
+  recordStatusSample,
+} from './funnelMetrics'
 import { PortfolioRiskView } from './portfolioRisk'
 import {
   SAMPLE_ALERTS,
@@ -344,6 +351,22 @@ export function DecisionWorkspace() {
         : '服务未连接'
   const [showSample, setShowSample] = useState(true)
   const sample = !reachable && showSample
+
+  // 漏斗 L3：打开决策页计一次。用 ref 守住「每个组件实例只 +1」，
+  // 避免 StrictMode 双调用 / 重渲染把打开次数刷高。
+  const openedRef = useRef(false)
+  useEffect(() => {
+    if (openedRef.current) return
+    openedRef.current = true
+    incrementOpenWorkspace()
+  }, [])
+
+  // 漏斗 L1/L2：只跟随既有 30s status 查询结果写入。去重由 recordStatusSample
+  // 内部按 dataUpdatedAt 完成（同一份 fetch 结果只计一次），这里不另开紧循环。
+  useEffect(() => {
+    if (!status.data) return
+    recordStatusSample(status.data, status.dataUpdatedAt)
+  }, [status.data, status.dataUpdatedAt])
 
   const select = (id: SectionId) => {
     const next = new URLSearchParams(params)
@@ -1496,6 +1519,57 @@ function ImportCodes({ reachable }: { reachable: boolean }) {
   )
 }
 
+/**
+ * 设置区「漏斗自诊断」只读块。
+ *
+ * 与 {@link UsageSummary}（上游 LLM token 用量）**分标题、分容器**：
+ * `data-usage-summary` 仍只属于 token 用量，本块用 `data-dsa-funnel-diagnostics`。
+ * 两者不混名、不互相覆盖（硬约束 X7）。
+ *
+ * 文案只描述「本机发生过什么」，任何比率/达标结论都不给（无生产采样）。
+ */
+function FunnelDiagnostics({ reachable }: { reachable: boolean }) {
+  const diag = buildFunnelDiagnostics({ reachable })
+  const counts = diag.counts
+  const rows: [string, string, string][] = [
+    ['L1 启用', counts.enabledSeen ? '曾见启用' : '未见过', DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.enabled_seen']],
+    ['L2 可达', `通 ${counts.reachableTrueCount} · 断 ${counts.reachableFalseCount}`, DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.reachable_true_count']],
+    ['L3 打开', `${counts.openWorkspaceCount} 次`, DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.open_workspace_count']],
+    ['L4 留存动作', '槽位空', DSA_FUNNEL_PENDING_NOTES['tsp.dsa.funnel.core_action_count']],
+  ]
+  return (
+    <div data-dsa-funnel-diagnostics className="mt-2 space-y-2">
+      <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {[
+          ['当前可达', diag.reachabilityLabel],
+          ['漏斗状态', diag.status],
+          ['L4 状态', diag.l4Status],
+          ['口径', '本机 only'],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-lg border border-border bg-base px-3 py-2">
+            <dt className="text-[11px] text-muted">{label}</dt>
+            <dd className="text-xs text-foreground">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <ul className="space-y-1">
+        {rows.map(([label, value, note]) => (
+          <li key={label} className="grid gap-1 text-[11px] sm:grid-cols-[88px_96px_1fr]">
+            <span className="text-foreground">{label}</span>
+            <span className="num text-secondary">{value}</span>
+            <span className="text-muted">{note}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="text-[10px] text-muted">
+        计数只存本机（localStorage，前缀 <code className="font-mono">tsp.dsa.funnel.</code>），不上报、不进买卖信号链路。
+        无生产多日采样，故状态为 <code className="font-mono">{diag.status}</code>；L4 动作枚举未钉，故为{' '}
+        <code className="font-mono">{DSA_FUNNEL_L4_STATUS}</code>。此处不给任何比率结论。
+      </p>
+    </div>
+  )
+}
+
 function SettingsPanel({
   features,
   envVars,
@@ -1539,6 +1613,9 @@ function SettingsPanel({
             </li>
           ))}
         </ul>
+      </Panel>
+      <Panel title="漏斗自诊断" hint="使用率漏斗第 1 步 · 只读 · 与本机 LLM 用量无关">
+        <FunnelDiagnostics reachable={reachable} />
       </Panel>
       <Panel title="环境变量" hint="写在仓库根目录 .env。页面不回显密钥。">
         <ul className="divide-y divide-border">
