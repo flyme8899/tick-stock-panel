@@ -1,4 +1,4 @@
-"""做 T 轮次状态机: 转移表 + KPI 硬禁 + 正 T 老底仓硬禁。
+"""做 T 轮次状态机: 转移表 + KPI 硬禁 + 卖出腿老底仓硬禁。
 
 ## 四条硬约束
 
@@ -18,9 +18,9 @@
    不允许直接 `transition(..., "completed")` —— 那个入口不知道净价差算没算完。
 
 4. **同 `(symbol, trade_date)` 超过 `max_rounds_per_day` 的轮次拒绝**
-   计数口径是"**消耗掉轮次**"的状态: 已开腿的都算(含 completed / incomplete /
-   abandoned / expired_review), 只有 `void_data` 不算 —— 数据异常那一轮什么都没发生,
-   不该占掉当天的名额。
+   计数口径是"**消耗掉轮次**"的状态: 已开腿的都算(含 completed /
+   unreverted_at_cutoff / data_truncated / limit_locked / expired_review),
+   只有 `void_data` 不算 —— 数据异常那一轮什么都没发生, 不该占掉当天的名额。
 
 ## 与 `buy_sell_signals.state_machine` 的关系
 
@@ -109,8 +109,9 @@ STATUSES_CONSUMING_QUOTA: Final = frozenset(
         "open_leg1",
         "open_leg2",
         "completed",
-        "incomplete",
-        "abandoned",
+        "unreverted_at_cutoff",
+        "data_truncated",
+        "limit_locked",
         "expired_review",
     }
 )
@@ -119,6 +120,16 @@ STATUSES_CONSUMING_QUOTA: Final = frozenset(
 `void_data` **不在**里面: 数据异常那一轮什么都没发生(可能第一腿都没真成交就被判
 脏了), 不该占掉当天唯一的名额。其余只要是"真的开过腿"的, 无论成败都算用掉一轮 ——
 否则"一轮失败就重来"会让单日轮次上限形同虚设。
+
+## 为什么必须纳入三个结局桶(批次 20261025gtrounds_patch ⑤)
+
+批次 20261025gtrounds 把结局桶拆成 `unreverted_at_cutoff`(走到截点没回摆) /
+`data_truncated`(数据提前断) / `limit_locked`(涨跌停锁死), 但这里当时还写着旧名
+`incomplete` / `abandoned`。后果不是"漏统计"那么轻 —— 这三个桶都是**真的开过腿**的,
+它们不进集合意味着当天配额会按"没用掉"回算, 于是同一天能再开一轮: 一个反复回摆
+不成的票, 可以靠着失败刷出无限次机会。这是**配额空洞**, 不是统计口径问题。
+
+`void_data` 仍然不在集合里, 与本批次无关, 保持不变。
 """
 
 
@@ -132,7 +143,7 @@ def assert_transition_allowed(record: TRoundRecord, target: str) -> None:
             t_round_id=record.t_round_id,
             source=record.round_status,
             target=target,
-            detail="completed 只能由 complete_round() 进入(那里才检查净价差与正 T 老底仓)",
+            detail="completed 只能由 complete_round() 进入(那里才检查净价差与卖出腿老底仓(sell_first/buy_first))",
         )
 
     allowed = ALLOWED_TRANSITIONS.get(record.round_status, frozenset())
@@ -213,6 +224,8 @@ def _check_source_lots(
     *,
     leg1_source_lot: str | None = None,
     leg2_source_lot: str | None = None,
+    require_filled: bool = False,
+    target: str = "open_leg2",
 ) -> None:
     """**卖出腿**份额校验 —— 两条腿的来源一起判。
 
@@ -225,26 +238,45 @@ def _check_source_lots(
     `None`, 校验会被"来源为 None 就放行"直接跳过 —— 等于没查。批次
     20261025gtrounds 的回归用例正是踩在这里。
 
-    传进来的 `None` 会退回记录上的已有值, 所以"只改 leg2"的旧调用方式行为不变。
+    传进来的 `None` 在**开腿路径**上会退回记录上的已有值, 所以"只改 leg2"的旧调用
+    方式行为不变。但结算路径(`require_filled=True`)**不做回退**: 那里显式传 None
+    与不传是同一个意思 —— "这一轮没被确认过卖的是老底仓", 必须拒绝。
+    若仍回退到记录旧值, 就会出现"调用方明确说了 None、系统却拿旧值放行"的静默
+    覆盖, 而那恰恰是最需要报错的情形。
+
+    `require_filled=True` 只在**结算路径**(`complete_round`)传: 那时卖出腿的
+    来源不能还是 `None` —— 开腿前不知道是合理的, 结算时不知道就说明这一轮从没被
+    确认过卖的是老底仓。判定本身仍在 `models.check_sell_leg_source_lot` 里,
+    这里只透传, 不另写一份。
+
+    `target` 是为了让报错指向**真实的目标状态**: 从 `open_leg1` 调到 `open_leg2`
+    与从 `open_leg2` 结算到 `completed`, 是两条不同的边, 报错写错边会让人查错地方。
     """
     for name, value in (("leg1_source_lot", leg1_source_lot), ("leg2_source_lot", leg2_source_lot)):
         if value is not None and value not in C.SOURCE_LOTS:
             raise TRoundValidationError(f"未知 {name}: {value!r}")
 
+    def _resolve(passed: str | None, stored: str | None) -> str | None:
+        """结算路径不回退: 显式 None 就是 None; 开腿路径才退回记录旧值。"""
+        if require_filled:
+            return passed
+        return passed if passed is not None else stored
+
     try:
         check_sell_leg_source_lot(
             mode=record.mode,
             leg1_side=record.leg1_side,
-            leg1_source_lot=leg1_source_lot if leg1_source_lot is not None else record.leg1_source_lot,
+            leg1_source_lot=_resolve(leg1_source_lot, record.leg1_source_lot),
             leg2_side=record.leg2_side,
-            leg2_source_lot=leg2_source_lot if leg2_source_lot is not None else record.leg2_source_lot,
+            leg2_source_lot=_resolve(leg2_source_lot, record.leg2_source_lot),
             t_round_id=record.t_round_id,
+            require_filled=require_filled,
         )
     except TRoundValidationError as exc:
         raise InvalidTRoundTransitionError(
             t_round_id=record.t_round_id,
             source=record.round_status,
-            target="open_leg2",
+            target=target,
             detail=str(exc),
         ) from exc
 
@@ -305,8 +337,15 @@ def complete_round(
             target="completed",
             detail="只有 open_leg2(两腿均已成交)才能结算完成",
         )
-
-    _check_source_lots(record, leg1_source_lot=leg1_source_lot, leg2_source_lot=leg2_source_lot)
+    # 结算路径: 卖出腿来源**不能是 None**(填了还必须是 old_lot)。
+    # 开腿前/构造期的 None 仍放行 —— 那时本就知道不了。判据只有这一处定义。
+    _check_source_lots(
+        record,
+        leg1_source_lot=leg1_source_lot,
+        leg2_source_lot=leg2_source_lot,
+        require_filled=True,
+        target="completed",
+    )
 
     for name, value in (("leg1_price", leg1_price), ("leg2_price", leg2_price)):
         if not isinstance(value, (int, float)) or value <= 0:
@@ -348,6 +387,9 @@ def complete_round(
         leg2_qty=qty,
         leg1_ts=leg1_ts or record.leg1_ts or now,
         leg2_ts=leg2_ts or record.leg2_ts or now,
+        # 两条腿的来源都落库: 只写 leg2 的话, `sell_first` 的卖出腿(leg1)
+        # 校验通过了却查不到它当初填的是什么 —— 审计时无从复核。
+        leg1_source_lot=leg1_source_lot if leg1_source_lot is not None else record.leg1_source_lot,
         leg2_source_lot=leg2_source_lot,
         gross_spread=gross,
         cost_amount=float(cost.cost_amount),

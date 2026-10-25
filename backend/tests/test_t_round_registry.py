@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import inspect
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -174,7 +175,8 @@ def test_non_completed_cannot_mark_net_spread_realized(status):
 
 def test_only_completed_is_kpi_eligible():
     assert C.REALIZED_KPI_ELIGIBLE_STATUS == frozenset({"completed"})
-    completed = complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot")
+    completed = complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+                               leg1_source_lot="old_lot", leg2_source_lot="old_lot")
     assert completed.kpi_eligible is True
     for status in C.ROUND_STATUSES - {"completed"}:
         assert status not in C.REALIZED_KPI_ELIGIBLE_STATUS
@@ -192,7 +194,8 @@ def test_transition_clears_kpi_flags():
     assert voided.count_in_realized_kpi is False
     assert voided.net_spread_realized is False
 
-    completed = complete_round(open2, leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot")
+    completed = complete_round(open2, leg1_price=10.0, leg2_price=9.9, qty=100,
+                               leg1_source_lot="old_lot", leg2_source_lot="old_lot")
     with pytest.raises(InvalidTRoundTransitionError):
         transition(completed, "void_data", note="数据源回滚")
 
@@ -390,7 +393,8 @@ def test_true_terminal_states_have_no_exit(source):
     所以这条测试必须同步拆开。
     """
     if source == "completed":
-        rec = complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot")
+        rec = complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+                             leg1_source_lot="old_lot", leg2_source_lot="old_lot")
     else:
         rec = _record(round_status=source)
     for target in C.ROUND_STATUSES:
@@ -454,7 +458,8 @@ def test_unknown_target_rejected():
 def test_sell_first_spread_direction():
     """先卖后买: 卖价 > 买价才赚。"""
     out = complete_round(
-        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot"
+        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
     )
     assert out.gross_spread == pytest.approx(10.0)
     assert out.net_spread == pytest.approx(10.0)
@@ -472,13 +477,15 @@ def test_buy_first_spread_direction():
 
 def test_losing_round_still_completes():
     """亏了也要能完成 —— 不能只让赚钱的那轮完成, 那是幸存者偏差。"""
-    out = complete_round(_open_leg2(), leg1_price=9.9, leg2_price=10.0, qty=100, leg2_source_lot="old_lot")
+    out = complete_round(_open_leg2(), leg1_price=9.9, leg2_price=10.0, qty=100,
+                         leg1_source_lot="old_lot", leg2_source_lot="old_lot")
     assert out.round_status == "completed"
     assert out.gross_spread == pytest.approx(-10.0)
 
 
 def test_cost_defaults_to_design_pending():
-    out = complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot")
+    out = complete_round(_open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+                         leg1_source_lot="old_lot", leg2_source_lot="old_lot")
     assert out.cost_bp_tier == "design_pending"
     assert out.cost_amount == 0.0
 
@@ -488,14 +495,16 @@ def test_real_cost_tier_rejected_this_batch():
     with pytest.raises(TRoundValidationError, match="design_pending"):
         complete_round(
             _open_leg2(),
-            leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot",
+            leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
             cost=RoundCost(cost_amount=5.0, cost_bp_tier="tier_a_measured"),
         )
 
 
 def test_cost_deducted_from_net():
     out = complete_round(
-        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot",
+        _open_leg2(), leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
         cost=RoundCost(cost_amount=3.0),
     )
     assert out.net_spread == pytest.approx(out.gross_spread - 3.0)
@@ -503,7 +512,101 @@ def test_cost_deducted_from_net():
 
 def test_bad_prices_rejected():
     with pytest.raises(TRoundValidationError, match="正数"):
-        complete_round(_open_leg2(), leg1_price=0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot")
+        complete_round(_open_leg2(), leg1_price=0, leg2_price=9.9, qty=100,
+                       leg1_source_lot="old_lot", leg2_source_lot="old_lot")
+
+
+# =========================================================== 结算时卖出腿来源不可为空
+#
+# 批次 20261025gtrounds_patch ③。
+#
+# 旧行为: `check_sell_leg_source_lot` 里 `if source_lot is None: return` —— 开腿前
+# 不知道来源是合理的, 所以放行。但 `complete_round` 走的是同一个函数, 于是
+# `sell_first`(卖出腿是 leg1)只传 `leg2_source_lot` 时, 卖出腿的来源一直是构造时的
+# None, 被这句"是 None 就放行"直接跳过 → 一轮从没被确认过卖的是老底仓的 T 也能标成
+# completed。纸面上它和真正合规的轮次一模一样, 只有去逐条翻来源才看得出来。
+#
+# 现在: 结算路径传 `require_filled=True`, None 直接拒绝; 开腿前/构造期仍放行。
+
+
+def _open_leg2_sell_first_no_leg1_source() -> TRoundRecord:
+    """sell_first 推到 open_leg2, 但**只**给 leg2(买入腿)填来源 —— 卖出腿 leg1 留 None。
+
+    这正是 Hark @#212 head 那种调法: 参数名看着像"把来源给了", 实际给的是买腿。
+    """
+    return transition(_sell_first(), "open_leg2", leg2_source_lot="old_lot")
+
+
+def test_completed_rejects_none_sell_leg_source_for_sell_first():
+    """反例(sell_first): 不传 `leg1_source_lot` → 拒绝, 不得进 completed。"""
+    open2 = _open_leg2_sell_first_no_leg1_source()
+    assert open2.leg1_source_lot is None, "夹具: 卖出腿来源必须仍是 None"
+    assert open2.leg2_source_lot == "old_lot", "夹具: 买腿来源已填"
+
+    with pytest.raises((TRoundValidationError, InvalidTRoundTransitionError), match="不能是 None"):
+        complete_round(
+            open2,
+            leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg2_source_lot="old_lot",
+        )
+
+
+def test_completed_rejects_none_sell_leg_source_for_buy_first():
+    """对称(buy_first): 卖出腿是 leg2, 不给 leg2 来源亦拒绝。
+
+    `leg2_source_lot` 在 `complete_round` 签名上是必填位置参数, 所以这里传 None
+    绕不过去的是"填了但填的是 None" —— 与 None 同一条判据。
+    """
+    open2 = transition(_buy_first(), "open_leg2", leg2_source_lot="old_lot")
+    with pytest.raises((TRoundValidationError, InvalidTRoundTransitionError), match="不能是 None"):
+        complete_round(
+            open2,
+            leg1_price=9.9, leg2_price=10.0, qty=100,
+            leg2_source_lot=None,  # type: ignore[arg-type]
+        )
+
+
+def test_completed_accepts_explicit_old_lot_on_sell_leg_both_modes():
+    """正向: 两模式卖出腿显式 `old_lot` → 仍可 completed(回归不破)。"""
+    sf = complete_round(
+        _open_leg2_sell_first_no_leg1_source(),
+        leg1_price=10.0, leg2_price=9.9, qty=100,
+        leg1_source_lot="old_lot", leg2_source_lot="old_lot",
+    )
+    assert sf.round_status == "completed"
+    assert sf.leg1_source_lot == "old_lot"
+
+    bf = complete_round(
+        transition(_buy_first(), "open_leg2", leg2_source_lot="old_lot"),
+        leg1_price=9.9, leg2_price=10.0, qty=100,
+        leg2_source_lot="old_lot",
+    )
+    assert bf.round_status == "completed"
+
+
+def test_pre_fill_none_source_is_still_allowed():
+    """开腿前 / 构造期 / open_leg2 的 None 放行**保留** —— 那时本就知道不了一半。"""
+    rec = _sell_first()
+    assert rec.leg1_source_lot is None and rec.leg2_source_lot is None
+    # open_leg1 → open_leg2 只给买腿来源, 不报错(此时卖腿来源仍未知)
+    open2 = transition(rec, "open_leg2", leg2_source_lot="old_lot")
+    assert open2.round_status == "open_leg2"
+
+
+def test_completed_error_points_at_the_completed_edge():
+    """报错的 target 必须是 `completed`, 不是 `open_leg2`。
+
+    两条边共用一份校验实现, 若 target 写死成 open_leg2, 结算失败的人会去翻开腿的
+    代码, 而问题在结算参数上。
+    """
+    with pytest.raises(InvalidTRoundTransitionError) as excinfo:
+        complete_round(
+            _open_leg2_sell_first_no_leg1_source(),
+            leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg2_source_lot="old_lot",
+        )
+    assert excinfo.value.target == "completed"
+    assert excinfo.value.source == "open_leg2"
 
 
 # =========================================================== Store 内存往返
@@ -589,7 +692,8 @@ def test_completed_round_still_consumes_quota():
     store.upsert(
         complete_round(
             _open_leg2(_record(t_round_id="r1")),
-            leg1_price=10.0, leg2_price=9.9, qty=100, leg2_source_lot="old_lot",
+            leg1_price=10.0, leg2_price=9.9, qty=100,
+            leg1_source_lot="old_lot", leg2_source_lot="old_lot",
         )
     )
     assert store.count_rounds("600000.SH", TODAY) == 1
@@ -616,13 +720,119 @@ def test_moving_round_to_another_day_rechecks_quota():
 
 
 def test_store_consuming_set_matches_state_machine():
-    """Store 里的两个集合必须与状态机一致。"""
-    assert store_module._CONSUMING == state_machine.STATUSES_CONSUMING_QUOTA
+    """Store 与状态机用的是**同一个集合**（不是各存一份、再靠测试对齐）。
+
+    老实现两边各写一份字面量，靠 `==` 守着。批次 20261025gtrounds_patch 里
+    状态机换了新的结局桶名、Store 没跟上，两份就脱钩了 —— 而且是被别的用例
+    顺带照出来的。现在 `is` 判同一对象：以后谁想再分叉，得先删掉这行。
+    """
+    assert store_module._CONSUMING is state_machine.STATUSES_CONSUMING_QUOTA
 
 
 def test_check_round_quota_ignores_void():
     existing = [_record(t_round_id="x", round_status="void_data")]
     state_machine.check_round_quota(existing, "600000.SH", TODAY)  # 不抛
+
+
+# =========================================================== 配额：三个结局桶都占名额
+#
+# 批次 20261025gtrounds_patch ⑤。
+#
+# 上一批把结局桶拆成 unreverted_at_cutoff / data_truncated / limit_locked, 但
+# `STATUSES_CONSUMING_QUOTA` 还写着旧名 incomplete / abandoned。这三个桶都是**真的
+# 开过腿**的, 不进集合就意味着当天配额按"没用掉"回算 → 同一天还能再开一轮。
+# 一个反复回摆不成的票, 可以靠着失败刷出无限次机会。这是配额空洞。
+
+FINAL_STATES_THAT_MUST_CONSUME = (
+    "unreverted_at_cutoff",
+    "data_truncated",
+    "limit_locked",
+)
+
+
+def _final_state_kwargs(status: str) -> dict:
+    """三个终态在模型层都强制要原因 —— 这里按状态补上, 免得每条用例重复写。"""
+    reason_key = {
+        "unreverted_at_cutoff": "unreverted_reason",
+        "data_truncated": "truncated_reason",
+        "limit_locked": "limit_locked_reason",
+    }[status]
+    return {"round_status": status, reason_key: "夹具"}
+
+
+@pytest.mark.parametrize("status", FINAL_STATES_THAT_MUST_CONSUME)
+def test_final_states_are_in_consuming_set(status):
+    assert status in state_machine.STATUSES_CONSUMING_QUOTA, (
+        f"{status} 是真的开过腿的结局, 必须占当日名额, 否则配额出现空洞"
+    )
+
+
+@pytest.mark.parametrize("status", FINAL_STATES_THAT_MUST_CONSUME)
+def test_final_states_consume_quota_end_to_end(status):
+    """端到端: 一条处于该终态的记录 → 当天名额已用掉, 第二条被拒。"""
+    store = InMemoryTRoundRegistryStore()
+    store.upsert(_record(t_round_id="r1", **_final_state_kwargs(status)))
+    assert store.count_rounds("600000.SH", TODAY) == 1, f"{status} 未计入消耗"
+    with pytest.raises(RoundQuotaExceeded, match="max_rounds_per_day"):
+        store.upsert(_record(t_round_id="r2"))
+
+
+@pytest.mark.parametrize("status", FINAL_STATES_THAT_MUST_CONSUME)
+def test_check_round_quota_counts_final_states(status):
+    existing = [_record(t_round_id="x", **_final_state_kwargs(status))]
+    with pytest.raises(RoundQuotaExceeded):
+        state_machine.check_round_quota(existing, "600000.SH", TODAY)
+
+
+def test_legacy_status_names_are_not_in_the_frozenset():
+    """旧名不得再出现在集合字面量里 —— 它们已经不是合法状态了。"""
+    src = inspect.getsource(state_machine)
+    # 只看赋值语句那一段, 不扫整文件(docstring 里会合法地提到旧名作为历史说明)。
+    start = src.index("STATUSES_CONSUMING_QUOTA: Final = frozenset(")
+    end = src.index(")", src.index("}", start))
+    literal = src[start:end]
+    assert "incomplete" not in literal, "旧名 incomplete 仍留在集合字面量里"
+    assert "abandoned" not in literal, "旧名 abandoned 仍留在集合字面量里"
+    assert "incomplete" not in state_machine.STATUSES_CONSUMING_QUOTA
+    assert "abandoned" not in state_machine.STATUSES_CONSUMING_QUOTA
+
+
+def test_void_data_still_not_consuming():
+    """`void_data` 仍然不在集合 —— 与本批次无关, 保持不变。"""
+    assert "void_data" not in state_machine.STATUSES_CONSUMING_QUOTA
+
+
+def test_consuming_set_only_contains_known_round_statuses():
+    """集合里不许有拼错的状态名(否则等于静默不占名额)。"""
+    unknown = state_machine.STATUSES_CONSUMING_QUOTA - C.ROUND_STATUSES
+    assert not unknown, f"集合含未知状态: {sorted(unknown)}"
+
+
+def test_every_open_or_post_entry_status_consumes():
+    """除了 void_data 和尚未开腿的状态, 其余都应消耗名额。"""
+    must_not = {"void_data"}
+    for status in C.ROUND_STATUSES - must_not:
+        assert status in state_machine.STATUSES_CONSUMING_QUOTA, (
+            f"{status} 应当消耗名额(只有 void_data 不算)"
+        )
+
+
+# =========================================================== 文案：不再出现「正 T 老底仓」
+
+
+def test_user_visible_errors_do_not_say_zheng_t():
+    """用户可见报错里不许再写「正 T 老底仓」—— 模式名已统一为 sell_first/buy_first。
+
+    只扫 `detail=` 与 `raise` 的消息部分: docstring/注释里提到历史别名是允许的
+    (别名表、走查史记都要能说清楚旧名), 那些不是用户看到的。
+    """
+    src = inspect.getsource(state_machine)
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or stripped.startswith('"""'):
+            continue
+        if "detail=" in stripped or "raise " in stripped:
+            assert "正 T" not in stripped, f"用户可见报错仍含「正 T」: {stripped}"
 
 
 # =========================================================== 默认不落盘

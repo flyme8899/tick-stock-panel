@@ -27,7 +27,11 @@ from typing import Protocol
 
 from . import constants as C
 from .models import TRoundRecord, TRoundValidationError
-from .state_machine import TRoundStateError, check_round_quota
+from .state_machine import (
+    STATUSES_CONSUMING_QUOTA,
+    TRoundStateError,
+    check_round_quota,
+)
 
 
 class TRoundRegistryError(RuntimeError):
@@ -158,21 +162,18 @@ class InMemoryTRoundRegistryStore:
             return len(self._records)
 
 
-_CONSUMING = frozenset(
-    {
-        "open_leg1",
-        "open_leg2",
-        "completed",
-        "incomplete",
-        "abandoned",
-        "expired_review",
-    }
-)
-"""与 `state_machine.STATUSES_CONSUMING_QUOTA` 同一口径。
+_CONSUMING = STATUSES_CONSUMING_QUOTA
+"""消耗名额的状态 —— **直接引用** `state_machine.STATUSES_CONSUMING_QUOTA`, 不再自带一份。
 
-这里重复一份而不是 import: Store 与状态机之间保持单向依赖(Store 已 import
-state_machine 的 `check_round_quota`), 反向再取常量会让两个模块互相引用。有测试
-断言两份集合相等。
+原来这里复制了一份字面量, 理由写的是"避免两个模块互相引用"。但 Store 本来就
+import 了 `state_machine.check_round_quota`, 方向是 Store → state_machine 的单向,
+再取一个常量并不会成环。而复制一份的代价在批次 20261025gtrounds_patch 兑现了:
+状态机那边的结局桶已经换成 `unreverted_at_cutoff` / `data_truncated` / `limit_locked`,
+这里还留着 `incomplete` / `abandoned` —— 于是**同一个 `void_data` 之外的三类轮次,
+在状态机里占名额、在 Store 里不占**, 当日配额出现空洞。
+
+两份常量之间的"相等"靠测试守着, 而测试只能守已经写下来的期望; 真脱钩时它
+恰好是最后才被想起来的地方。现在改成一个来源, 测试退化为"别名是否还指着原对象"。
 """
 
 
