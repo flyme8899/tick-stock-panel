@@ -262,13 +262,20 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("buy_sell_signals 注册表初始化失败 (不影响启动): %s", e)
 
-    # 买卖信号推送出口 (批次 20261025gpush): 只在 BUY_SELL_SIGNALS_PUSH 开时挂 helper。
-    # 通道 = SSE(QuoteService.push_alerts) + 站内(alert_store); 飞书下一拍。
+    # 买卖信号推送出口 (批次 20261025gpush / gding): 只在 BUY_SELL_SIGNALS_PUSH 开时挂 helper。
+    # 通道 = SSE(QuoteService.push_alerts) + 站内(alert_store); 外部钉钉另受
+    # BUY_SELL_SIGNALS_DINGTALK 与既有 DINGTALK_WEBHOOK_URL 二次门控(与关系, 默认关)。
+    # 飞书已取消(批次 20261025gding 起从路线图去掉, 不再排期)。
     # 这里**不调用** try_push —— 启动路径零真实推送, 也没有任何"扫全表自动推"的逻辑。
     # 与上面的 persist env 正交: 落盘管"活得久", 推送管"播出去", 互不推导。
     # 未开时不挂该属性(而不是挂一个 enabled=False), 让"没开"这件事在 state 上直接可见。
     try:
-        from app.buy_sell_signals.push import push_env_enabled, try_push
+        from app.buy_sell_signals.push import (
+            dingtalk_env_enabled,
+            dingtalk_webhook_ready,
+            push_env_enabled,
+            try_push,
+        )
 
         if push_env_enabled():
             app.state.buy_sell_signal_push = {
@@ -276,8 +283,16 @@ async def _application_lifespan(app: FastAPI):
                 "try_push": try_push,
                 "quote_service": getattr(app.state, "quote_service", None),
                 "data_dir": store.data_dir,
+                # 只读标志: 告诉运维"外部通道是否也已开门", 不代表本次启动发过任何消息。
+                "dingtalk_env": dingtalk_env_enabled(),
+                "dingtalk_webhook": dingtalk_webhook_ready(),
             }
-            logger.info("buy_sell_signals 推送门已开(SSE/站内; 飞书下一拍)")
+            logger.info(
+                "buy_sell_signals 推送门已开(SSE/站内); 钉钉另受 %s 门控(当前%s, webhook%s)",
+                "BUY_SELL_SIGNALS_DINGTALK",
+                "开" if dingtalk_env_enabled() else "关",
+                "已配置" if dingtalk_webhook_ready() else "未配置",
+            )
     except Exception as e:  # noqa: BLE001
         logger.warning("buy_sell_signals 推送门初始化失败 (不影响启动): %s", e)
 

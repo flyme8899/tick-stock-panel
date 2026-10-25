@@ -1,4 +1,4 @@
-"""买卖信号的推送出口(批次 20261025gpush)。
+"""买卖信号的推送出口(批次 20261025gpush 起, 20261025gding 加钉钉支路)。
 
 **仅供研究，不构成投资建议；执行须人工确认。**
 
@@ -8,18 +8,25 @@
 - **SSE**: `QuoteService.push_alerts(list[dict])` → 内部 `_broadcast_alerts` →
   各 `QuoteSubscriber.push_alerts`。不新建路由、不新建总线、不碰 `sse_starlette`。
 - **站内**: `alert_store.append_many(data_dir, [event])` → `data_dir/user_data/alerts.jsonl`。
+- **钉钉**(gding, 外部, best-effort): 调用**既有** `app.news.dingtalk.send_markdown`,
+  凭证读既有的 `settings.dingtalk_webhook_url` / `settings.dingtalk_secret` —— 与资讯、
+  ETF、价位提醒**同一个机器人**, 不新建 webhook、不新建机器人、不复制加签实现。
 
-**本批次不做飞书**(下一拍): 这里不 import `webhook_adapter`, 不调
-`QuoteService._maybe_send_webhook`, 不 import `app.news.push`。`monitor_rules` 里
-那段「落盘 → SSE → 飞书」的三步链条, 本模块**只抄前两步**。
+**飞书已取消**(批次 20261025gding 起从路线图去掉, 不再排期): 这里不 import
+`webhook_adapter`, 不调 `QuoteService._maybe_send_webhook`, 不 import `app.news.push`。
+钉钉只是"把已组好的正文发到群里", 不拖任何资讯业务逻辑进来。
 
-**门控**: `BUY_SELL_SIGNALS_PUSH`,真值集合与 `BUY_SELL_SIGNALS_PERSIST` 完全一致
-(`{"1","true","yes","on"}`,大小写与首尾空白归一)。未设 → 本模块所有入口都是空操作,
-一行都不写。生产是否置 1 **另等部署口令**, 不得随合入默开。
+**门控 —— 三个 env 正交**:
 
-**与落盘正交**: 落盘(persist)管"记录活得比进程久", 推送(push)管"变更播出去"。
-两者各有一个 env, 互不推导 —— 可以只落盘不推、也可以只推不落盘(后者重启即失忆,
-不建议, 但代码不拦)。
+- `BUY_SELL_SIGNALS_PERSIST` 管记录活得比进程久(见 `store`)
+- `BUY_SELL_SIGNALS_PUSH` 管状态变更播出去(本站内 + SSE)
+- `BUY_SELL_SIGNALS_DINGTALK` 管播到外部钉钉群(**与**关系, 不是替代)
+
+真值集合三者完全一致(`{"1","true","yes","on"}`, 大小写与首尾空白归一), 但各自持有
+常量, 不是互相 import —— 一方改真值集合不该悄悄改到另一方。
+
+真实外发到钉钉 = PUSH 开 **且** DINGTALK 开 **且** `dingtalk_webhook_url` 非空。
+缺任一 → 钉钉静默跳过, **不影响** SSE/站内。生产是否置 1 **另等部署口令**, 不得随合入默开。
 
 ### 触发条件(全部满足才推)
 
@@ -28,6 +35,8 @@
 3. 派生 `push_eligible` 为真(内含"当前时间不在冷却窗口")
 4. `event_class != "limit_reopen"` —— 炸板/回封不推, 与状态机双拦一致
 5. **状态变化**: `last_pushed_at is None` 或 `last_status_change_at > last_pushed_at`
+
+钉钉支路**不另设触发条件**, 也不另设时钟: 它就是同一次 `try_push` 的第四个动作。
 
 ### 「同状态不推」优先于「冷却期满回 armed」
 
@@ -41,6 +50,16 @@
 
 理由: 冷却的语义是"别重复播报同一条消息", 不是"时间到了就再播一遍"。反过来做,
 用户会在没有任何新信息的情况下周期性收到同一条信号。
+
+### 冷却只写一次, 与通道成败无关(通道之间的策略差异)
+
+- **核心通道(站内/SSE)失败** → 不写回, 返回 `ok=False`。宁可下次重推一遍, 也不要
+  出现"标记为已推、其实没人收到"。此时**不发钉钉**(钉钉挂在核心成功之后)。
+- **钉钉失败** → 记 warning, **不回滚**已成功的站内/SSE, **仍写**一次冷却, 返回 `ok=True`。
+  钉钉是外部 best-effort 通道: 为了它失败而把整次尝试标成失败, 会导致下次重推时
+  站内/SSE 又播一遍 —— 用内部通道的重复来补偿外部通道的抖动, 是更差的结果。
+
+两条策略不矛盾, 它们各自守的是"哪一侧的重复更不可接受"。
 """
 from __future__ import annotations
 
@@ -55,6 +74,7 @@ from app.market_time import CN_TZ, cn_now
 
 from . import disclaimer as _disclaimer
 from .constants import (
+    DINGTALK_ENV_NAME,
     MONITOR_EVENT_TYPE,
     NAMESPACE,
     PUSH_DEDUPE_COOLDOWN_MIN,
@@ -92,12 +112,26 @@ class PushResult:
     """推送成功后**已更新**的记录(冷却字段与 `push_gate` 已改)。失败时为 None。"""
     sse_sent: bool = False
     inbox_sent: bool = False
+    dingtalk_sent: bool = False
+    """钉钉是否**真的发出去并成功**了(gding)。
+
+    `False` 有三种来源, 都属正常: 门没开 / 没配 webhook / 发送抛错。要区分请读
+    `reason` 与 warning 日志 —— 这里只回答"外部群到底收到没有"。
+    """
     message: str = ""
     """人读的一行摘要(与推送出去的 message 同文)。"""
 
     @property
     def channels(self) -> tuple[str, ...]:
-        return tuple(name for name, hit in (("sse", self.sse_sent), ("inbox", self.inbox_sent)) if hit)
+        return tuple(
+            name
+            for name, hit in (
+                ("sse", self.sse_sent),
+                ("inbox", self.inbox_sent),
+                ("dingtalk", self.dingtalk_sent),
+            )
+            if hit
+        )
 
 
 class PushError(Exception):
@@ -122,6 +156,72 @@ class PushRejected(PushError):
 def push_env_enabled() -> bool:
     """推送门是否开。只认 `PUSH_ENV_NAME` 这一个名字。"""
     return os.environ.get(PUSH_ENV_NAME, "").strip().lower() in _TRUTHY
+
+
+# ================================================================ 钉钉支路(外部)
+
+
+def dingtalk_env_enabled() -> bool:
+    """钉钉**支路**门是否开。只认 `DINGTALK_ENV_NAME` 这一个名字。
+
+    与 `push_env_enabled()` 各自独立: 这一条为真**不**代表会推送, 还要 PUSH 也开。
+    """
+    return os.environ.get(DINGTALK_ENV_NAME, "").strip().lower() in _TRUTHY
+
+
+def dingtalk_webhook_ready() -> bool:
+    """既有钉钉机器人是否配好了 webhook。
+
+    只读 `settings.dingtalk_webhook_url`(**既有**字段, env `DINGTALK_WEBHOOK_URL`)。
+    本包**不新增**任何钉钉配置项 —— 多一个 webhook 字段就等于多一个会漏配的地方。
+
+    空串 → `False`, 调用方静默跳过。`send_markdown` 自己也会对空 webhook 抛
+    `RuntimeError("未配置钉钉机器人")`, 但那是个异常, 用在"没配"这种**预期状态**上
+    会让日志里全是噪音, 所以先在这里挡掉。
+    """
+    from app.config import settings
+
+    return bool((getattr(settings, "dingtalk_webhook_url", "") or "").strip())
+
+
+def build_dingtalk_text(payload: dict[str, Any]) -> tuple[str, str]:
+    """从共用载荷组 `(title, text)`。
+
+    信息密度与站内/SSE **同级**: 用户不用点进页面就知道是哪条信号、什么状态、
+    哪一版。合规脚注单列一段, 不做行内小字 —— 群里消息常被转发, 脚注必须跟着走。
+
+    **不转发新闻正文**: 本包不持有任何新闻正文, 载荷里也没有正文位。想加, 先过评审。
+    """
+    title = f"买卖信号 · {payload.get('display_name', '')}"[:64]
+    lines = [
+        f"**{payload.get('display_name', '')}** ({payload.get('signal_id', '')})",
+        f"状态 → {payload.get('status', '')} · 闸门 {payload.get('push_gate', '')} · {payload.get('version', '')}",
+        f"事件 {payload.get('event_class', '')} · 家族 {payload.get('family', '')}",
+        "",
+        payload.get("message", ""),
+        "",
+        f"_{payload.get('disclaimer', '')}_",
+    ]
+    return title, "\n".join(lines)
+
+
+def _emit_dingtalk(record: SignalRecord, payload: dict[str, Any]) -> None:
+    """发一条到既有钉钉群。**best-effort, 调用方负责 catch。**
+
+    复用 `app.news.dingtalk.send_markdown`(与资讯 / ETF / 价位提醒同一路径),
+    不复制 `signed_url` 的 HMAC 加签实现, 也不新建机器人。
+
+    本函数**不捕获**异常: 成功/失败由调用方决定后果(这里只负责发)。
+    也**不打印**任何东西 —— url / secret 一旦进日志就等于泄露, 而日志行里加上
+    "已脱敏的 url" 只会让人以为没有泄露风险。
+    """
+    from app.config import settings
+    from app.news.dingtalk import send_markdown
+
+    url = (getattr(settings, "dingtalk_webhook_url", "") or "").strip()
+    secret = (getattr(settings, "dingtalk_secret", "") or "").strip()
+    title, text = build_dingtalk_text(payload)
+    send_markdown(url, secret, title, text)
 
 
 # ================================================================ 载荷
@@ -321,6 +421,7 @@ def try_push(
 
     inbox_sent = False
     sse_sent = False
+    dingtalk_sent = False
     try:
         if data_dir is not None:
             from app.services import alert_store  # 局部 import: 本模块被 main 的 lifespan 调用
@@ -340,6 +441,24 @@ def try_push(
             sse_sent=sse_sent,
             inbox_sent=inbox_sent,
         )
+
+    # 钉钉支路(gding): **挂在核心扇出成功之后**。核心失败上面已经 return, 所以
+    # 站内都没写出去时绝不会往外部群里发一条"其实没落库"的消息。
+    # 失败不 return(ok 仍为 True)、不回滚、仍写一次冷却 —— 见模块 docstring 末节。
+    if dingtalk_env_enabled() and dingtalk_webhook_ready():
+        try:
+            _emit_dingtalk(record, payload)
+            dingtalk_sent = True
+        except Exception as exc:  # noqa: BLE001
+            # 只留 signal_id 与异常文本。url / secret 在 settings 里, 本函数不碰它们,
+            # 第三方库的异常消息也不该带出完整 URL, 所以这里不必额外脱敏。
+            logger.warning(
+                "buy_sell_signals 钉钉发送失败 (signal_id=%s): %s", record.signal_id, exc
+            )
+    elif not dingtalk_env_enabled():
+        logger.debug("buy_sell_signals 钉钉支路未开 (%s 未设), 跳过", DINGTALK_ENV_NAME)
+    else:
+        logger.info("buy_sell_signals 钉钉 webhook 未配置, 跳过外部通道 (signal_id=%s)", record.signal_id)
 
     updated = record.with_fields(
         last_pushed_at=stamp,
@@ -362,13 +481,23 @@ def try_push(
                 record=updated,
                 sse_sent=sse_sent,
                 inbox_sent=inbox_sent,
+                dingtalk_sent=dingtalk_sent,
                 message=payload["message"],
             )
 
     logger.info(
         "buy_sell_signals 已推送 signal_id=%s channels=%s cooldown_until=%s",
         record.signal_id,
-        ",".join(n for n, hit in (("sse", sse_sent), ("inbox", inbox_sent)) if hit) or "none",
+        ",".join(
+            n
+            for n, hit in (
+                ("sse", sse_sent),
+                ("inbox", inbox_sent),
+                ("dingtalk", dingtalk_sent),
+            )
+            if hit
+        )
+        or "none",
         updated.push_dedupe_cooldown_until,
     )
     return PushResult(
@@ -376,6 +505,7 @@ def try_push(
         record=updated,
         sse_sent=sse_sent,
         inbox_sent=inbox_sent,
+        dingtalk_sent=dingtalk_sent,
         message=payload["message"],
     )
 
@@ -385,8 +515,11 @@ __all__ = [
     "PushError",
     "PushRejected",
     "PushResult",
+    "build_dingtalk_text",
     "build_push_payload",
     "build_sse_alert",
+    "dingtalk_env_enabled",
+    "dingtalk_webhook_ready",
     "evaluate_push",
     "push_env_enabled",
     "try_push",

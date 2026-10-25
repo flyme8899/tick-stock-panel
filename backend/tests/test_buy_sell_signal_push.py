@@ -457,6 +457,12 @@ def test_push_module_only_imports_allowed_app_modules():
         # `from app.services import alert_store` 会同时绑 app.services 这个包名,
         # 但它只能取到包内的 alert_store, 上一条白名单已经钉死了取谁。
         "app.services",
+        # gding: 钉钉支路。只允许**发送函数**与**既有 settings**这两样:
+        #   - `app.news.dingtalk` 是既有机器人实现, 本包只调 send_markdown
+        #   - `app.config` 只为读 dingtalk_webhook_url / dingtalk_secret(既有字段)
+        # `app.news.push` 仍禁 —— 那是资讯业务逻辑, 会顺带拖进 BAND / cooldown。
+        "app.news.dingtalk",
+        "app.config",
     }
     allowed_relative = {
         "",  # from . import disclaimer as _disclaimer

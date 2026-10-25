@@ -1,4 +1,4 @@
-# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送）
+# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送 + gding 可选钉钉）
 
 > **仅供研究，不构成投资建议；执行须人工确认。**
 
@@ -7,9 +7,10 @@
 
 > 20261025g2 的改动见文末 [g2 窄化](#g2-窄化批次-20261025g2) 一节；
 > 20261025gp 的改动见文末 [gp 可选落盘](#gp-可选落盘批次-20261025gp) 一节；
-> 20261025gpush 的改动见文末 [gpush 可选推送](#gpush-可选推送批次-20261025gpush) 一节。
+> 20261025gpush 的改动见文末 [gpush 可选推送](#gpush-可选推送批次-20261025gpush) 一节；
+> 20261025gding 的改动见文末 [gding 可选钉钉](#gding-可选钉钉批次-20261025gding) 一节。
 
-**现行口径：落盘已开 · 推送可选（env）· 竞价/放量事件仍未接。**
+**现行口径：落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接。**
 
 ## 一句话
 
@@ -19,13 +20,15 @@ Store 默认用**内存实现**，置 `BUY_SELL_SIGNALS_PERSIST=1` 后改为**�
 
 推送出口 `push.try_push()` 已就位，但**默认关**：置 `BUY_SELL_SIGNALS_PUSH=1` 才会真实
 扇出，通道 = **SSE（复用 `QuoteService.push_alerts`）+ 站内告警（`alerts.jsonl`）**。
-**飞书下一拍，本包不接。**
+外部通道只接**既有钉钉 webhook**，且要再开一道 `BUY_SELL_SIGNALS_DINGTALK`（默认关，
+与 PUSH 是**与**关系）。**飞书已取消**（批次 20261025gding 起从路线图去掉，不再排期）。
 
 **没有**接任何 HTTP 路由、**没有**接日管道（不会自动扫全表晋升/推送）。
 
-**落盘与推送正交**：这是两个 env，互不推导。落盘管"记录活得比进程久"，推送管
-"状态变更播出去"。可以只落盘不推（生产当前状态），也可以只推不落盘（不建议，
-重启即失忆，但代码不拦）。
+**落盘 / 推送 / 钉钉三者正交**：三个 env，互不推导。落盘管"记录活得比进程久"，
+推送管"状态变更播出去（站内/SSE）"，钉钉管"播到外部群"。可以只落盘不推，也可以只推
+不落盘（不建议，重启即失忆，但代码不拦）。**钉钉真实外发 = PUSH 开 且 DINGTALK 开
+且 `DINGTALK_WEBHOOK_URL` 非空**，缺任一即静默跳过，不影响站内/SSE。
 
 ## 包结构
 
@@ -210,7 +213,7 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 
 ## 本批次明确不做
 
-- 飞书推送（SSE/站内已可选开启）
+- 飞书推送（**已取消**：批次 20261025gding 起从路线图去掉，不再排期）
 - 默认落盘 / persist 开关默认开
 - 竞价回测、分钟放量、炸板回测
 - 做 T（旁支 h）轮次
@@ -352,7 +355,7 @@ rebalance_id, pit_asof, score_version, universe_n, scored_n, whitelist_n_p40
 
 - 估值腿实装 / 健康规则引擎（`health_veto_hit` 保持 `None`，**不是** `False`）
 - 权重标定、白名单锁定、p30/p50 敏感性
-- 正式推送闸 / SSE / 飞书
+- 正式推送闸 / SSE / 飞书（SSE 已在 gpush 交付；飞书在 gding 取消）
 - 落盘、persist 默认开、生产分区写入
 - 竞价回测、09:30 首根 1m 冒充 09:25
 - 再平衡的生产调度（cron / 批跑 / 写分区）
@@ -396,7 +399,8 @@ rebalance_id, pit_asof, score_version, universe_n, scored_n, whitelist_n_p40
   `WHITELIST_PERCENTILE_LOCKED = None` 全部照旧。gp 不碰 g2.1 的口径
 - **推送当时未接**（gpush 起改为 env 门控）：`main.py` **至今仍不得** import
   `app.news.push` / `sse_starlette` / 飞书客户端，有静态测试按 **import 语句**扫
-  （不是裸子串 —— 注释里写"不接 news.push"是合法的）
+  （不是裸子串 —— 注释里写"不接 news.push"是合法的）。gding 起 `push.py` 允许
+  import `app.news.dingtalk` 与 `app.config`（只为调既有发送函数、读既有 settings）
 - **日管道仍未接**：`daily_pipeline.py` 里不得出现 `DiskSignalRegistryStore` 或
   `buy_sell_signals`
 - **`partition_writer` 仍禁**：AST 扫 `store.py`，名字不得出现
@@ -433,8 +437,8 @@ BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
 
 ## gpush 可选推送（批次 20261025gpush）
 
-**一句话**：推送出口 `push.try_push()` 接上了，但**默认关**，**通道只有 SSE + 站内**，
-**飞书下一拍**。
+**一句话**：推送出口 `push.try_push()` 接上了，但**默认关**，**通道只有 SSE + 站内**。
+外部通道当时未接，由下一批 gding 只补钉钉；**飞书已取消**（gding 起从路线图去掉）。
 
 ### 改了什么
 
@@ -455,7 +459,7 @@ BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
 
 **不新建**推送总线、不新建 SSE 路由（`sse_starlette` 一行都不 import）、不接飞书
 （`send_feishu` / `_maybe_send_webhook` 都不调）。`monitor_rules` 里那段
-"落盘 → SSE → 飞书"的三步链条，本模块**只抄前两步**。
+"落盘 → SSE → 飞书"的三步链条，本模块**只取前两步**（钉钉在 gding 另按独立门追加）。
 
 **顺序：先站内、后 SSE**。站内是持久化的，SSE 队列满会丢最旧 —— 先写不会丢的那份。
 
@@ -509,8 +513,8 @@ BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
 - **persist 语义未动**：`PERSIST_*` / `registry.json` 路径 / 真值集合全部原样
 - **无自动晋升**：没新增状态机边；炸板仍禁 `publishable`
 - **日管道未接**：`daily_pipeline.py` 里仍无 `buy_sell_signals` / `try_push`
-- **无飞书**：`push.py` 的 AST 里连 `send_feishu` / `_maybe_send_webhook` / `webhook_adapter`
-  这些标识符都不许出现（有测试逐符号扫）
+- **无飞书**（gding 起正式取消，路线图移除）：`push.py` 的 AST 里连 `send_feishu` /
+  `_maybe_send_webhook` / `webhook_adapter` 这些标识符都不许出现（有测试逐符号扫）
 - **无提醒层耦合**：不 import `trade_marks` / `news.push` 的 BAND 与 cooldown，
   冷却只用包内 `PUSH_DEDUPE_COOLDOWN_MIN`
 
@@ -521,11 +525,129 @@ BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
 - [x] env 名 = `BUY_SELL_SIGNALS_PUSH`；未设 / 单测默认 → 不真实推送
 - [x] 仅 `publishable` + `armed` + 冷却已过 + 状态变化才推；同状态重算不推
 - [x] 成功后 `last_pushed_at` 有值；冷却 = now + 30 分钟；冷却期阻断
-- [x] 通道 = SSE + 站内（复用 `QuoteService.push_alerts`）；本派无飞书
+- [x] 通道 = SSE + 站内（复用 `QuoteService.push_alerts`）；本派无飞书（gding 起正式取消）
 - [x] 载荷含合规脚注（`DISCLAIMER_TEXT`）与 `monitor_event_type`
 - [x] 无自动 `publishable`；炸板不可推；无日管道自动扫晋升
 - [x] 无 import `trade_marks` / `news.push` BAND·cooldown；与 `t_rounds` 零耦合
 - [x] 文档写清口径；脚注保留
+- [x] `WHITELIST_PERCENTILE_LOCKED is None`；`WHITELIST_TRIAL_QUANTILE == 0.60`
+- [x] 未接竞价/放量事件生成；未实装估值/健康；未开 MCP 交易
+- [x] 单测全绿
+
+*参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
+
+## gding 可选钉钉（批次 20261025gding）
+
+**一句话**：在 #205 的 `try_push` 资格门之后，接**既有钉钉 webhook** 作为外部通道，
+另加一道 `BUY_SELL_SIGNALS_DINGTALK`（默认关，与 `BUY_SELL_SIGNALS_PUSH` 是**与**关系）。
+**飞书已取消**——不是"以后再说"，是从路线图上去掉了。
+
+### 为什么外部通道要独立一道门
+
+生产 `BUY_SELL_SIGNALS_PUSH=1` 早已打开，`DINGTALK_WEBHOOK_URL` 多半也为资讯推送配好了。
+如果钉钉只认 PUSH 门，本批代码**一合入、一重启就会立刻往既有群里外发**。
+
+站内消息发错了，刷新一下就没了；群里发错了，收不回来。独立门的价值就在这条非对称上：
+
+    真实外发到钉钉 = push_env_enabled() and dingtalk_env_enabled() and webhook 非空
+
+缺任一 → 钉钉**静默跳过**，站内/SSE 照常，冷却照写。生产置 1 **另等部署口令**，
+**合入 ≠ 开钉钉**。
+
+### 改了什么
+
+| 位置 | 变化 |
+|---|---|
+| `constants.py` | 新增 `DINGTALK_ENV_NAME = "BUY_SELL_SIGNALS_DINGTALK"`；`PUSH_ENV_NAME` 说明改写（飞书取消、外部通道另门控）；**语义未动** |
+| `push.py` | 新增 `dingtalk_env_enabled()` / `dingtalk_webhook_ready()` / `build_dingtalk_text()` / `_emit_dingtalk()`；`PushResult` 增 `dingtalk_sent`，`channels` 纳入 `"dingtalk"`；`try_push` 在核心扇出成功后、写回冷却前插入钉钉支路 |
+| `__init__.py` | 导出 `DINGTALK_ENV_NAME` / `dingtalk_env_enabled` / `dingtalk_webhook_ready` / `build_dingtalk_text`；模块头补 gding 段，并把旧的「飞书待办」措辞改为「飞书已取消」 |
+| `main.py` | lifespan 注释与 info 日志改为「SSE/站内；钉钉另受 BUY_SELL_SIGNALS_DINGTALK 门控」；`buy_sell_signal_push` 增两个**只读**标志 `dingtalk_env` / `dingtalk_webhook` |
+| `tests/` | 新建 `test_buy_sell_signal_dingtalk.py`（17 条）；`test_buy_sell_signal_push.py` 的 import 白名单放行 `app.news.dingtalk` / `app.config` |
+| `docs` | 本节 + 上文口径改写 |
+
+### 通道：复用既有机器人，不新建
+
+| 项 | 取值 |
+|---|---|
+| 发送函数 | `app.news.dingtalk.send_markdown(webhook, secret, title, text)` —— 与资讯 / ETF / 价位提醒**同一条路径** |
+| 凭证 | 既有 `settings.dingtalk_webhook_url` / `settings.dingtalk_secret`（env `DINGTALK_WEBHOOK_URL` / `DINGTALK_SECRET`） |
+| 标题 | `买卖信号 · {display_name}`，截断到 64 字符 |
+| 正文 | 信号名 + id、状态 / 闸门 / 版本、事件 / 家族、`message`、合规脚注单列一段 |
+
+**不新建** webhook 配置项、不新建机器人、**不复制** `signed_url` 的 HMAC 加签实现
+（AST 测试禁 `hmac` / `hashlib` / `base64` / `urllib.request`）。**不转发新闻正文**——
+本包不持有正文，载荷里也没有正文位。
+
+### 触发：与 #205 完全一致，钉钉没有自己的时钟
+
+1. `status == "publishable"` —— 唯一入口仍是 `manual_publish()`
+2. `push_gate == "armed"`
+3. 按**入口时刻**判定冷却已过
+4. `event_class != "limit_reopen"`
+5. **状态变化**：`last_pushed_at is None` 或 `last_status_change_at > last_pushed_at`
+
+钉钉支路不是第六个条件，而是同一次 `try_push` 的第四个动作。
+
+### 冷却只写一次，但两侧的失败策略不同
+
+同一次状态变化可以**同时** SSE + 站内 + 钉钉，`last_pushed_at` /
+`push_dedupe_cooldown_until`（now + 30）/ `push_gate=cooldown` **只写一次**，
+由 `try_push` 尾部统一写回。钉钉支路**不自带** `last_pushed_at` 写操作，也不另算冷却。
+
+| 谁失败 | 写回 | 返回 | 钉钉 |
+|---|---|---|---|
+| 核心通道（站内/SSE） | **不写** | `ok=False` | **不发**（钉钉挂在核心成功之后） |
+| 钉钉 | **照写一次** | `ok=True`（`dingtalk_sent=False`） | 已尝试一次，不重试 |
+
+两条策略不矛盾，各自守的是"哪一侧的重复更不可接受"：核心挂了不写回，是宁可下次重推；
+钉钉挂了仍写回，是不愿为外部通道的抖动让站内/SSE 再播一遍。
+
+钉钉失败只 `logger.warning(..., signal_id=..., 异常文本)`，**不打印** url / secret / token。
+
+### 怎么开
+
+```bash
+# 默认: 三个门全关, try_push 一行都不写
+python -m app.main
+
+# 站内 + SSE(生产现状)
+BUY_SELL_SIGNALS_PUSH=1 python -m app.main
+
+# 站内 + SSE + 钉钉(还需既有 DINGTALK_WEBHOOK_URL 非空)
+BUY_SELL_SIGNALS_PUSH=1 BUY_SELL_SIGNALS_DINGTALK=1 python -m app.main
+
+# 只落盘不推(仍是最小面, 与上面三者正交)
+BUY_SELL_SIGNALS_PERSIST=1 python -m app.main
+```
+
+`BUY_SELL_SIGNALS_PERSIST=1` / `BUY_SELL_SIGNALS_PUSH=1` 已上；`BUY_SELL_SIGNALS_DINGTALK`
+**另等部署口令**，不随合入默开。
+
+### 没改什么（逐条钉住）
+
+- **白名单未动**：`WHITELIST_TRIAL_QUANTILE = 0.60`、`WHITELIST_PERCENTILE_LOCKED = None`，
+  `quality_rank.py` 一行未改
+- **PUSH / PERSIST 语义未动**：`PUSH_ENV_NAME` / `push_env_enabled` / `evaluate_push` /
+  `PERSIST_*` / `registry.json` 路径 / 真值集合全部原样
+- **无飞书**：`send_feishu` / `_maybe_send_webhook` / `webhook_adapter` 仍是禁用标识符
+- **无提醒层耦合**：不 import `trade_marks` / `news.push` 的 BAND 与 cooldown；
+  允许调 `app.news.dingtalk` **发送函数**，仍禁 import `app.news.push` 业务逻辑
+- **无自动晋升 / 无日管道自动扫 / 无 MCP 交易**
+- **无竞价/放量事件**、估值/健康仍 `pending`
+
+### gding 验收自检（ALIGN §5）
+
+- [x] 基线 tip = `285a48195f4e2fecad697def82232c7d62a309d5`（含 #205）
+- [x] 改动焦点 `buy_sell_signals`（+ tests/docs）；`main.py` 仅文案与一段只读标志；无新建推送总线 / 独立 SSE / 平行机器人
+- [x] env 名 = `BUY_SELL_SIGNALS_DINGTALK`；未设 / 单测默认 → 零真实钉钉；与 PUSH 为**与**关系
+- [x] 仅 `publishable` + `armed` + `push_eligible` 且状态变化才推；同状态重算不推
+- [x] 同一次可 SSE + 站内 + 钉钉，但**只记一次** `last_pushed_at`；冷却 = now + 30；冷却期阻断
+- [x] 无 webhook 时钉钉静默跳过且不影响 SSE/站内
+- [x] 通道外部 = 既有钉钉 webhook；**无飞书**（路线图已移除）
+- [x] 载荷含合规脚注；不转发新闻正文；token / URL 不进日志明文（有 caplog 断言）
+- [x] 无自动 `publishable`；炸板不可推；无日管道自动扫晋升
+- [x] 无 import `trade_marks` / `news.push` BAND·cooldown；与 `t_rounds` 零耦合
+- [x] 文档写清「落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接」
 - [x] `WHITELIST_PERCENTILE_LOCKED is None`；`WHITELIST_TRIAL_QUANTILE == 0.60`
 - [x] 未接竞价/放量事件生成；未实装估值/健康；未开 MCP 交易
 - [x] 单测全绿
