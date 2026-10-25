@@ -36,10 +36,33 @@
 `same_day_buy`，`complete_round()` 会抛 `InvalidTRoundTransitionError`，那一轮
 进不了 `completed`，只会落在 `incomplete` 里。
 
-## 一日一票一轮
+## 一日一票一轮（四个格子各是独立世界）
 
-`MAX_ROUNDS_PER_DAY=1` 在这里同样生效（与 `InMemoryTRoundRegistryStore.upsert()`
-的配额检查同一口径）。**同票同日第二个信号不再开轮**，记入 `skipped_quota`。
+`MAX_ROUNDS_PER_DAY=1` **钉死不放宽**（与 `InMemoryTRoundRegistryStore.upsert()`
+的配额检查同一口径）。同一 (symbol, 交易日) 在同一格里第二个候选不再开轮，计入
+`skipped_quota`。
+
+### 配额按「格子」隔离，不跨格子共享
+
+四个格子（正/倒 T × 路径 A/B）是**四个反事实世界**：每个格子各自受一日一轮约束，
+彼此不排队、不抢名额。
+
+这一条是本批次明确修正过的。早先的实现让四格共享一个 `(symbol, 交易日)` 名额，
+于是「谁先被扫到谁拿走」—— 顺序被写死成「正 T 优先、A 优先」。后果很具体：
+路径 A 会在每个同时满足两类条件的日子抢走名额，B 永远拿不到，A 与 B 的对比
+自带系统性优势。而任务书要求 A∥B **分列、不混主门禁** —— 带顺序偏置的分列
+没有可比性。
+
+改成隔离之后，「硬规则有没有被放宽」这个疑问要分清两件事：
+
+- **没有放宽**：每个世界内部仍然是一日一轮，同一天在同一世界里的第二个候选照旧
+  被拒、照旧记 `skipped_quota`。
+- **不再互相排队**：不同世界之间本来就不该排队 —— 它们不会同时发生。真实交易
+  里你只可能处在其中一种情形下；把四个假设并排摆出来看，是评估的工作方式，
+  不是同时开四轮 T。
+
+`skipped_quota` 因此只有一个含义：**同一世界、同一路径、同日多候选撞配额**。
+它**不再**表示"被别的格子抢走了名额"。
 
 这不是为了"让数字好看"而做的限制：一天做多轮 T 在纸面回测里几乎总是更好看
 （多做几次总能摊到一次成功的），但它要求能在同一个日内区间反复进出，实盘上滑点
@@ -95,7 +118,11 @@ class BucketCounts:
     incomplete: int = 0
     abandoned: int = 0
     skipped_quota: int = 0
-    """因一日一票一轮而被拒的信号数。**不是**一轮 T，只计数不建记录。"""
+    """同一世界（模式, 路径）同日多候选时，超出 `MAX_ROUNDS_PER_DAY` 被拒的候选数。
+
+    **不是**一轮 T，只计数不建记录。也**不是**"被别的格子抢走的名额" —— 配额按
+    格子隔离，四个格子各跑各的（见模块 docstring「四个格子各是独立世界」）。
+    """
 
     @property
     def rounds(self) -> int:
@@ -235,22 +262,31 @@ def _confirm_columns(mode: str, path: str) -> tuple[str, ...]:
     return ("gate_enter_band_up",) if mode == "zheng_t" else ("gate_enter_band_down",)
 
 
-def _confirmed_entry_bar(
+def _confirmed_entry_bars(
     day_sorted: pl.DataFrame, *, flag: str, confirm: tuple[str, ...]
-) -> Any | None:
-    """路径 A 的入场 bar：**边沿当日第一根、且其后同日出现过进带**的那根。
+) -> list[Any]:
+    """当日**全部**合格的入场 bar（按时间升序）。
 
-    返回 `None` 表示当日没有合格的入场点（边沿没出现，或出现了但价格至终没离开
-    均价 —— 后者正是「贴着均价抖动」那种不该记成交的情形）。
+    返回空列表表示当日没有合格入场点（边沿没出现，或出现了但价格至终没离开均价
+    —— 后者正是「贴着均价抖动」那种不该记成交的情形）。
 
-    只取「边沿之后」的进带：边沿之前就进过带不算数，因为那时价格还没穿越，
-    那根带是上一段行情的尾巴，不能拿来确认这次穿越。
+    为什么返回**多个**而不是第一个：同一 (symbol, 交易日) 在同一格里可能被价格
+    反复穿越（每次穿越且之后进带，都是一次独立的入场候选）。原来的实现只取第一
+    个，于是 `MAX_ROUNDS_PER_DAY=1` 永远撞不到，`skipped_quota` 变成死代码。
+    现在把候选全列出来，再由格子内配额按一日一轮取前 N 个、其余记 `skipped_quota`
+    —— 这才让那个计数器有真实含义。
+
+    路径 A 的确认是**因果的**：只认「边沿之后」的进带。边沿之前就进过带不算数，
+    因为那时价格还没穿越，那根带是上一段行情的尾巴。
     """
     hits = day_sorted.filter(pl.col(flag).fill_null(False))
     if hits.is_empty():
-        return None
+        return []
+    candidates: list[Any] = hits["datetime"].to_list()
     if not confirm:
-        return hits["datetime"][0]
+        # 路径 B 的带列本身已带 ε，且「首次进带」在 gates 里就只标一根，
+        # 所以这里通常只有一个候选。仍按列表返回，保持两种路径同一形状。
+        return candidates
 
     ts = day_sorted["datetime"]
     confirmed = pl.all_horizontal(
@@ -260,11 +296,26 @@ def _confirmed_entry_bar(
         pl.col("_confirmed")
     )["_ts"]
 
-    for entry_ts in hits["datetime"].to_list():
-        # 同日、不早于边沿那根之后的任意一根进带 → 这次边沿被确认
-        if confirmed_ts.len() and (confirmed_ts > entry_ts).any():
-            return entry_ts
-    return None
+    if not confirmed_ts.len():
+        return []
+    confirmed_list = confirmed_ts.to_list()
+    return [
+        entry_ts
+        for entry_ts in candidates
+        if any(c > entry_ts for c in confirmed_list)
+    ]
+
+
+def _confirmed_entry_bar(
+    day_sorted: pl.DataFrame, *, flag: str, confirm: tuple[str, ...]
+) -> Any | None:
+    """当日第一个合格入场 bar；没有则 `None`。
+
+    便捷封装，语义等同 `_confirmed_entry_bars(...)` 的首元素。回测主循环用列表版
+    （它需要知道"还有几个候选被配额挡掉了"），这里留给单点查询的调用方。
+    """
+    found = _confirmed_entry_bars(day_sorted, flag=flag, confirm=confirm)
+    return found[0] if found else None
 
 
 def entry_side(mode: str, path: str) -> str:
@@ -437,11 +488,17 @@ def run_mode_a_backtest(
     }
 
     # 配额（`MAX_ROUNDS_PER_DAY = 1`）是**按票按日**算的, 不是按 (模式, 路径) 算的。
-    # 这直接决定了四个格子不可能都填满: 同一 (symbol, 交易日) 只允许一轮 T, 先到的
-    # 那个格子拿走名额, 其余记 `skipped_quota`。顺序写死为 模式 → 路径, 于是
-    # 「正 T 优先、A 优先」。这是取舍而不是遗漏: 四个格子各自独立计数会得到
-    # 一天做四轮 T 的样本, 与本系统一日一轮的硬规则不符。
-    used: dict[tuple[str, date], int] = {}
+    # 配额按 (模式, 路径, symbol, 交易日) 计数 —— **四个格子各是独立世界**。
+    #
+    # 为什么不共享一个 `(symbol, 交易日)` 名额：那样四个格子就会互相抢，抢的顺序
+    # （谁先扫到谁拿走）直接写进 A/B 的比较里，等于给路径 A 一个系统性优势。而
+    # 任务书要求 A∥B **分列、不混主门禁** —— 带顺序偏置的分列没有可比性。
+    #
+    # 反事实口径：把每个格子看成"如果只按这一格的条件交易，会怎样"，四个答案
+    # 各自独立地受 `MAX_ROUNDS_PER_DAY=1` 约束。**硬规则没有被放宽** —— 每个
+    # 世界内部仍然一天一轮；放宽的是"不同世界之间要不要互相排队"，而它们本来就
+    # 不该排队：它们不会同时发生（同一时刻只会有一个条件先满足）。
+    used: dict[tuple[str, str, str, date], int] = {}
 
     for (symbol, trade_date), day in feature_frame.group_by(["symbol", "date"], maintain_order=True):
         symbol = str(symbol)
@@ -453,37 +510,44 @@ def run_mode_a_backtest(
                 col = _band_column(mode, path)
                 if col not in day_sorted.columns:
                     continue
-                # 路径 A 要「边沿在前、进带在后」的同日确认；路径 B 直接取首个进带。
+                # 路径 A 要「边沿在前、进带在后」的同日确认；路径 B 直接取进带标记。
                 confirm = _confirm_columns(mode, path)
-                entry_ts = _confirmed_entry_bar(day_sorted, flag=col, confirm=confirm)
-                if entry_ts is None:
+                candidates = _confirmed_entry_bars(day_sorted, flag=col, confirm=confirm)
+                if not candidates:
                     continue
-                key = (symbol, trade_date)
-                # 名额口径与 `Store.count_rounds` 一致：`void_data` 不占名额。纸面
-                # 模拟不产生 `void_data`, 所以这里等价于"已开过几轮", 但保留同一
-                # 判据, 免得将来加了 `void_data` 分支后两处口径分叉。
-                if used.get(key, 0) >= C.MAX_ROUNDS_PER_DAY:
-                    counters[(mode, path)]["skipped_quota"] += 1
-                    continue
-                used[key] = used.get(key, 0) + 1
 
-                record = _make_record(symbol, trade_date, mode, path, str(entry_ts))
-                outcome, entry_px, exit_px, exit_ts = _simulate_one(
-                    day_sorted, mode=mode, path=path, entry_ts=entry_ts
-                )
-                settled = _settle(
-                    record,
-                    outcome=outcome,
-                    entry_px=entry_px,
-                    exit_px=exit_px,
-                    entry_ts=entry_ts,
-                    exit_ts=exit_ts,
-                )
-                records.append(settled)
-                counters[(mode, path)][settled.round_status] += 1
-                if settled.round_status == "completed" and settled.net_spread is not None:
-                    realized[(mode, path)].append(float(settled.net_spread))
-                    realized_gross[(mode, path)] += float(settled.gross_spread or 0.0)
+                # 格子内配额：缺口径与 `Store.count_rounds` 一致——`void_data`
+                # 不占名额。纸面模拟不产生 `void_data`, 所以这里等价于"已开过几轮",
+                # 但保留同一判据, 免得将来加了 `void_data` 分支后两处口径分叉。
+                world = (mode, path, symbol, trade_date)
+                allowed = max(0, C.MAX_ROUNDS_PER_DAY - used.get(world, 0))
+                taken = candidates[:allowed]
+                # 当天在同一世界里还有候选、但配额已满 → 记 `skipped_quota`。
+                # 这是 `skipped_quota` 的**唯一**含义：同世界同路径同日多候选撞配额。
+                for _ in candidates[len(taken):]:
+                    counters[(mode, path)]["skipped_quota"] += 1
+                if not taken:
+                    continue
+
+                for entry_ts in taken:
+                    used[world] = used.get(world, 0) + 1
+                    record = _make_record(symbol, trade_date, mode, path, str(entry_ts))
+                    outcome, entry_px, exit_px, exit_ts = _simulate_one(
+                        day_sorted, mode=mode, path=path, entry_ts=entry_ts
+                    )
+                    settled = _settle(
+                        record,
+                        outcome=outcome,
+                        entry_px=entry_px,
+                        exit_px=exit_px,
+                        entry_ts=entry_ts,
+                        exit_ts=exit_ts,
+                    )
+                    records.append(settled)
+                    counters[(mode, path)][settled.round_status] += 1
+                    if settled.round_status == "completed" and settled.net_spread is not None:
+                        realized[(mode, path)].append(float(settled.net_spread))
+                        realized_gross[(mode, path)] += float(settled.gross_spread or 0.0)
 
     groups: list[GroupSummary] = []
     for mode in ("zheng_t", "dao_t"):

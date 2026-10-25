@@ -290,9 +290,13 @@ def test_no_helper_relabels_0930_as_0925() -> None:
                 )
                 if looks_auction and looks_relabel:
                     offenders.append(f"{src.name}:{node.lineno} 函数 {node.name}()")
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if "09:25" in node.value and id(node) not in explain_ids:
-                    offenders.append(f"{src.name}:{node.lineno} 代码常量含 09:25")
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and "09:25" in node.value
+                and id(node) not in explain_ids
+            ):
+                offenders.append(f"{src.name}:{node.lineno} 代码常量含 09:25")
 
     assert not offenders, f"发现把开盘首根改标成 09:25 的路径: {offenders}"
 

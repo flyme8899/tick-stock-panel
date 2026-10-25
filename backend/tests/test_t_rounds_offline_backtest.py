@@ -420,11 +420,16 @@ def test_path_a_produces_rounds() -> None:
 # ---------------------------------------------------------------- 配额
 
 
-def test_quota_is_per_symbol_per_day_not_per_group() -> None:
-    """一日一票只允许一轮：四个格子竞争同一个名额，其余记 `skipped_quota`。
+def test_groups_do_not_compete_for_the_same_slot() -> None:
+    """四个格子**各是独立世界**：正 T 的 A 和 B 都要能各自成轮，不互相抢名额。
 
-    四个格子各自独立计数会得到"一天做四轮 T"的样本，与本系统一日一轮的硬规则
-    不符 —— 而且那种样本几乎总是更好看（多做几次总能摊到一次成功的）。
+    这条钉的是本批次修正过的一个口径错误。早先实现让四格共享一个
+    `(symbol, 交易日)` 名额，扫到顺序是「正 T 优先、A 优先」，于是 A 会在每个
+    两类条件都满足的日子抢走名额、B 永远拿不到 —— A 与 B 的对比自带系统性优势，
+    而任务书要求 A∥B 分列且**不混主门禁**，带偏置的分列没有可比性。
+
+    夹具里 10.02 上穿（A 的边沿）与 10.06 首次进上带（B 的入场）在同一天都成立。
+    旧实现下只有一个格子的 `rounds == 1`；现在 A 与 B 各有一个。
     """
     frame = _day(
         [10.00, 10.02, 10.06, 10.05, 9.98],
@@ -434,39 +439,69 @@ def test_quota_is_per_symbol_per_day_not_per_group() -> None:
     )
     summary = run_mode_a_backtest(frame)
 
-    assert len(summary.records) == 1, "同票同日建立了不止一轮"
-    total_rounds = sum(g.counts.rounds for g in summary.groups)
-    total_skipped = sum(g.counts.skipped_quota for g in summary.groups)
-    assert total_rounds == 1
-    assert total_skipped >= 1, "有别的格子也看到了信号，应记 skipped_quota"
+    a = _group(summary, "zheng_t", PATH_A)
+    b = _group(summary, "zheng_t", PATH_B)
+
+    assert a.counts.completed == 1, "正 T + A 这个反事实世界没成轮"
+    assert b.counts.completed == 1, "正 T + B 这个反事实世界没成轮"
+
+    # 两个世界互不记账为"被对方挤掉"
+    assert a.counts.skipped_quota == 0
+    assert b.counts.skipped_quota == 0
 
 
-def test_max_rounds_per_day_is_respected() -> None:
-    """配额上限就是常量 `MAX_ROUNDS_PER_DAY`，不是本包自己定的数。"""
+def test_skipped_quota_counts_only_within_the_same_world() -> None:
+    """`skipped_quota` 的**唯一**含义：同世界、同路径、同日多候选撞配额。
+
+    构造同一天里同一格子出现两次合格入场（上穿 → 进带 → 跌回 → 再上穿 → 再进带）。
+    一日一轮只允许第一轮，第二个候选记 `skipped_quota`。
+    """
+    # 价格：10.00 → 10.02(上穿1) → 10.06(进带1) → 9.98(回摆) → 10.02(上穿2) → 10.06(进带2)
     frame = _day(
-        [10.00, 10.02, 10.06, 10.05, 9.98],
+        [10.00, 10.02, 10.06, 9.98, 10.02, 10.06, 9.99],
         vwap=10.0,
-        up_band=[False, False, True, False, False],
-        up_cross=[False, True, False, False, False],
+        up_band=[False, False, True, False, False, True, False],
+        up_cross=[False, True, False, False, True, False, False],
     )
     summary = run_mode_a_backtest(frame)
-    assert len(summary.records) <= C.MAX_ROUNDS_PER_DAY
+    a = _group(summary, "zheng_t", PATH_A)
+
+    # 同一世界内只开一轮，第二个候选被配额拒
+    assert a.counts.rounds == C.MAX_ROUNDS_PER_DAY
+    assert a.counts.skipped_quota >= 1, "同格第二个候选应记 skipped_quota"
+    # 落盘记录也只一条
+    same_world = [r for r in summary.records if r.mode == "zheng_t" and r.trigger_layer_ref.endswith("A")]
+    assert len(same_world) == C.MAX_ROUNDS_PER_DAY
+
+
+def test_max_rounds_per_day_is_respected_per_world() -> None:
+    """配额上限就是常量 `MAX_ROUNDS_PER_DAY`，**每个格子各自**受它约束。"""
+    frame = _day(
+        [10.00, 10.02, 10.06, 9.98, 10.02, 10.06, 9.99],
+        vwap=10.0,
+        up_band=[False, False, True, False, False, True, False],
+        up_cross=[False, True, False, False, True, False, False],
+    )
+    summary = run_mode_a_backtest(frame)
+    for g in summary.groups:
+        # 每个格子内，一轮 T 的记录数不超过上限；`skipped_quota` 不算记录
+        assert g.counts.rounds <= C.MAX_ROUNDS_PER_DAY
 
 
 def test_skipped_quota_is_not_a_round() -> None:
-    """`skipped_quota` 不进 `rounds`（它不是一轮 T，只是被拒的信号）。"""
+    """`skipped_quota` 不进 `rounds`（它不是一轮 T，只是被拒的候选）。"""
     frame = _day(
-        [10.00, 10.02, 10.06, 10.05, 9.98],
+        [10.00, 10.02, 10.06, 9.98, 10.02, 10.06, 9.99],
         vwap=10.0,
-        up_band=[False, False, True, False, False],
-        up_cross=[False, True, False, False, False],
+        up_band=[False, False, True, False, False, True, False],
+        up_cross=[False, True, False, False, True, False, False],
     )
     summary = run_mode_a_backtest(frame)
     for g in summary.groups:
         c = g.counts
         assert c.rounds == c.completed + c.incomplete + c.abandoned
         # skipped 单独一列，不能混进 rounds
-        assert c.rounds <= 1
+        assert c.rounds <= C.MAX_ROUNDS_PER_DAY
 
 
 # ---------------------------------------------------------------- 倒 T
