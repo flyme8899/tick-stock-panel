@@ -190,6 +190,24 @@ describe('「叠加」tab 列表语义 (G-T5 / G-T6 / G-T9)', () => {
     expect(container.querySelectorAll('[data-strategy-id]').length).toBeGreaterThan(0)
   })
 
+  it('三道判据任一命中都要排除 (source / backend / id 前缀)', async () => {
+    // 只命中单一判据的策略也必须被排除 —— 只测"三处都命中"会漏掉判据各自失效。
+    state.presets = [
+      preset('normal_builtin', 'builtin'),
+      preset('only_source', 'composite'),                                  // 仅 source
+      preset('only_backend', 'custom', { execution_backend: 'composite' }), // 仅 backend
+      preset('composite_prefix_only', 'ai'),                                // 仅 id 前缀
+    ]
+    mount()
+    await flush()
+    await clickGroup('叠加')
+
+    const ids = [...container.querySelectorAll('[data-strategy-id]')].map(
+      el => el.getAttribute('data-strategy-id'),
+    )
+    expect(ids).toEqual(['normal_builtin'])
+  })
+
   it('策略池只有 composite 时才显示真空态提示', async () => {
     state.presets = [preset('composite_only', 'composite', { execution_backend: 'composite' })]
     mount()
@@ -275,6 +293,42 @@ describe('叠加多选与当次回测 (G-T8)', () => {
     })
     await flush()
     expect(state.startBacktestCalls[0].merge_mode).toBe('union')
+  })
+
+  it('切回单选时不得残留 overlay_children (防止串成叠加)', async () => {
+    // 先选满叠加, 再切回单选分组 —— 最隐蔽的一类串味:
+    // 组件内部 selectedOverlayIds 仍留着, 若请求里把 overlay_children 一并发出,
+    // 后端会按叠加跑, 而用户在界面上看到的是"单选某策略"。
+    mount()
+    await flush()
+    await clickGroup('叠加')
+
+    for (const id of ['ma_golden_cross', 'my_custom']) {
+      await act(async () => {
+        (container.querySelector(`[data-strategy-id="${id}"]`) as HTMLButtonElement).click()
+      })
+    }
+    await flush()
+
+    // 切回内置分组, 选中单策略后运行
+    await clickGroup('内置')
+    await act(async () => {
+      (container.querySelector('[data-strategy-id="ma_golden_cross"]') as HTMLButtonElement).click()
+    })
+    await flush()
+
+    const run = [...container.querySelectorAll('button')].find(b => b.textContent?.includes('运行回测'))
+    expect(run).toBeTruthy()
+    await act(async () => { (run as HTMLButtonElement).click() })
+    await flush()
+
+    expect(state.startBacktestCalls).toHaveLength(1)
+    const payload = state.startBacktestCalls[0]
+    expect(payload.strategy_id).toBe('ma_golden_cross')
+    // 显式为 null (后端看到 null/undefined 都按单选处理, 但 null 更能表达"清空")
+    expect(payload.overlay_children ?? null).toBeNull()
+    expect(payload.merge_mode ?? null).toBeNull()
+    expect(payload.min_confirm ?? null).toBeNull()
   })
 })
 

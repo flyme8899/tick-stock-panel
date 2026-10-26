@@ -231,14 +231,14 @@ def register_overlay(engine: StrategyEngine, spec: OverlaySpec) -> StrategyDef:
     # 复用引擎既有的引用校验 (存在性/禁嵌套/资产与周期兼容/数量上限), 不另写一份。
     # 已存在的同 id 临时定义先摘掉, 否则校验会把它自己当成子策略。
     probe_map = {cid: cdef for cid, cdef in resolved}
-    error = engine._validate_composite_references(  # noqa: SLF001
+    error = engine._validate_composite_references(
         spec.strategy_id, overlay, probe_map
     )
     if error is not None:
         raise OverlaySpecError(f"叠加子策略不可用: {error}")
     # 引擎没有 register API, 且刻意不新增 —— 新增会被当成"支持运行期注册任意策略"
     # 的口子。这里只写当次引擎实例的注册表, engine.get/has 立即生效。
-    engine._strategies[spec.strategy_id] = overlay  # noqa: SLF001
+    engine._strategies[spec.strategy_id] = overlay
     return overlay
 
 

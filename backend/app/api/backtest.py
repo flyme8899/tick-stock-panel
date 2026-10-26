@@ -684,7 +684,12 @@ def _overlay_children_payload(
         return None
     from app.backtest.overlay import OverlaySpecError, parse_overlay_children
 
-    return [c.model_dump() for c in children]
+    raw = [c.model_dump() for c in children]
+    try:
+        parse_overlay_children(raw)
+    except OverlaySpecError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return raw
 
 
 def _checked_min_confirm(value: int | None, children: list[OverlayChild] | None) -> int:

@@ -335,18 +335,42 @@ def test_min_confirm_equal_to_child_count_equals_full_intersect(svc) -> None:
 
 
 def test_overlay_uses_config_merge_mode_not_params(svc) -> None:
-    """叠加路径的 merge_mode 来自请求字段; params 里的同名键不得覆盖它。"""
+    """叠加路径的 merge_mode 来自请求字段; params 里的同名键不得覆盖它。
+
+    两层断言缺一不可:
+    - strategy_info 里的归因字段 (证明报告的数字对)
+    - **实际交易数** (证明信号矩阵真的是按 config 合并的) —— 归因字段是从 config
+      直接抄的, 只断言它会漏掉"合并时其实读了 params"这种变异。
+    """
     service, _ = svc
-    cfg = _cfg(
-        _overlay_children(*_PAIR),
-        merge_mode="union",
+
+    def _run(**kw):
+        service.strategy_engine._strategies.pop(EPHEMERAL_OVERLAY_STRATEGY_ID, None)
+        res = service.run(_cfg(_overlay_children(*_PAIR), **kw))
+        assert res.error is None, res.error
+        return res
+
+    union_only = _run(merge_mode="union")
+    intersect_only = _run(merge_mode="intersect")
+    # params 与 config 相反: 结果必须跟随 config (union = 交易更多)
+    cfg_union_params_intersect = _run(
+        merge_mode="union", params={"merge_mode": "intersect", "min_confirm": 2}
     )
-    # 故意在 params 里塞相反的 merge_mode: 若实现读 params, 结果会被改口径。
-    cfg.params = {"merge_mode": "intersect", "min_confirm": 2}
-    result = service.run(cfg)
-    assert result.error is None, result.error
-    assert result.strategy_info["merge_mode"] == "union"
-    assert result.strategy_info["min_confirm"] == 0
+    cfg_intersect_params_union = _run(
+        merge_mode="intersect", params={"merge_mode": "union", "min_confirm": 0}
+    )
+
+    assert len(union_only.trades) > len(intersect_only.trades), (
+        "前提: 两种合并模式在这份合成行情上必须产出不同交易数, 否则本测无鉴别力"
+    )
+    assert len(cfg_union_params_intersect.trades) == len(union_only.trades), (
+        "params 里塞相反的 merge_mode 不得改变叠加结果"
+    )
+    assert len(cfg_intersect_params_union.trades) == len(intersect_only.trades), (
+        "params 里塞 union 也不得把 intersect 的叠加救活"
+    )
+    assert cfg_union_params_intersect.strategy_info["merge_mode"] == "union"
+    assert cfg_union_params_intersect.strategy_info["min_confirm"] == 0
 
 
 def test_overlay_registration_is_scoped_to_the_engine(svc) -> None:
@@ -548,3 +572,130 @@ def test_no_sample_ai_strategy_is_added() -> None:
     repo = Path(__file__).resolve().parents[2]
     hits = [p for p in repo.rglob("*") if "ai_chaodie_fantan" in p.name]
     assert hits == [], f"不得新增样本 AI 策略: {hits}"
+
+
+# ── SSE 侧参数传递 ────────────────────────────────────────────────
+
+
+def _stream_capture_config(monkeypatch, query: dict) -> tuple[int, dict | None, str]:
+    """请求一次 SSE 端点, 把落进 StrategyBacktestConfig 的字段抓出来。
+
+    回测在后台线程里跑, 直接 monkeypatch worker 不保险。改成卡住重任务槽:
+    线程会在进槽时直接抛异常, 回测不会真跑, 但 config 已经构造完毕。
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import app.services.heavy_job_limiter as limiter_mod
+    from app.api import backtest as backtest_api
+
+    captured: dict = {}
+    import app.backtest.strategy as strategy_mod
+
+    real_cfg = strategy_mod.StrategyBacktestConfig
+
+    class _CapturingConfig(real_cfg):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            super().__init__(**kwargs)
+
+    class _StopError(Exception):
+        pass
+
+    class _Slot:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            raise _StopError("被测: 不进重任务槽")
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(strategy_mod, "StrategyBacktestConfig", _CapturingConfig)
+    monkeypatch.setattr(
+        limiter_mod, "shared_heavy_job_limiter", type("L", (), {"slot": lambda *a, **k: _Slot()})()
+    )
+
+    app = FastAPI()
+    app.include_router(backtest_api.router)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/api/backtest/strategy/stream", params=query)
+    return resp.status_code, captured or None, resp.text
+
+
+def test_stream_passes_overlay_fields_into_config(monkeypatch) -> None:
+    """SSE 端点必须把 overlay_children / merge_mode / min_confirm 传进配置。
+
+    worker 子进程只认 `StrategyBacktestConfig`; query 参数漏传就是"界面勾了叠加,
+    实际跑的是单选" —— 最难察觉的一类串味。
+    """
+    import json as _json
+
+    status, cfg, _body = _stream_capture_config(monkeypatch, {
+        "strategy_id": "whatever",
+        "start": "2025-01-01",
+        "end": "2025-02-01",
+        "overlay_children": _json.dumps([
+            {"strategy_id": "a", "weight": 1},
+            {"strategy_id": "b", "weight": 2},
+        ]),
+        "merge_mode": "union",
+        "min_confirm": "1",
+    })
+    assert status == 200
+    assert cfg is not None, "config 未被构造, 说明请求在校验阶段就被拒了"
+    assert cfg["overlay_children"] == [
+        {"strategy_id": "a", "weight": 1},
+        {"strategy_id": "b", "weight": 2},
+    ]
+    assert cfg["merge_mode"] == "union"
+    assert cfg["min_confirm"] == 1
+
+
+def test_stream_defaults_to_intersect_when_overlay_given(monkeypatch) -> None:
+    """不传 merge_mode 时 SSE 必须落到 intersect, 不能是 union。"""
+    import json as _json
+
+    _status, cfg, _body = _stream_capture_config(monkeypatch, {
+        "strategy_id": "whatever",
+        "start": "2025-01-01",
+        "end": "2025-02-01",
+        "overlay_children": _json.dumps([{"strategy_id": "a"}, {"strategy_id": "b"}]),
+    })
+    assert cfg is not None
+    assert cfg["merge_mode"] == "intersect"
+    assert cfg["min_confirm"] == 0
+
+
+def test_stream_rejects_bad_overlay_before_starting_job() -> None:
+    """SSE 侧非法叠加参数必须是 400, 不能带着坏参数把任务起起来。"""
+    import json as _json
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import backtest as backtest_api
+
+    app = FastAPI()
+    app.include_router(backtest_api.router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    resp = client.get("/api/backtest/strategy/stream", params={
+        "strategy_id": "whatever",
+        "start": "2025-01-01",
+        "end": "2025-02-01",
+        "overlay_children": _json.dumps([{"strategy_id": "only_one"}]),
+    })
+    assert resp.status_code == 400, resp.text
+    assert "单选" in resp.json()["detail"]
+
+    resp2 = client.get("/api/backtest/strategy/stream", params={
+        "strategy_id": "whatever",
+        "start": "2025-01-01",
+        "end": "2025-02-01",
+        "overlay_children": _json.dumps([{"strategy_id": "a"}, {"strategy_id": "b"}]),
+        "merge_mode": "and",
+    })
+    assert resp2.status_code == 400, resp2.text
+    assert "merge_mode" in resp2.json()["detail"]
