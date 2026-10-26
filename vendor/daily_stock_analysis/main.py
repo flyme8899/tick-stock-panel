@@ -1083,6 +1083,7 @@ def run_full_analysis(
                             f"# 📈 大盘复盘\n\n{market_report}",
                             history_query_id=reused_review_history_query_id,
                             notify=not args.no_notify,
+                            config=config,
                         )
 
             review_result = None
@@ -1178,6 +1179,7 @@ def run_full_analysis(
                     combined_content,
                     history_query_id=reused_review_history_query_id,
                     notify=True,
+                    config=config,
                 )
                 if merge_outcome.success:
                     logger.info("已合并推送（个股+大盘复盘）")
@@ -1191,6 +1193,7 @@ def run_full_analysis(
                 market_report,
                 history_query_id=reused_review_history_query_id,
                 notify=False,
+                config=config,
             )
 
         # 输出摘要

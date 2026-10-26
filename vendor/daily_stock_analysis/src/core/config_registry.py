@@ -1798,6 +1798,63 @@ _FIELD_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
         "warning_codes": ["secret_value"],
     },
+    "DSA_REVIEW_DINGTALK_WEBHOOK_URL": {
+        "title": "定时复盘专用钉钉 Webhook",
+        "description": (
+            "定时复盘 / 日摘要专用钉钉群机器人 webhook。缺省不配时复盘钉钉"
+            "拒发（reason=review_webhook_not_configured），不会回落到"
+            " DINGTALK_WEBHOOK_URL（资讯/BSS/狙击共群）。"
+        ),
+        "category": "notification",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {},
+        "display_order": 20,
+        "help_key": "settings.notification.DSA_REVIEW_DINGTALK_WEBHOOK_URL",
+        "examples": [
+            "DSA_REVIEW_DINGTALK_WEBHOOK_URL=https://oapi.dingtalk.com/robot/send?access_token=your_review_token",
+        ],
+        "docs": [
+            {
+                "label": "DSA 集成：定时复盘独立钉钉通道",
+                "href": "https://github.com/flyme8899/tick-stock-panel/blob/main/docs/dsa-integration.md",
+            },
+        ],
+        "warning_codes": ["webhook_secret_value"],
+    },
+    "DSA_REVIEW_DINGTALK_SECRET": {
+        "title": "定时复盘专用钉钉加签密钥",
+        "description": (
+            "定时复盘专用群机器人的加签密钥；留空表示该机器人未开启加签。"
+            "与 DINGTALK_SECRET 语义一致，但只作用于复盘外发。"
+        ),
+        "category": "notification",
+        "data_type": "string",
+        "ui_control": "password",
+        "is_sensitive": True,
+        "is_required": False,
+        "is_editable": True,
+        "default_value": None,
+        "options": [],
+        "validation": {},
+        "display_order": 21,
+        "help_key": "settings.notification.DSA_REVIEW_DINGTALK_SECRET",
+        "examples": [
+            "DSA_REVIEW_DINGTALK_SECRET=your_review_signing_secret",
+        ],
+        "docs": [
+            {
+                "label": "DSA 集成：定时复盘独立钉钉通道",
+                "href": "https://github.com/flyme8899/tick-stock-panel/blob/main/docs/dsa-integration.md",
+            },
+        ],
+        "warning_codes": ["secret_value"],
+    },
     "PUSHPLUS_TOKEN": {
         "title": "PushPlus Token",
         "description": "Token for PushPlus notifications.",
