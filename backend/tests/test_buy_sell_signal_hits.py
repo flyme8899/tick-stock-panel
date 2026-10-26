@@ -51,6 +51,7 @@ from app.buy_sell_signals.hits_visibility import (
     visible_hits,
 )
 from app.buy_sell_signals.store import InMemorySignalRegistryStore
+from app.market_time import cn_today
 
 
 def _registry(*records) -> InMemorySignalRegistryStore:
@@ -189,12 +190,16 @@ def test_vendor_payload_without_price_survives_round_trip():
 
 
 def test_asof_yesterday_is_stale():
-    assert fx.stale_daily_hit().is_stale(today=date(2026, 10, 26)) is True
+    # 夹具按 cn_today() 算「昨天」，这里的参照日必须跟着走 —— 写死某一天的话，
+    # 一过零点就静默失效（本仓真的这么红过一次）。
+    today = cn_today()
+    assert fx.stale_daily_hit().is_stale(today=today) is True
 
 
 def test_asof_today_is_not_stale():
-    hit = fx.publishable_hit(asof="2026-10-26")
-    assert hit.is_stale(today=date(2026, 10, 26)) is False
+    today = cn_today()
+    hit = fx.publishable_hit(asof=today.isoformat())
+    assert hit.is_stale(today=today) is False
 
 
 def test_illegal_asof_is_treated_as_stale():
@@ -451,9 +456,10 @@ def test_visible_hits_are_sorted_newest_first():
 
 
 def test_view_marks_stale_and_asof_date():
-    view = hit_to_view(fx.stale_daily_hit(), today=date(2026, 10, 26))
+    today = cn_today()
+    view = hit_to_view(fx.stale_daily_hit(), today=today)
     assert view["stale"] is True
-    assert view["asof_date"] == "2026-10-25"
+    assert view["asof_date"] == (today - timedelta(days=1)).isoformat()
     assert view["is_daily_fundamental"] is True
 
 
