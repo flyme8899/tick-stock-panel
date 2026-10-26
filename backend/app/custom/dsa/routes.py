@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from app.custom.dsa.catalog import catalog_payload
 from app.custom.dsa.commands import CommandError, execute
 from app.custom.dsa.jobs import run_etf_rotation
+from app.custom.dsa.ledger_audit import ledger_audit_payload
 from app.custom.dsa.proxy import (
     InvalidUpstreamPathError,
     UpstreamError,
@@ -63,6 +64,21 @@ def build_router() -> APIRouter:
     @router.get("/quant-evidence")
     def quant_evidence() -> dict:
         return evidence_summary()
+
+    @router.get("/ledger-audit")
+    def ledger_audit(
+        code: str | None = None,
+        page: int = 1,
+        limit: int = 20,
+    ) -> dict:
+        """上游 ``backtest_results`` 的只读审计视图。
+
+        读的是上游 ``GET /backtest/results``（不是 ``/run``），所以没有写库
+        副作用。响应恒带 ``audit_status=unaudited``，任何展示面都要带
+        「未经 TSP 审计」；取不到上游时返回空行 + 原因，不抛 500，也不
+        拿空账本冒充「没有亏损记录」。
+        """
+        return ledger_audit_payload(code=code, page=page, limit=limit)
 
     @router.get("/stock-context")
     def stock_context(symbol: str, request: Request) -> dict:

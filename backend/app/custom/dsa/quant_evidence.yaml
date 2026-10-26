@@ -25,6 +25,22 @@ _meta:
   universe: 5882
   benchmark_return: "-4.00%"
   updated: "2026-10-08"
+  # ---- P-qe 时效门禁（20261026gdsaledger 并进）----
+  # as_of 是证据窗的锚定日（= period 右端）。超过 90 日历日即视为过期，
+  # 过期后 render_skill_appendix 返回空串、不注入技能提示（fail-closed）。
+  as_of: "2026-10-08"
+  # 显式过期日（可选）；设了就优先于「as_of + 90 天」规则。
+  expires_on: "2027-01-06"
+  # 证据窗行情环境：同期上证 -4.00%，属弱势下行窗口。空值会被 summary 标
+  # env_label_missing，且不得把证据当「全环境适用」。
+  env_label: "弱势下行（上证同期 -4.00%）"
+  # L5「次日开盘建仓 / 信号日收盘清仓」与上游回测报告原文是否一致：
+  # pending = 未定性，禁止当已核口径引用。
+  l5_entry_exit_status: "pending"
+  l5_entry_exit_note: |
+    本文首「次日开盘建仓 / 信号日收盘清仓」抄自 TSP 内置回测报告，尚未逐句
+    比对上游 backtest_service / backtest_engine 的实现原文。定性之前，
+    引用该口径须显式标注「未定性·勿引用」。
 
 ma_golden_cross:
   matched: ["MA金叉", "均线粘合突破", "MACD金叉放量"]
