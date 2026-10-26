@@ -32,6 +32,24 @@ if TYPE_CHECKING:
 # 中性分: 子策略无 score 或单候选(无法排名)时的占位, 不污染融合结果。
 _NEUTRAL_NORM = 0.5
 
+# 合并模式的唯一真源: 选股(merge_results)与回测(merge_signal_matrices)共用。
+# 默认 intersect —— 与 CompositeStrategyDialog 的 UI 默认一致, 也与回测 ephemeral
+# overlay 的默认一致; 三个入口写死同一个值, 避免"界面上看起来是交集、跑出来是并集"。
+MERGE_MODES: tuple[str, ...] = ("union", "intersect")
+DEFAULT_MERGE_MODE = "intersect"
+
+
+def normalize_merge_mode(value: str | None) -> str:
+    """归一合并模式; 空值回落默认, 非法值抛 ValueError。
+
+    不做"猜" : 传 `intersect ` (带空格) 会 strip, 但传 `and` / `or` 一律拒,
+    避免上层把拼写错误当成一种新模式静默当成 union 跑。
+    """
+    text = (value or DEFAULT_MERGE_MODE).strip().lower()
+    if text not in MERGE_MODES:
+        raise ValueError(f"unsupported merge_mode: {value!r}")
+    return text
+
 
 def _effective_weights(
     children_weights: list[float],

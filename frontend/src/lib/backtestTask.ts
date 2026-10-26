@@ -178,6 +178,12 @@ async function connectSSE(url: string): Promise<void> {
   })
 }
 
+/** 回测当次临时叠加的子策略 (不落盘, 服务端内存合成 composite) */
+export interface OverlayChild {
+  strategy_id: string
+  weight: number
+}
+
 /** 启动一次 SSE 回测任务 */
 export function startBacktest(params: {
   strategy_id: string
@@ -204,6 +210,10 @@ export function startBacktest(params: {
   regime_filter?: { states?: string[]; min_score?: number } | null
   volume_limit?: number | null
   benchmark_symbol?: string
+  /** 叠加当次多选; >=2 才有效, 传了就忽略 strategy_id (服务端钉死占位 id) */
+  overlay_children?: OverlayChild[] | null
+  merge_mode?: 'union' | 'intersect'
+  min_confirm?: number
 }): void {
   // 取消之前的任务状态
   if (eventSource) {
@@ -240,6 +250,15 @@ export function startBacktest(params: {
     regime_filter: params.regime_filter ? JSON.stringify(params.regime_filter) : undefined,
     volume_limit: params.volume_limit != null && params.volume_limit > 0 ? params.volume_limit : undefined,
     benchmark_symbol: params.benchmark_symbol,
+    // 叠加: 只在 >=2 个子策略时下传。1 个不下传 —— 后端会 400, 前端不该把单选
+    // 伪装成叠加请求发出去。JSON 与 params/overrides 同风格 (同一套 buildQuery)。
+    overlay_children: params.overlay_children && params.overlay_children.length >= 2
+      ? JSON.stringify(params.overlay_children)
+      : undefined,
+    merge_mode: params.merge_mode,
+    min_confirm: params.overlay_children && params.overlay_children.length >= 2
+      ? (params.min_confirm ?? 0)
+      : undefined,
   })
 
   // 存 reconnect 信息 (刷新后用)

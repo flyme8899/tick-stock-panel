@@ -483,6 +483,19 @@ class StrategyBacktestRequest(BaseModel):
     # 0 或省略 = 关闭。开启后单笔成交不超过当根成交量的该比例。
     volume_limit: float | None = None
     benchmark_symbol: str = "000001.SH"
+    # ── 回测当次临时叠加 (ephemeral overlay) ──
+    # 非空即走叠加路径: 服务端在内存合成 composite 定义, 不落盘, strategy_id 被替换为
+    # 占位 __ephemeral_overlay__。至少 2 个子策略; 任一子策略是 composite → 400。
+    # merge_mode 默认 intersect (对齐 CompositeStrategyDialog 的默认)。
+    # 见 app/backtest/overlay.py 模块说明。
+    overlay_children: list[OverlayChild] | None = None
+    merge_mode: Literal["union", "intersect"] = "intersect"
+    min_confirm: int = 0
+
+
+class OverlayChild(BaseModel):
+    strategy_id: str
+    weight: float = 1.0
 
 
 def _guard_minute_strategy_backtest(
@@ -548,6 +561,9 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         regime_filter=req.regime_filter,
         volume_limit=_checked_volume_limit(req.volume_limit),
         benchmark_symbol=_checked_benchmark(req.benchmark_symbol),
+        overlay_children=_overlay_children_payload(req.overlay_children),
+        merge_mode=req.merge_mode,
+        min_confirm=_checked_min_confirm(req.min_confirm, req.overlay_children),
     )
     task = make_worker_task("backtest", settings.data_dir, cfg)
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
@@ -624,12 +640,15 @@ def _make_job_key(
     regime_filter: str | None = None,
     volume_limit: float | None = None,
     benchmark_symbol: str = "000001.SH",
+    overlay_children: str | None = None,
+    merge_mode: str = "intersect",
+    min_confirm: int = 0,
 ) -> str:
     raw = (
         f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}"
         f"|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}"
         f"|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}"
-        f"|{volume_limit}|{benchmark_symbol}"
+        f"|{volume_limit}|{benchmark_symbol}|{overlay_children}|{merge_mode}|{min_confirm}"
     )
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
@@ -651,6 +670,79 @@ def _checked_benchmark(symbol: str | None) -> str:
         allowed = "、".join(BENCHMARK_NAMES)
         raise HTTPException(status_code=400, detail=f"基准指数仅支持 {allowed}")
     return text
+
+
+def _overlay_children_payload(
+    children: list[OverlayChild] | None,
+) -> list[dict] | None:
+    """把请求里的叠加子策略转成 worker 可序列化的普通 dict; 非法即 400。
+
+    只做结构与权重的快速校验 (走 overlay 模块的同一份解析), 真正的存在性/嵌套
+    检查在 worker 子进程的引擎上做 —— 那里才是真正持有注册表的地方。
+    """
+    if not children:
+        return None
+    from app.backtest.overlay import OverlaySpecError, parse_overlay_children
+
+    return [c.model_dump() for c in children]
+
+
+def _checked_min_confirm(value: int | None, children: list[OverlayChild] | None) -> int:
+    confirm = int(value or 0)
+    if confirm < 0:
+        raise HTTPException(status_code=400, detail="min_confirm 不能为负")
+    if children and confirm > len(children):
+        raise HTTPException(
+            status_code=400,
+            detail=f"min_confirm 不能大于子策略数 ({len(children)})",
+        )
+    return confirm
+
+
+def _parse_overlay_children_query(raw: str | None) -> list[dict] | None:
+    """SSE/cancel 走 query string: `overlay_children` 是 JSON 字符串。
+
+    解析失败按 400 处理, 不静默当成"没传" —— 静默吞掉会让用户以为跑了叠加,
+    实际跑的是单选 (或者直接 unknown strategy), 属于最难查的一类假绿。
+    """
+    if not raw:
+        return None
+    from app.backtest.overlay import OverlaySpecError, parse_overlay_children
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"overlay_children 不是合法 JSON: {exc}") from exc
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail="overlay_children 必须是数组")
+    try:
+        parse_overlay_children(parsed)
+    except OverlaySpecError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return parsed
+
+
+def _checked_merge_mode(value: str | None) -> str:
+    from app.strategy.composite import MERGE_MODES, normalize_merge_mode
+
+    try:
+        return normalize_merge_mode(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"merge_mode 仅支持 {'、'.join(MERGE_MODES)}"
+        ) from exc
+
+
+def _checked_min_confirm_query(value: int | None, children: list[dict] | None) -> int:
+    confirm = int(value or 0)
+    if confirm < 0:
+        raise HTTPException(status_code=400, detail="min_confirm 不能为负")
+    if children and confirm > len(children):
+        raise HTTPException(
+            status_code=400,
+            detail=f"min_confirm 不能大于子策略数 ({len(children)})",
+        )
+    return confirm
 
 
 @router.get("/strategy/stream")
@@ -680,12 +772,19 @@ async def strategy_stream(
     regime_filter: str | None = None,
     volume_limit: float | None = None,
     benchmark_symbol: str = "000001.SH",
+    overlay_children: str | None = None,
+    merge_mode: str = "intersect",
+    min_confirm: int = 0,
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
     - 相同参数的任务只启动一次, 多次连接订阅同一个任务
     - 断开连接不会取消任务 (除非显式调用 cancel)
     - 结果保留 5 分钟供重连
+
+    `overlay_children` 为 JSON 字符串 (与 params/overrides 同风格):
+    `[{"strategy_id": "ma_golden_cross", "weight": 1}]`, 至少 2 个; 传了就走
+    ephemeral overlay 路径, 不落盘。
 
     事件类型:
       - progress: {day, total, date, equity}
@@ -706,6 +805,9 @@ async def strategy_stream(
         start_date = earliest or (end_date - timedelta(days=FACTOR_DEFAULT_DAYS))
     volume_limit = _checked_volume_limit(volume_limit)
     benchmark_symbol = _checked_benchmark(benchmark_symbol)
+    overlay_payload = _parse_overlay_children_query(overlay_children)
+    merge_mode = _checked_merge_mode(merge_mode)
+    min_confirm = _checked_min_confirm_query(min_confirm, overlay_payload)
     _guard_minute_strategy_backtest(request, strategy_id, start_date, asset_type)
 
     # 服务端范围保护
@@ -727,6 +829,10 @@ async def strategy_stream(
         regime_filter=regime_filter,
         volume_limit=volume_limit,
         benchmark_symbol=benchmark_symbol,
+        # 叠加参数必须进 key: 否则两组不同子策略会命中同一个 job, 用户看到别人的结果。
+        overlay_children=overlay_children,
+        merge_mode=merge_mode,
+        min_confirm=min_confirm,
     )
 
     _cleanup_stale_jobs()
@@ -790,6 +896,9 @@ async def strategy_stream(
                 regime_filter=json.loads(regime_filter) if regime_filter else None,
                 volume_limit=volume_limit,
                 benchmark_symbol=benchmark_symbol,
+                overlay_children=overlay_payload,
+                merge_mode=merge_mode,
+                min_confirm=min_confirm,
             )
 
             def _run_backtest():
@@ -899,6 +1008,9 @@ async def strategy_cancel(request: Request):
         regime_filter=_get("regime_filter") or None,
         volume_limit=_checked_volume_limit(_get_opt_float("volume_limit")),
         benchmark_symbol=_checked_benchmark(_get("benchmark_symbol") or None),
+        overlay_children=_get("overlay_children") or None,
+        merge_mode=_get("merge_mode", "intersect"),
+        min_confirm=int(_get("min_confirm", "0") or 0),
     )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
