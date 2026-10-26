@@ -156,6 +156,30 @@ class SignalHit:
     而它当时根本不该被当作已校准结果。
     """
 
+    freq_lock_version: str | None = None
+    """这条命中是**按哪一套频率锁定口径**算出来的(镜像值, 批次 20261026gbsscalib)。
+
+    ## 为什么是镜像而不是"查当前戳"
+
+    校准登记记的是「某套口径在历史上跑出过什么」。一条命中如果是按 `freq_lock_v1`
+    的参数算的, 而今天口径已经走到 `freq_lock_v2`, 拿"当前戳"去给这条老命中找登记,
+    会找到一份**属于别的口径**的 `passed` —— 从输出上完全看不出来。
+
+    所以命中自带一份口径标签, 对齐时用它, 不用"当前"。缺这个字段(`None`)的命中
+    一律不可见(fail-closed): 连按哪套口径算的都不知道, 凭什么说它已校准。
+
+    ## 它只是标签, 不是指纹
+
+    指纹在 `freq_lock.FreqLockStamp` 上, 不落在命中里 —— 命中带指纹会让每条命中
+    膨胀一大截, 而"参数有没有被改过"这件事只需要在登记侧比对一次。
+
+    ## 这里**没有** `calibrated`
+
+    `calibrated: bool` 是刻意不加的。一个可手改的布尔字段, 等于给"洗白"留了一个
+    一字之差的入口: 把 `false` 改成 `true`, 从任何 diff 上都看不出来。可见性由
+    `hits_visibility.visible_hits` 查**独立的**校准登记决定, 命中记录本身无权自称。
+    """
+
     schema_version: str = HITS_SCHEMA_VERSION
     namespace: str = NAMESPACE
     recorded_at: datetime | None = None
@@ -178,6 +202,12 @@ class SignalHit:
         if self.recorded_at is not None:
             _require(isinstance(self.recorded_at, datetime), "recorded_at 必须是 datetime")
             _require(self.recorded_at.tzinfo is not None, "recorded_at 必须带时区")
+
+        if self.freq_lock_version is not None:
+            _require(
+                isinstance(self.freq_lock_version, str) and self.freq_lock_version.strip(),
+                "freq_lock_version 传了就必须是非空字符串(不传请用 None)",
+            )
 
     # ================================================================ 派生
 
@@ -232,6 +262,7 @@ class SignalHit:
             "event_class": self.event_class,
             "direction_label": self.direction_label,
             "definition_status_at_hit": self.definition_status_at_hit,
+            "freq_lock_version": self.freq_lock_version,
             "recorded_at": None if self.recorded_at is None else self.recorded_at.isoformat(),
             "disclaimer_key": DISCLAIMER_KEY,
             "disclaimer": _disclaimer.DISCLAIMER_TEXT,
@@ -319,6 +350,7 @@ def signal_hit_from_dict(payload: dict[str, Any]) -> SignalHit:
         "event_class": payload.get("event_class"),
         "direction_label": payload.get("direction_label"),
         "definition_status_at_hit": payload.get("definition_status_at_hit"),
+        "freq_lock_version": payload.get("freq_lock_version"),
         "recorded_at": recorded_at,
     }
     for key in ("schema_version", "namespace"):

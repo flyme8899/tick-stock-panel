@@ -21,7 +21,13 @@ from fastapi.testclient import TestClient
 
 from app.api.buy_sell_signals_hits import router
 from app.buy_sell_signals import hits_fixtures as fx
-from app.buy_sell_signals.constants import EMPTY_HITS_MESSAGE, HITS_FILENAME, PERSIST_SUBDIR
+from app.buy_sell_signals.calib_store import InMemoryCalibStore
+from app.buy_sell_signals.constants import (
+    CALIB_FILENAME,
+    EMPTY_HITS_MESSAGE,
+    HITS_FILENAME,
+    PERSIST_SUBDIR,
+)
 from app.buy_sell_signals.hits_store import InMemoryHitStore
 from app.buy_sell_signals.store import InMemorySignalRegistryStore
 
@@ -46,6 +52,22 @@ def _full_registry() -> InMemorySignalRegistryStore:
     )
 
 
+def _passed_store() -> InMemoryCalibStore:
+    """夹具 `passed` 登记, 覆盖本文件用到的全部可见信号（理由见 `test_buy_sell_signal_hits` 的同名 helper）。
+
+    刻意给 candidate / limit_reopen 也配上, 这样 `definition_not_publishable`
+    与 `limit_reopen_never_visible` 这两个 reject 计数才仍然是"它们本来要谈的原因"。
+    """
+    return InMemoryCalibStore(
+        [
+            fx.passed_calib(signal_id="fx.pub.intraday_volume"),
+            fx.passed_calib(signal_id="fx.pub.daily_quality_value"),
+            fx.passed_calib(signal_id="fx.cand.intraday_volume"),
+            fx.passed_calib(signal_id="fx.limit_reopen"),
+        ]
+    )
+
+
 def _client(
     tmp_path: Path,
     *,
@@ -53,12 +75,14 @@ def _client(
     registry: InMemorySignalRegistryStore | None = None,
     watch: list[str] | None = None,
     holdings: list[str] | None = None,
+    calib: InMemoryCalibStore | None = None,
 ) -> TestClient:
     app = FastAPI()
     app.include_router(router)
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.state.buy_sell_signal_store = registry if registry is not None else _full_registry()
     app.state.buy_sell_signal_hit_store = InMemoryHitStore(hits or [])
+    app.state.buy_sell_signal_calib_store = calib if calib is not None else _passed_store()
 
     # 自选 / 持仓用 monkeypatch 级的桩, 不碰真实 data 目录
     import app.api.buy_sell_signals_hits as mod
@@ -125,11 +149,25 @@ def test_hits_file_on_disk_is_read_through_the_route(tmp_path):
         ),
         encoding="utf-8",
     )
+    # 校准登记也真写一份到同一目录, 否则这条命中会被新叠的校准闸拦掉 ——
+    # 那测的就不是"磁盘命中能不能读出来"了。
+    calib_path = tmp_path / PERSIST_SUBDIR / CALIB_FILENAME
+    calib_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "namespace": "buy_sell_signals",
+                "entries": [fx.passed_calib().to_dict()],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     app = FastAPI()
     app.include_router(router)
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.state.buy_sell_signal_store = _full_registry()
-    # 不注入 hit store → 走 build_hit_store(data_dir) 的磁盘路径
+    # 不注入 hit / calib store → 走 build_hit_store / build_calib_store 的磁盘路径
     body = TestClient(app).get(HITS_URL).json()
     assert body["count"] == 1
     assert body["hits"][0]["symbol"] == "000001"
@@ -348,3 +386,112 @@ def test_scope_endpoint_reports_stats_not_symbols(tmp_path):
     # 不回明细: 这个接口不该变成第二个自选接口
     assert "000001" not in dumped
     assert "600519" not in dumped
+
+
+# ------------------------------------------------ 校准闸（批次 20261026gbsscalib）
+
+
+def test_without_calib_store_everything_is_invisible(tmp_path):
+    """生产最可能的状态: `calib.json` 不存在 → 一条都不可见, 文案照旧。
+
+    这条**不是**在测"功能没做完", 它测的是"没有通过登记时系统的诚实反应":
+    count=0 而不是把 publishable 的命中照发出去。
+    """
+    client = _client(tmp_path, hits=[fx.calibrated_hit()], calib=InMemoryCalibStore())
+    body = client.get(HITS_URL).json()
+    assert body["count"] == 0
+    assert body["empty_message"] == EMPTY_HITS_MESSAGE
+    assert body["rejected"]["calib_not_passed"] == 1
+    assert body["calib_gate"] == "applied"
+    assert body["calib_passed_keys"] == 0
+
+
+def test_passed_calibration_unlocks_the_hit_at_api_level(tmp_path):
+    client = _client(tmp_path, hits=[fx.calibrated_hit()])
+    body = client.get(HITS_URL).json()
+    assert body["count"] == 1
+    assert body["hits"][0]["hit_id"] == "fx.hit.pub.000001"
+    assert body["calib_passed_keys"] >= 1
+
+
+def test_pending_calibration_does_not_unlock(tmp_path):
+    client = _client(
+        tmp_path,
+        hits=[fx.calibrated_hit()],
+        calib=InMemoryCalibStore([fx.pending_calib()]),
+    )
+    assert client.get(HITS_URL).json()["count"] == 0
+
+
+def test_failed_calibration_does_not_unlock(tmp_path):
+    client = _client(
+        tmp_path,
+        hits=[fx.calibrated_hit()],
+        calib=InMemoryCalibStore([fx.failed_calib()]),
+    )
+    assert client.get(HITS_URL).json()["count"] == 0
+
+
+def test_calib_gate_is_not_frontend_side(tmp_path):
+    """裸请求（没有任何前端状态）也拿不到未校准的命中 —— 闸在服务端。"""
+    client = _client(tmp_path, hits=[fx.calibrated_hit()], calib=InMemoryCalibStore())
+    assert client.get(HITS_URL).json()["hits"] == []
+
+
+def test_scope_endpoint_reports_calib_gate_summary(tmp_path):
+    body = _client(tmp_path).get(f"{HITS_URL}/scope").json()
+    assert body["calib_gate"] == "applied"
+    assert body["calib_passed_keys"] == 0
+    assert body["calib_file"].endswith("calib.json")
+    assert body["calib_file_exists"] is False
+    # 仍然不回任何个别标的
+    assert "000001" not in json.dumps(body, ensure_ascii=False)
+
+
+def test_calib_store_on_disk_is_read_through_the_route(tmp_path):
+    """真写一份 calib.json + hits.json, 走磁盘路径读到"可见"。"""
+    root = tmp_path / PERSIST_SUBDIR
+    root.mkdir(parents=True, exist_ok=True)
+    (root / HITS_FILENAME).write_text(
+        json.dumps(
+            {"schema_version": "1", "namespace": "buy_sell_signals", "hits": [fx.calibrated_hit().to_dict()]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (root / CALIB_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "namespace": "buy_sell_signals",
+                "entries": [fx.passed_calib().to_dict()],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    app.state.buy_sell_signal_store = _full_registry()
+    body = TestClient(app).get(HITS_URL).json()
+    assert body["count"] == 1
+    assert body["calib_passed_keys"] == 1
+
+
+def test_broken_calib_file_hides_everything(tmp_path):
+    """`calib.json` 坏掉 → 无登记 → 全不可见。fail-closed, 不是"大概没问题"。"""
+    root = tmp_path / PERSIST_SUBDIR
+    root.mkdir(parents=True, exist_ok=True)
+    (root / CALIB_FILENAME).write_text("{oops", encoding="utf-8")
+    # 刻意不注入 calib store: 让 _calib_index 走 build_calib_store(data_dir) 的磁盘路径。
+    # (`_client()` 的默认会塞一个内存 passed 店, 那测不到磁盘退化。)
+    app = FastAPI()
+    app.include_router(router)
+    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    app.state.buy_sell_signal_store = _full_registry()
+    app.state.buy_sell_signal_hit_store = InMemoryHitStore([fx.calibrated_hit()])
+    app.state.buy_sell_signal_calib_store = None  # 强制走磁盘店
+    body = TestClient(app).get(HITS_URL).json()
+    assert body["count"] == 0
+    assert body["rejected"]["calib_not_passed"] == 1

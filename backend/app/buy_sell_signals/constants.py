@@ -283,6 +283,139 @@ DIRECTION_LABELS: Final = frozenset({"research_buy", "research_sell", "research_
 HIT_SOURCE_MODES: Final = frozenset({"fixture", "shadow", "live"})
 """命中来源模式。本拍只产出 `fixture`(测例); `live` 是**保留值**, 没有写它的代码路径。"""
 
+# ---------------------------------------------------------------- 频率锁定戳(批次 20261026gbsscalib)
+#
+# 这一段与下面的「校准登记」是**两层不同的东西**, 不要合并:
+#
+# - 频率锁定戳(`freq_lock.py`)回答「这条信号按什么节拍、用什么阈值参数集评估」,
+#   以及「这份口径有没有被悄悄改过」。它是**评估口径的身份**。
+# - 校准登记(`calib_*.py`)回答「这套口径在历史上跑出来过什么样的结果, 过没过门槛」。
+#   它是**结果的可信度**。
+#
+# 口径被改过(指纹变)而结果登记还挂着旧的那个, 就是本拍要拦的那类失真: 登记说的是
+# 旧口径的成绩, 读者以为它给新口径背书。
+
+FREQ_LOCK_VERSION: Final = "freq_lock_v1"
+"""频率锁定戳的**人读标签**(写死)。
+
+它是给人看的, 不参与任何判定 —— 真正参与比对的是 `freq_lock.FreqLockStamp.fingerprint`
+(内容指纹)。留一个标签是因为「只改了代码逻辑、常量没动」这种情况下指纹不会变,
+那时候唯一能说出来"这是第几版口径"的就只有这个字符串。
+
+对标 `regime_caliber` 的做法, 但**独立模块、独立命名空间**: 那边描述的是**市场环境**
+的计算口径(`SignalRecord.regime_caliber_version`), 与 BSS 信号的评估频率/阈值毫无关系。
+"""
+
+FREQ_LOCK_CADENCES: Final = frozenset({"minute_event", "daily_fundamental"})
+"""**评估节拍**的封闭取值域。
+
+刻意与 `SIGNAL_FAMILIES` 分开写一份、而不是直接复用:
+`SIGNAL_FAMILIES` 里还有 `composite`, 而 `composite` **没有**一个明确的评估节拍
+(它将来由若干子信号合成, 节拍取决于被合的那些)。让 `FREQ_LOCK_CADENCES` 少一个值,
+是为了让「合成信号的节拍还没定义」这件事在类型上就显形, 而不是等某个人给
+`composite` 随便挑一个 cadence 写进去。
+
+本拍没有任何 `composite` 的频率锁定戳, 也没有写它的代码路径。
+"""
+
+FREQ_LOCK_SCHEMA_VERSION: Final = "1"
+"""戳的序列化格式版本(字符串, 理由同 `REGISTRY_SCHEMA_VERSION`)。"""
+
+# ---------------------------------------------------------------- 校准登记(批次 20261026gbsscalib)
+
+CALIB_FILENAME: Final = "calib.json"
+"""校准登记的文件名(写死)。
+
+与 `REGISTRY_FILENAME` / `HITS_FILENAME` **同目录**(`<data_dir>/buy_sell_signals/`),
+但是**第三份文件**: 定义、命中、校准三件事各有各的生命周期, 合成一份会互相覆盖。
+
+## 为什么不挂在 `BUY_SELL_SIGNALS_PERSIST` 下面
+
+**不绑。** 那个 env 管的是「定义注册表落不落盘」。把校准读取也挂在它下面, 会造出
+「没开 PERSIST 所以看不到校准」这种假耦合 —— 而校准看不看得见, 只该取决于文件在不在。
+
+缺文件 = 无登记 = 一条都不可见(见 `hits_visibility.CALIB_NOT_PASSED`)。这不是缺陷,
+是诚实空态: 没有通过登记的时候, 系统确实什么都不能担保。
+"""
+
+CALIB_SCHEMA_VERSION: Final = "1"
+"""`calib.json` 的文件级格式版本(字符串, 理由同 `REGISTRY_SCHEMA_VERSION`)。"""
+
+CALIB_STATUSES: Final = frozenset({"passed", "pending", "failed"})
+"""校准状态的**封闭**取值域。
+
+封闭是刻意的, 而且刻意只有三种:
+
+- `passed` —— 唯一算「已校准」的值;
+- `pending` —— 还没结论;
+- `failed` —— 有结论且没过门槛。
+
+**禁用** `ok` / `true` / `verified` / `calibrated` 这类近义词。它们不是"更宽松的写法",
+而是把「过没过」这件事变成了可以有多个答案。多一个近义词, 就多一个地方可以悄悄
+把 `pending` 写成"通过"。
+"""
+
+CALIB_STATUS_PASSED: Final = "passed"
+"""唯一代表「已校准」的状态值。比较一律用它, 不写字面量 `"passed"`。"""
+
+CALIB_SAMPLE_N_MIN: Final = 30
+"""写 `passed` 所要求的**最少样本数**(N2, 写死)。
+
+`sample_n < 30` 一律**拒写** `passed`(不是静默降级成 `pending`)。
+
+为什么是拒而不是降级: 悄悄降级会让人以为「我写进去了, 只是没过」, 实际是**没写**。
+下次他来查登记, 看到一条 `pending` 会以为是自己的回测没过, 而不是自己的调用被拒了。
+口径要一致 —— 门槛不满足就是写入失败, 让他当场知道。
+
+30 这个数字本身没有魔法, 它是 ALIGN N2 钉的下限, 不是统计显著性门槛。过 30 不等于
+显著, 只等于"够说一句有样本量的话"。真正的显著性口径是 `BONFERRONI_*` 那一组。
+"""
+
+CALIB_EVAL_WINDOW_UNIT: Final = "trading_days"
+"""`eval_window` 的**单位**(N2, 写死 = **交易日**)。
+
+不写"天"、不写"自然日": 两者在 A 股上差着整整一年的节假日。写 "20 天" 而实际是
+20 个自然日, 样本区间会覆盖不到 3 个完整交易周, 而写的人和读的人都以为它盖了一个月。
+单位必须显式落进文件(`eval_window_unit` 字段), 不能只靠文档约定。
+"""
+
+CALIB_COST_BP_ROUNDTRIP: Final = 18.2
+"""回测必须计入的**来回成本**, 单位 bp(写死 18.2)。
+
+`cost_bp_roundtrip != 18.2` 一律拒写 `passed`。
+
+为什么钉死而不是"由调用方自报": 成本是个**可以让任何策略从负变正**的参数。允许自报,
+第一个想让它过的人就会填 5bp, 而 5bp 在 A 股连印花税都不够(卖出千分之0.5, 加上
+双边佣金与过户费, 来回 18.2bp 是仓内既有的实测口径, 见 `quality_rank` 里
+`C_cost_18_2bp_measured_pending` 那条缺口标注)。钉死之后, 这个参数不再是可调项,
+而是**准入口径的一部分**。
+"""
+
+CALIB_HIT_DEDUPE_KEY_FIELDS: Final = (
+    "signal_id",
+    "definition_version",
+    "symbol",
+    "asof",
+    "freq_lock_version",
+)
+"""命中侧去重/对齐键的字段名(顺序即语义顺序)。
+
+## 这不是播报冷却
+
+`PUSH_DEDUPE_COOLDOWN_MIN` / `push_dedupe_cooldown_until` 是**提醒层**的去重:
+「同一条信号别在推送通道里重复播报」。本常量是**校准层**的对齐键:
+「这条命中是不是在那套被登记过的口径下算出来的」。
+
+两者的窗口、目的、失效条件全不一样。把播报冷却当成本拍的"频率锁定"对象,
+会让「30 分钟不重复推」变成「口径锁定」—— 一个改推送静音时间的动作顺手改掉了
+信号的可信度判定, 而且改的人不会觉得自己动了信号。
+
+## 本拍只定义键, 不实现写路径
+
+`hits_store` 仍然只读, 没有任何 upsert。这个键当前的唯一用途是「三键对齐」时的
+字段名来源, 以及给将来的去重写路径留一个不会被随手改动的定义。
+"""
+
 # ---------------------------------------------------------------- 合规
 
 DISCLAIMER_KEY: Final = "research_only_v1"
@@ -293,11 +426,22 @@ __all__ = [
     "BONFERRONI_FAMILY_ALPHA",
     "BONFERRONI_M",
     "BONFERRONI_SCHEME_ID",
+    "CALIB_COST_BP_ROUNDTRIP",
+    "CALIB_EVAL_WINDOW_UNIT",
+    "CALIB_FILENAME",
+    "CALIB_HIT_DEDUPE_KEY_FIELDS",
+    "CALIB_SAMPLE_N_MIN",
+    "CALIB_SCHEMA_VERSION",
+    "CALIB_STATUSES",
+    "CALIB_STATUS_PASSED",
     "DINGTALK_ENV_NAME",
     "DIRECTION_LABELS",
     "DISCLAIMER_KEY",
     "EMPTY_HITS_MESSAGE",
     "EVENT_CLASSES",
+    "FREQ_LOCK_CADENCES",
+    "FREQ_LOCK_SCHEMA_VERSION",
+    "FREQ_LOCK_VERSION",
     "HITS_FILENAME",
     "HITS_SCHEMA_VERSION",
     "HIT_SOURCE_MODES",

@@ -28,6 +28,30 @@
 把 `data_pending` 写成"已校准"。呈现层能说的最多是「暂无已校准的买卖信号」——
 空就是空。
 
+## 校准闸: AND, 不是 OR(批次 20261026gbsscalib 新增)
+
+在既有四条闸**之后**再叠一条: 命中还必须有一条**校准通过登记**与它三键对齐
+(`signal_id` + `definition_version` + `freq_lock_version`)。
+
+        可见 ⟺ publishable ∧ ¬limit_reopen ∧ family 暴露 ∧ fund-scope ∧ calib passed
+
+为什么是 AND 而不是"有其一即可": 原来的四条闸回答的是「这条命中**该不该**被发出来」
+(定义敢不敢担保、事件类型允不允许、范围对不对)。校准闸回答的是另一个问题:
+「这套口径**有没有**拿得出手的成绩」。两个问题都答"是"才该显示; 任一答不上来就不显示。
+把它们做成 OR, 等于让"定义是 publishable"替"回测没过"背书 —— 而定义发布只是
+一次人工审批动作, 它不产生任何关于收益/胜率的证据。
+
+缺 `passed` 时与「没有任何命中」完全等价(`CALIB_NOT_PASSED`)。
+`pending` / `failed` / 没有登记 / 登记读不出来 —— 四种情况同一个下场, 一条都不可见。
+这不是"降级显示", 是**不可见**。
+
+## 命中无权自称已校准
+
+判断依据只有独立的 `calib.json`(经 `CalibIndex`)。命中记录里**没有**、也**禁止**加
+`calibrated` 布尔字段: 一个可手改的 `true`, 从任何 diff 上都看不出来, 但会让所有闸
+形同虚设。命中侧只带一个 `freq_lock_version` 标签(镜像值), 而标签本身不构成任何担保
+—— 它只用来**参与对齐**, 对不上就不可见。
+
 ## 范围过滤(自选 ∪ 持仓)只作用于基本面
 
 `daily_fundamental` 的命中是日频全市场量级, 不做范围过滤的话 tab 里会堆上千条与用户
@@ -46,6 +70,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from .calib_store import CalibIndex
 from .constants import EMPTY_HITS_MESSAGE, HITS_SCHEMA_VERSION, NAMESPACE
 from .hits_models import SignalHit
 from .models import SignalRecord
@@ -68,6 +93,17 @@ class VisibilityReject:
     FAMILY_NOT_EXPOSED = "family_not_exposed"
     UNKNOWN_FAMILY_FILTER = "unknown_family_filter"
     OUT_OF_SCOPE = "out_of_scope"
+    CALIB_NOT_PASSED = "calib_not_passed"
+    """没有与本命中三键对齐的 `passed` 校准登记(批次 20261026gbsscalib)。
+
+    四条既有闸全过、但这一条拦下来时, 说明的正是本拍要说的那句话:
+    「这条信号被批准发布了, 但还没有跑出过一份过门槛的回测」。
+
+    刻意只有一个原因码, 不细分成 `calib_missing` / `calib_pending` / `calib_failed` /
+    `calib_key_mismatch`。对读者来说四者的结论一样(不可见), 而细分会让诊断字段变成
+    一个"这个信号离通过还差几步"的进度条 —— 那个信息不该从监控接口泄露出去。
+    真要排查, 去看 `calib.json` 与 `/hits/calib` 的口径摘要。
+    """
 
     ALL = (
         DEFINITION_MISSING,
@@ -76,6 +112,7 @@ class VisibilityReject:
         FAMILY_NOT_EXPOSED,
         UNKNOWN_FAMILY_FILTER,
         OUT_OF_SCOPE,
+        CALIB_NOT_PASSED,
     )
 
 
@@ -91,6 +128,12 @@ class FilteredHits:
     rejected: dict[str, int]
     scope_applied: bool
     scope_size: int
+    calib_passed_keys: int = 0
+    """参与本轮判定的 `passed` 登记条数（**只回数字, 不回内容**）。
+
+    诊断用: 「为什么一条都不显示」时, 这个数等于 0 基本就说明 `calib.json` 不存在
+    或者一条 `passed` 都没有 —— 那是诚实空态, 不是缺陷。
+    """
 
     @property
     def count(self) -> int:
@@ -109,6 +152,7 @@ def visible_hits(
     symbol: str | None = None,
     scope_symbols: frozenset[str] | None = None,
     today: date | None = None,
+    calib: CalibIndex | None = None,
 ) -> FilteredHits:
     """把候选命中过闸。
 
@@ -119,10 +163,15 @@ def visible_hits(
       结果恒空(不是 400: 空比报错更符合"这个 tab 现在没有这类数据"的语义)。
     - `symbol`: 可选个股过滤。
     - `scope_symbols`: 基本面命中的范围闸。传 `None` 表示不做范围过滤(仅测例用)。
+    - `calib`: 校准登记索引。**传 `None` 等同于"一条 passed 都没有"** —— 全部丢弃。
+      刻意**不**给一个"跳过校准闸"的开关: 那样等于给可见性留一个后门, 而调用
+      `visible_hits` 的地方恰恰是最需要它严格的地方。测例要验"仅 publishable 是否可见",
+      应当传一个空索引 `CalibIndex([])`, 得到"不可见"—— 正是真实行为。
     """
     rejected: dict[str, int] = {}
     kept: list[SignalHit] = []
     scope = scope_symbols if scope_symbols is not None else frozenset()
+    index = calib if calib is not None else CalibIndex([])
 
     family_filter_ok = family is None or family in EXPOSED_FAMILIES
 
@@ -141,14 +190,16 @@ def visible_hits(
         if symbol is not None and hit.symbol != symbol:
             continue
 
-        record: SignalRecord | None = registry.get(hit.signal_id) if registry is not None else None
-        if record is None:
+        definition: SignalRecord | None = (
+            registry.get(hit.signal_id) if registry is not None else None
+        )
+        if definition is None:
             _reject(rejected, VisibilityReject.DEFINITION_MISSING)
             continue
-        if record.status != "publishable":
+        if definition.status != "publishable":
             _reject(rejected, VisibilityReject.NOT_PUBLISHABLE)
             continue
-        if record.event_class == "limit_reopen" or hit.event_class == "limit_reopen":
+        if definition.event_class == "limit_reopen" or hit.event_class == "limit_reopen":
             # 双保险: 定义侧被外部改成 publishable 时, 这里仍然拦住。
             _reject(rejected, VisibilityReject.LIMIT_REOPEN)
             continue
@@ -156,6 +207,19 @@ def visible_hits(
         # 范围闸只作用于基本面日表。
         if hit.is_daily_fundamental and scope_symbols is not None and hit.symbol not in scope:
             _reject(rejected, VisibilityReject.OUT_OF_SCOPE)
+            continue
+
+        # 校准闸: 独立的 calib 登记里必须有与**本命中**三键对齐的 passed。
+        #
+        # 三键里 `definition_version` 取**命中自带的**(不是定义当前的): 一条按 v1 算的
+        # 命中, 不该因为定义升到 v2 而自动获得 v2 的校准结论背书。
+        # `freq_lock_version` 取命中镜像值; 缺失即不可见 —— 连按哪套口径算的都不知道,
+        # 不能把"当前戳"顶上去替它担保。
+        if hit.freq_lock_version is None:
+            _reject(rejected, VisibilityReject.CALIB_NOT_PASSED)
+            continue
+        if index.get(hit.signal_id, hit.definition_version, hit.freq_lock_version) is None:
+            _reject(rejected, VisibilityReject.CALIB_NOT_PASSED)
             continue
 
         kept.append(hit)
@@ -169,6 +233,7 @@ def visible_hits(
         rejected=rejected,
         scope_applied=scope_symbols is not None,
         scope_size=len(scope),
+        calib_passed_keys=len(index),
     )
 
 
@@ -199,6 +264,10 @@ def build_response(
 
     `empty_message` **恒在**, 不管 `count` 是多少。空列表时它是空态文案, 非空时前端
     也用不到 —— 但恒在的好处是契约稳定, 少一个"有时有有时没有"的字段。
+
+    **其字面一个字节都不许改**(`EMPTY_HITS_MESSAGE`)。"暂无已校准的买卖信号" 这句话
+    里的"已校准"三个字是本拍唯一一处对用户承诺"闸在生效"的地方: 改成"今天没信号"
+    就等于把"还没有任何东西通过校准"说成"系统在跑、今天恰好空着"。
     """
     views = [hit_to_view(hit, today=today) for hit in filtered.hits]
     return {
@@ -211,6 +280,11 @@ def build_response(
         "rejected": dict(sorted(filtered.rejected.items())),
         "scope_applied": filtered.scope_applied,
         "scope_size": filtered.scope_size,
+        # 校准闸的只读摘要: 告诉调用方"这道闸开着", 以及本轮有多少条 passed 参与判定。
+        # 刻意只说条数, 不回任何 signal_id —— 否则这个字段会变成一个"哪些信号已校准"
+        # 的查询接口, 而那个信息应当只在 calib.json 与运维口径里。
+        "calib_gate": "applied",
+        "calib_passed_keys": filtered.calib_passed_keys,
     }
 
 

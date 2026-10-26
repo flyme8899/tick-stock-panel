@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from app.buy_sell_signals import hits_fixtures as fx
+from app.buy_sell_signals.calib_store import CalibIndex
 from app.buy_sell_signals.constants import (
     DIRECTION_LABELS,
     EMPTY_HITS_MESSAGE,
@@ -59,6 +60,31 @@ def _registry(*records) -> InMemorySignalRegistryStore:
     for rec in records:
         reg.upsert(rec)
     return reg
+
+
+def _passed_index() -> CalibIndex:
+    """一条 `passed` 登记覆盖全部夹具信号的三键。
+
+    ## 为什么这个 helper 是必要的(而不是"给测例开后门")
+
+    叠加校准闸之后, "定义是 publishable" 不再等于 "命中可见"。既有测例谈的是
+    **前半段**闸(定义状态 / 事件类型 / 范围), 要让它们继续谈前半段, 就得把后半段
+    (校准) 配齐 —— 否则每条都会卡在 `calib_not_passed` 上, 测出来的全是同一件事。
+
+    所以这里给的是"校准已过"这个**前提**, 不是"跳过校准闸"的开关: 闸本身仍然
+    逐条走(`CalibIndex.get` 找不到就拒), 只是这次的登记确实都在。谁想验"没登记
+    就不显示", 传 `CalibIndex([])` —— 那正是本文件末尾 adjacencies 段的做法。
+    """
+    return CalibIndex(
+        [
+            fx.passed_calib(signal_id="fx.pub.intraday_volume"),
+            fx.passed_calib(signal_id="fx.pub.daily_quality_value"),
+            # 以下两条是"对照组的证明": 给 candidate / limit_reopen 也配上 passed,
+            # 才能验出它们挡住的原因**不是**校准缺失, 而是定义状态 / 事件类型本身。
+            fx.passed_calib(signal_id="fx.cand.intraday_volume"),
+            fx.passed_calib(signal_id="fx.limit_reopen"),
+        ]
+    )
 
 
 def _full_registry() -> InMemorySignalRegistryStore:
@@ -318,7 +344,7 @@ def test_hit_store_has_no_write_api():
 
 
 def test_publishable_hit_is_visible():
-    filtered = visible_hits([fx.publishable_hit()], _full_registry(), scope_symbols=frozenset())
+    filtered = visible_hits([fx.publishable_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert [h.hit_id for h in filtered.hits] == ["fx.hit.pub.000001"]
 
 
@@ -328,7 +354,7 @@ def test_publishable_hit_is_visible():
 )
 def test_non_publishable_hits_are_invisible(hit_factory):
     """candidate / observe / limit_reopen 的命中**不可见** —— 即使夹具真的写出了命中。"""
-    filtered = visible_hits([hit_factory()], _full_registry(), scope_symbols=frozenset())
+    filtered = visible_hits([hit_factory()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert sum(filtered.rejected.values()) == 1
 
@@ -350,26 +376,26 @@ def test_limit_reopen_rejected_even_if_definition_was_hand_edited_to_publishable
             "app.market_time", fromlist=["cn_now"]
         ).cn_now(),
     )
-    filtered = visible_hits([fx.limit_reopen_hit()], _registry(forged), scope_symbols=frozenset())
+    filtered = visible_hits([fx.limit_reopen_hit()], _registry(forged), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.LIMIT_REOPEN) == 1
 
 
 def test_hit_without_definition_is_invisible():
-    filtered = visible_hits([fx.orphan_hit()], _full_registry(), scope_symbols=frozenset())
+    filtered = visible_hits([fx.orphan_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.DEFINITION_MISSING) == 1
 
 
 def test_missing_registry_fails_closed():
     """注册表压根没有 → 全丢。不猜、不默认放行。"""
-    filtered = visible_hits([fx.publishable_hit()], None, scope_symbols=frozenset())
+    filtered = visible_hits([fx.publishable_hit()], None, scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
 
 
 def test_composite_hits_are_not_exposed():
     """`composite` 首批不暴露 —— 即使定义是 publishable。"""
-    filtered = visible_hits([fx.composite_hit()], _full_registry(), scope_symbols=frozenset())
+    filtered = visible_hits([fx.composite_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.FAMILY_NOT_EXPOSED) == 1
     assert "composite" not in EXPOSED_FAMILIES
@@ -377,7 +403,11 @@ def test_composite_hits_are_not_exposed():
 
 def test_unknown_family_filter_returns_empty():
     filtered = visible_hits(
-        [fx.publishable_hit()], _full_registry(), family="composite", scope_symbols=frozenset()
+        [fx.publishable_hit()],
+        _full_registry(),
+        family="composite",
+        scope_symbols=frozenset(),
+        calib=_passed_index(),
     )
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.UNKNOWN_FAMILY_FILTER) == 1
@@ -395,12 +425,14 @@ def test_definition_status_is_read_at_request_time_not_at_hit_time():
 
     # 同 signal_id, 但当前状态是 candidate → 不可见
     downgraded = fx.candidate_definition(signal_id="fx.pub.intraday_volume")
-    filtered = visible_hits([hit], _registry(downgraded), scope_symbols=frozenset())
+    filtered = visible_hits([hit], _registry(downgraded), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.NOT_PUBLISHABLE) == 1
 
     # 同 signal_id, 当前 publishable → 可见
-    filtered = visible_hits([hit], _registry(fx.publishable_definition()), scope_symbols=frozenset())
+    filtered = visible_hits(
+        [hit], _registry(fx.publishable_definition()), scope_symbols=frozenset(), calib=_passed_index()
+    )
     assert len(filtered.hits) == 1
 
     # 反向: 命中写入时是 candidate, 定义现在 publishable → 仍可见
@@ -410,6 +442,7 @@ def test_definition_status_is_read_at_request_time_not_at_hit_time():
         [early],
         _registry(fx.publishable_definition()),
         scope_symbols=frozenset(),
+        calib=_passed_index(),
     )
     assert len(filtered.hits) == 1
 
@@ -417,7 +450,10 @@ def test_definition_status_is_read_at_request_time_not_at_hit_time():
 def test_fundamental_out_of_scope_is_hidden():
     hit = fx.daily_fundamental_hit(symbol="600000")
     filtered = visible_hits(
-        [hit], _full_registry(), scope_symbols=frozenset({"000001", "000002"})
+        [hit],
+        _full_registry(),
+        scope_symbols=frozenset({"000001", "000002"}),
+        calib=_passed_index(),
     )
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.OUT_OF_SCOPE) == 1
@@ -427,20 +463,26 @@ def test_fundamental_out_of_scope_is_hidden():
 
 def test_fundamental_in_scope_is_visible():
     hit = fx.daily_fundamental_hit(symbol="600000")
-    filtered = visible_hits([hit], _full_registry(), scope_symbols=frozenset({"600000"}))
+    filtered = visible_hits(
+        [hit], _full_registry(), scope_symbols=frozenset({"600000"}), calib=_passed_index()
+    )
     assert [h.symbol for h in filtered.hits] == ["600000"]
 
 
 def test_minute_event_is_not_scope_limited():
     """事件命中不过范围闸 —— 否则别处的异动永远看不见。"""
     hit = fx.publishable_hit(symbol="999999")
-    filtered = visible_hits([hit], _full_registry(), scope_symbols=frozenset({"600000"}))
+    filtered = visible_hits(
+        [hit], _full_registry(), scope_symbols=frozenset({"600000"}), calib=_passed_index()
+    )
     assert [h.symbol for h in filtered.hits] == ["999999"]
     assert filtered.rejected.get(VisibilityReject.OUT_OF_SCOPE) is None
 
 
 def test_scope_none_means_no_scope_filter():
-    filtered = visible_hits([fx.daily_fundamental_hit()], _full_registry(), scope_symbols=None)
+    filtered = visible_hits(
+        [fx.daily_fundamental_hit()], _full_registry(), scope_symbols=None, calib=_passed_index()
+    )
     assert len(filtered.hits) == 1
     assert filtered.scope_applied is False
 
@@ -448,7 +490,7 @@ def test_scope_none_means_no_scope_filter():
 def test_visible_hits_are_sorted_newest_first():
     old = fx.publishable_hit(hit_id="old", asof=fx.dated(3))
     new = fx.publishable_hit(hit_id="new", asof=fx.dated(0))
-    filtered = visible_hits([old, new], _full_registry(), scope_symbols=frozenset())
+    filtered = visible_hits([old, new], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert [h.hit_id for h in filtered.hits] == ["new", "old"]
 
 
@@ -490,7 +532,7 @@ def test_definition_status_events_never_become_hits():
 
     # 而且响应体里不含这个键
     payload = build_response(
-        visible_hits([fx.publishable_hit()], _full_registry(), scope_symbols=frozenset())
+        visible_hits([fx.publishable_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     )
     dumped = json.dumps(payload, ensure_ascii=False)
     assert MONITOR_EVENT_TYPE not in dumped

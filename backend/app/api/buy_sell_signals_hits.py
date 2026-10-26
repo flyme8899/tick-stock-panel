@@ -11,6 +11,18 @@
 所以命中走独立路由, 各自的数据源、各自的字段、各自的空态文案。订阅端(SSE)那条
 仍然只有定义状态, 本拍只给它补了 `family` / `event_class` 两个分类字段。
 
+## 校准闸在本文件的哪里
+
+不在接口层，在 `hits_visibility.visible_hits` 里（第 7 条规则）。本文件只负责把
+校准登记索引递给它，以及在响应里带一个只读摘要 `calib_gate: "applied"`。
+
+**不在前端过滤**：前端即使全放了也不过是显示空，后端不放的东西不会因为它"渲染逻辑
+宽松"而漏出去。反过来，如果只在 `Monitor.tsx` 里按 `calibrated` 过滤，那么绕过前端
+直接调本接口就能拿到全部命中 —— 那种实现看起来一模一样，安全性完全不同。
+
+`empty_message` 恒为「暂无已校准的买卖信号」，本文件不改它的字面，
+`calib.json` 不存在也照用这一句：空就是空。
+
 ## 鉴权
 
 沿用站内只读接口的现状(与 `/api/alerts` / `/api/watchlist` 同级), **不新增** Basic、
@@ -27,6 +39,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query, Request
 
+from app.buy_sell_signals.calib_store import DiskCalibStore, build_calib_store, build_index
 from app.buy_sell_signals.constants import EMPTY_HITS_MESSAGE
 from app.buy_sell_signals.hits_store import DiskHitStore, build_hit_store
 from app.buy_sell_signals.hits_visibility import build_response, visible_hits
@@ -62,6 +75,21 @@ def _data_dir(request: Request) -> Path:
 def _registry(request: Request):
     """定义注册表。缺失时返回 `None` —— 闸会把所有命中判为"定义缺失"。"""
     return getattr(request.app.state, "buy_sell_signal_store", None)
+
+
+def _calib_index(request: Request):
+    """校准登记索引。
+
+    优先用 `app.state.buy_sell_signal_calib_store`(启动时建好, 也方便测例替换成内存店),
+    没有则按 `data_dir` 现建一个磁盘店。**任何情况下都只读。**
+
+    缺失/读不出来时返回空索引 —— 含义是"一条 passed 都没有", 即所有命中不可见。
+    这是 fail-closed 的正确方向: 拿不到校准证据时, 宁可什么都不显示。
+    """
+    store = getattr(request.app.state, "buy_sell_signal_calib_store", None)
+    if store is None:
+        store = build_calib_store(_data_dir(request))
+    return build_index(store)
 
 
 def _paper_symbols(data_dir: Path) -> set[str]:
@@ -135,6 +163,7 @@ def list_hits(
         symbol=symbol,
         scope_symbols=scope,
         today=today,
+        calib=_calib_index(request),
     )
     return build_response(filtered, today=today or cn_today())
 
@@ -146,12 +175,21 @@ def hits_scope(request: Request) -> dict[str, Any]:
     给运维用的: 「为什么我这里基本面是空的」—— 大概率是自选和持仓都为空。
     刻意不回 symbol 列表, 免得这个接口变成第二个自选接口。
     """
+    data_dir = _data_dir(request)
+    hit_store = DiskHitStore(data_dir)
+    calib_store = DiskCalibStore(data_dir)
     return {
         "scope_family": SCOPE_FAMILY,
         "scope_size": len(scope_symbols(request)),
         "empty_message": EMPTY_HITS_MESSAGE,
-        "hits_file": str(DiskHitStore(_data_dir(request)).path),
-        "hits_file_exists": DiskHitStore(_data_dir(request)).exists(),
+        "hits_file": str(hit_store.path),
+        "hits_file_exists": hit_store.exists(),
+        # 校准闸的口径摘要。**只回条数与路径, 不回任何 signal_id** —— 否则这个接口
+        # 会变成一个"哪些信号已校准"的查询口。
+        "calib_gate": "applied",
+        "calib_passed_keys": len(build_index(calib_store)),
+        "calib_file": str(calib_store.path),
+        "calib_file_exists": calib_store.exists(),
     }
 
 

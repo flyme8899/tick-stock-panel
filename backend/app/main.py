@@ -281,6 +281,26 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("buy_sell_signals 命中层读取器初始化失败 (不影响启动): %s", e)
 
+    # 买卖信号校准登记 (批次 20261026gbsscalib): 同样**只读**店, 挂进 app.state。
+    #
+    # 与命中层同一个纪律: 不评估、不调度、不扫表、不写文件。文件不存在是合法状态 ——
+    # 含义是「一条 passed 都没有」, 于是所有命中不可见, 监控走空态。这**不是**缺陷,
+    # 是诚实: 没有通过校准证据的时候, 系统确实什么都不能担保。
+    #
+    # 注意: 这里**不**读 BUY_SELL_SIGNALS_PERSIST。校准看不看得见只取决于 calib.json
+    # 在不在, 与「定义注册表落不落盘」是两件事。
+    try:
+        from app.buy_sell_signals.calib_store import build_calib_store
+
+        app.state.buy_sell_signal_calib_store = build_calib_store(store.data_dir)
+        if app.state.buy_sell_signal_calib_store.exists():
+            logger.info(
+                "buy_sell_signals 校准登记只读店: %s",
+                app.state.buy_sell_signal_calib_store.path,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("buy_sell_signals 校准登记读取器初始化失败 (不影响启动): %s", e)
+
     # 买卖信号推送出口 (批次 20261025gpush / gding): 只在 BUY_SELL_SIGNALS_PUSH 开时挂 helper。
     # 通道 = SSE(QuoteService.push_alerts) + 站内(alert_store); 外部钉钉另受
     # BUY_SELL_SIGNALS_DINGTALK 与既有 DINGTALK_WEBHOOK_URL 二次门控(与关系, 默认关)。
