@@ -1513,25 +1513,31 @@ export function Schedule({ reachable }: { reachable: boolean }) {
       qc.invalidateQueries({ queryKey: QK.dsaUpstream('history') })
     },
   })
-  const run = useMutation({
-    mutationFn: () => dsaUpstream('system/scheduler/run-now', { method: 'POST' }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: QK.dsaSchedule }) },
-  })
   const [channel, setChannel] = useState<string>(NOTIFICATION_TEST_CHANNELS[0].value)
-  const test = useMutation({
-    mutationFn: () => dsaUpstream('system/config/notification/test-channel', {
-      method: 'POST',
-      body: JSON.stringify({ channel }),
-    }),
-  })
+  // 「立即跑一轮」与「发送测试」本来各挂一条 system POST，经 /api/dsa/upstream
+  // 打到上游。P-sec 把浏览器侧 system/portfolio 收窄成只读（非 GET → 405），
+  // 所以这两条请求已经发不出去了。这里**不**改打别的写 API、不走 MCP、不新造
+  // 服务端替代路由 —— 直接把按钮诚实禁掉，并把原因写在界面上。宁可少一个按钮，
+  // 也不要留一个点了必然 405 的假按钮。
   const scheduler = query.data?.scheduler
   const extraTimes = query.data?.extra_times ?? []
   return (
     <div className="space-y-3">
       <Panel title="定时任务" hint="时钟在决策服务进程里，时区 Asia/Shanghai。只在交易日分析下面的自选，结果进入决策仪表盘，并按已配置的通知渠道推送。TSP 的盘后管道不受这里影响。" extra={
-        <button className={primaryBtn} type="button" disabled={!reachable || run.isPending} onClick={() => run.mutate()}>立即跑一轮</button>
+        <button
+          className={primaryBtn}
+          type="button"
+          disabled
+          data-upstream-readonly="system/scheduler/run-now"
+          title="浏览器上游已收窄为只读"
+        >
+          立即跑一轮
+        </button>
       }>
         {!reachable && <Notice>服务未连接。可先在 .env 写好 SCHEDULE_ENABLED、SCHEDULE_TIME 和 STOCK_LIST，再用 docker compose --profile dsa up --build 启动。</Notice>}
+        <Notice>
+          浏览器上游已收窄为只读：「立即跑一轮」不再从本页触发，改走服务端入口（定时任务到点自跑，或运维侧手动触发）。下面的定时设置保存走 TSP 自有接口，不受影响。
+        </Notice>
         {query.isError && <Failure error={query.error} onRetry={() => query.refetch()} />}
         <form className="mt-3 space-y-3" onSubmit={event => { event.preventDefault(); save.mutate() }}>
           <label className="flex items-center gap-2 text-xs text-secondary">
@@ -1583,20 +1589,27 @@ export function Schedule({ reachable }: { reachable: boolean }) {
         {scheduler?.last_error && <p className="mt-2 text-[11px] leading-relaxed text-warning">{scheduler.last_error}</p>}
         {save.isError && <div className="mt-2"><Failure error={save.error} /></div>}
         {save.isSuccess && <p className="mt-2 text-xs text-secondary">已写入 .env，并让决策服务重新加载定时任务。启动服务本身不会立刻分析。</p>}
-        {run.isError && <div className="mt-2"><Failure error={run.error} /></div>}
-        {run.isSuccess && <p className="mt-2 text-xs text-secondary">已提交本轮。完成后到决策仪表盘查看，通知发往已配置的渠道。</p>}
       </Panel>
-      <Panel title="通知渠道试发" hint="渠道密钥写在 .env。这里只发一条测试，不改 TSP 监控推送。">
-        <form className="flex gap-2" onSubmit={event => { event.preventDefault(); test.mutate() }}>
+      <Panel title="通知渠道试发" hint="渠道密钥写在 .env。这里原本只发一条测试，不改 TSP 监控推送。">
+        <form className="flex gap-2" onSubmit={event => { event.preventDefault() }}>
           <select className={fieldCls} value={channel} onChange={event => setChannel(event.target.value)} aria-label="通知渠道">
             {NOTIFICATION_TEST_CHANNELS.map(item => (
               <option key={item.value} value={item.value}>{item.label}</option>
             ))}
           </select>
-          <button className={ghostBtn} type="submit" disabled={!reachable || test.isPending}>发送测试</button>
+          <button
+            className={ghostBtn}
+            type="submit"
+            disabled
+            data-upstream-readonly="system/config/notification/test-channel"
+            title="浏览器上游已收窄为只读"
+          >
+            发送测试
+          </button>
         </form>
-        {test.isError && <div className="mt-2"><Failure error={test.error} /></div>}
-        {test.isSuccess && <p className="mt-2 text-xs text-secondary">已提交测试。若密钥为空，上游会返回失败原因。</p>}
+        <p className="mt-2 text-[11px] leading-relaxed text-muted">
+          浏览器上游已收窄为只读：试发通知不再从本页触发，改走服务端入口（.env 里的渠道配置不变）。选渠道仍然可以改，方便你对照要配哪一路。
+        </p>
       </Panel>
     </div>
   )
