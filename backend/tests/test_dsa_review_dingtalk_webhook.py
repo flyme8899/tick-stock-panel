@@ -386,19 +386,64 @@ def test_schedule_and_merge_share_same_cap(tmp_path) -> None:
 # ── DingtalkSender override 行为（真实类，绕过重依赖链）──────────────────
 
 
+_SENDER_STUBBED_MODULES = ("src", "src.config", "src.formatters", "requests")
+
+
 def _load_dingtalk_sender_class():
-    """按文件加载 ``DingtalkSender``，绕开 ``src.notification_sender.__init__``。
+    """按文件加载 ``DingtalkSender``，把它自己的 import 全换成桩件。
 
-    那条包级 import 会把 ``data_provider`` 整条抓取链拉起来（需要
-    sqlalchemy / fake_useragent 等），而本用例只想验"发到哪个 URL"。
+    为什么不用真 import：
+    * ``src.notification_sender.__init__`` 会把 ``data_provider`` 整条抓取链拉起来；
+    * 连直接加载文件也不行 —— ``dingtalk_sender`` 顶层就 import
+      ``src.formatters``，而后者 ``import markdown2``，这个包既不在
+      ``backend/pyproject.toml`` 也不在 CI 环境里（CI 只装 backend 自己的依赖）。
+
+    本用例只关心"发到哪个 URL / 用哪个 secret 加签"，所以把三条外部 import
+    换成最小桩件即可，测的还是 ``dingtalk_sender.py`` 里真实的 override 逻辑。
     """
-    import importlib.util
+    import sys
+    import types
 
-    path = _VENDOR / "src" / "notification_sender" / "dingtalk_sender.py"
-    spec = importlib.util.spec_from_file_location("_p_ding_sender", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+    config_mod = types.ModuleType("src.config")
+
+    class _Config:  # 仅作类型标注用，构造器不读它
+        pass
+
+    config_mod.Config = _Config
+
+    formatters_mod = types.ModuleType("src.formatters")
+    formatters_mod.chunk_content_by_max_bytes = lambda content, max_bytes, add_page_marker=False: [content]
+    formatters_mod.strip_hidden_markdown_metadata = lambda text: text
+
+    requests_mod = types.ModuleType("requests")
+    requests_mod.post = None  # 由 _sender_with 装上 recorder
+
+    src_pkg = types.ModuleType("src")
+    src_pkg.__path__ = []  # type: ignore[attr-defined]
+
+    saved = {name: sys.modules.get(name) for name in _SENDER_STUBBED_MODULES}
+    sys.modules.update(
+        {
+            "src": src_pkg,
+            "src.config": config_mod,
+            "src.formatters": formatters_mod,
+            "requests": requests_mod,
+        }
+    )
+    try:
+        import importlib.util
+
+        path = _VENDOR / "src" / "notification_sender" / "dingtalk_sender.py"
+        spec = importlib.util.spec_from_file_location("_p_ding_sender", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+    finally:
+        for name, previous in saved.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
     return module.DingtalkSender
 
 
@@ -419,12 +464,18 @@ class _PostRecorder:
         return _FakeResponse()
 
 
+class _RequestsStub:
+    def __init__(self, recorder: _PostRecorder) -> None:
+        self.post = recorder
+
+
 def _sender_with(monkeypatch, *, webhook, secret=None):
     cls = _load_dingtalk_sender_class()
     cfg = SimpleNamespace(dingtalk_webhook_url=webhook, dingtalk_secret=secret)
     sender = cls(cfg)
     recorder = _PostRecorder()
-    monkeypatch.setattr(sender.__class__.send_to_dingtalk.__globals__["requests"], "post", recorder)
+    # 模块已从 sys.modules 撤掉，只能顺着函数 __globals__ 找它引用的 requests 桩
+    monkeypatch.setitem(sender.send_to_dingtalk.__globals__, "requests", _RequestsStub(recorder))
     return sender, recorder
 
 
