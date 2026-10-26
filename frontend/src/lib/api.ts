@@ -1370,6 +1370,53 @@ export interface MonitorRuleOptions {
   all_a_member_count?: number
 }
 
+/**
+ * 买卖信号**命中**记录(只读)。
+ *
+ * 与 `AlertEvent` 是两类东西: AlertEvent 是"某条监控规则被触发了", 命中是
+ * "某只票按某版定义被判定命中"。所以这里**没有** price / qty / 下单字段 ——
+ * 后端 schema 也不允许有, 契约上就别留。
+ */
+export interface BuySellHit {
+  schema_version: string
+  namespace: string
+  hit_id: string
+  signal_id: string
+  /** 命中产生时所依据的定义版本, 钉死; 定义改版后旧命中不按新版重读 */
+  definition_version: string
+  symbol: string
+  /** 评估/数据时点(ISO 日期或带时区时间) */
+  asof: string
+  /** 归一后的上海日期, 解析不了为 null */
+  asof_date: string | null
+  /** 数据是否过期: asof 日 < 上海今日, 或 asof 解析不了 */
+  stale: boolean
+  /** 是否按"基本面日表"形态呈现(不 toast, 带 asof, 过期显形) */
+  is_daily_fundamental: boolean
+  source: { evaluator: string; mode: 'fixture' | 'shadow' | 'live' }
+  family: 'minute_event' | 'daily_fundamental'
+  event_class: string
+  /** 研究标签,**不是**下单方向 */
+  direction_label: 'research_buy' | 'research_sell' | 'research_watch'
+  definition_status_at_hit?: string | null
+  recorded_at?: string | null
+  disclaimer_key: string
+  disclaimer: string
+}
+
+export interface BuySellHitsResponse {
+  schema_version: string
+  namespace: string
+  /** 空态文案, 后端写死「暂无已校准的买卖信号」; 前端直接渲染它, 不要自己拼 */
+  empty_message: string
+  hits: BuySellHit[]
+  count: number
+  /** 诊断: 各条闸丢弃了几条(只有原因与计数, 无个股内容) */
+  rejected: Record<string, number>
+  scope_applied: boolean
+  scope_size: number
+}
+
 export interface AlertEvent {
   ts: number
   rule_id?: string
@@ -4803,6 +4850,18 @@ export const api = {
 
   alertsClear: () =>
     request<{ ok: boolean; cleared: number }>('/api/alerts', { method: 'DELETE' }),
+
+  /**
+   * 买卖信号命中(只读)。**不要**用 alertsList 代替 —— 那里面是定义状态事件。
+   * 闸在服务端: 非 publishable 定义的命中不会出现在响应里。
+   */
+  buySellHits: (params?: { family?: string; symbol?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.family) qs.set('family', params.family)
+    if (params?.symbol) qs.set('symbol', params.symbol)
+    const s = qs.toString()
+    return request<BuySellHitsResponse>(`/api/buy-sell-signals/hits${s ? `?${s}` : ''}`)
+  },
 
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),

@@ -27,6 +27,44 @@ const MONITOR_TAG_LABELS: Record<string, string> = {
   dropped: '移出',
 }
 
+/**
+ * 买卖信号命中层的 family chip。
+ *
+ * 只有两类对外: `minute_event`(事件) / `daily_fundamental`(基本面)。
+ * `composite` **首批不渲染入口** —— 复合信号还没走完验证, 给它一个永远空的 chip
+ * 只是在暗示"这里以后会有东西"。后端也不会返回 composite 命中, 这里是双保险。
+ */
+export const HIT_FAMILY_LABELS: Record<string, string> = {
+  minute_event: '事件',
+  daily_fundamental: '基本面',
+}
+
+/**
+ * `direction_label` → 中文。**研究口径**, 不是下单方向。
+ *
+ * 刻意不用「买入 / 卖出」: 那两个字在本仓别处都是可执行动作。「偏多 / 偏空 / 观察」
+ * 描述的是这条记录在研究上的倾向, 看完之后要不要动手与它无关。
+ */
+export const HIT_DIRECTION_LABELS: Record<string, string> = {
+  research_buy: '研究·偏多',
+  research_sell: '研究·偏空',
+  research_watch: '研究·观察',
+}
+
+/** 命中 family → chip 文案; 未知或 composite 返回 null(不渲染)。 */
+export function hitFamilyLabel(family: string | null | undefined): string | null {
+  const raw = (family ?? '').trim()
+  if (!raw) return null
+  return HIT_FAMILY_LABELS[raw] ?? null
+}
+
+/** 命中 direction_label → 中文; 未知返回 null(不渲染, 也不回退成英文键)。 */
+export function hitDirectionLabel(label: string | null | undefined): string | null {
+  const raw = (label ?? '').trim()
+  if (!raw) return null
+  return HIT_DIRECTION_LABELS[raw] ?? null
+}
+
 function isInternalKey(raw: string): boolean {
   return /^[a-z][a-z0-9_]*$/.test(raw)
 }

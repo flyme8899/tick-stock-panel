@@ -1282,3 +1282,205 @@ data/auction_scan/{YYYY-MM-DD}.json     ← 经 get_scan(data_dir, target) 读
 - [x] 默认不部署；合入另等盘后口令
 
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。*
+
+---
+
+## 命中层（批次 20261026gbsshits · P-hits）
+
+### 一句话
+
+在定义层之上新增**命中记录**: 「某只票, 在某时点, 按某版定义, 被判定命中」。
+监控中心只读展示已校准的命中, 空则显示「暂无已校准的买卖信号」。
+
+### 命中 ≠ 定义
+
+这是本节最重要的一条区分, 也是本拍存在的理由。
+
+| | 定义层 `SignalRecord` | 命中层 `SignalHit` |
+|---|---|---|
+| 回答的问题 | 这个信号是什么、能不能发布 | 哪只票什么时候命中了它 |
+| 有 `symbol` 吗 | **没有** | 有, 必填 |
+| 数量级 | 几十条, 人工维护 | 按票 × 时间增长 |
+| 可变性 | 状态可变（走状态机） | 一旦写入不可改写 |
+| 状态机 | `candidate → … → publishable` | 没有状态机 |
+
+把两者塞进一个类型会立刻产生三个问题: 定义改版会连带改写历史命中; `definition_version`
+无处安放; 定义的状态机被命中的"无状态"污染。所以命中层是**新的一层**, 只从定义
+**拷贝** `family` / `event_class`, 不做任何反向写入。
+
+**特别说明**: `/api/alerts` 里那条 `monitor_event_type=buy_sell_signal_status_changed`
+是**定义状态变更**（「这条信号被批准发布了」）, 不是个股命中。它没有 `symbol` ——
+命中层要求 `symbol` 必填, 所以一条定义状态事件在数据结构上**无法**被当成命中。
+监控的「买卖信号」tab 读的是 `/api/buy-sell-signals/hits`, 不是 `/api/alerts`。
+
+### 命中 schema
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `schema_version` | 是 | 首批 `"1"` |
+| `namespace` | 是 | 恒 `buy_sell_signals` |
+| `hit_id` | 是 | 稳定唯一 id |
+| `signal_id` | 是 | 指向定义 |
+| `definition_version` | 是 | **钉死**命中产生时所依据的定义版本 |
+| `symbol` | 是 | 个股代码（命中层才有） |
+| `asof` | 是 | 评估/数据时点 |
+| `source` | 是 | `{evaluator, mode}`, `mode ∈ {fixture, shadow, live}` |
+| `family` / `event_class` | 是 | ∈ `SIGNAL_FAMILIES` / `EVENT_CLASSES`, 从定义拷贝 |
+| `direction_label` | 是 | 封闭集 `research_buy` / `research_sell` / `research_watch` |
+| `disclaimer` / `disclaimer_key` | 是 | 合规三件套 |
+| `definition_status_at_hit` | 否 | 写入时的状态快照, **仅供审计** |
+| `stale` / `asof_date` | 派生 | 由 API 计算, 不落盘 |
+
+**`definition_version` 为什么要钉死**: 定义改版后, 旧命中仍须按当时那一版解释。
+读侧按"当前版"重读, 会让一条按 v1 口径算出来的命中被 v2 的措辞描述, 且从输出上
+完全看不出来。
+
+**载荷里不许有**: 价格、数量、仓位、订单号、可执行指令、模拟盘下单字段。
+这不是"暂时没做", 是命中层的定位 —— 它是研究记录, 不是交易指令。`from_dict` 遇到
+这些键**报错而不是丢弃**: 一份带 `price` 的命中文件说明写入侧出了问题, 静默丢掉
+会让问题一直藏着。
+
+### N1 · 只读店 `data/buy_sell_signals/hits.json`
+
+路径: `Path(settings.data_dir) / "buy_sell_signals" / "hits.json"`（与 `registry.json`
+同目录, 但是两份文件）。文件级 schema:
+
+```json
+{
+  "schema_version": "1",
+  "namespace": "buy_sell_signals",
+  "hits": [ /* SignalHit.to_dict() */ ]
+}
+```
+
+- **只有读**: `DiskHitStore` 没有 `upsert` / `write` / `append`。本拍没有任何代码路径
+  写 live 命中 —— 没有影子调度、没有启动扫描、没有日管道写入。
+- **与 `BUY_SELL_SIGNALS_PERSIST` 无关**: 那个 env 管的是定义注册表落不落盘。把命中
+  读取也挂在它下面会造出"没开 PERSIST 所以看不到命中"这种耦合。
+- 缺文件 / 空文件 → 0 条命中 → 空态。这是**全新部署的合法状态**, 不是缺陷。
+- 单条记录反序列化失败 → **跳过该条**, 其余照常（一条脏数据不该让整个 tab 打不开）。
+- 顶层形状不对 / JSON 语法错误 → 0 条 + warning（注册表那边是抛错, 因为它是唯一事实源
+  且会被覆写; 命中层是只读派生数据, 显示空态比让监控页白屏合理）。
+
+### N2 · `GET /api/buy-sell-signals/hits`
+
+Query: `family`（可选）、`symbol`（可选）、`today`（仅测试用, 不在 OpenAPI 里）。
+
+响应:
+
+```json
+{
+  "schema_version": "1",
+  "namespace": "buy_sell_signals",
+  "empty_message": "暂无已校准的买卖信号",
+  "hits": [],
+  "count": 0,
+  "rejected": {"definition_not_publishable": 2},
+  "scope_applied": true,
+  "scope_size": 12
+}
+```
+
+**闸在服务端**, 顺序如下:
+
+1. `family` 不在 `{minute_event, daily_fundamental}` → 返回空（不是 400）
+2. 命中 family 是 `composite` → 丢弃（首批不暴露）
+3. 查定义注册表 `get(signal_id)`
+4. 定义不存在 → 丢弃
+5. 定义当前 `status != "publishable"` → 丢弃
+6. `event_class == "limit_reopen"` → 丢弃（双保险）
+7. 基本面命中若不在自选 ∪ 持仓内 → 丢弃
+
+第 6 条特意不冗余: 状态机已经有双重拦截让 `limit_reopen` 到不了 `publishable`,
+但注册表文件是可以被外部直接写的, 一条被手改成 `publishable` 的炸板定义在状态机
+之外是合法的。炸板/回封漏进来会被读成"信号有效", 而它本质上只是一个"刚刚发生过
+的事实"。多一行的成本换这一道, 值。
+
+第 1 条为什么不报 400: 「这个 tab 现在没有这类数据」和「你传错了参数」对使用者
+来说结果一样是空, 没必要让他看到一个红色错误框。
+
+### 空态文案
+
+**「暂无已校准的买卖信号」**（`EMPTY_HITS_MESSAGE`, 逐字写死）。
+
+不许改成「今天没信号」。后者在读者眼里等价于「系统在跑、只是今天没有」, 而真实
+情况往往是「评估器还没锁定阈值, 一条都还没产出」。把后者说成前者, 就是在暗示系统
+比实际更就绪。
+
+前端不自己拼空态文案, 直接渲染响应里的 `empty_message` —— 两处各写一份迟早分叉。
+
+### N4 · 过期判定
+
+规则: `asof` 日期（上海）< 今日（上海）→ 过期。
+
+- 带时区的 `asof` 先转 `Asia/Shanghai` 再取日期（UTC 16:30 是上海次日 00:00）。
+- 纯日期按该日。
+- **非法 `asof` 一律视为过期** —— fail-closed。一条连时间都读不出来的记录, 按
+  「当前」呈现就是在替它担保。
+- **不做**精细交易日历（跳周末/节假日找"最近交易日"）: 那需要一份准确的节假日表,
+  是另一拍的事。所以节后第一天, 节前最后一个交易日的命中会显示为过期 —— 已知且
+  可接受的保守偏差。
+
+UI 上过期条目不隐藏、不禁用, 只打「数据过期」标。藏起来等于假装它没发生过。
+
+### N3 · 范围闸: 自选 ∪ 持仓（只作用于基本面）
+
+- 自选: `app.services.watchlist.list_symbols()`
+- 持仓: `paper.overview()` 的 holdings
+- **基本面命中**过闸, **事件命中不过闸**（两者都仍须过 publishable 闸）
+
+为什么分开: 基本面命中是日频全市场量级, 不过滤会堆上千条无关的票; 事件命中一天
+几条到几十条, 过滤反而会让用户看不到别处的异动。
+
+**范围闸不是权限**: 过了 publishable 的命中, 事件类一律可见。这是一条产品口径,
+不是安全边界, 所以它放在可见性闸**之后**。
+
+两者都读不出来时返回空集 —— 保守方向: 让人以为"没有信号", 而不是"看到了一堆
+不该看的"。
+
+### SSE: 只补两个字段
+
+`build_sse_alert` 的 `keep` 元组**加入** `family`、`event_class`。
+
+共用载荷 `build_push_payload` 里早就有这两个字段, 是 SSE 这一层把它们过滤掉了,
+于是所有订阅者拿到的推送都缺分类, 只能靠 `display_name` 猜这是事件类还是基本面类。
+
+这是**呈现修复**, 不是新推送路径: 门控（三 env）、触发时机、载荷其余内容一律未动。
+定义状态推送**仍然没有 `symbol`** —— 给它补 symbol 等于让订阅端以为"有票命中了"。
+
+### P-fund-scope: 基本面日表的呈现规则
+
+| 规则 | 实现 |
+|---|---|
+| 形态 | 收盘日表 + 显式 `asof`, 不是盘中逐条 toast 流 |
+| toast | **不弹** AlertToast（`BuySellHitsList` 里没有 toast 调用） |
+| 范围 | 自选 ∪ 持仓（N3） |
+| 过期 | 带「数据过期」标（N4） |
+| 存储 | **不写** `alerts.jsonl`; 读路径走命中 store/API, 不劫持 BSS `try_push` |
+
+### 本拍明确不做
+
+- `VOLUME_BREAKOUT_TRIGGERING_ENABLED` 翻 `True`; 真触发; 影子调度; 新 crontab
+- 评估器 / 日管道写 live 命中（命中层本拍**只读**）
+- 命中钉钉推送（P-ding-later, 另口令）
+- P-calib（阈值锁定 + 回测）
+- 三 env（`BUY_SELL_SIGNALS_PERSIST` / `PUSH` / `DINGTALK`）字面量与语义
+- 全 A 范围（N3 另口令）; 精细交易日历（N4 另口令）
+- `composite` 展示入口
+
+### 本节验收
+
+- [x] 命中 schema 必填齐全; 禁价格/数量字段（参数化逐词测）; `direction_label` 封闭集
+- [x] `hits.json` 只读; 缺文件 → 空态; 测例可注入; 单条脏数据只跳过自己
+- [x] `GET /api/buy-sell-signals/hits` 服务端闸; 不返回定义状态事件
+- [x] 夹具: publishable 可见; candidate / observe / limit_reopen 不可见
+- [x] `limit_reopen` 即使定义被手改成 publishable 仍不可见（双保险真的独立）
+- [x] 空态文案逐字「暂无已校准的买卖信号」, 且不含「今天没信号」这类变体
+- [x] `build_sse_alert` keep 含 `family` / `event_class`, 且既有 13 个字段一个不丢
+- [x] 定义状态推送仍无 `symbol`
+- [x] N4 三条: 昨日 → stale; 今日 → 非 stale; 非法 → stale
+- [x] 基本面不弹 toast; 不写 `alerts.jsonl`; 范围闸只作用于基本面
+- [x] 命中新文件不 import `app.t_rounds`; 三 env 字面量未变; TRIGGERING 仍 `False`
+- [x] 默认不部署; 合入另等盘后口令
+
+*仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。*
