@@ -137,3 +137,34 @@ services:
     entrypoint: ["python", "/opt/tsp/dsa_bootstrap.py"]
     command: ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     restart: unless-stopped
+
+  # 可选。Kronos 推理 sidecar —— 默认 `docker compose up` **不**拉起。
+  # 在 .env 设 KRONOS_ENABLED=1 + KRONOS_BASE_URL=http://kronos:8200 后执行:
+  #   docker compose --profile kronos up --build
+  #
+  # 只做推理与产出，不托管面板、不接买卖信号。侧车镜像自带 torch，主 app 镜像
+  # 依旧零 torch（见 docs/kronos-integration.md）。权重不进镜像、不进 git：
+  # 用 KRONOS_WEIGHTS_DIR 挂宿主机目录，路径只读挂进去。
+  kronos:
+    profiles: ["kronos"]
+    build:
+      context: ./docker/kronos
+      dockerfile: Dockerfile
+    user: "1000:1000"
+    container_name: TickFlow_Stock_Panel_Kronos
+    ports:
+      - "${KRONOS_HOST:-127.0.0.1}:${KRONOS_PORT:-8200}:8200"
+    environment:
+      - HOME=/home/kronos
+      - PYTHONDONTWRITEBYTECODE=1
+      - KRONOS_WEIGHTS_DIR=/opt/kronos/weights
+    volumes:
+      # 只读挂权重目录。未准备权重时容器仍能起来，/health 会如实报缺权重。
+      - ${KRONOS_WEIGHTS_DIR:-./data/kronos_weights}:/opt/kronos/weights:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
