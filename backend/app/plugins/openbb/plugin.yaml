@@ -1,0 +1,10 @@
+name: openbb
+display_name: "OpenBB 研究源"
+runtime: none
+entry: app.plugins.openbb.provider:OpenBBProvider
+check: app.plugins.openbb.provider:availability
+datasets: [hk_daily, us_daily, macro]
+research_only: true
+description: "独立 OpenBB V5 sidecar 的港股、美股日K与 FRED 宏观只读研究候选；非 A 股主行情。"
+install_hint: "配置 OPENBB_BASE_URL 并显式启动 compose profile openbb"
+homepage: "https://github.com/openbq-org/OpenBB"

@@ -33,6 +33,7 @@ import {
   type CapabilityMatrix,
   type CapabilityRoute,
   type DataSourceItem,
+  type OpenBBStatus,
   type PluginDataSourceItem,
   type Preferences,
   type ProviderField,
@@ -251,6 +252,46 @@ function CapabilityCard({ cap, pendingKey, onSelect }: {
   )
 }
 
+function OpenBBResearchStatus() {
+  const query = useQuery<OpenBBStatus>({ queryKey: ['openbb-status'], queryFn: api.openbbStatus })
+  const data = query.data
+  const allowlist = data ? Object.entries(data.allowlist) : []
+  return (
+    <section className={`rounded-card border bg-surface p-5 ${data?.reachable ? 'border-border' : 'border-border/60 opacity-75'}`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <Database className="h-4 w-4 text-secondary shrink-0" />
+          <h2 className="text-sm font-medium text-foreground">OpenBB 研究源</h2>
+          <span className="text-[10px] text-muted">展示/研究只读 · 非 A 股主行情</span>
+        </div>
+        <button onClick={() => query.refetch()} className="text-muted hover:text-foreground" title="重新探测">
+          <RefreshCw className={`h-3.5 w-3.5 ${query.isFetching ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+      <div className="mt-3 flex items-center gap-2 text-xs">
+        <span className={`h-2 w-2 rounded-full ${data?.reachable ? 'bg-bear' : 'bg-muted/40'}`} />
+        <span className={data?.reachable ? 'text-foreground' : 'text-muted'}>
+          {query.isLoading ? '探测中' : data?.reachable ? '已连接' : data?.enabled ? '不可达' : '未配置'}
+        </span>
+        {data && <span className="font-mono text-[10px] text-muted">Platform {data.pin} · {data.license}</span>}
+      </div>
+      <div className="mt-2 text-[11px] text-muted break-all" title={data?.detail || (query.error as Error)?.message}>
+        {data?.detail || (query.isError ? (query.error as Error).message : '仅 reachable 表示连接成功')}
+      </div>
+      {allowlist.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {allowlist.map(([dataset, symbols]) => (
+            <span key={dataset} className="rounded bg-elevated/60 px-2 py-1 font-mono text-[10px] text-muted">
+              {dataset}: {symbols.join(' / ')}
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="mt-3 text-[10px] text-muted/70">仅供研究，不构成投资建议；执行须人工确认。</p>
+    </section>
+  )
+}
+
 /** 能力路由区 (页面主视图): 每个能力一张卡, 点候选标签即刻切换 (乐观更新) */
 function CapabilityRoutingSection() {
   const qc = useQueryClient()
@@ -317,7 +358,7 @@ function CapabilityRoutingSection() {
     onSettled: invalidateRouting,
   })
 
-  const list = matrix.data?.capabilities ?? []
+  const list = (matrix.data?.capabilities ?? []).filter(c => !c.research_only)
   const anyCustom = list.some(c => c.current !== c.default)
 
   return (
@@ -593,9 +634,12 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
   const errors = sources.data?.errors ?? []
   const activeName = prefs.data?.daily_data_provider || 'tickflow'
 
-  const pluginItems: DataSourceItem[] = pluginList.map(p => ({
-    name: p.name, display_name: p.display_name, datasets: p.datasets,
-  }))
+  const pluginItems: DataSourceItem[] = pluginList
+    // OpenBB 只有独立研究端点；不进入通用「套用」卡，避免重置 A 股路由。
+    .filter(p => p.name !== 'openbb')
+    .map(p => ({
+      name: p.name, display_name: p.display_name, datasets: p.datasets,
+    }))
   const allItems = [
     ...builtin,
     ...pluginItems,
@@ -622,7 +666,7 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
   const servingSetOf = (name: string) => new Set(servingDatasets(name))
 
-  const matrixCaps = matrix.data?.capabilities ?? []
+  const matrixCaps = (matrix.data?.capabilities ?? []).filter(c => !c.research_only)
 
   // 数据源集合/插件可用性/档位变化都会改变能力候选集 → 统一连带失效
   const invalidateSources = () => {
@@ -716,6 +760,7 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     <div className="space-y-5 max-w-5xl">
       {/* ===== 上区: 能力路由 (能力为主视图, 点标签切换提供方) ===== */}
       <CapabilityRoutingSection />
+      <OpenBBResearchStatus />
 
       {/* ===== 下区: 数据源 (源为主视图, 配置/接入) ===== */}
       <AnchorWrap highlight={highlight} anchor="data-sources">
@@ -1100,7 +1145,7 @@ function PluginDetail({ plugin, isActive, matrixCaps, servingSet }: {
 /** TickFlow 详情: 介绍 + 能力档位表 + Key/可用功能左右两栏。
  *  检测档位集群 (档位徽章 + ? 说明 + 重新检测 + 可用功能悬停) 挂在 API Key 标题行右侧。 */
 function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: CapabilityMatrix }) {
-  const caps = matrix?.capabilities ?? []
+  const caps = (matrix?.capabilities ?? []).filter(c => !c.research_only)
   const tier = matrix?.tickflow_tier
   const { data: tfCaps } = useCapabilities()
   const capEntries = tfCaps ? Object.entries(tfCaps.capabilities) : []

@@ -581,6 +581,11 @@ def _register_one_plugin(manifest: dict) -> None:
     }
     if not available:
         return  # 依赖没装: 不注册, 但状态已记录供 UI 显示
+    # 独立研究源只参与 capability candidates/pending，不进入通用路由注册表。
+    # 因此即使健康，也不能被写成 A 股 daily/financial 等偏好或进入主同步协议。
+    if manifest.get("research_only"):
+        logger.info("内置插件 %s 仅注册研究能力 (runtime=%s)", name, runtime)
+        return
     # 可用 → 动态加载 provider 类并实例化
     try:
         provider_cls = _load_entry(manifest["entry"])

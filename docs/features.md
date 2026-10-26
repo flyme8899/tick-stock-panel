@@ -176,7 +176,7 @@ ST 用的是证券**当前名称**,历史某段是否为 ST 有前视。新股�
 
 ### 数据源插件化
 
-内置 [TickFlow](https://tickflow.org) 官方 SDK(日 K / 分钟 K / 指数 / 财务 / 实时行情),同时支持接入第三方数据源:YAML 声明自有 HTTP 接口,或开发插件源(参考实现 stock-sdk,Docker 镜像已内置)。多个数据集(日K / 除权因子 / 实时行情 / 分钟K / 五档盘口 / 财务,注册表持续扩展)按源声明自由组合,在「设置 → 数据源」切换。
+内置 [TickFlow](https://tickflow.org) 官方 SDK(日 K / 分钟 K / 指数 / 财务 / 实时行情),同时支持接入第三方数据源:YAML 声明自有 HTTP 接口,或开发插件源(参考实现 stock-sdk,Docker 镜像已内置)。多个数据集(日K / 除权因子 / 实时行情 / 分钟K / 五档盘口 / 财务,注册表持续扩展)按源声明自由组合,在「设置 → 数据源」切换。OpenBB 另以独立 sidecar 提供 `research_only`（`candidate/pending`）港股、美股与 FRED 诊断数据，仅用于独立 API 和设置页诊断，不进入 A 股 `daily` / `financial` 路由、回测、enrichment 或因子落盘，生产默认不拉起；详见 [openbb-integration.md](./openbb-integration.md)（仅供研究，不构成投资建议；执行须人工确认。）
 
 详见 [custom-data-source.md](./custom-data-source.md) 与 [plugin-development.md](./plugin-development.md)。
 

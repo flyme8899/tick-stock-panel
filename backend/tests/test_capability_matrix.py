@@ -41,30 +41,30 @@ def test_registry_covers_all_routing_fields():
     assert len(set(routable)) == len(routable)
     assert {c["id"] for c in CAPABILITY_REGISTRY} == {
         "realtime", "daily", "minute", "full_minute", "depth5", "adj_factor", "financial",
+        "hk_daily", "us_daily", "macro",
     }
     full_minute = next(c for c in CAPABILITY_REGISTRY if c["id"] == "full_minute")
     assert full_minute["field"] == "full_minute_data_provider"
     assert full_minute["tf_tier"] == "expert"
     for cap in CAPABILITY_REGISTRY:
-        assert cap["default"] == "tickflow"
+        assert cap["default"] == ("none" if cap.get("research_only") else "tickflow")
         assert cap["tf_tier"] in ("none", "starter", "pro", "expert")
         assert "follow" not in cap
 
 
 def test_matrix_without_third_party_sources(monkeypatch):
-    """无插件无自定义源: 每个能力只剩 TickFlow 候选, 默认路由全部生效。"""
+    """无第三方源: A 股能力走 TickFlow；研究能力保持无路由、不可用。"""
     _fake_sources(monkeypatch, [])
     matrix = build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert")
     assert matrix["tickflow_tier"] == "expert"
-    assert len(matrix["capabilities"]) == 7
+    assert len(matrix["capabilities"]) == 10
     for cap in matrix["capabilities"]:
         names = [c["name"] for c in cap["candidates"]]
-        assert names == ["tickflow"]
-        assert cap["candidates"][0]["kind"] == "builtin"
-        assert cap["tf_available"] is True
-        assert cap["usable"] is True
+        assert names == ([] if cap["research_only"] else ["tickflow"])
+        assert cap["tf_available"] is (not cap["research_only"])
+        assert cap["usable"] is (not cap["research_only"])
         assert cap["pending"] == []
-        assert cap["current"] == cap["effective"] == "tickflow"
+        assert cap["current"] == cap["effective"] == ("none" if cap["research_only"] else "tickflow")
 
 
 def test_candidates_only_available_unready_goes_pending(monkeypatch):
@@ -96,7 +96,7 @@ def test_tickflow_candidates_filtered_by_tier(monkeypatch):
     caps = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="free"))
     assert caps["daily"]["tf_available"] is True
     assert [c["name"] for c in caps["daily"]["candidates"]] == ["tickflow"]
-    for cap_id in ("realtime", "minute", "depth5", "adj_factor", "financial"):
+    for cap_id in ("realtime", "minute", "depth5", "adj_factor", "financial", "hk_daily", "us_daily", "macro"):
         assert caps[cap_id]["tf_available"] is False
         assert [c["name"] for c in caps[cap_id]["candidates"]] == []
     # starter 解锁实时与除权, 分钟/五档/财务仍锁

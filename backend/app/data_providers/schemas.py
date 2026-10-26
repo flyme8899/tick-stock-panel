@@ -6,6 +6,8 @@ DAILY_COLUMNS = [
     "volume", "amount", "pre_close", "change_pct",
 ]
 
+MACRO_COLUMNS = ["date", "series_id", "value", "provider", "source"]
+
 ADJ_FACTOR_COLUMNS = ["symbol", "asset_type", "source", "trade_date", "ex_factor"]
 
 INSTRUMENT_COLUMNS = [

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tsp-openbb-yahoo"
+version = "0.1.0"
+description = "TSP minimal read-only OpenBB V5 Yahoo historical provider"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+dependencies = ["openbb-core[pandas]>=2.0,<3", "yfinance==1.7.0"]
+
+[project.entry-points."openbb_provider_extension"]
+tsp_yahoo = "tsp_yahoo:provider"
+
+[project.entry-points."openbb_core_extension"]
+tsp_yahoo = "tsp_yahoo.router:router"
