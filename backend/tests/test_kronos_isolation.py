@@ -94,16 +94,41 @@ def test_kronos_import_does_not_pull_torch() -> None:
     assert result.returncode == 0, result.stderr
 
 
+# 只扫「会被 git 带走」的路径。虚拟环境 / 构建产物 / node_modules 不属于仓库内容，
+# 其中的 `.pth` 是 editable install 的路径文件，不是权重。
+_SKIP_PARTS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "site-packages",
+        "__pycache__",
+        "data",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
+
+
 def test_no_weight_files_in_repo() -> None:
-    """权重不入仓：仓库里不能有 .pt / .pth / .safetensors / .ckpt。"""
+    """权重不入仓：仓库里不能有 .pt / .pth / .safetensors / .ckpt / .bin。"""
     heavy = [
         p.relative_to(_ROOT)
         for pattern in ("*.pt", "*.pth", "*.safetensors", "*.ckpt", "*.bin")
         for p in _ROOT.rglob(pattern)
-        if "node_modules" not in p.parts and ".git" not in p.parts
+        if not _SKIP_PARTS.intersection(p.parts)
     ]
 
     assert heavy == [], f"仓库里有权重文件：{heavy}"
+
+
+def test_gitignore_covers_weights_and_gate_record() -> None:
+    """上面那条扫描跳过 .venv 等目录，所以必须另证「真的进不了库」。"""
+    text = (_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "data/kronos_weights/" in text
+    assert "data/kronos/gate.json" in text
 
 
 # ── G-T9 compose profile ──────────────────────────────
