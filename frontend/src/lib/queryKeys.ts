@@ -135,6 +135,8 @@ export const QK = {
   paperCompare:         ['paper', 'compare'] as const,
   paperAutoRules:       (acc: string) => ['paper', 'auto-rules', acc] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
+  /** 买卖信号命中(只读, 与 alerts 分开 —— 定义状态事件不是命中) */
+  buySellHits:          (family?: string) => ['buy-sell-hits', family ?? ''] as const,
 
   // AI 大盘复盘
   reviewReports:        ['review-reports'] as const,

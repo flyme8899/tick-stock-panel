@@ -19,6 +19,7 @@ from app.api import (
     analysis,
     auction_scan,
     backtest,
+    buy_sell_signals_hits,
     chip,
     data,
     ext_data,
@@ -261,6 +262,24 @@ async def _application_lifespan(app: FastAPI):
             )
     except Exception as e:  # noqa: BLE001
         logger.warning("buy_sell_signals 注册表初始化失败 (不影响启动): %s", e)
+
+    # 买卖信号命中层 (批次 20261026gbsshits): **只读**店, 挂进 app.state 供命中 API 用。
+    #
+    # 这里只建一个读取器, 不做任何评估、不做影子调度、不扫表、不写文件 —— 命中层的
+    # 写入属于另一拍(评估器 + P-calib)。文件不存在是合法状态: 命中数 0, 监控走空态。
+    # 与上面的 PERSIST env **无关**: 那个管定义注册表落不落盘, 命中看不看得见只取决于
+    # hits.json 在不在。
+    try:
+        from app.buy_sell_signals.hits_store import build_hit_store
+
+        app.state.buy_sell_signal_hit_store = build_hit_store(store.data_dir)
+        if app.state.buy_sell_signal_hit_store.exists():
+            logger.info(
+                "buy_sell_signals 命中层只读店: %s",
+                app.state.buy_sell_signal_hit_store.path,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("buy_sell_signals 命中层读取器初始化失败 (不影响启动): %s", e)
 
     # 买卖信号推送出口 (批次 20261025gpush / gding): 只在 BUY_SELL_SIGNALS_PUSH 开时挂 helper。
     # 通道 = SSE(QuoteService.push_alerts) + 站内(alert_store); 外部钉钉另受
@@ -786,6 +805,7 @@ app.include_router(overview.router)
 app.include_router(paper.router)
 app.include_router(picker.router)
 app.include_router(abnormal.router)
+app.include_router(buy_sell_signals_hits.router)
 app.include_router(auction_scan.router)
 app.include_router(regime.router)
 app.include_router(analysis.router)

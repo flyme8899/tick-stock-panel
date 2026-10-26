@@ -248,6 +248,41 @@ INDUSTRY_STANDARD_SW_L1: Final = "sw_l1"
 INDUSTRY_STANDARD_THS_CURRENT: Final = "ths_current"
 """同花顺当前态。**不被本包接受**, 仅用于在错误信息里指名道姓地说清拒绝的是什么。"""
 
+# ---------------------------------------------------------------- 命中层(批次 20261026gbsshits)
+
+HITS_FILENAME: Final = "hits.json"
+"""命中层只读店的文件名(写死)。
+
+与 `REGISTRY_FILENAME` 同目录(`<data_dir>/buy_sell_signals/`), 但**是两份文件**:
+注册表存的是「信号定义」, 这份存的是「某只票在某天命中过某条定义」。合成一份会让
+「定义改版」和「历史命中」互相覆盖, 而历史命中是不能被改写的。
+
+**只读**: 生产/启动路径只读, 本拍没有任何代码路径往这里写 live 命中。缺文件 = 0 条命中,
+UI 走空态, 这是合法且诚实的生产状态。
+"""
+
+HITS_SCHEMA_VERSION: Final = "1"
+"""`hits.json` 的文件级格式版本(字符串, 理由同 `REGISTRY_SCHEMA_VERSION`)。"""
+
+EMPTY_HITS_MESSAGE: Final = "暂无已校准的买卖信号"
+"""监控中心买卖信号 tab 的空态文案(**逐字写死**)。
+
+不许改成「今天没信号」这类句子: 那句话在读者眼里等价于「系统在跑、只是今天没有」,
+而真实情况往往是「评估器还没锁定阈值, 一条都还没产出」。两者对使用者的含义完全不同,
+把后者说成前者就是在暗示系统比实际更就绪。详见 `models.SignalHit` 的 docstring。
+"""
+
+DIRECTION_LABELS: Final = frozenset({"research_buy", "research_sell", "research_watch"})
+"""`direction_label` 的**封闭**取值集。
+
+刻意不叫 `direction`、不叫 `side`、不用 `buy` / `sell`: 这三个词在本仓别处指的是
+可执行动作。命中层的标签只是「这条记录在研究中偏向哪一边」, 不是下单方向, 也不含
+任何数量。名字里带 `research_` 前缀, 是为了让任何一次代码搜索都搜不到裸的 `"buy"`。
+"""
+
+HIT_SOURCE_MODES: Final = frozenset({"fixture", "shadow", "live"})
+"""命中来源模式。本拍只产出 `fixture`(测例); `live` 是**保留值**, 没有写它的代码路径。"""
+
 # ---------------------------------------------------------------- 合规
 
 DISCLAIMER_KEY: Final = "research_only_v1"
@@ -259,8 +294,13 @@ __all__ = [
     "BONFERRONI_M",
     "BONFERRONI_SCHEME_ID",
     "DINGTALK_ENV_NAME",
+    "DIRECTION_LABELS",
     "DISCLAIMER_KEY",
+    "EMPTY_HITS_MESSAGE",
     "EVENT_CLASSES",
+    "HITS_FILENAME",
+    "HITS_SCHEMA_VERSION",
+    "HIT_SOURCE_MODES",
     "INDUSTRY_STANDARD_SW_L1",
     "INDUSTRY_STANDARD_THS_CURRENT",
     "MONITOR_EVENT_TYPE",

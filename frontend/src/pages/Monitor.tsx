@@ -7,12 +7,12 @@ import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { ErrorState } from '@/components/ErrorState'
 import { Skeleton } from '@/components/data/Skeleton'
-import { api, type MonitorRule, type AlertEvent, type MonitorCondition, type MonitorExtFieldItem } from '@/lib/api'
+import { api, type MonitorRule, type AlertEvent, type BuySellHit, type MonitorCondition, type MonitorExtFieldItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtPrice, fmtPct, priceColorClass } from '@/lib/format'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { cn } from '@/lib/cn'
-import { abnormalWindowLabel, monitorBadgeText, monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
+import { abnormalWindowLabel, hitDirectionLabel, hitFamilyLabel, monitorBadgeText, monitorDisplayText, monitorTagLabel } from '@/lib/monitorLabels'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS, strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -27,7 +27,14 @@ import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 const TYPE_LABEL: Record<string, string> = {
   signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控', sector: '板块监控',
   abnormal: '异动监控', volume_delta: '轮询放量', date: '日期提醒',
+  // 命中层。**不用 `signal` 这个键** —— 那个已经被内置信号监控占用了, 复用会让
+  // 两套完全不同的东西在同一个 tab 里混排。
+  buy_sell: '买卖信号',
 }
+
+/** 命中列表的 family chip。只有这两类对外, `composite` 不渲染入口。 */
+const BUY_SELL_FAMILIES = ['minute_event', 'daily_fundamental'] as const
+type BuySellFamily = (typeof BUY_SELL_FAMILIES)[number]
 
 /** 严重级别 → 左侧色条 + 图标 */
 const SEVERITY_CONFIG: Record<string, { bar: string; icon: any; iconCls: string }> = {
@@ -44,6 +51,7 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
   abnormal: 'bg-orange-500/10 text-orange-500 border-orange-500/20 dark:text-orange-400',
   volume_delta: 'bg-rose-500/10 text-rose-400 border-rose-500/20 dark:text-rose-300',
   date:     'bg-violet-500/10 text-violet-500 border-violet-500/20 dark:text-violet-300',
+  buy_sell: 'bg-sky-500/10 text-sky-600 border-sky-500/20 dark:text-sky-300',
 }
 
 /**
@@ -138,7 +146,9 @@ export function Monitor() {
   }, [searchParams, setSearchParams])
 
   // 触发记录: 过滤 + 统计 (提升到主组件, 供 header 行使用)
-  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal' | 'volume_delta' | 'date'>('all')
+  const [filter, setFilter] = useState<'all' | 'strategy' | 'signal' | 'price' | 'market' | 'sector' | 'abnormal' | 'volume_delta' | 'date' | 'buy_sell'>('all')
+  // family chip 只在 buy_sell tab 内生效; 切走时保留选择但不影响其它 tab。
+  const [hitFamily, setHitFamily] = useState<BuySellFamily | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearRules, setConfirmClearRules] = useState(false)
 
@@ -171,6 +181,17 @@ export function Monitor() {
     },
   })
   const total = alertsQuery.data?.total ?? 0
+
+  // 买卖信号命中(只读)。**只在 buy_sell tab 拉**, 不跟 alerts 抢同一条查询。
+  // 数据源是 /api/buy-sell-signals/hits, 不是 /api/alerts —— 后者里那条
+  // buy_sell_signal_status_changed 是"定义状态变更", 不是个股命中。
+  const hitsQuery = useQuery({
+    queryKey: QK.buySellHits(hitFamily ?? undefined),
+    queryFn: () => api.buySellHits({ family: hitFamily ?? undefined }),
+    enabled: filter === 'buy_sell',
+    // 命中是低频数据(评估器还没开), 30s 足够; 不必跟告警一样 10s 轮询。
+    refetchInterval: 30_000,
+  })
 
   // 规则个数
   const rulesQuery = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList })
@@ -225,7 +246,7 @@ export function Monitor() {
               <SectionHeader icon={BellRing} title="触发记录" />
               {/* 过滤标签 — 单行横向滚动, 不折行 (缩放/窄窗口下保持一行) */}
               <div className="flex min-w-0 flex-nowrap items-center gap-0.5 overflow-x-auto [&>button]:shrink-0">
-                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal', 'volume_delta', 'date'] as const).map(f => (
+                {(['all', 'strategy', 'signal', 'price', 'market', 'sector', 'abnormal', 'volume_delta', 'date', 'buy_sell'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => setFilter(f)}
@@ -238,6 +259,25 @@ export function Monitor() {
                   </button>
                 ))}
               </div>
+              {/* family chip: 只在买卖信号 tab 内出现; composite 没有入口 */}
+              {filter === 'buy_sell' && (
+                <div className="flex shrink-0 items-center gap-0.5">
+                  {([null, ...BUY_SELL_FAMILIES] as const).map(fam => (
+                    <button
+                      key={fam ?? 'all'}
+                      onClick={() => setHitFamily(fam)}
+                      className={cn(
+                        'rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-all cursor-pointer',
+                        hitFamily === fam
+                          ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
+                          : 'text-muted hover:bg-elevated/60 hover:text-secondary',
+                      )}
+                    >
+                      {fam === null ? '全部' : hitFamilyLabel(fam)}
+                    </button>
+                  ))}
+                </div>
+              )}
               {/* 数量 + 清空 + 字段配置 */}
               <div className="ml-auto flex items-center gap-2 shrink-0">
                 <button
@@ -250,8 +290,10 @@ export function Monitor() {
                 >
                   <Tags className="h-3.5 w-3.5" />
                 </button>
-                <span className="rounded-md bg-elevated/50 px-1.5 py-0.5 text-[10px] font-medium text-muted">{total}</span>
-                {total > 0 && (
+                <span className="rounded-md bg-elevated/50 px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                  {filter === 'buy_sell' ? (hitsQuery.data?.count ?? 0) : total}
+                </span>
+                {filter !== 'buy_sell' && total > 0 && (
                   <button
                     onClick={() => setConfirmClear(true)}
                     className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-danger/10 hover:text-danger cursor-pointer"
@@ -262,7 +304,11 @@ export function Monitor() {
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-3.5">
-              <AlertsList alertsQuery={alertsQuery} confirmClear={confirmClear} setConfirmClear={setConfirmClear} total={total} enterTs={enterTsRef.current} monitorExtFields={monitorExtFields} />
+              {filter === 'buy_sell' ? (
+                <BuySellHitsList query={hitsQuery} />
+              ) : (
+                <AlertsList alertsQuery={alertsQuery} confirmClear={confirmClear} setConfirmClear={setConfirmClear} total={total} enterTs={enterTsRef.current} monitorExtFields={monitorExtFields} />
+              )}
             </div>
           </section>
 
@@ -331,6 +377,122 @@ function SectionHeader({ icon: Icon, title }: { icon: any; title: string }) {
     <div className="flex items-center gap-1.5 shrink-0">
       <Icon className="h-4 w-4 text-accent" />
       <h2 className="text-sm font-semibold text-foreground whitespace-nowrap">{title}</h2>
+    </div>
+  )
+}
+
+// ── 买卖信号命中列表(只读) ──────────────────────────
+/**
+ * 只读渲染 `/api/buy-sell-signals/hits` 的返回。
+ *
+ * 三条硬规则:
+ *
+ * 1. **不弹 AlertToast**。基本面命中是日表形态(一天几百条), 弹 toast 会把真正的
+ *    告警淹掉。事件类也不弹 —— 命中是研究记录, 不是需要立刻反应的告警。
+ * 2. **空态文案来自后端** `empty_message`, 前端不自己拼。"暂无已校准的买卖信号"这
+ *    句话的含义是"评估器还没有产出可展示的结果", 不是"今天没有信号"。
+ * 3. **过期要显形**。`stale` 的条目打「数据过期」标, 不禁用、不隐藏 —— 藏起来等于
+ *    假装它没发生过。
+ *
+ * 列表里没有价格、没有数量、没有下单按钮。不是没做, 是 hits 契约里就没有这些字段。
+ */
+function BuySellHitsList({ query }: { query: ReturnType<typeof useQuery> }) {
+  const body = query.data as { hits?: BuySellHit[]; empty_message?: string; count?: number } | undefined
+  const hits = body?.hits ?? []
+  const emptyMessage = body?.empty_message ?? '暂无已校准的买卖信号'
+
+  if (query.isLoading) {
+    return (
+      <div className="space-y-2">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Skeleton key={i} h="h-14" rounded="rounded-card" />
+        ))}
+      </div>
+    )
+  }
+
+  if (query.isError) {
+    return (
+      <ErrorState
+        title="买卖信号加载失败"
+        hint="命中接口暂时不可用，请重试。"
+        retrying={query.isFetching}
+        onRetry={() => query.refetch()}
+      />
+    )
+  }
+
+  if (hits.length === 0) {
+    // 空态文案逐字来自后端, 这里不写死第二份 —— 两处各写一份迟早会分叉。
+    return <EmptyState icon={Bell} title={emptyMessage} hint="评估器校准完成后，命中记录会出现在这里。" />
+  }
+
+  return (
+    <div className="space-y-2">
+      {hits.map(hit => (
+        <BuySellHitRow key={hit.hit_id} hit={hit} />
+      ))}
+    </div>
+  )
+}
+
+/**
+ * 行标题提示: 说明 asof 的归一方式。
+ *
+ * 写在这里而不是散在 jsx 里, 是为了一眼能看出"过期判定是后端做的, 前端只负责显示"。
+ */
+const HIT_ASOF_HINT = 'asof 由后端归一为上海时区; 非法时间值后端会标 stale'
+
+function BuySellHitRow({ hit }: { hit: BuySellHit }) {
+  const famLabel = hitFamilyLabel(hit.family)
+  const dirLabel = hitDirectionLabel(hit.direction_label)
+  const isFund = hit.is_daily_fundamental
+  return (
+    <div
+      className={cn(
+        'rounded-card border border-border/60 bg-surface/60 px-3 py-2 transition-colors',
+        hit.stale && 'border-warning/30',
+      )}
+      title={HIT_ASOF_HINT}
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-sm font-medium text-foreground">{hit.symbol}</span>
+        {famLabel && (
+          <span
+            className={cn(
+              'rounded px-1 py-0.5 text-[10px] font-medium border',
+              isFund
+                ? 'bg-sky-500/10 text-sky-600 border-sky-500/20 dark:text-sky-300'
+                : 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20 dark:text-indigo-300',
+            )}
+          >
+            {famLabel}
+          </span>
+        )}
+        {dirLabel && (
+          <span className="rounded bg-elevated/60 px-1 py-0.5 text-[10px] text-secondary">{dirLabel}</span>
+        )}
+        {hit.stale && (
+          <span className="rounded bg-warning/15 px-1 py-0.5 text-[10px] font-medium text-warning">
+            数据过期
+          </span>
+        )}
+        {/* asof 对基本面是必看字段; 事件类也带, 只是不抢眼 */}
+        <span className="ml-auto text-[10px] text-muted tabular-nums">
+          {isFund ? '数据日 ' : '时点 '}
+          {hit.asof_date ?? hit.asof}
+        </span>
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted">
+        <span className="text-secondary">{hit.signal_id}</span>
+        <span className="opacity-60">·</span>
+        <span>定义版 {hit.definition_version}</span>
+        <span className="opacity-60">·</span>
+        <span>{hit.event_class}</span>
+        <span className="opacity-60">·</span>
+        <span title="来源: fixture 为测例合成, 生产不应出现">来源 {hit.source?.mode ?? '—'}</span>
+      </div>
+      <p className="mt-1 text-[10px] leading-relaxed text-muted/80">{hit.disclaimer}</p>
     </div>
   )
 }

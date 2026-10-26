@@ -1,5 +1,12 @@
 import { expect, it } from 'vitest'
-import { abnormalWindowLabel, monitorBadgeText, monitorDisplayText, monitorTagLabel } from './monitorLabels'
+import {
+  abnormalWindowLabel,
+  hitDirectionLabel,
+  hitFamilyLabel,
+  monitorBadgeText,
+  monitorDisplayText,
+  monitorTagLabel,
+} from './monitorLabels'
 
 it('maps monitor signal types to Chinese and never returns the raw key', () => {
   expect(monitorTagLabel('volume_delta')).toBe('放量')
@@ -35,4 +42,30 @@ it('rewrites interval seconds and deviation windows in alert text', () => {
   expect(abnormalWindowLabel('10D')).toBe('10日窗口')
   expect(abnormalWindowLabel('any')).toBe('全部窗口')
   expect(abnormalWindowLabel('nope')).toBe('其他窗口')
+})
+
+it('maps buy-sell hit families to chips and refuses to label composite', () => {
+  expect(hitFamilyLabel('minute_event')).toBe('事件')
+  expect(hitFamilyLabel('daily_fundamental')).toBe('基本面')
+  // composite 首批不对外: 没有入口, 也不给兜底文案
+  expect(hitFamilyLabel('composite')).toBeNull()
+  expect(hitFamilyLabel('')).toBeNull()
+  expect(hitFamilyLabel(null)).toBeNull()
+  expect(hitFamilyLabel(undefined)).toBeNull()
+})
+
+it('maps direction_label to research wording, never to trading verbs', () => {
+  expect(hitDirectionLabel('research_buy')).toBe('研究·偏多')
+  expect(hitDirectionLabel('research_sell')).toBe('研究·偏空')
+  expect(hitDirectionLabel('research_watch')).toBe('研究·观察')
+  expect(hitDirectionLabel('buy')).toBeNull()
+  expect(hitDirectionLabel('')).toBeNull()
+
+  // 「买入 / 卖出」是可执行动作, 命中层不该出现
+  for (const key of ['research_buy', 'research_sell', 'research_watch']) {
+    const label = hitDirectionLabel(key)!
+    expect(label).not.toContain('买入')
+    expect(label).not.toContain('卖出')
+    expect(label).toContain('研究')
+  }
 })

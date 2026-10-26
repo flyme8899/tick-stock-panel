@@ -264,6 +264,12 @@ def build_sse_alert(payload: dict[str, Any]) -> dict[str, Any]:
 
     SSE 订阅者的队列容量有限(见 `QuoteSubscriber`), 载荷越大越容易在拥堵时被丢最旧。
     这里保留判定与展示必需的部分, 丢掉 `spec_ref` 这类长字符串。
+
+    `family` / `event_class` 是批次 20261026gbsshits 补进来的: 共用载荷里**早就有**
+    这两个字段(见 `_build_payload`), 但 SSE 这一层把它们过滤掉了, 于是所有订阅者
+    拿到的推送都缺分类 —— 订阅端只能靠 `display_name` 猜这是事件类还是基本面类。
+    补这两个字段纯粹是修呈现, **不是**新增推送路径: 门控(三 env)、触发时机、载荷
+    其余内容一律未动。
     """
     keep = (
         "source",
@@ -279,6 +285,8 @@ def build_sse_alert(payload: dict[str, Any]) -> dict[str, Any]:
         "push_gate",
         "schema_version",
         "namespace",
+        "family",
+        "event_class",
     )
     return {key: payload[key] for key in keep if key in payload}
 
