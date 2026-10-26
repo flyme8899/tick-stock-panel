@@ -1484,3 +1484,234 @@ UI 上过期条目不隐藏、不禁用, 只打「数据过期」标。藏起来
 - [x] 默认不部署; 合入另等盘后口令
 
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。*
+
+---
+
+## P-calib：频率锁定戳 + 回测校准登记 + 可见性 AND（批次 20261026gbsscalib）
+
+### 一句话
+
+在 #228 命中层之上叠两层东西：**频率锁定戳**（这套口径按什么节拍、用什么阈值参数评估，
+钉死 `definition_version`）+ **回测校准登记**（这套口径跑出过什么、过没过门槛），
+并把监控可见性从「`publishable` 即可见」收紧成 **`publishable` ∧ `calib passed`**。
+
+### 阈值锁定 ≠ 开触发
+
+这是本节最容易被读歪的一句，写在最前面。
+
+| 有 | 不代表 |
+|---|---|
+| `FreqLockStamp` 存在、指纹稳定 | 阈值已被证据支持 |
+| `calib.json` 存在、有 `passed` 条目 | 触发闸开了 |
+| 一条命中可见 | 系统在产 live 信号 |
+
+- `VOLUME_BREAKOUT_TRIGGERING_ENABLED` 仍是 `False`，`AUCTION_ABNORMAL_TRIGGERING_ENABLED`
+  仍是 `False`，本拍**零碰**。
+- `VOLUME_BREAKOUT_EVIDENCE_PENDING` 的**四条 pending 一条没清**，
+  包括 `threshold_lock_data_pending`。"阈值被写下来了一个值"和"这个值被证据支持"
+  是两件事：前者只需要有人填一个数，后者需要一份能解释负号（`quant_evidence.yaml` 里
+  `volume_breakout` 四个口径全负）的回测表。
+- 本拍交付的是**容器**，不是结论。生产可以继续空着，这是诚实的空态。
+
+### 两层「频率」
+
+| 层 | 内容 | 落点 |
+|---|---|---|
+| ① 评估节拍 | `minute_event`（事件/时点）vs `daily_fundamental`（日频收盘, Asia/Shanghai） | `FreqLockStamp.cadence`, 封闭集 `FREQ_LOCK_CADENCES` |
+| ② 阈值参数集 | 量比 / 突破幅度 / 窗口分钟…… | `FreqLockStamp.params`, 参与内容指纹 |
+
+`composite` **不在**节拍封闭集里：它将来由若干子信号合成，节拍取决于被合成的那些，
+本拍不给它随便挑一个。
+
+### 指纹是内容算的，不是手写版本号
+
+```text
+freq_lock_fingerprint(signal_id, definition_version, cadence, params) =
+  sha256(canonical_json({signal_id, definition_version, cadence, params}))   # 全 64 位
+```
+
+两条理由：
+
+1. **手写版本号会忘。** `freq_lock_v1` 这种标签，改了阈值忘了 bump 就完全失效 ——
+   而"改了两个阈值忘了改版本"恰恰是最容易发生的事。指纹从参数值本身算出来，
+   改任何一个值必变。
+2. **标签仍然保留。** 它覆盖指纹覆盖不到的那一类：只改了代码逻辑、常量没动。
+   那时指纹一模一样，唯一能说"这是第几版口径"的就是标签。
+
+所以**标签与指纹各管一半，一起用**：三键（`signal_id` + `definition_version` +
+`freq_lock_version`）对齐，指纹再对一次。
+
+> **M6：伪称干净**：把量比阈值从 2.5 改成 1.8，版本标签仍写 `freq_lock_v1`。
+> 单看标签看不出来，但指纹变了。`FreqLockStamp.matches()` 要求三键**且**指纹都一致，
+> 于是"标签相同、指纹不同"被识别为**另一套口径**，旧登记的 `passed` 不得复用。
+
+### 校准登记：`calib.json`
+
+| 项 | 值 |
+|---|---|
+| 路径 | `<data_dir>/buy_sell_signals/calib.json` |
+| 文件级 schema | `{"schema_version":"1","namespace":"buy_sell_signals","entries":[...]}` |
+| 与 `BUY_SELL_SIGNALS_PERSIST` | **无关**。那个 env 管定义注册表落不落盘；校准看不看得见只取决于文件在不在 |
+| 缺文件 | 无登记 → **一条都不可见**（honest empty） |
+| 坏 JSON / 顶层形状不对 | 同上，退化 + warning |
+| 单条脏数据 | 只跳过那一条，其余照常 |
+
+`status` 是**封闭集** `{passed, pending, failed}`，**只有 `passed` 算已校准**。
+`pending` / `failed` / 没有登记在可见性闸上与"空集"完全等价。
+刻意不接受 `ok` / `true` / `verified` 这类近义词 —— 多一个近义词就多一个地方
+可以悄悄把 `pending` 写成"通过"。
+
+### `CalibRecord` 字段
+
+| 字段 | 约束 |
+|---|---|
+| `signal_id` / `definition_version` / `freq_lock_version` | 非空。三键，与戳、命中一致 |
+| `status` | ∈ `{passed, pending, failed}` |
+| `eval_window` | 正整数 |
+| `eval_window_unit` | 恒 `"trading_days"`（**N2：单位＝交易日**） |
+| `sample_n` | 非负整数；`passed` 时 **≥ 30**（**N2**） |
+| `cost_bp_roundtrip` | `passed` 时必须 **= 18.2**（来回，**N2**） |
+| `baseline_ref` | `passed` 时非空 |
+| `interval` | `{lo, hi}`；`passed` 时必须有 |
+| `report_id` / `source` | `passed` 时非空，指向回测产物 |
+| `passed_at` | `passed` 时必填，带时区（Asia/Shanghai） |
+
+### 门槛是硬拒，不是降级
+
+`sample_n < 30`、`cost_bp_roundtrip ≠ 18.2`、缺任何必填引用 → **抛错**，
+不静默转成 `pending`。
+
+理由：悄悄降级会让人以为"我写进去了，只是没过"，实际是**没写**。下次来查登记看到
+一条 `pending`，只会以为自己的回测没过，而不是自己的调用被拒了。口径要一致 ——
+门槛不满足就是写入失败，让他当场知道。
+
+成本为什么钉死而不是自报：成本是一个能让任何策略从负变正的参数。允许自报，第一个
+想让它过的人就会填 5bp，而 5bp 在 A 股连印花税都不够（卖出千分之 0.5，加双边佣金与
+过户费，来回 18.2bp 是仓内既有口径）。
+
+### 可见性：AND，且缺一即不可见
+
+```text
+可见 ⟺ publishable
+      ∧ ¬limit_reopen
+      ∧ family ∈ EXPOSED_FAMILIES
+      ∧ (基本面 → symbol ∈ 自选 ∪ 持仓)
+      ∧ 存在与命中三键对齐的 calib passed
+```
+
+前四条是 #228 的闸，**原样保留**；第五条是本拍叠上去的。新增拒绝原因
+`VisibilityReject.CALIB_NOT_PASSED`。
+
+为什么是 AND：前四条回答"这条命中**该不该**发出来"（定义敢不敢担保、事件类型允不允许、
+范围对不对），第五条回答"这套口径**有没有**拿得出手的成绩"。两个问题都答"是"才该显示。
+做成 OR 等于让"定义是 publishable"替"回测没过"背书 —— 而定义发布只是一次人工审批动作，
+它不产生任何关于收益/胜率的证据。
+
+**三键取命中自带的**（不是定义当前的）：
+- `definition_version` 用命中的：一条按 v1 算的命中，不该因为定义升到 v2 而自动获得
+  v2 的校准结论背书。
+- `freq_lock_version` 用命中镜像字段：缺失即不可见。连按哪套口径算的都不知道，
+  不能拿"当前戳"顶上去。
+
+### 命中无权自称已校准
+
+`SignalHit` 上**没有**、也**禁止**加 `calibrated` 布尔字段（延续 #228 纪律）。
+一个可手改的 `true`，从任何 diff 上都看不出来，但会让所有闸形同虚设。
+命中侧只有 `freq_lock_version` 这一个**标签**，而标签本身不构成担保 ——
+它只参与对齐，对不上就不可见。
+
+> **M11**：往命中 JSON 里塞 `calibrated: true`，闸不认（`from_dict` 会丢弃未知键，
+> 且 `visible_hits` 只看 `calib.json`）。
+
+### 空态文案一个字节都没动
+
+「暂无已校准的买卖信号」（`EMPTY_HITS_MESSAGE`）。
+
+这句话里的"已校准"三个字，是本拍唯一一处对用户承诺"闸在生效"的地方。改成"今天没信号"
+就等于把"还没有任何东西通过校准"说成"系统在跑、今天恰好空着"。
+
+> **M9**：把文案改成「今天没信号」→ 三条测例同时红（`constants` 逐字、API 响应、
+> 可见性矩阵）。
+
+### 校准闸在服务端，不在前端
+
+前端过滤只防手滑，防不住直接调接口 —— 绕过前端拿到的就是全部命中。
+`Monitor.tsx` 的 `buy_sell` tab 本拍**默认不改**：后端 `empty_message` 已钉，
+前端照渲染即可。若在 `Monitor.tsx` 里按 `calibrated` 过滤，看起来一模一样，
+安全性完全不同。
+
+### 正交：`regime_caliber` 零共享
+
+| | `app.services.regime_caliber` | 本节 |
+|---|---|---|
+| 描述什么 | **市场环境**（涨跌家数、宽度、状态分档）怎么算 | **某条 BSS 信号**用什么节拍/阈值评估 |
+| 落在哪 | `SignalRecord.regime_caliber_version` | `FreqLockStamp` / `calib.json` |
+| 是否代表"信号已校准" | **否** | 是（`passed`） |
+
+两者只是**都用了"内容指纹"这个技术手段**。本拍没有 import `regime_caliber` 的任何符号，
+没有读写它的 stamp 文件，也没有改 `SignalRecord.regime_caliber_version` 的含义。
+
+> **M12**：`regime_caliber_version` 有值 ≠ 命中可见。测例直接构造一条带该字段的定义，
+> 在 `CalibIndex([])` 下断言 `hits == []`。
+
+### 本拍明确不做
+
+- ~~P-calib（阈值锁定 + 回测）~~ → **本拍即 P-calib 的交付**（戳 + 登记 + 可见性 AND）
+- **N3：离线 shadow 物化 CLI —— 不做**（仍算条件可交；另口令。若后续要做，
+  必须显式一次性、无调度、无 lifespan 注册）
+- `VOLUME_BREAKOUT_TRIGGERING_ENABLED` / `AUCTION_ABNORMAL_TRIGGERING_ENABLED` 翻 `True`；
+  真触发；影子调度；新 crontab；`main` lifespan 自动扫写 hits
+- 清 `threshold_lock_data_pending`（四条 pending 一条不少）
+- 三 env（`BUY_SELL_SIGNALS_PERSIST` / `PUSH` / `DINGTALK`）字面量、真值集合、生产值
+- 命中钉钉推送（P-ding-later，另拍）
+- 生产路径自动产 `passed`（**没有任何代码路径**会自动写一条 `passed`）
+- 命中钉钉 / Opt-A / #6 / 整包 UX / DecisionWorkspace IA / 竞价·放量实现扩 / 17–19
+- 精细交易日历（N8，保持 #228 简易规则）
+
+### 生产可以继续空
+
+当前生产真值：
+
+- `hits.json` 大概率不存在 → 命中 0 条
+- `calib.json` **一定**不存在 → `passed` 0 条
+- 于是监控 tab 显示「暂无已校准的买卖信号」
+
+这是**正确且诚实**的状态，不是缺陷。没有通过校准证据的时候，系统确实什么都不能担保 ——
+把它说成"今天没信号"或"正在初始化"，才是对使用者不诚实。
+
+### 本节验收
+
+- [x] 存在 `FreqLockStamp`（`freq_lock_version` + 内容指纹 + 钉 `definition_version`）
+- [x] 同参指纹稳；改任一参与字段（`signal_id` / `definition_version` / `cadence` / `params`）指纹必变
+- [x] 指纹对键序不敏感（`sort_keys`）；对数值近邻敏感（2.5 vs 2.55 不同）
+- [x] 戳文件里的 `fingerprint` 读时重算，对不上即报错
+- [x] `calib.json` 路径与文件名钉死；与 `BUY_SELL_SIGNALS_PERSIST` **无耦合**（env 开/关都是磁盘店）
+- [x] `status` 封闭集三元；`ok`/`true`/`verified`/`PASSED`/空串全部拒绝
+- [x] `sample_n=29` 写 `passed` → 拒；`=30` → 通过
+- [x] `cost_bp_roundtrip ∈ {0,5,18.19,18.21,20,36.4}` 写 `passed` → 全拒；`=18.2` → 通过
+- [x] 缺 `baseline_ref` / `interval` / `report_id` / `source` / `passed_at` → 拒
+- [x] `eval_window_unit` 写 `calendar_days` → 拒；`eval_window ≤ 0` / 非整数 / `bool` → 拒
+- [x] `passed_at` 无时区 → 拒；序列化后带 `+08:00`
+- [x] 反序列化不是后门：手改 JSON 塞 `sample_n=3` 的 `passed` 读不进来
+- [x] 缺文件 / 坏 JSON / 顶层形状不对 → 空（= 全不可见）；单条脏数据只跳过自己
+- [x] **M1** publishable + 无登记 → 不可见；`calib=None` 等同空索引（不是"跳过闸"）
+- [x] **M1c** publishable + 无 `freq_lock_version` → 不可见
+- [x] **M2** publishable + `pending` / `failed` → 不可见
+- [x] **M3** candidate + `passed` → 不可见（reject 原因是 `not_publishable`，不是 calib）
+- [x] **M4** limit_reopen + `passed`（定义被手改 publishable）→ 不可见
+- [x] **M5** 生产盘店不 import 夹具；夹具登记带 `fixture://` 前缀
+- [x] **M6** 同标签异参数 → `matches()` False；登记版本/定义版本对不上 → 不可见
+- [x] **M7/M8** 门槛拒绝后索引为空 → 命中不可见（端到端连通）
+- [x] **M9** 空态文案逐字；改字三条测例同时红
+- [x] **M10** 两 TRIGGERING 仍 `False`；`threshold_lock_data_pending` 仍在
+- [x] **M11** `SignalHit` 无 `calibrated` 字段；注入该键也不可见
+- [x] **M12** `regime_caliber_version` 有值不构成校准；闸逻辑里不出现该符号
+- [x] 新文件不 import `app.services.regime_caliber` / `app.t_rounds*`；无 `APScheduler` / `add_job` / `crontab`
+- [x] 包内除 `calib_models` / `constants` / `calib_store` / `hits_fixtures` 外，
+      无任何文件给 `status` 赋 `"passed"`
+- [x] 响应含只读摘要 `calib_gate: "applied"` + `calib_passed_keys`（只回条数）
+- [x] `/hits/scope` 增 `calib_file` / `calib_file_exists` / `calib_passed_keys`，仍不回明细
+- [x] 既有 #228 命中测 91 条全绿（夹具补 `passed`，属契约收紧的合理连带）
+- [x] 默认不部署；合入另等盘后口令
+
+*仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*
