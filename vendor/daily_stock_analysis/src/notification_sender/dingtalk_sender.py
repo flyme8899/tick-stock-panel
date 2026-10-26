@@ -18,27 +18,48 @@ class DingtalkSender:
         self.webhook_url = config.dingtalk_webhook_url
         self.secret = config.dingtalk_secret
 
-    def send_to_dingtalk(self, content: str, title: str = "", timeout_seconds: int = 10) -> bool:
-        """发送 Markdown 消息到钉钉群 (Send DingTalk Markdown message)"""
-        if not self.webhook_url:
+    def send_to_dingtalk(
+        self,
+        content: str,
+        title: str = "",
+        timeout_seconds: int = 10,
+        *,
+        webhook_url_override: Optional[str] = None,
+        secret_override: Optional[str] = None,
+    ) -> bool:
+        """发送 Markdown 消息到钉钉群 (Send DingTalk Markdown message)
+
+        ``webhook_url_override`` / ``secret_override`` 是**调用方作用域**的临时替换，
+        只有定时复盘卡口（``market_review_push``）会传 —— 那是唯一该走
+        ``DSA_REVIEW_DINGTALK_WEBHOOK_URL`` 的路径。
+
+        默认 ``None`` 时行为与改前完全一致（读构造时绑定的 ``self.webhook_url``），
+        所以资讯 / BSS / 狙击这些共用本 notifier 的路径不受影响。
+
+        刻意**不**让 ``__init__`` 去读 ``DSA_REVIEW_*``: notifier 是单例，
+        构造期改 webhook 会把复盘键泄给所有渠道。
+        """
+        webhook_url = webhook_url_override if webhook_url_override is not None else self.webhook_url
+        secret = secret_override if secret_override is not None else self.secret
+        if not webhook_url:
             return False
         sanitized_content = strip_hidden_markdown_metadata(content).strip()
 
         # 1. 签名逻辑 (Security Signature)
-        if self.secret:
+        if secret:
             timestamp = str(round(time.time() * 1000))
-            secret_enc = self.secret.encode('utf-8')
-            string_to_sign = f'{timestamp}\n{self.secret}'
+            secret_enc = secret.encode('utf-8')
+            string_to_sign = f'{timestamp}\n{secret}'
             string_to_sign_enc = string_to_sign.encode('utf-8')
             hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
             sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-            
-            if "?" in self.webhook_url:
-                url = f"{self.webhook_url}&timestamp={timestamp}&sign={sign}"
+
+            if "?" in webhook_url:
+                url = f"{webhook_url}&timestamp={timestamp}&sign={sign}"
             else:
-                url = f"{self.webhook_url}?timestamp={timestamp}&sign={sign}"
+                url = f"{webhook_url}?timestamp={timestamp}&sign={sign}"
         else:
-            url = self.webhook_url
+            url = webhook_url
 
         # 2. 限制标题长度，防止极端长标题吃掉过多 JSON 字节预算
         safe_title = (title[:100] + "...") if title and len(title) > 100 else title

@@ -184,6 +184,60 @@ Docker 把 `analysis_bridge.py` 只读挂到 `/opt/tsp/analysis_bridge.py`。
 
 卡片本身存在 DSA 的 `analysis_history`。移出是软删除（`dismissed_at`），列表和详情不再返回，回测关联仍留在库里。同一天重复生成的大盘复盘，列表只给最新一条。`POST /api/v1/history/read` 标已读，`POST /api/v1/history/dismiss` 按主键、已读或早于 N 天移出。浏览器只打 TSP 的 `/api/dsa/upstream/...`，要有面板登录；转发层再带 DSA 会话访问上游。
 
+### 定时复盘独立钉钉机器人
+
+**独立 webhook 是定时复盘的硬门槛。** 不配就不发，也不会改发到别处。
+
+同一份复盘正文（`notify_market_review_text`）有三个入口会复用：`SCHEDULE_TIME` 的复用推送、个股+大盘的合并摘要、「立即跑一轮」。三条都只走下面这一个键。
+
+| 变量 | 必填 | 作用 |
+| --- | --- | --- |
+| `DSA_REVIEW_DINGTALK_WEBHOOK_URL` | 复盘钉钉外发时必填 | 定时复盘 / 日摘要钉钉通道的**唯一** webhook |
+| `DSA_REVIEW_DINGTALK_SECRET` | 可选 | 该机器人的加签密钥，空 = 未开启加签 |
+
+钉钉的解析现在分两条路：
+
+| 路径 | 用哪个 webhook | 门控 |
+| --- | --- | --- |
+| 资讯热点/异动 | `DINGTALK_WEBHOOK_URL` | `NEWS_PUSH_*` |
+| BSS 买卖信号 | `DINGTALK_WEBHOOK_URL` | `PUSH` ∧ `BUY_SELL_SIGNALS_DINGTALK` ∧ URL 非空 |
+| DSA 狙击价位线 | `DINGTALK_WEBHOOK_URL` | 30 分钟自冷却 + 前缀 |
+| **定时复盘 / 日摘要** | **`DSA_REVIEW_DINGTALK_WEBHOOK_URL`** | 本键存在 + 日 cap |
+| DSA 其它渠道（飞书/企微…） | 既有 DSA env | 未改 |
+
+不配 `DSA_REVIEW_DINGTALK_WEBHOOK_URL` 时，那次复盘推送返回 `status=skipped`、`reason=review_webhook_not_configured`、`attempts=0`，写进 `notification_runs`，日志里说明「已跳过外发（不会发到资讯/买卖共群）」。**旧 `DINGTALK_WEBHOOK_URL` 非空也不会顶替**——那正是这个键要分开的原因。
+
+把复盘键填成和 `DINGTALK_WEBHOOK_URL` 一样的值是可以的（同一个机器人是显式选择），但会打一条 warning：两个用途共用一个群，注意力竞争还在。
+
+**每自然日最多成功发一条**（Asia/Shanghai）。首个成功外发后，同一天再触发直接 `reason=daily_cap_reached`、`attempts=0`。发送失败和 skip 不占额度，所以偶发网络问题不会把当天额度烧掉。`SCHEDULE_TIME`、合并推送、「立即跑一轮」共用这一份额度。
+
+额度落在 DB 同目录的小 JSON：
+
+```
+Path(database_path).parent / "market_review_dingtalk_daily_cap.json"
+```
+
+默认 `database_path=./data/stock_analysis.db`，容器里就是 `/app/data/market_review_dingtalk_daily_cap.json`——和 `market_review.lock` 同一个卷，重启换容器也还在。
+
+```json
+{
+  "schema_version": "1",
+  "tz": "Asia/Shanghai",
+  "days": {
+    "2026-10-26": {
+      "success_count": 1,
+      "last_success_at": "2026-10-26T18:05:00+08:00"
+    }
+  }
+}
+```
+
+文件坏了或读不出来时按 0 处理（允许发一条）并打 warning，**不会**因此回落旧 webhook。只保留最近 14 天的键。想手动解除当日限制，删掉文件或把当天那条 `success_count` 改成 0。
+
+`NOTIFICATION_DAILY_DIGEST_ENABLED` 与本机制**无关**。那个开关在上游是 reserved，打开只会 warning、不发摘要。这边的限流由 DSA 自己管，别指望互操作。
+
+> 仅供研究，不构成投资建议；执行须人工确认。
+
 ## 使用率漏斗第1步（gdsa）
 
 > 仅供研究，不构成投资建议；执行须人工确认。

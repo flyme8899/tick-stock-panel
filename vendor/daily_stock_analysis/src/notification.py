@@ -2584,7 +2584,15 @@ class NotificationService(
         email_stock_codes: Optional[List[str]],
         email_send_to_all: bool,
         route_type: Optional[str] = None,
+        dingtalk_webhook_override: Optional[str] = None,
+        dingtalk_secret_override: Optional[str] = None,
     ) -> bool:
+        """发往单个静态渠道。
+
+        ``dingtalk_*_override`` 只由定时复盘卡口经 ``send_with_results`` 传入，
+        让那一条消息的钉钉外发用 ``DSA_REVIEW_DINGTALK_WEBHOOK_URL`` 而不是
+        构造期绑定的 ``config.dingtalk_webhook_url``。其它调用方不传，行为不变。
+        """
         use_image = self._should_use_image_for_channel(channel, image_bytes)
         sanitized_content = strip_hidden_markdown_metadata(content).strip()
         if channel == NotificationChannel.WECHAT:
@@ -2600,7 +2608,11 @@ class NotificationService(
                 return self.send_feishu_file(filepath)
             return self.send_to_feishu(sanitized_content)
         if channel == NotificationChannel.DINGTALK:
-            return self.send_to_dingtalk(sanitized_content)
+            return self.send_to_dingtalk(
+                sanitized_content,
+                webhook_url_override=dingtalk_webhook_override,
+                secret_override=dingtalk_secret_override,
+            )
         if channel == NotificationChannel.TELEGRAM:
             if use_image:
                 return self._send_telegram_photo(image_bytes)
@@ -2652,6 +2664,8 @@ class NotificationService(
         dedup_key: Optional[str] = None,
         cooldown_key: Optional[str] = None,
         structured_payload: Optional[Dict[str, Any]] = None,
+        dingtalk_webhook_override: Optional[str] = None,
+        dingtalk_secret_override: Optional[str] = None,
     ) -> NotificationDispatchResult:
         """
         Send a notification and return per-channel diagnostics.
@@ -2673,6 +2687,10 @@ class NotificationService(
             dedup_key: 可选稳定去重 key；未设置时使用内容 hash
             cooldown_key: 可选冷却 key；未设置时使用路由/级别默认 key
             structured_payload: 可选的个股或市场结构化结果，仅用于图片模板精确填充
+            dingtalk_webhook_override: 仅定时复盘卡口传入 —— 该条消息的钉钉外发
+                走复盘专用 webhook（``DSA_REVIEW_DINGTALK_WEBHOOK_URL``）。None 时
+                用构造期绑定的 ``config.dingtalk_webhook_url``，资讯/BSS/狙击不受影响。
+            dingtalk_secret_override: 复盘专用加签密钥；None 时用 ``config.dingtalk_secret``
 
         Returns:
             Structured dispatch diagnostics.
@@ -2808,6 +2826,8 @@ class NotificationService(
                     email_stock_codes=email_stock_codes,
                     email_send_to_all=email_send_to_all,
                     route_type=route_type,
+                    dingtalk_webhook_override=dingtalk_webhook_override,
+                    dingtalk_secret_override=dingtalk_secret_override,
                 )
                 latency_ms = int((time.monotonic() - started_at) * 1000)
 

@@ -1,4 +1,10 @@
-"""SCHEDULE_TIME 复盘：上下文生成不发通知，复用路径必须推钉钉并记下原因。"""
+"""SCHEDULE_TIME 复盘：上下文生成不发通知，复用路径必须推钉钉并记下原因。
+
+批次 20261026gdsading 起：复用路径的钉钉外发**只**走复盘专用 webhook
+（``DSA_REVIEW_DINGTALK_WEBHOOK_URL``），缺则拒发 ``review_webhook_not_configured``；
+每自然日成功外发 ≤1。所以下面的用例都显式给 ``_review_config(...)``，
+不再依赖"notifier 可用就发"。
+"""
 from __future__ import annotations
 
 import sys
@@ -19,6 +25,21 @@ from src.services.daily_market_context import (  # noqa: E402
 )
 from src.services.market_review_push import notify_market_review_text  # noqa: E402
 
+_REVIEW_URL = "https://example.invalid/review"
+_OLD_URL = "https://example.invalid/old"
+
+
+def _review_config(tmp_path, *, review_url=_REVIEW_URL, old_url=_OLD_URL, secret=None, **extra):
+    """最小 config 替身：复盘键 + 旧键 + cap 落点（DB 同目录）。"""
+    return SimpleNamespace(
+        dsa_review_dingtalk_webhook_url=review_url,
+        dsa_review_dingtalk_secret=secret,
+        dingtalk_webhook_url=old_url,
+        dingtalk_secret="old-secret",
+        database_path=str(tmp_path / "data" / "stock_analysis.db"),
+        **extra,
+    )
+
 
 class _HistoryDB:
     def __init__(self) -> None:
@@ -38,6 +59,8 @@ class _DingTalkNotifier:
         self.status = status
         self.dingtalk_payloads: list[str] = []
         self.kwargs: list[dict] = []
+        # 复盘卡口通过 override 注入 webhook；这里记下来，断言"用的是哪一条 URL"。
+        self.dingtalk_webhook_overrides: list[str | None] = []
 
     def is_available(self) -> bool:
         return self.available
@@ -48,6 +71,7 @@ class _DingTalkNotifier:
 
     def send_with_results(self, content: str, **kwargs):
         self.kwargs.append(kwargs)
+        self.dingtalk_webhook_overrides.append(kwargs.get("dingtalk_webhook_override"))
         ok = self.send_to_dingtalk(content) if self.available else False
         return SimpleNamespace(
             dispatched=self.available,
@@ -98,7 +122,7 @@ def test_context_generation_defers_push_with_explicit_reason(monkeypatch: pytest
     assert "今日 A 股复盘正文" in (context.full_report or "")
 
 
-def test_reuse_path_sends_dingtalk_and_records_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reuse_path_sends_dingtalk_and_records_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     context, captured = _generate_context(monkeypatch)
     notifier = _DingTalkNotifier()
     db = _HistoryDB()
@@ -110,11 +134,14 @@ def test_reuse_path_sends_dingtalk_and_records_success(monkeypatch: pytest.Monke
         history_query_id=history_query_id,
         notify=True,
         db=db,
+        config=_review_config(tmp_path),
     )
 
     assert notifier.dingtalk_payloads
     assert "今日 A 股复盘正文" in notifier.dingtalk_payloads[0]
     assert notifier.kwargs[0]["route_type"] == "report"
+    # 关键: 这次外发用的是复盘专用 webhook，不是旧共群
+    assert notifier.dingtalk_webhook_overrides[0] == _REVIEW_URL
     assert outcome.status == "success"
     assert outcome.reason == "sent"
     assert db.calls[0]["query_id"] == "market_context_schedule-run_cn"
@@ -146,7 +173,7 @@ def test_reuse_path_records_skip_reason_without_sending() -> None:
     assert run["error_message_sanitized"] == "no_notify"
 
 
-def test_reuse_path_records_not_configured_and_send_failure() -> None:
+def test_reuse_path_records_not_configured_and_send_failure(tmp_path) -> None:
     db = _HistoryDB()
     missing = _DingTalkNotifier(available=False, status="no_channel")
     skipped = notify_market_review_text(
@@ -155,7 +182,9 @@ def test_reuse_path_records_not_configured_and_send_failure() -> None:
         history_query_id="market_context_schedule-run_cn",
         notify=True,
         db=db,
+        config=_review_config(tmp_path),
     )
+    # notifier 自己不可用时仍是 not_configured（内部缺口），与"缺复盘 webhook"区分开
     assert missing.dingtalk_payloads == []
     assert skipped.status == "skipped"
     assert skipped.reason == "not_configured"
@@ -168,12 +197,17 @@ def test_reuse_path_records_not_configured_and_send_failure() -> None:
         history_query_id="market_context_schedule-run_cn",
         notify=True,
         db=db,
+        config=_review_config(tmp_path),
     )
     assert failed_notifier.dingtalk_payloads
     assert failed.status == "failed"
     assert failed.reason == "send_failed"
     assert db.calls[1]["notification_runs"][0]["status"] == "failed"
     assert db.calls[1]["notification_runs"][0]["reason"] == "send_failed"
+    # 失败不占当日额度
+    from src.core.market_review_daily_cap import is_review_daily_cap_reached
+
+    assert is_review_daily_cap_reached(_review_config(tmp_path).database_path) is False
 
 
 def test_schedule_reuse_branch_always_notifies_after_context_generation() -> None:

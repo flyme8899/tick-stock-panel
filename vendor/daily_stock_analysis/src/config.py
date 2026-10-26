@@ -1101,6 +1101,10 @@ class Config:
     feishu_webhook_keyword: Optional[str] = None  # 自定义机器人关键词（可选）
     dingtalk_webhook_url: Optional[str] = None
     dingtalk_secret: Optional[str] = None
+    # 定时复盘 / 日摘要专用钉钉机器人（与上面的资讯/BSS/狙击共群 webhook 分开）。
+    # 缺省不配 → 复盘钉钉拒发（review_webhook_not_configured），**不**回落上面的旧键。
+    dsa_review_dingtalk_webhook_url: Optional[str] = None
+    dsa_review_dingtalk_secret: Optional[str] = None
 
     # 飞书应用机器人（App Bot）通知
     feishu_chat_id: Optional[str] = None  # 目标群会话 chat_id（群聊模式），或用户 open_id（P2P 模式）
@@ -2109,6 +2113,8 @@ class Config:
             feishu_webhook_keyword=os.getenv('FEISHU_WEBHOOK_KEYWORD'),
             dingtalk_webhook_url=os.getenv('DINGTALK_WEBHOOK_URL'),
             dingtalk_secret=os.getenv('DINGTALK_SECRET'),
+            dsa_review_dingtalk_webhook_url=os.getenv('DSA_REVIEW_DINGTALK_WEBHOOK_URL'),
+            dsa_review_dingtalk_secret=os.getenv('DSA_REVIEW_DINGTALK_SECRET'),
             
 
             feishu_chat_id=os.getenv('FEISHU_CHAT_ID'),
