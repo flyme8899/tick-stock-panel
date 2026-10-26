@@ -1,0 +1,6 @@
+# 仅 sidecar 使用；OpenBB V5 核心与 REST 均为 Apache-2.0。
+# 不安装 openbb 元包，避免一次引入全部 provider；禁 OpenBB 4.x / AGPL openbb-yfinance。
+openbb-core[pandas]==2.0.1
+openbb-platform-api==2.0.1
+openbb-fred==2.0.0
+yfinance==1.7.0

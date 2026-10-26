@@ -2155,6 +2155,7 @@ export interface CapabilityRoute {
   default: string
   tf_tier: string                                  // TickFlow 所需最低订阅档位
   tf_available: boolean                            // 当前 TickFlow 档位是否提供该能力
+  research_only?: boolean                          // 独立研究面，不可路由到 A 股主链
   usable: boolean                                  // 生效源当前能否真正提供 (各页能力门控的统一判定)
   current: string                                  // 原始偏好值
   current_display: string
@@ -2162,6 +2163,17 @@ export interface CapabilityRoute {
   effective_display: string
   candidates: CapabilityCandidate[]                // 当前可用候选 (按当前 TickFlow 档位过滤)
   pending: CapabilityCandidate[]                   // 声明了该能力但未就绪的源 (置灰提示)
+}
+
+export interface OpenBBStatus {
+  enabled: boolean
+  base_url: string
+  reachable: boolean
+  detail: string
+  pin: string
+  license: string
+  research_only: boolean
+  allowlist: Record<string, string[]>
 }
 
 export interface CapabilityMatrix {
@@ -3002,6 +3014,7 @@ export const api = {
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
   capabilityMatrix: () => request<CapabilityMatrix>('/api/settings/capability-matrix'),
+  openbbStatus: () => request<OpenBBStatus>('/api/openbb/status'),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {

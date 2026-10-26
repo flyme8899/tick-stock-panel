@@ -86,6 +86,33 @@ CAPABILITY_REGISTRY: list[dict] = [
         # TickFlow 侧需 Expert 档; 插件/自定义源声明 full_minute 数据集即可提供
         # (插件实现 get_intraday_batch / 可选 get_intraday_latest, YAML 仅修复轮)
     },
+    {
+        "id": "hk_daily",
+        "label": "港股日K（研究）",
+        "desc": "OpenBB sidecar 只读样例；非主行情",
+        "field": None,
+        "default": "none",
+        "tf_tier": "none",
+        "research_only": True,
+    },
+    {
+        "id": "us_daily",
+        "label": "美股日K（研究）",
+        "desc": "OpenBB sidecar 只读样例；非主行情",
+        "field": None,
+        "default": "none",
+        "tf_tier": "none",
+        "research_only": True,
+    },
+    {
+        "id": "macro",
+        "label": "宏观序列（研究）",
+        "desc": "FRED 只读样例；独立宏观 schema",
+        "field": None,
+        "default": "none",
+        "tf_tier": "none",
+        "research_only": True,
+    },
 ]
 
 _TICKFLOW_CANDIDATE = {
@@ -166,7 +193,7 @@ def build_capability_matrix(current: dict[str, str], tickflow_tier: str = "none"
         tf_available = tier_rank >= _TIER_RANK[cap["tf_tier"]]
         candidates: list[dict] = []
         pending: list[dict] = []
-        if tf_available:
+        if tf_available and not cap.get("research_only"):
             candidates.append(dict(_TICKFLOW_CANDIDATE))
         for s in sources:
             if cap["id"] not in s["datasets"]:
@@ -180,7 +207,10 @@ def build_capability_matrix(current: dict[str, str], tickflow_tier: str = "none"
                 "note": None if s["available"] else (s["status"] or "不可用"),
             }
             (candidates if s["available"] else pending).append(entry)
-        usable = any(c["name"] == effective for c in candidates)
+        # 研究能力没有路由偏好：有真实可用候选即可研究，但不成为生效主源。
+        usable = bool(candidates) if cap.get("research_only") else any(
+            c["name"] == effective for c in candidates
+        )
         capabilities.append({
             "id": cap["id"],
             "label": cap["label"],
@@ -188,7 +218,8 @@ def build_capability_matrix(current: dict[str, str], tickflow_tier: str = "none"
             "field": cap["field"],
             "default": cap["default"],
             "tf_tier": cap["tf_tier"],
-            "tf_available": tf_available,
+            "tf_available": False if cap.get("research_only") else tf_available,
+            "research_only": bool(cap.get("research_only")),
             "usable": usable,
             "current": effective,
             "current_display": _display_of(sources, effective),

@@ -31,6 +31,8 @@ _RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/index/minute", "read:market"),
     ("GET", "/api/overview/market", "read:market"),
     ("GET", "/api/screener/market-snapshot", "read:market"),
+    # OpenBB 独立研究面只读；无任何交易 scope 或写方法。
+    ("GET", "/api/openbb", "read:market"),
     # read:ext — 扩展数据读取 (Key 状态子路径除外, 属管理面)
     ("GET", "/api/ext-data/schema-all", "read:ext"),
     ("GET", "/api/ext-data/schema/", "read:ext"),

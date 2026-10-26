@@ -43,6 +43,30 @@ services:
       - ${CODEX_HOME_HOST:-${HOME}/.codex}:/codex-home:ro
     restart: unless-stopped
 
+  # 可选研究 sidecar。默认 docker compose up 不拉起；主进程只走 HTTP。
+  # 在 .env 设置 OPENBB_BASE_URL=http://openbb:6900 后执行:
+  #   docker compose --profile openbb up --build
+  openbb:
+    profiles: ["openbb"]
+    build:
+      context: ./docker/openbb
+      dockerfile: Dockerfile
+    user: "1000:1000"
+    container_name: TickFlow_Stock_Panel_OpenBB
+    ports:
+      - "${OPENBB_HOST:-127.0.0.1}:${OPENBB_PORT:-6900}:6900"
+    environment:
+      - HOME=/home/openbb
+      - XDG_CACHE_HOME=/home/openbb/.cache
+      - PYTHONDONTWRITEBYTECODE=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6900/api/v1/tsp/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
+
   # 可选。DSA 的 API 旁路，不托管它自己的前端。
   # 在 .env 设置 DSA_BASE_URL=http://dsa:8000 后执行:
   #   docker compose --profile dsa up --build

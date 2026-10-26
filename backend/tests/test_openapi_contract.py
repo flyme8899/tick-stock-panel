@@ -10,6 +10,8 @@
 契约变更记录:
   - 2026-10 (P3): 移除全部 /api/paper* (20 条)。模拟盘读+写整体退出 Token 开放面,
     仅面板 UI 会话可用。持有历史 paper:trade scope 的 Token 亦不再获得访问权。
+  - 2026-10 (P4): 新增 4 条 /api/openbb/* 只读研究端点，统一要求 read:market；
+    不新增写方法或交易 scope，不回开 paper:trade。
 """
 from __future__ import annotations
 
@@ -58,6 +60,10 @@ EXPECTED_OPEN_ENDPOINTS: set[str] = {
     "GET /api/news/messages",
     "GET /api/news/stocks/{symbol}",
     "GET /api/overview/market",
+    "GET /api/openbb/hk_daily",
+    "GET /api/openbb/macro",
+    "GET /api/openbb/status",
+    "GET /api/openbb/us_daily",
     "GET /api/regime/breadth",
     "GET /api/regime/breadth/latest",
     "GET /api/regime/caliber",

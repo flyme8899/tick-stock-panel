@@ -193,7 +193,7 @@ Markdown 正文。`metadata.*` 是本仓给 CI 用的机读字段，宿主不认
 | G3 | 只读 Token 真开放 + 拒交易 scope 网关加固 | **本拍收口** | Token 通道已无交易 scope：签发侧拒 `paper:*`/`trade:*`/`order:*`，访问侧 Bearer 打 `/api/paper/*` 一律 403，Tier A 契约已移除全部 paper 端点。模拟盘仅面板 UI 会话 |
 | G4 | `run_backtest` 对第三方真开放 + 策略入口全量注册 lookahead | 另拍 / #217 延续 | 文档衔接，不重做夹具 |
 | G5 | DSA 经 skill 面**实调用**接线 | P5 邻近 | 只引用形态 |
-| G6 | OpenBB / Kronos | P4 / P6 另口令 | 不塞 |
+| G6 | OpenBB / Kronos | P4 / P6 另口令 | OpenBB 半截本拍收口（sidecar 只读展示）；Kronos 仍归 P6，不塞 |
 
 ---
 
