@@ -1,4 +1,4 @@
-# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送 + gding 可选钉钉 + gval 估值健康窄开 + gwlist 白名单未锁 + gauction 放量未开）
+# 买卖信号骨架（批次 g + g2 窄化 + gp 可选落盘 + gpush 可选推送 + gding 可选钉钉 + gval 估值健康窄开 + gwlist 白名单未锁 + gauction 放量未开 + gauction2 竞价窄开）
 
 > **仅供研究，不构成投资建议；执行须人工确认。**
 
@@ -11,7 +11,7 @@
 > 20261025gding 的改动见文末 [gding 可选钉钉](#gding-可选钉钉批次-20261025gding) 一节；
 > 20261025gval 的改动见文末 [gval 估值/健康窄开](#gval-估值健康窄开批次-20261025gval) 一节。
 
-**现行口径：落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价/放量事件仍未接 · 估值/健康仍 pending。**
+**现行口径：落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 放量身份/契约已钉、触发仍 pending · 竞价身份/只读适配已钉、四缺口 pending(B1 部分解阻 · B2 分钟 09:25 仍缺) · 估值/健康仍 pending。**
 
 ## 一句话
 
@@ -1134,3 +1134,151 @@ cd backend && python -m pytest \
 - [x] 默认不自动部署；合入另等盘后口令
 
 *参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议；执行须人工确认。*
+
+---
+
+## 竞价窄开（gauction2 · `auction_0925`）（批次 20261026gauction2）
+
+> 本节是 **放量（#210 / gvol）的对称腿**：同一套「身份钉 + 空桩 + 证据缺口」骨架，
+> 语义严格互斥。**不是重做放量**，`volume_breakout_stub.py` 一个字节未改。
+
+### 从 blocked 到**部分**解阻
+
+旧的 `20261025gauction` 拍把竞价整段标为 blocked，理由是 B1「没有竞价数据包」。
+现在这条理由**部分**不成立了：生产环境有 `data/auction_scan/` 多日 JSON，
+`get_scan` 能读到「当天命中了哪些票」。
+
+但**只有 B1 部分解阻，B2 仍然 blocked**：
+
+| 缺口 | 状态 | 说明 |
+|---|---|---|
+| **B1** 无竞价数据包 | **部分解阻** | 有 `auction_scan` 落盘存档可读；但落盘**没有** `auction_price` / `prev_close` |
+| **B2** 分钟 09:25 bar | **仍 blocked** | 分钟库最早仍是 09:30；标签 `minute_0925_still_absent` 保留 |
+
+**部分解阻 ≠ 整拍可推。** 能读到「那天命中了哪几只票」，和「这条信号经过验证」
+是两件事。本节做的只是前者。
+
+### 身份钉
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `signal_id` | `auction_abnormal` | 全仓唯一的竞价异动信号 |
+| `event_class` | `auction` | 唯一允许带竞价桶的类别 |
+| `family` | `minute_event` | 必须有分钟级证据才能谈标定，不用日线代理糊 |
+| `auction_stat_bucket` | `auction_0925`（**恒**） | 只有这一个桶 |
+| `auction_rule_id` | `None` | 阈值未标定，本拍**不锁规则** |
+| `post_open_noise_flag` | `False`（**恒**） | 09:25 早于连续竞价，不属于任何开盘后时段 |
+| `post_open_noise_bucket` | `None`（**禁带**） | 带非 None 会被 `SignalRecord` 拒 |
+| `triggering_enabled` | `False`（**恒**） | 改成 True 只会让空桩撒谎 |
+
+`models.SignalRecord.__post_init__` 在 tip 上**已经**双向拒绝混桶（竞价带开盘后桶 →
+拒；放量带 `auction_0925` → 拒）。本拍只把竞价这条路径**显式覆盖**并测下来，
+没有重新实现分列校验，也没有削弱它。
+
+### 只读存档：读什么、不读什么
+
+信号侧**只读**既有落盘：
+
+```
+data/auction_scan/{YYYY-MM-DD}.json     ← 经 get_scan(data_dir, target) 读
+```
+
+**不做**这三件事：
+
+1. **不重抓快照**。同一天不同时刻重抓拿到不同快照，于是「这条信号那天有没有出现」
+   取决于你什么时候跑它 —— 这样的评估没有意义。
+2. **不跑 `SCAN_WINDOW`**。窗口逻辑属于扫描服务（`app/services/auction_scan.py`），
+   信号侧不拥有它，也不该为了「让信号有数据」去驱动它。
+3. **不盘后补扫**。开盘后抓到的快照已经不是集合竞价撮合那一刻的信息集。
+
+缺文件 → **fail-closed**：`state=no_data` → 评估 `reason="no_data"` /
+`status="data_pending"`，绝不「静默填空候选当触发」。
+
+### 字段映射表（落盘 → 候选）
+
+| 存档 / 派生 | 候选字段 | 备注 |
+|---|---|---|
+| `trade_date` + 固定 **09:25:00 Asia/Shanghai** | `auction_ts` | **不读分钟 bar**；签名里根本没有分钟数据可传 |
+| `scanned_at` | `metadata["scanned_at"]` | 这个结论基于哪一刻的快照 |
+| `item.symbol` | `symbol` | 缺则整条跳过，不拿空串当标的 |
+| `item.ticker` / `item.name` | `ticker` / `display_name` | 展示用 |
+| `item.gap` | `metadata["gap"]` | 由 scan 内价算出；价本身没落盘 |
+| `item.vol_ratio` | `metadata["vol_ratio"]` | **UI 阈值来源，不当已锁门禁** |
+| `item.auction_volume` | `auction_volume` | 有则填，缺则 `None`（**不填 0**） |
+| `item.auction_amount` | `metadata["auction_amount"]` | |
+| （无）`auction_price` / `prev_close` | `auction_price = None` | 见 `auction_price_not_persisted` |
+
+**为什么 `auction_price` 恒 `None` 而不是用 `gap` 倒推**：`gap` 是相对昨收的比例，
+反推价格还需要 `prev_close` —— 而 `prev_close` 同样没落盘。两个未落盘量的比值
+看起来像个价，实际不可复核。
+
+### 四条证据缺口（全部 pending）
+
+| 标签 | 含义 | 清掉的条件（另拍） |
+|---|---|---|
+| `auction_price_not_persisted` | 落盘 item 只有 `gap` / `vol_ratio` / `auction_volume` / `auction_amount`，**没有** `auction_price` / `prev_close` | 另拍补 scan 落盘 schema（零行为破坏）或接入等价可信价源 |
+| `threshold_lock_data_pending` | UI 列表的 `min_gap` / `min_vol_ratio` 是**页面筛选参数**，不是 PHASE3 回测门禁 | 回测标定后锁 `auction_rule_id` + version |
+| `backtest_evidence_data_pending` | 没有竞价异动的回测表 / 触发表 / 显著性证据 | 另拍证据表 + 门禁样本 |
+| `minute_0925_still_absent` | 分钟库最早仍 09:30 | **保留**；**不**阻塞读 scan 存档；**永不**用 09:30 清掉 |
+
+**`min_vol_ratio` 不是门禁。** 它是页面上「你看列表时想筛多严」的参数，
+随时可能被调。把它写进代码当阈值，等于把一个 UI 偏好升级成统计口径。
+
+### 永久硬禁：09:30 冒充 09:25
+
+`auction_ts` 由 `trade_date` + 固定 `09:25:00+08:00` 推出，函数签名只接受一个
+`trade_date`——**没有**分钟数据可以传进来。这是「不冒充」的机械保证，不是口头约定。
+
+用 09:30 或任意开盘后 bar 冒充 09:25 是**永久禁止**的：两者是离散撮合与连续成交
+两个信息集，混用的结果**不会报错**，只会让竞价类信号的统计全部失真。
+
+### 与 #210 放量正交
+
+| 项 | 放量（#210） | 竞价（本拍） |
+|---|---|---|
+| `event_class` | `intraday_volume` | `auction` |
+| `auction_stat_bucket` | 恒 `None` | 恒 `auction_0925` |
+| `post_open_noise_bucket` | 可空桩（`None`） | **不得携带** |
+| 信息集 | 开盘后连续成交 | 09:25 集合竞价离散撮合 |
+
+两个方向都不许混桶。本拍 `volume_breakout_stub.py` **字节未改**（有测例用 git
+比对守着）。
+
+### 评估态恒 pending
+
+三种路径，结论都是 `data_pending`：
+
+| 情形 | `reason` | 候选 |
+|---|---|---|
+| 没有 `data_dir` / 存档缺失 | `no_data` | 空 |
+| 读到存档但没有可映射条目 | `no_candidates` | 空 |
+| 读到存档且有条目 | `evidence_pending` | 若干候选，全部带四条 pending |
+
+第三种**最容易误读**：明明映射出了候选、`gap` 和 `vol_ratio` 都有值，看起来像
+「能算了」。但那些值是存档里现成的筛选结果，不是这条信号的触发结论。
+
+`triggered` 恒 `None`（「无法判断」），**不是** `False`（「查过，没异动」）——
+在没有阈值、没有回测、没有 09:25 分钟证据的情况下返回 `False`，等于向调用方
+保证一件我们并不知道的事。
+
+### 对外口径
+
+未验收前只说「ALIGN / 竞价窄开 stub（定义 + 读存档 + pending）」。
+
+**不宣称**：回测已经通过、可以按它交易、可以对外推送、阈值已锁定、
+调用链已生产验证。**部分解阻 ≠ 整拍可推。**
+
+### 本节验收
+
+- [x] 身份常量钉死（`auction_abnormal` / `auction` / `auction_0925` / `flag=False` / 禁带桶）
+- [x] 混桶用例 RED（竞价带开盘后桶 → 拒；放量带竞价桶 → 拒）
+- [x] 有合成 JSON → 可映射候选但仍带四条 `evidence_pending`；无文件 → fail-closed / `no_data`
+- [x] 四条 pending 标签机器可读；`auction_price` 诚实 `None`
+- [x] **未**改 `volume_breakout_stub` 行为（git 字节比对守着）
+- [x] **未**改三 env；**未**改 `SCAN_WINDOW` / 落盘 schema / 盘后补扫
+- [x] **未**出现 09:30 冒充 09:25（`auction_ts` 签名只收 `trade_date`）
+- [x] **未**宣称回测已通过 / 可交易 / 可推送
+- [x] 软提醒 **10** 条写入本节与 PR
+- [x] 默认不部署；合入另等盘后口令
+
+*仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。*

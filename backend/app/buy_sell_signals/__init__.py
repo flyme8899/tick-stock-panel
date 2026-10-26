@@ -96,7 +96,32 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 改 `push.py` / `store.py` / `main.py` / `t_rounds`。
 **质量/估值/健康/白名单零碰**(#208 / #209 行为字节未改)。
 
-现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价仍 blocked(无 09:25 包) · 放量身份/契约已钉、触发仍 pending · 估值/健康仍 pending · 白名单试跑未锁**。
+**gauction2 做了什么(批次 20261026gauction2 · 竞价窄开)**: 竞价信号腿**定义钉 +
+读存档适配 + 显式 pending**; **不重做放量**(#210 行为字节未改)。
+
+- **身份钉**: 新建 `auction_abnormal_stub.py`, 把 `signal_id="auction_abnormal"` ·
+  `event_class="auction"` · `family="minute_event"` ·
+  `auction_stat_bucket="auction_0925"`(恒) · `post_open_noise_flag=False` ·
+  `post_open_noise_bucket=None`(禁带) · `auction_rule_id=None` 写成可扫常量。
+- **只读适配**: 只读 `data/auction_scan/{date}.json`(经 `get_scan`), 映射出候选;
+  缺文件 fail-closed → `no_data` / `data_pending`; **不**重抓快照 / **不**跑
+  SCAN_WINDOW / **不**盘后补扫。`auction_ts` 由 `trade_date` + 固定 09:25:00+08:00
+  推出, **不读分钟 bar**。
+- **四条 pending**: `auction_price_not_persisted`(落盘无竞价价) ·
+  `threshold_lock_data_pending`(UI 阈值 != 回测门禁) ·
+  `backtest_evidence_data_pending`(无回测/触发表) ·
+  `minute_0925_still_absent`(分钟库仍无 09:25, 且永不能用 09:30 清掉)。
+- **恒不触发**: `AUCTION_ABNORMAL_TRIGGERING_ENABLED=False`; `triggered` 恒 `None`
+  (**不是** `False`); `auction_price` 恒 `None`(不填 0、不用 gap 倒推)。
+- **与混合桶正交**: 竞价恒 `auction_0925`、放量恒 `None`; 双向混桶均被
+  `SignalRecord` 拒; 本拍**零改** `volume_breakout_stub.py`。
+
+**gauction2 没做**: 补 scan 落盘 `auction_price`(默不开) · 阈值锁定 · 回测证据表 ·
+分钟 09:25 bar · 真锁 · 估值打分 · 健康引擎 · 改 `SCAN_WINDOW` / 落盘 schema ·
+改三 env · 竞价触发引擎。
+**放量 / 质量 / 估值 / 健康 / 白名单零碰**(#208 / #209 / #210 行为字节未改)。
+
+现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价由 blocked 转部分解阻(B1 有 scan 存档 / B2 分钟 09:25 仍缺) · 放量身份/契约已钉、触发仍 pending · 竞价身份/只读适配已钉、四缺口 pending · 估值/健康仍 pending · 白名单试跑未锁**。
 
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
@@ -111,6 +136,20 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 """
 from __future__ import annotations
 
+from .auction_abnormal_stub import (
+    AUCTION_ABNORMAL_AUCTION_STAT_BUCKET,
+    AUCTION_ABNORMAL_EVENT_CLASS,
+    AUCTION_ABNORMAL_EVIDENCE,
+    AUCTION_ABNORMAL_EVIDENCE_PENDING,
+    AUCTION_ABNORMAL_SIGNAL_ID,
+    AUCTION_ABNORMAL_STATUS,
+    AUCTION_ABNORMAL_TRIGGERING_ENABLED,
+    AuctionCandidate,
+    AuctionEvaluation,
+    auction_ts_for,
+    build_auction_abnormal_record,
+    evaluate_auction_abnormal,
+)
 from .constants import (
     BONFERRONI_M,
     BONFERRONI_SCHEME_ID,
@@ -195,6 +234,18 @@ from .volume_breakout_stub import (
 )
 
 __all__ = [
+    "AUCTION_ABNORMAL_AUCTION_STAT_BUCKET",
+    "AUCTION_ABNORMAL_EVENT_CLASS",
+    "AUCTION_ABNORMAL_EVIDENCE",
+    "AUCTION_ABNORMAL_EVIDENCE_PENDING",
+    "AUCTION_ABNORMAL_SIGNAL_ID",
+    "AUCTION_ABNORMAL_STATUS",
+    "AUCTION_ABNORMAL_TRIGGERING_ENABLED",
+    "AuctionCandidate",
+    "AuctionEvaluation",
+    "auction_ts_for",
+    "build_auction_abnormal_record",
+    "evaluate_auction_abnormal",
     "BONFERRONI_M",
     "BONFERRONI_SCHEME_ID",
     "DINGTALK_ENV_NAME",
