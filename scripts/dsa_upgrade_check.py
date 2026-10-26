@@ -24,11 +24,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 FLOATING = {"latest", "main", "master", "head", "develop", "dev", "trunk"}
 
+_COMMIT_LINE = re.compile(r"Upstream commit:\s*`([^`]+)`")
+
 _PIN_SOURCES = (
-    ("catalog.py", "backend/app/custom/dsa/catalog.py", re.compile(r'^UPSTREAM_COMMIT\s*=\s*"([^"]+)"', re.M)),
-    ("VENDOR.md", "vendor/daily_stock_analysis/VENDOR.md", re.compile(r"Upstream commit:\s*`([^`]+)`")),
+    (
+        "catalog.py",
+        "backend/app/custom/dsa/catalog.py",
+        re.compile(r'^UPSTREAM_COMMIT\s*=\s*"([^"]+)"', re.M),
+    ),
+    ("VENDOR.md", "vendor/daily_stock_analysis/VENDOR.md", _COMMIT_LINE),
     ("dsa-integration.md", "docs/dsa-integration.md", re.compile(r"提交\s*`([^`]+)`")),
-    ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md", re.compile(r"Upstream commit:\s*`([^`]+)`")),
+    ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md", _COMMIT_LINE),
 )
 
 # 钩子文件名 -> 容器内挂载路径（只读）。

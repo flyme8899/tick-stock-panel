@@ -82,7 +82,8 @@ def test_sop_forbids_rolling_pin() -> None:
     for word in _FLOATING:
         for match in re.finditer(rf"`{word}`", text, re.IGNORECASE):
             window = text[max(0, match.start() - 40) : match.end() + 20]
-            assert "禁止" in window or "不" in window, f"`{word}` 出现在非禁止语境：{window!r}"
+            forbidden = "禁止" in window or "不" in window
+            assert forbidden, f"`{word}` 出现在非禁止语境：{window!r}"
 
 
 def test_sop_states_no_upstream_follow() -> None:
@@ -186,7 +187,7 @@ def test_sop_has_no_bare_sha_shortcut(relative: str) -> None:
 
     for match in re.finditer(r"\b([0-9a-f]{7,39})\b", text):
         candidate = match.group(1)
-        # 允许普通的十六进制词（如 H1/H2 之外的短标识不算），只拦「像缩写 SHA」的。
+        # 只拦「像缩写 SHA」的短十六进制串，普通词不算。
         assert len(candidate) >= 7 and not re.fullmatch(r"[0-7]{1,3}", candidate)
         assert len(candidate) == 40 or not re.fullmatch(r"[0-9a-f]{7}", candidate), (
             f"SOP 里出现疑似缩写 SHA：{candidate}"

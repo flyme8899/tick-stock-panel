@@ -172,7 +172,9 @@ def test_present_hook_file_reaches_install(monkeypatch, caplog, code, tmp_path: 
 
 
 @pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5"])
-def test_broken_hook_does_not_block_startup(monkeypatch, caplog, code, started, tmp_path: Path) -> None:
+def test_broken_hook_does_not_block_startup(
+    monkeypatch, caplog, code, started, tmp_path: Path
+) -> None:
     """钩子内部炸：exception 日志 + 继续，DSA 入口照常被调用。"""
     (tmp_path / _HOOKS[code]).write_text("raise RuntimeError('探针故意失败')\n", encoding="utf-8")
     _isolate(monkeypatch, tmp_path)
@@ -186,7 +188,9 @@ def test_broken_hook_does_not_block_startup(monkeypatch, caplog, code, started, 
 
 
 @pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5"])
-def test_missing_files_never_pretend_success(monkeypatch, caplog, started, tmp_path: Path, code) -> None:
+def test_missing_files_never_pretend_success(
+    monkeypatch, caplog, started, tmp_path: Path, code
+) -> None:
     """五个文件全缺：四条 info + H1 的 off 日志，日志里没有任何成功字样。"""
     _isolate(monkeypatch, tmp_path)
 
@@ -237,7 +241,8 @@ def test_h1_enabled_value_wraps_both_loaders(monkeypatch, caplog, value, tmp_pat
     fake_agent.__path__ = []  # type: ignore[attr-defined]
     fake_skills = ModuleType("src.agent.skills")
     fake_skills.base = base  # type: ignore[attr-defined]
-    for name, module in (("src", fake_src), ("src.agent", fake_agent), ("src.agent.skills", fake_skills)):
+    packages = (("src", fake_src), ("src.agent", fake_agent), ("src.agent.skills", fake_skills))
+    for name, module in packages:
         monkeypatch.setitem(dsa_bootstrap.sys.modules, name, module)
 
     with caplog.at_level(logging.INFO, logger="tsp.dsa.bootstrap"):

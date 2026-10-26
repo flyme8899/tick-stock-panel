@@ -55,7 +55,9 @@ def test_status_shape(monkeypatch: pytest.MonkeyPatch, status_client: TestClient
     assert payload["base_url"] == "http://dsa.test"
 
 
-def test_unconfigured_is_not_enabled_nor_reachable(monkeypatch: pytest.MonkeyPatch, status_client: TestClient) -> None:
+def test_unconfigured_is_not_enabled_nor_reachable(
+    monkeypatch: pytest.MonkeyPatch, status_client: TestClient
+) -> None:
     """URL 显式留空：enabled=False，reachable=False，detail 说明未配置。"""
     monkeypatch.setenv("DSA_BASE_URL", "")
     monkeypatch.setattr(proxy, "health", proxy.health)
@@ -82,7 +84,9 @@ def test_configured_but_down_is_enabled_and_unreachable(
     assert "Connection refused" in payload["detail"]
 
 
-def test_configured_and_healthy_is_both_true(monkeypatch: pytest.MonkeyPatch, status_client: TestClient) -> None:
+def test_configured_and_healthy_is_both_true(
+    monkeypatch: pytest.MonkeyPatch, status_client: TestClient
+) -> None:
     monkeypatch.setenv("DSA_BASE_URL", "http://dsa.up")
     _patch_health(monkeypatch, (True, "已连接"))
 
@@ -111,7 +115,9 @@ def test_health_exception_becomes_unreachable_detail(
     assert "timed out" in payload["detail"]
 
 
-def test_health_http_error_is_unreachable(monkeypatch: pytest.MonkeyPatch, status_client: TestClient) -> None:
+def test_health_http_error_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, status_client: TestClient
+) -> None:
     """health 返回 503：reachable=False，detail 带截断后的上游文本。"""
     monkeypatch.setenv("DSA_BASE_URL", "http://dsa.up")
 
