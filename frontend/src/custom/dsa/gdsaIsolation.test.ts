@@ -140,7 +140,7 @@ it('改动清单可用（非空），diff 类断言的取数机制没有坏', ()
  * DSA 拍则改由它自己那套边界测(gdsaledgerIsolation)守。这样红线不丢, 也不会
  * 因为下一拍碰了 DSA 就红。
  */
-const DSA_SCOPED_BATCHES = ['20261026gdsaledger', 'fix/20261026gdsaledger', '20261025gdsa2', '20261025gdsa', '20261026gdsaux', 'fix/20261026gdsaux']
+const DSA_SCOPED_BATCHES = ['20261026gdsaledger', 'fix/20261026gdsaledger', '20261025gdsa2', '20261025gdsa', '20261026gdsaux', 'fix/20261026gdsaux', '20261026gdsasec', 'fix/20261026gdsasec']
 
 function currentBatchIsDsaScoped(): boolean {
   // 分支名比 commit subject 可靠：工作树在提交之前，HEAD 还停在上一拍。

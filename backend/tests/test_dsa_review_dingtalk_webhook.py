@@ -313,9 +313,14 @@ def test_cap_file_schema_is_pinned(tmp_path) -> None:
     payload = json.loads(cap_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "1"
     assert payload["tz"] == "Asia/Shanghai"
-    entry = payload["days"]["2026-10-26"]
+    # 日期键来自可注入的 today_fn，跟着 _TODAY 走
+    entry = payload["days"][_TODAY.isoformat()]
     assert entry["success_count"] == DAILY_SUCCESS_CAP
-    assert entry["last_success_at"].startswith("2026-10-26T")
+    # last_success_at 取的是**真实时钟**（now_fn 未从 notify 这一层注入），
+    # 所以只能断言"是个可解析的带时区时间戳"，不能钉死日期 ——
+    # 钉死的话每天过零点都会红，而它跟这条用例真正要守的东西（schema）无关。
+    stamp = datetime.fromisoformat(entry["last_success_at"])
+    assert stamp.tzinfo is not None
 
 
 def test_corrupted_cap_file_fails_open_without_old_fallback(tmp_path) -> None:

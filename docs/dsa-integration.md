@@ -178,11 +178,33 @@ Docker 把 `analysis_bridge.py` 只读挂到 `/opt/tsp/analysis_bridge.py`。
 
 决策页「定时推送」可以改这些值。保存会写回 `.env`，并让 sidecar 重新加载调度，所以 Docker 里该文件是可写挂载。多个时点以页面上的一个时刻为准，保存后 `SCHEDULE_TIMES` 与 `SCHEDULE_TIME` 相同。
 
-结果写入 DSA 历史，决策仪表盘能看到。推送走 `.env` 里的 `FEISHU_WEBHOOK_URL`、`WECHAT_WEBHOOK_URL`、Telegram、Discord、Slack、邮件等，不改 TSP 设置页里的监控渠道。页面上的「生成研报」仍然 `notify=false`；定时任务和「立即跑一轮」按这些渠道发送。
+结果写入 DSA 历史，决策仪表盘能看到。推送走 `.env` 里的 `FEISHU_WEBHOOK_URL`、`WECHAT_WEBHOOK_URL`、Telegram、Discord、Slack、邮件等，不改 TSP 设置页里的监控渠道。页面上的「生成研报」仍然 `notify=false`；定时任务按这些渠道发送（见下方「浏览器上游只读」——页面上的「立即跑一轮」已从浏览器侧撤下）。
 
 观察池就是这份 `STOCK_LIST`。仪表盘上可以单条或批量移出，之后定时任务不再分析这些代码。已有分析卡片不会跟着消失。
 
 卡片本身存在 DSA 的 `analysis_history`。移出是软删除（`dismissed_at`），列表和详情不再返回，回测关联仍留在库里。同一天重复生成的大盘复盘，列表只给最新一条。`POST /api/v1/history/read` 标已读，`POST /api/v1/history/dismiss` 按主键、已读或早于 N 天移出。浏览器只打 TSP 的 `/api/dsa/upstream/...`，要有面板登录；转发层再带 DSA 会话访问上游。
+
+### 浏览器上游只读（system / portfolio）
+
+`/api/dsa/upstream/*` 对前缀 **`system`** 和 **`portfolio`** **只放行 GET**（含 HEAD）。非 GET → **HTTP 405**，`detail` 写明「… 上游代理仅允许 GET（浏览器侧只读）；写操作请走服务端入口。」，**不**转发到 DSA。
+
+| 面 | 行为 |
+|---|---|
+| `GET /api/dsa/upstream/portfolio/risk` | 照常转发，持仓风险面板用它 |
+| `GET /api/dsa/upstream/system/…`（含 `config/export`） | 照常转发（只读；字段脱敏另议） |
+| `POST/PUT/PATCH/DELETE` 打 system / portfolio | 405，一个字节都不出网关 |
+| 其它前缀（`analysis` / `history` / `screening` / `backtest` / `intelligence` …） | **本拍一个没收窄**，写方法照旧 |
+
+**闸在 `routes.upstream`，不在 `proxy.forward()`。** 这一点是硬约束：定时任务的保存（`PUT /api/dsa/schedule`）服务端内部要 `forward("PUT", "system/config")`，在 `forward` 里全局拒写会把这个正常功能一起打断。
+
+页面侧对应的两处变化：
+
+- 定时任务面板的「立即跑一轮」、通知渠道的「发送测试」两个按钮**恒禁用**，并明示「浏览器上游已收窄为只读」。它们原本就是经上述 system 前缀 POST 出去的，收窄后必然 405 —— 留一个点了就报错的按钮比没有更糟。
+- 定时设置的读取与保存走 TSP 自有 `/api/dsa/schedule`，**不受影响**。
+
+401 与 405 是两件事：401 是没登录，405 是这个资源不支持该方法（资源本身可读）。看到 405 说明路径写对了，只是方法要换 GET。
+
+> 仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。
 
 ### 定时复盘独立钉钉机器人
 
