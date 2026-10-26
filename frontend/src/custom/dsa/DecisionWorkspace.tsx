@@ -39,6 +39,7 @@ import {
   fetchDsaQuantEvidence,
   fetchDsaLedgerAudit,
   type DsaLedgerAudit,
+  type DsaLedgerAuditRow,
   type DsaQuantEvidence,
   fetchDsaSchedule,
   fetchDsaStatus,
@@ -629,15 +630,180 @@ export function LedgerAuditPanel({ data }: { data: DsaLedgerAudit }) {
 }
 
 function LedgerAudit() {
-  const query = useQuery({
+  const query = useQuery<DsaLedgerAudit>({
     queryKey: ['dsaLedgerAudit'],
-    queryFn: fetchDsaLedgerAudit,
+    queryFn: () => fetchDsaLedgerAudit(),
     staleTime: 300_000,
     retry: false,
   })
   if (!query.data) return null
   return <LedgerAuditPanel data={query.data} />
 }
+
+/**
+ * 「上次建议结果」—— 研报页按当前股票代码只读回看**上一次** DSA 建议的事后结果。
+ *
+ * 仅供研究，不构成投资建议；执行须人工确认。
+ *
+ * ## 这是留存钩，不是新的分析台
+ *
+ * 数据只有一个来源：`GET /api/dsa/ledger-audit?code=…`（N1 补的 query）。
+ * 不新造端点、不新写表、不调 `backtest/run`。取不到就诚实说取不到。
+ *
+ * ## N2：「上次」= 最新 1 条
+ *
+ * 该股 `rows` 按 `analysis_history_id` 降序取第一条主展示；同 id 再比出现序
+ * （后出现的更新）。可选展开到合计 ≤3 条 —— 再多就不是「上次」了。
+ *
+ * ## 为什么不显示胜率百分比
+ *
+ * 这是**单股卡**。`summary.win_rate_pct` 是全账本口径，拿来当「该股胜率」
+ * 是拿别人的样本替这一只股票背书。所以本卡一律不印胜率%，只看单条 outcome。
+ *
+ * ## 收益要带成本
+ *
+ * `simulated_return_pct` 是上游原值，未扣成本。展示时必须并排写出「成本来回
+ * 18.2bp」—— 行字段里没有成本列，所以用文案脚注，不去动审计引擎的口径。
+ *
+ * ## `entry_next_open` 常常是空的（N3）
+ *
+ * 上游没注入就照实写「未注入」。**绝不**用收盘价或跳空倒推一个开盘价出来顶上。
+ */
+export function LastAdviceResultCard({ code }: { code: string }) {
+  const trimmed = code.trim()
+  const query = useQuery({
+    queryKey: ['dsaLedgerAudit', trimmed],
+    queryFn: () => fetchDsaLedgerAudit({ code: trimmed, limit: LAST_ADVICE_FETCH_LIMIT }),
+    enabled: Boolean(trimmed),
+    staleTime: 120_000,
+    retry: false,
+  })
+  const [expanded, setExpanded] = useState(false)
+  const data = query.data
+  const badge = data?.summary.badge || TSP_AUDIT_BADGE
+
+  let body: ReactNode
+  if (query.isError || (data && !data.available)) {
+    // 不可达：把上游给的原因原样带出来，不自己编一个
+    const reason = data?.summary.unavailable_reason || '账本暂不可读'
+    body = <Notice>{badge} · 账本暂不可读（{reason}）。不会用模拟数据填充。</Notice>
+  } else if (query.isPending) {
+    body = <Notice>正在读取该股账本结算记录…</Notice>
+  } else {
+    const rows = latestAdviceRows(data?.rows ?? [], trimmed)
+    if (rows.length === 0) {
+      body = (
+        <Notice>
+          该股暂无账本结算记录。生成研报并完成上游评估后，这里会显示上次建议的事后结果。
+        </Notice>
+      )
+    } else {
+      const shown = expanded ? rows.slice(0, LAST_ADVICE_MAX_ROWS) : rows.slice(0, 1)
+      const rest = rows.length - 1
+      body = (
+        <div className="space-y-2">
+          {shown.map((row, index) => (
+            <LastAdviceRowView key={`${row.analysis_history_id}-${index}`} row={row} primary={index === 0} />
+          ))}
+          {rest > 0 && (
+            <button
+              type="button"
+              className={ghostBtn}
+              data-last-advice-toggle
+              onClick={() => setExpanded(value => !value)}
+            >
+              {expanded
+                ? '收起'
+                : `展开更多（还有 ${Math.min(rest, LAST_ADVICE_MAX_ROWS - 1)} 条，合计最多 ${LAST_ADVICE_MAX_ROWS} 条）`}
+            </button>
+          )}
+        </div>
+      )
+    }
+  }
+
+  return (
+    <Panel
+      title="上次建议结果"
+      hint="按当前股票代码读上游账本（只读）。单股卡只看这一条建议的事后结果，不套全账本胜率。"
+      extra={<span data-tsp-audit-badge className="rounded-btn bg-elevated px-2 py-1 text-[11px] text-secondary">{badge}</span>}
+    >
+      <div data-last-advice-result data-last-advice-code={trimmed}>
+        {body}
+      </div>
+    </Panel>
+  )
+}
+
+/** 「上次」最多回看几条（N2 写死 ≤3）。 */
+const LAST_ADVICE_MAX_ROWS = 3
+/**
+ * 请求时向后端要的条数。
+ *
+ * 比 `LAST_ADVICE_MAX_ROWS` 宽一点：账本是跨股的，`limit` 是上游原始条数上限，
+ * 该股的记录可能散在中间。多要几条能降低「该股其实有记录但被截断」的概率。
+ */
+const LAST_ADVICE_FETCH_LIMIT = 20
+
+/**
+ * 按股筛出「上次」及次新（N2）。
+ *
+ * 排序：`analysis_history_id` 降序；同 id 时**后出现**的算更新（上游按时间追加，
+ * 出现序即时间序，我们没有更细的时间戳可用）。非本股的记录一律丢弃 —— 后端
+ * 已按 `code` 过滤，但上游回退到全量时不信任它，这里再筛一次。
+ */
+export function latestAdviceRows(rows: DsaLedgerAuditRow[], code: string): DsaLedgerAuditRow[] {
+  const trimmed = code.trim()
+  if (!trimmed) return []
+  return rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => row.code?.trim() === trimmed)
+    .sort((a, b) => (b.row.analysis_history_id - a.row.analysis_history_id) || (b.index - a.index))
+    .map(({ row }) => row)
+}
+
+function LastAdviceRowView({ row, primary }: { row: DsaLedgerAuditRow; primary: boolean }) {
+  const outcomeColor = priceColorClass(row.outcome === 'win' ? 1 : row.outcome === 'loss' ? -1 : 0)
+  return (
+    <div
+      data-last-advice-row
+      data-last-advice-primary={primary ? 'true' : undefined}
+      className={cn('rounded-lg border border-border bg-base px-3 py-2', primary ? '' : 'opacity-90')}
+    >
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
+        <span className="font-mono text-foreground">{row.code}</span>
+        <span className={cn('font-medium', outcomeColor)} data-last-advice-outcome>
+          {row.outcome || '—'}
+        </span>
+        <span className="text-muted">收盘入场</span>
+        <span className="num text-secondary">{row.entry_close ?? '—'}</span>
+        <span className="text-muted">次日开盘</span>
+        {/* N3：上游没注入就照实写「未注入」，不倒推 */}
+        <span className="num text-secondary" data-last-advice-next-open>
+          {row.entry_next_open ?? '未注入'}
+        </span>
+        <span className="text-muted" data-last-advice-denominator>
+          {row.in_denominator ? '计入分母' : row.unfillable ? '不可成交 · 不计入分母' : '不计入分母'}
+        </span>
+      </div>
+      {row.simulated_return_pct != null && (
+        <p className="mt-1 text-[11px] leading-relaxed text-muted" data-last-advice-return>
+          模拟收益{' '}
+          <span className={cn('num', priceColorClass(row.simulated_return_pct))}>
+            {formatPercentPoints(row.simulated_return_pct)}
+          </span>
+          {' '}· 成本来回 18.2bp（纸面/机械基线分账口径）未计入此原值
+        </p>
+      )}
+      {row.unfillable && (
+        <p className="mt-1 text-[11px] leading-relaxed text-muted">
+          不可成交原因：<span className="font-mono">{row.unfillable}</span>
+        </p>
+      )}
+    </div>
+  )
+}
+
 
 function QuantEvidence() {
   const query = useQuery({
@@ -725,6 +891,9 @@ export function Reports({ sample, reachable, initialCode }: { sample: boolean; r
         {report.isError && <Failure error={report.error} onRetry={() => report.refetch()} />}
         {markdown ? <MarkdownRenderer content={markdown} /> : <Notice>输入记录编号后加载 Markdown。样例模式下编号 1 展示版式。</Notice>}
       </Panel>
+      {/* P-ux：上次建议结果（只读留存钩）。放在全文与狙击登记之间 —— 先看结论，
+          再决定要不要登记新的价位线。与登记面板并存，互不影响。 */}
+      <LastAdviceResultCard code={code} />
       <SniperRegisterPanel reachable={reachable} defaultSymbol={code} analysisId={recordId} />
     </div>
   )

@@ -155,8 +155,28 @@ export interface DsaLedgerAudit {
   audit_items?: { id: string; title: string; state: string; detail: string }[]
 }
 
-export function fetchDsaLedgerAudit(): Promise<DsaLedgerAudit> {
-  return fetch('/api/dsa/ledger-audit').then(res => parse<DsaLedgerAudit>(res))
+/**
+ * 读证据账本（P-ledger / P-ux）。
+ *
+ * 后端 `routes.py` 的 `ledger_audit(code, page, limit)` 一直支持按股过滤，
+ * 但前端这里原先恒发无参请求（全量）—— 研报页想按当前代码挂「上次建议结果」
+ * 就做不到。所以这里补上 query 拼装（N1）。
+ *
+ * 兼容性：**无参调用行为不变**（仍打全量），既有 `LedgerAudit` 审计台不用改。
+ * 空字符串 / 纯空白的 `code` 视为「不过滤」，不会拼出 `?code=`。
+ */
+export function fetchDsaLedgerAudit(opts?: {
+  code?: string
+  page?: number
+  limit?: number
+}): Promise<DsaLedgerAudit> {
+  const q = new URLSearchParams()
+  const code = opts?.code?.trim()
+  if (code) q.set('code', code)
+  if (opts?.page != null) q.set('page', String(opts.page))
+  if (opts?.limit != null) q.set('limit', String(opts.limit))
+  const qs = q.toString()
+  return fetch(`/api/dsa/ledger-audit${qs ? `?${qs}` : ''}`).then(res => parse<DsaLedgerAudit>(res))
 }
 
 export function dsaUpstream<T>(path: string, init?: RequestInit): Promise<T> {
