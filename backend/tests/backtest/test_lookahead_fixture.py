@@ -1085,3 +1085,88 @@ def test_t9m_run_config_without_frame_is_red() -> None:
     # 非 Mapping 的 run_config 也要拒
     with pytest.raises(KeySpecError):
         run_truncated_replay(ENTRY_T_ROUNDS_OFFLINE, ["not", "a", "mapping"], D1)  # type: ignore[arg-type]
+
+
+# ── M02：replay 调用链上必须真的经过 assert_truncated ──────────────────────
+#
+# 上一段（t9a–t9m）守的是"喂坏记录、夹具要拒"。这一段守的是**另一件事**：
+# `replay_t_rounds_offline` 拿到正确输入时，它自己**有没有真的调用**截断复核。
+#
+# 这两件事分开测的理由与文件开头那句一样：把 `assert_truncated(...)` 一行删掉，
+# 上面 13 条 t9* 全部照绿 —— 因为它们从不经过那条语句。于是"截断复核"成了一行
+# 没人守的代码，删掉也没人知道。
+
+
+def test_t10_replay_call_chain_verifies_truncation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`truncate_frame` 静默失效（原样返回）时，replay 必须抛 `TruncationNotAppliedError`。
+
+    ## 为什么需要这条（M02 存活的原因）
+
+    `entries.replay_t_rounds_offline` 里有两行连着的：
+
+        truncated = truncate_frame(frame, t, t_kind="date")
+        assert_truncated(truncated, frame, t, t_kind="date")
+
+    第一行截断，第二行**复核**。把第二行删掉，全仓测试照样绿 —— 因为没有一条用例
+    制造过"裁了但等于没裁"这种局面。而第二行正是 `truncate.py` 模块文档里
+    「裁完必须调用」那句话的执行者：它一删，"必须"就只剩注释了。
+
+    这里把 `truncate_frame` 换成"原样返回"，模拟截断静默失效（换错列、时区搞反到
+    自洽、或干脆被人改成 `return frame`）。复核在，就必然抛；复核不在，就会拿着
+    全量数据继续跑，产出看起来完全正常 —— 这是最难发现的一类假绿。
+
+    ## monkeypatch 为什么打 `truncate` 模块而不是 `entries`
+
+    `entries` 里是**函数体内局部 import**：
+
+        from .truncate import assert_truncated, truncate_frame
+
+    所以 `entries` 模块对象上没有 `truncate_frame` 这个属性，
+    `monkeypatch.setattr(entries, "truncate_frame", ...)` 会直接
+    `AttributeError`（而且 `monkeypatch` 默认 `raising=True`，会当场炸）。
+    必须打到 `truncate` 模块本身 —— 局部 import 拿的就是那个模块的属性。
+
+    仅供研究，不构成投资建议；执行须人工确认。
+    """
+    frame = _two_day_frame()
+
+    from app.backtest.lookahead_fixture import truncate as _truncate
+
+    monkeypatch.setattr(_truncate, "truncate_frame", lambda f, t, **kwargs: f)
+
+    # 先自证补丁生效：否则下面"抛了"可能压根不是因为复核（比如别的环节坏了）
+    patched = _truncate.truncate_frame(frame, D1, t_kind="date")
+    assert len(patched) == len(frame), "补丁没生效：truncate_frame 应当原样返回"
+
+    with pytest.raises(TruncationNotAppliedError) as ei:
+        run_truncated_replay(ENTRY_T_ROUNDS_OFFLINE, build_run_config(frame), D1)
+    assert "截断未生效" in str(ei.value)
+
+
+def test_t10b_baseline_does_not_go_through_truncation_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一补丁下 `build_baseline` 不走截断复核，仍出全量（设计取舍，不是漏测）。
+
+    ## 这条是对照，不是缺口
+
+    `build_baseline` 是"不截断的那条路"：它本来就该看到全部数据，所以没有复核可做。
+    这个取舍是刻意的 —— baseline 的语义就是全量，硬塞一个截断复核进去会把它变成
+    另一条 replay。
+
+    钉这条是为了防止有人"顺手统一一下"：给 baseline 也加截断/复核，t10 依然绿，
+    但 baseline 不再是 baseline 了。数字钉死 `len == 4`（两天 × A/B 两格）
+    与 path 集合 `{A, B}`，多加一道截断就会立刻对不上。
+
+    仅供研究，不构成投资建议；执行须人工确认。
+    """
+    frame = _two_day_frame()
+
+    from app.backtest.lookahead_fixture import truncate as _truncate
+
+    monkeypatch.setattr(_truncate, "truncate_frame", lambda f, t, **kwargs: f)
+
+    rows = build_baseline(ENTRY_T_ROUNDS_OFFLINE, build_run_config(frame))
+
+    assert len(rows) == 4, "两天 × 两个格子 = 4 轮，baseline 应出全量"
+    assert {r["path"] for r in rows} == {"A", "B"}
