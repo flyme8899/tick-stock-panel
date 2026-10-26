@@ -169,7 +169,30 @@ TSP 内置回测报告，**尚未**逐句比对上游 `backtest_service` / `back
 `_meta.l5_entry_exit_status: "pending"` 记录该状态。定性之前，引用这个口径
 必须显式标注「未定性·勿引用」。
 
-## 5. 与其它批次的关系
+## 5. P-diag 门禁读出（2026-10-26 采集）
+
+> 来源：`PDIAG_20261026gdsaledger.md` · sha256 `269c507d9619a11ea517100c2f26ad663bbaa05cc70809aac6b1f40d1c341866`
+> 采集时间 2026-10-26 ~17:02–17:04（Asia/Shanghai）
+
+| 项 | 读出 |
+|---|---|
+| 浏览器 L2 通/断累计 | **data_pending**（本机读不到所有者 `localStorage`） |
+| 服务端 reachable | **true**（app 内 proxy `health() → reachable=true`） |
+| DSA health | **ok**（HTTP 200；容器 Up healthy） |
+| `analysis_history` 近 7 日 | **66** |
+| `analysis_history` 近 14 日 | **144** |
+| `analysis_history` 总条数（旁证） | 151 |
+| `backtest_results` 总条数（旁证） | 13（全部 `completed`） |
+| L2「断」是否占多数 | **否**（按服务端替代证据；浏览器累计不可读，不作「断≫通」主张） |
+| 账本是否因 P-diag defer | **不必 defer** |
+
+诚实边界：浏览器端的通断累计**没有读到**，这一项仍是 `data_pending`。上面的结论建立在
+服务端替代证据上（proxy 可达 + 近 14 日有 144 条写入），不是建立在浏览器数字上。
+
+日后若所有者浏览器显示「断≫通」而服务端仍通，应按「设备 localStorage 单端」解释，
+**不自动推翻本结**。
+
+## 6. 与其它批次的关系
 
 | 上游 | 关系 |
 |---|---|
@@ -182,7 +205,7 @@ TSP 内置回测报告，**尚未**逐句比对上游 `backtest_service` / `back
 
 合入 ≠ 部署；合入 ≠ 改三 env；合入 ≠ 宣称审计已过。
 
-## 6. 下一步（另拍）
+## 7. 下一步（另拍）
 
 | 缺口 | 清掉条件 |
 |---|---|
