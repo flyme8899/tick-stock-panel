@@ -193,7 +193,7 @@ Markdown 正文。`metadata.*` 是本仓给 CI 用的机读字段，宿主不认
 | G3 | 只读 Token 真开放 + 拒交易 scope 网关加固 | **本拍收口** | Token 通道已无交易 scope：签发侧拒 `paper:*`/`trade:*`/`order:*`，访问侧 Bearer 打 `/api/paper/*` 一律 403，Tier A 契约已移除全部 paper 端点。模拟盘仅面板 UI 会话 |
 | G4 | `run_backtest` 对第三方真开放 + 策略入口全量注册 lookahead | 另拍 / #217 延续 | 文档衔接，不重做夹具 |
 | G5 | DSA 经 skill 面**实调用**接线 | 仍邻近 defer（Opt-A） | 只引用形态；P5 只收口「升级 SOP」，实调用另等口令 |
-| G6 | OpenBB / Kronos | P4 / P6 另口令 | OpenBB 半截本拍收口（sidecar 只读展示）；Kronos 仍归 P6，不塞 |
+| G6 | OpenBB / Kronos | P5 已收口 / P6 接旧骨架收口 | OpenBB 半截 #220 已收；Kronos 半截本拍收口（接旧骨架：ext 分布特征 + 三态 enabled≠reachable≠gate_passed + 门禁未过不进信号）；**不宣称可交易 / 未过门禁** |
 
 ---
 
@@ -240,7 +240,7 @@ cd backend && python -m pytest tests/skills/test_skills_boundary.py -q
 ## 10. 明确未做
 
 - ~~P3 Token 真落地 / 拒交易 scope 网关加固~~ → 已收口（见 §7 G3）
-- P4 OpenBB≥5 sidecar · P6 Kronos 接旧实装
+- ~~P4 OpenBB≥5 sidecar~~ → 已在 #220 收口；~~P6 Kronos 接旧实装~~ → 已收口（接旧骨架：S3 分布列 → ext 表 → `ext_kronos_pred_*` 因子族；`enabled`≠`reachable`≠`gate_passed`，gate 默认假；未过门禁不接 `buy_sell_signals`；主进程零 torch；**未重训、未跑日批、未宣称 alpha**；对外只说「接旧骨架」，未验收前不下可交易结论）
 - ~~P5 DSA 升级 SOP~~ → 已收口（钉四处一致 + `docs/dsa-upgrade.md` + 钩子矩阵 H1–H5 + 防滚动）；**实调用接线仍 defer**（Opt-A，另等口令）
 - MCP / skill 下单；开放交易 scope（`paper:trade` 已不存在，签发与访问双侧拒绝）
 - marketplace 上架 / 签名分发

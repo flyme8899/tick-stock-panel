@@ -118,3 +118,9 @@ reports/cursor_tickflow_pro_rate_limit_p0.bundle
 
 # ===== 研究数据快照（scripts/export_research_snapshot.py 生成，体积大，不入库）=====
 research/_snapshots/
+
+# ===== Kronos 接旧骨架（P6）：权重与门禁记录一律不入库 =====
+# 权重体积大、且与具体 S3 训练产物绑定，只走 docker/kronos 只读挂载。
+data/kronos_weights/
+# 门禁记录由人工按评估结论落盘，进 git 等于把门禁变成可回滚的文本。
+data/kronos/gate.json
