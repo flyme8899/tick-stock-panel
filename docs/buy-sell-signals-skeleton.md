@@ -1462,7 +1462,7 @@ UI 上过期条目不隐藏、不禁用, 只打「数据过期」标。藏起来
 
 - `VOLUME_BREAKOUT_TRIGGERING_ENABLED` 翻 `True`; 真触发; 影子调度; 新 crontab
 - 评估器 / 日管道写 live 命中（命中层本拍**只读**）
-- 命中钉钉推送（P-ding-later, 另口令）
+- ~~命中钉钉推送（P-ding-later, 另口令）~~ → **已由批次 20261027gbssding 交付**（独立 webhook，见下节）
 - P-calib（阈值锁定 + 回测）
 - 三 env（`BUY_SELL_SIGNALS_PERSIST` / `PUSH` / `DINGTALK`）字面量与语义
 - 全 A 范围（N3 另口令）; 精细交易日历（N4 另口令）
@@ -1663,9 +1663,9 @@ freq_lock_fingerprint(signal_id, definition_version, cadence, params) =
   真触发；影子调度；新 crontab；`main` lifespan 自动扫写 hits
 - 清 `threshold_lock_data_pending`（四条 pending 一条不少）
 - 三 env（`BUY_SELL_SIGNALS_PERSIST` / `PUSH` / `DINGTALK`）字面量、真值集合、生产值
-- 命中钉钉推送（P-ding-later，另拍）
+- ~~命中钉钉推送（P-ding-later，另拍）~~ → **已由批次 20261027gbssding 交付**（见下节）
 - 生产路径自动产 `passed`（**没有任何代码路径**会自动写一条 `passed`）
-- 命中钉钉 / Opt-A / #6 / 整包 UX / DecisionWorkspace IA / 竞价·放量实现扩 / 17–19
+- ~~命中钉钉~~ / Opt-A（仍 defer）/ #6 / 整包 UX / DecisionWorkspace IA / 竞价·放量实现扩 / 17–19
 - 精细交易日历（N8，保持 #228 简易规则）
 
 ### 生产可以继续空
@@ -1712,6 +1712,129 @@ freq_lock_fingerprint(signal_id, definition_version, cadence, params) =
 - [x] 响应含只读摘要 `calib_gate: "applied"` + `calib_passed_keys`（只回条数）
 - [x] `/hits/scope` 增 `calib_file` / `calib_file_exists` / `calib_passed_keys`，仍不回明细
 - [x] 既有 #228 命中测 91 条全绿（夹具补 `passed`，属契约收紧的合理连带）
+- [x] 默认不部署；合入另等盘后口令
+
+*仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*
+
+---
+
+## P-ding-later：命中钉钉独立 webhook（批次 20261027gbssding）
+
+> 仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp（本节非回测，仅旁注）。
+
+### 一句话
+
+BSS **命中**的钉钉外发只走独立键 `BUY_SELL_SIGNALS_HITS_DINGTALK_WEBHOOK_URL`（+ 可选
+`BUY_SELL_SIGNALS_HITS_DINGTALK_SECRET`）；只发通过 **publishable ∧ calib_passed**（复用
+`hits_visibility.visible_hits`）的命中；缺这个键就**拒发**，**永不**回落到
+`DINGTALK_WEBHOOK_URL`；推送正文含 symbol / direction_label / 免责，**不含**价格仓位；
+空态「暂无已校准的买卖信号」一个字节都没动。
+
+### 三条钉钉通道，互不相通
+
+定义态、命中、复盘是三条**并列**的链路，不是"新旧版本"。三者的键、门、失败原因全不同：
+
+| 通道 | webhook 来源 | 门 | 拒发原因字符串 |
+|---|---|---|---|
+| 资讯热点等 | `DINGTALK_WEBHOOK_URL` | `NEWS_PUSH_*` | — |
+| BSS **定义状态变更** | `DINGTALK_WEBHOOK_URL` | `PUSH` ∧ `BUY_SELL_SIGNALS_DINGTALK` ∧ URL 非空 | （静默跳过） |
+| DSA 狙击 | `DINGTALK_WEBHOOK_URL` | sniper 前缀 / 冷却 | — |
+| DSA **定时复盘** | `DSA_REVIEW_DINGTALK_WEBHOOK_URL` | #227 日 cap | `review_webhook_not_configured` |
+| **BSS 命中** | **`BUY_SELL_SIGNALS_HITS_DINGTALK_WEBHOOK_URL`** | URL 非空 ∧ 可见性闸 ∧ 非 fixture ∧ 冷却未命中 | `hits_webhook_not_configured` |
+
+为什么命中要单开一个键：命中是**逐股逐日**的，定义变更是一周几次。挂在共群上，一次
+命中批量就足以把"哪条信号被改过状态"刷掉——而后者恰恰更需要人看一眼。宁可运维多一个
+"配了没"的位置，也不能让两种语义抢同一个出口。
+
+### 缺配就是拒发，不是降级
+
+| 条件 | 行为 |
+|---|---|
+| 命中 URL 空 / 全空白 | `hits_webhook_not_configured`，`attempts = 0`，**一个字节都不发** |
+| 旧 `DINGTALK_WEBHOOK_URL` 非空、命中 URL 空 | **仍然拒发**；旧 URL 一次都没被请求 |
+| 命中 URL == 旧 URL | **允许**发送 + `warning`「注意力竞争未解除」（不拒发、不回落） |
+| 命中未过可见性闸 | `not_visible` + 具体 `VisibilityReject` |
+| `source.mode == "fixture"` | `fixture_not_pushable`（测例须显式 `allow_fixture=True`） |
+
+「配好了没」和「该不该发」是两件事。回落到共群会把前者伪装成"配好了"，
+而错发到群里的消息**收不回来**。
+
+### 只发已校准的命中：复用同一道闸，不另写
+
+外发前的判定**直接调** `visible_hits([hit], registry, scope_symbols=..., calib=...)`，
+要求返回恰好 1 条。不在这里另写一套"软闸"，理由是：监控页那道闸和外发这道闸如果要各写
+一遍，总有一天会不一致——而不一致的方向通常是"外发松了"。
+
+命中记录里**没有** `calibrated` 字段（延续 #228 / #231 纪律），本模块也不看任何自述，
+只认独立 `calib.json` 经 `CalibIndex` 给出的 `passed`。
+
+### 挂点：显式调用，不自动扫
+
+`HitStore` 是**只读**协议（只有 `list_all`，无 upsert），生产也没有写 live 命中的代码。
+所以本拍不假装"已接线自动推送"：唯一入口是显式调用 `try_push_hit(hit, registry, calib=...)`。
+
+**明确不做**：新增定时器 / 调度框架 / `lifespan` / `daily_pipeline` 遍历命中表外发；
+在只读 store 里塞写钩伪装自动推；启动时扫盘补发历史命中。
+
+没配 webhook 或没人调用 → 生产**零外发**。这是预期状态，不是缺陷。
+
+### 去重冷却：30 分钟，只在成功后写
+
+去重键 `(signal_id, definition_version, symbol, asof, freq_lock_version)` 五元组。
+少任何一个都会错：少了 `symbol` 把"同一条信号打在不同票上"当一条；少了 `asof` 把
+"昨天命中今天又命中"当重复；少了版本键会让改版/换口径后的新结论被旧冷却挡住。
+
+| 项 | 值 |
+|---|---|
+| 冷却时长 | `HITS_DINGTALK_DEDUPE_COOLDOWN_MIN = 30`（**独立常量**，不共用定义态的 `PUSH_DEDUPE_COOLDOWN_MIN`） |
+| 载体 | 进程内 `dict`（键 → 冷却截止时刻，统一换算到 Asia/Shanghai 比较） |
+| 写冷却时机 | **仅 `send_markdown` 成功后**。失败 / 缺配 / 不可见 **都不写** |
+| 跨重启 | 不持久化；重启后短窗内可能重复一条（可接受，本拍不做） |
+
+失败不写冷却这条是刻意的：一次网络抖动若把冷却写上了，这条命中就会静默 30 分钟，
+而失败恰恰是最该重试的情形。
+
+### 正文边界
+
+| 允许 | 禁止 |
+|---|---|
+| `symbol` / `direction_label` / `signal_id` / `definition_version` / `asof` / `family` / `event_class` / `hit_id` / `DISCLAIMER_TEXT` | 价格 / 数量 / 仓位 / 订单 / 可执行指令 / 模拟盘字段 |
+
+标题前缀是「**买卖信号命中** · {symbol}」，与定义态的「买卖信号 · {display_name}」
+刻意不同——两个通道可能被填成同一个群，群里必须一眼分得清"被命中"和"被改状态"。
+
+### 没有额外 enable 旗标（N3 写死＝不做）
+
+门 = URL strip 后非空 ∧ 可见性闸 ∧ 非 fixture ∧ 冷却未命中。**不加**
+`BUY_SELL_SIGNALS_HITS_DINGTALK_ENABLED`：多一个旗标就多一个"配了但忘了开"的位置。
+对标 #227 复盘通道的既有做法。
+
+### 本拍明确不做
+
+- ~~命中钉钉推送（P-ding-later）~~ → **本拍即 P-ding-later 的交付**
+- 日 cap（N4，另口令）；跨重启冷却持久化
+- 生产第二机器人 webhook 的填值（**部署口令**，本仓只保证缺配拒发）
+- `DSA_REVIEW_*` / 复盘日 cap / `market_review_push` 的任何改写
+- 三 env（`BUY_SELL_SIGNALS_PERSIST` / `PUSH` / `DINGTALK`）字面量、语义、生产值
+- `EMPTY_HITS_MESSAGE` 字面；可见性 AND 语义（只复用，不放松）
+- 两处 `*_TRIGGERING_ENABLED` 翻 `True`；影子调度；新 crontab；lifespan 扫写 hits
+- Opt-A（仍 defer）/ #6 / 整包 UX / IA / 竞价·放量实现扩 / 17–19 / MCP 下单
+
+### 本节验收
+
+- [x] 命中键与三 env 字面量各自钉死；`.env.example` 只有注释掉的空占位
+- [x] 发送目标 == 命中 URL；静态断言 `hits_dingtalk` 中 `dingtalk_webhook_url` 只出现在
+      同群比对函数里，`send_markdown` 第一个实参恒为 `url`
+- [x] 缺配 → `hits_webhook_not_configured`、`attempts=0`、旧 URL 一次都没被请求（含 settings 有值时）
+- [x] candidate / observe / limit_reopen / pending / 无 passed / 缺口径标签 → 全部不外发
+- [x] fixture 默认拒发；`allow_fixture` 仅测例；fixture 门在缺配门之前
+- [x] 正文含 symbol + direction_label + 免责；禁词逐个断言；标题与定义态可区分
+- [x] 定义态 `_emit_dingtalk` 仍打共群 URL；命中模块不引用定义态门常量
+- [x] 命中模块不出现复盘通道符号；本派不涉及复盘文件
+- [x] `EMPTY_HITS_MESSAGE` 字节级不变；命中模块不碰它
+- [x] 两处 `*_TRIGGERING_ENABLED` 仍 `False`；无调度 / 扫表 / 下单痕迹；`HitStore` 仍只读
+- [x] **V1–V12** 全覆盖（缺配拒发 / 发送目标 / 禁回落 / 可见性 / fixture / 空态 / 三 env /
+      复盘零碰 / 无真实凭证 / TRIGGERING / 冷却 / 同 URL warning）
 - [x] 默认不部署；合入另等盘后口令
 
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*

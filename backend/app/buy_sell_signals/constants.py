@@ -273,6 +273,68 @@ EMPTY_HITS_MESSAGE: Final = "暂无已校准的买卖信号"
 """
 
 DIRECTION_LABELS: Final = frozenset({"research_buy", "research_sell", "research_watch"})
+
+# ------------------------------------------------------- 命中钉钉外发(P-ding-later)
+#
+# 三分边界(**本包唯一的钉钉通道分类**, 文档 / 代码 / PR 三处口径必须一致):
+#
+#   1. 定义态(`push.py`):  `DINGTALK_WEBHOOK_URL` + PUSH ∧ BUY_SELL_SIGNALS_DINGTALK 门
+#   2. 命中(本组常量):    `BUY_SELL_SIGNALS_HITS_DINGTALK_WEBHOOK_URL` 独立键, URL 非空即门
+#   3. 复盘(`DSA_REVIEW_*` 系列键): + 日 cap —— 另一条链路, 零碰
+#
+# 为什么命中必须独立一个键(而不是复用 `DINGTALK_WEBHOOK_URL`): 那个键已经被资讯热点、
+# BSS 定义态、DSA 狙击三处共用。命中量和定义变更量不是一个量级 —— 命中是逐股逐日的,
+# 定义变更是一周几次。挂在共群上, 一次命中批量就足以把"哪条信号被改过状态"淹掉, 而
+# 淹掉的恰恰是更需要人看一眼的那类。所以宁可在运维上多一个"配了没"的位置,
+# 也不能让两种语义抢同一个出口。
+#
+# 缺这个键时**拒发**, 不回落共群 —— 回落在配置上看着"更省事", 实际是把"没配"这个
+# 事实伪装成"配好了", 而错发到共群是**发出去就收不回**的。
+
+HITS_DINGTALK_WEBHOOK_ENV_NAME: Final = "BUY_SELL_SIGNALS_HITS_DINGTALK_WEBHOOK_URL"
+"""命中钉钉通道**唯一**的 webhook 环境变量名。
+
+本包内**只有** `hits_dingtalk` 读它。定义态仍读 `DINGTALK_ENV_NAME` 那一套,
+两者不是"新旧版本", 是两条并存的通道。
+"""
+
+HITS_DINGTALK_SECRET_ENV_NAME: Final = "BUY_SELL_SIGNALS_HITS_DINGTALK_SECRET"
+"""命中钉钉的可选加签密钥。留空 = 该机器人未开启加签(与既有 `DINGTALK_SECRET` 同义)。"""
+
+HITS_WEBHOOK_NOT_CONFIGURED: Final = "hits_webhook_not_configured"
+"""缺命中 webhook 时的拒发原因(**机器可读**, 写进日志与结果对象)。
+
+用专有字符串而不是 `not_configured`: 复盘那边已经有一个
+`review_webhook_not_configured`, 两者同时出现在一份日志里时必须一眼分清是哪条通道
+没配 —— 混用同一个字符串会让人去查错的键。
+"""
+
+HITS_DINGTALK_DEDUPE_COOLDOWN_MIN: Final = 30
+"""同一命中 30 分钟内不重复外发(分钟)。
+
+与定义态的 `PUSH_DEDUPE_COOLDOWN_MIN` **同数值但相互独立**: 两者键不同(定义态按
+`signal_id` 冷却, 命中按含 `symbol` / `asof` 的五元组), 载体也不同(定义态记在
+`SignalRecord` 字段上, 命中只存进程内)。共用一个常量会让"调了命中冷却顺手改了
+定义态节奏"这种事故变得可能。
+"""
+
+HITS_DINGTALK_DEDUPE_KEY_FIELDS: Final = (
+    "signal_id",
+    "definition_version",
+    "symbol",
+    "asof",
+    "freq_lock_version",
+)
+"""去重键的字段顺序(**写死**)。
+
+五个字段都在的道理: 少了 `symbol` 会把"同一条信号打在不同票上"当成一条;
+少了 `asof` 会把"昨天命中今天又命中"当成重复; 少了 `definition_version` 或
+`freq_lock_version` 会让改版/换口径后的新结论被旧冷却挡住 —— 而口径变了本来就
+**该**再发一次, 那是新信息。
+
+刻意**不**复用定义态的 `PUSH_DEDUPE_COOLDOWN_FIELD`: 那个记录里没有 `symbol`,
+拿它当命中冷却载体等于把一只票的冷却施加到全市场。
+"""
 """`direction_label` 的**封闭**取值集。
 
 刻意不叫 `direction`、不叫 `side`、不用 `buy` / `sell`: 这三个词在本仓别处指的是
@@ -442,8 +504,13 @@ __all__ = [
     "FREQ_LOCK_CADENCES",
     "FREQ_LOCK_SCHEMA_VERSION",
     "FREQ_LOCK_VERSION",
+    "HITS_DINGTALK_DEDUPE_COOLDOWN_MIN",
+    "HITS_DINGTALK_DEDUPE_KEY_FIELDS",
+    "HITS_DINGTALK_SECRET_ENV_NAME",
+    "HITS_DINGTALK_WEBHOOK_ENV_NAME",
     "HITS_FILENAME",
     "HITS_SCHEMA_VERSION",
+    "HITS_WEBHOOK_NOT_CONFIGURED",
     "HIT_SOURCE_MODES",
     "INDUSTRY_STANDARD_SW_L1",
     "INDUSTRY_STANDARD_THS_CURRENT",
