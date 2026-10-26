@@ -1,8 +1,8 @@
-import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download } from 'lucide-react'
+import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download, Sparkles } from 'lucide-react'
 import {
   api,
   type StrategyBacktestResult,
@@ -24,6 +24,7 @@ import { toNavItems } from '@/lib/listNav'
 import { cnSignal } from '@/lib/signals'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { SignalPicker } from '@/components/screener/SignalPicker'
+import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
@@ -202,6 +203,25 @@ const STRATEGY_GROUPS: { id: StrategyGroup; label: string }[] = [
   { id: 'composite', label: '叠加' },
   { id: 'builtin', label: '内置' },
 ]
+/**
+ * 「叠加」tab 的候选列表 = 现有非 composite 策略。
+ *
+ * 语义翻转（批次 20261026gbtstrat）: 旧实现让「叠加」tab 只列已存的 composite_ 策略,
+ * 用户想叠两个内置策略必须先建一个 composite_ 存下来 —— 与本 tab 的用途相反。
+ * 现在这里列 builtin/custom/ai, 多选后直接当次回测; 已存的 composite_ 仍可从
+ * 「全部 / 内置」里单选跑 (禁嵌套, 不能拿来再叠)。
+ */
+function isOverlayCandidate(st: { id: string; source?: string; execution_backend?: string }): boolean {
+  return st.source !== 'composite'
+    && st.execution_backend !== 'composite'
+    && !String(st.id).startsWith('composite_')
+}
+/** 默认合并模式与 CompositeStrategyDialog / 后端 DEFAULT_MERGE_MODE 三处同值 */
+const DEFAULT_OVERLAY_MERGE_MODE: 'union' | 'intersect' = 'intersect'
+/** 叠加需要至少 2 个子策略: 少于 2 个时不允许点运行 (后端也会 400) */
+const MIN_OVERLAY_CHILDREN = 2
+/** 叠加占位 id, 与后端 app/backtest/overlay.py 的 EPHEMERAL_OVERLAY_STRATEGY_ID 同值 */
+const EPHEMERAL_OVERLAY_STRATEGY_ID = '__ephemeral_overlay__'
 const ADVANCED_TABS: { id: AdvancedSettingsTab; label: string }[] = [
   { id: 'params', label: '策略参数' },
   { id: 'filter', label: '基础过滤' },
@@ -994,6 +1014,12 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
+  /** 「叠加」tab 的多选子策略 (顺序即展示顺序; 权重均等) */
+  const [selectedOverlayIds, setSelectedOverlayIds] = useState<string[]>([])
+  /** 合并模式: 默认 intersect (与后端 DEFAULT_MERGE_MODE / CompositeDialog 同值) */
+  const [overlayMergeMode, setOverlayMergeMode] = useState<'union' | 'intersect'>(DEFAULT_OVERLAY_MERGE_MODE)
+  /** AI 分组自助创建入口: 回测页内挂 Builder, 不跳选股页 */
+  const [showBuilder, setShowBuilder] = useState(false)
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
@@ -1126,9 +1152,21 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     queryFn: () => api.screenerStrategies(assetType, 'all'),
   })
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
-  const filteredStrategyList = useMemo(() => (
-    strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
-  ), [strategyGroup, strategyList])
+  /**
+   * 「叠加」是多选、其余分组是单选, 所以列表数据源要分开算:
+   * - composite 分组: 现有非 composite 策略 (可多选)
+   * - 其它分组: 按 source 过滤 (原行为)
+   * 关键: 绝不能再写成 `source === strategyGroup` —— 那会让「叠加」只列 composite_,
+   * 与用户「把现有策略放上可多选」的口径相反。
+   */
+  const filteredStrategyList = useMemo(() => {
+    if (strategyGroup === 'composite') {
+      return strategyList.filter(isOverlayCandidate)
+    }
+    return strategyGroup === 'all'
+      ? strategyList
+      : strategyList.filter(st => st.source === strategyGroup)
+  }, [strategyGroup, strategyList])
   // 校验 localStorage 里保存的上次选中策略是否仍存在(本地开发残留的自定义策略
   // 拉新代码后会失效,导致 strategyGet 一直 404/加载中)。列表就绪后若失效,
   // 连带清除其专属的 params/overrides/result(这些是该策略的运行配置/产物,
@@ -1263,8 +1301,91 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     }
   }, [backtestTask])
 
+  // ── AI 自助创建 (回测页内闭环, 不跳选股页) ──
+  /**
+   * Builder 保存后的收尾:
+   * 1) 强制刷新策略列表 (staleTime:0, 不等缓存过期) —— 否则新策略不会出现在 AI 分组;
+   * 2) 切到 AI 分组并选中它, 用户可以直接点运行;
+   * 3) 若仍是 research_only 草稿: 在回测侧就地发布。不这么做的话用户为了回测一个新
+   *    生成的 AI 策略还得跑去选股页策略池点发布 —— 那就是"逼用户跨页"。
+   *    发布失败不静默: 抛给 Builder 显示错误, 并额外 toast 提示草稿仍可用。
+   */
+  const handleBuilderSaved = useCallback(async (id: string, researchOnly?: boolean) => {
+    const data = await queryClient.fetchQuery({
+      queryKey: QK.screenerStrategies(assetType, 'all'),
+      queryFn: () => api.screenerStrategies(assetType, 'all'),
+      staleTime: 0,
+    })
+    if (researchOnly) {
+      try {
+        await api.strategyPublish(id)
+        toast('AI 策略已发布, 可直接回测', 'success')
+        await queryClient.fetchQuery({
+          queryKey: QK.screenerStrategies(assetType, 'all'),
+          queryFn: () => api.screenerStrategies(assetType, 'all'),
+          staleTime: 0,
+        })
+      } catch (e) {
+        // 发布失败不是"没保存": 策略已在仓里, 只是还没公开。如实说明, 不假装成功。
+        toast(`AI 策略已保存为草稿，但自动发布失败：${String((e as Error)?.message || e)}`, 'error')
+      }
+    }
+    if (!data.presets.some(s => s.id === id)) {
+      throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
+    }
+    setStrategyGroup('ai')
+    setSelectedStrategy(id)
+  }, [assetType, queryClient])
+
+  /** 叠加子策略 -> 请求载荷 (等权; 权重不在前端归一, 由合并器处理) */
+  const overlayChildren = useMemo(
+    () => selectedOverlayIds.map(id => ({ strategy_id: id, weight: 1 })),
+    [selectedOverlayIds],
+  )
+  const overlayActive = strategyGroup === 'composite'
+  const overlayReady = overlayActive && selectedOverlayIds.length >= MIN_OVERLAY_CHILDREN
+
+  const toggleOverlay = (id: string) => {
+    setSelectedOverlayIds(prev => (
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    ))
+  }
+
   const handleRun = () => {
-    if (!selectedStrategy || backtestDataUnavailable) return
+    if (backtestDataUnavailable) return
+    if (overlayActive) {
+      // 叠加: 子策略 >=2 才发; strategy_id 传占位 (服务端会覆盖成同一个值),
+      // merge_mode 由用户切换决定 (默认 intersect), 权重均等。
+      if (!overlayReady) return
+      startBacktest({
+        strategy_id: EPHEMERAL_OVERLAY_STRATEGY_ID,
+        overlay_children: overlayChildren,
+        merge_mode: overlayMergeMode,
+        asset_type: assetType,
+        symbols: symbols ? symbols.split(',').map(s => s.trim()).filter(Boolean) : null,
+        start: start || null,
+        end: end || undefined,
+        matching,
+        entry_fill: entryFill,
+        exit_fill: exitFill,
+        commission_pct: Number(fees) / 10000,
+        stamp_tax_pct: Number(stampTax) / 1000,
+        slippage_bps: Number(slippage),
+        volume_limit: volumeLimitPct.trim() === '' ? null : Number(volumeLimitPct) / 100,
+        benchmark_symbol: benchmarkSymbol,
+        max_positions: Number(maxPositions),
+        max_exposure_pct: Number(maxExposure) / 100,
+        initial_capital: Number(initialCapital),
+        position_sizing: positionSizing,
+        // 叠加不带单个策略的 params/overrides: 子策略各自的 override 由服务端加载,
+        // 把当前选中策略的配置塞进去会串到某一个子策略上。
+        mode: simMode,
+        holding_days: Number(holdingDays) || 5,
+        minute_fill: highGranularity,
+      })
+      return
+    }
+    if (!selectedStrategy) return
     const requestOverrides = detail
       ? normalizeStrategyOverrides(detail, overrides)
       : overrides
@@ -1297,6 +1418,11 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             ...(regimeMinScore !== '' ? { min_score: Number(regimeMinScore) } : {}),
           }
         : null,
+      // 单选路径显式清空叠加字段: 用户多选完再切回单选时, 残留的 overlay_children
+      // 会让后端跑成叠加 —— 那是最难察觉的一类串味。
+      overlay_children: null,
+      merge_mode: undefined,
+      min_confirm: undefined,
     })
   }
 
@@ -1773,34 +1899,98 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 </button>
               ))}
             </div>
+            {/*
+              「叠加」tab 的头部: 说明 + 合并模式切换 + 已选计数。
+              空态也在这一行处理 —— 有可选策略时绝不显示"当前分组暂无策略" (N4 禁伪空)。
+            */}
+            {overlayActive && (
+              <div
+                data-overlay-toolbar
+                className="flex flex-wrap items-center gap-1.5 border-b border-border/40 bg-base/20 px-1.5 py-1"
+              >
+                <span className="text-[10px] text-muted">
+                  勾选 {MIN_OVERLAY_CHILDREN} 个以上现有策略，当次合成回测（不落盘）
+                </span>
+                <div className="ml-auto flex items-center gap-0.5 rounded-btn bg-elevated/70 p-0.5">
+                  {(['intersect', 'union'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      type="button"
+                      data-overlay-merge-mode={mode}
+                      aria-pressed={overlayMergeMode === mode}
+                      onClick={() => setOverlayMergeMode(mode)}
+                      className={`rounded-[5px] px-1.5 py-0.5 text-[10px] transition-colors ${overlayMergeMode === mode
+                        ? 'bg-accent/15 text-accent'
+                        : 'text-muted hover:text-secondary'
+                      }`}
+                    >
+                      {mode === 'intersect' ? '交集' : '并集'}
+                    </button>
+                  ))}
+                </div>
+                <span data-overlay-count className="text-[10px] tabular-nums text-muted">
+                  已选 {selectedOverlayIds.length}
+                </span>
+              </div>
+            )}
             <div className="flex max-h-[128px] flex-wrap gap-1 overflow-y-auto p-1">
             {strategies.isLoading && (
               <span className="text-xs text-muted px-2 py-1">加载中…</span>
             )}
-            {!strategies.isLoading && filteredStrategyList.length === 0 && (
-              <span className="text-xs text-muted px-2 py-1">当前分组暂无策略</span>
-            )}
-            {filteredStrategyList.map(st => (
+            {/*
+              AI 分组: 用户自助创建/生成入口。始终可见 (不只空态),
+              因为空态时它就是唯一的出路。弹层挂在回测页内, 不跳选股页。
+            */}
+            {!strategies.isLoading && strategyGroup === 'ai' && (
               <button
-                key={st.id}
-                onClick={() => setSelectedStrategy(st.id)}
-                className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer
-                  ${selectedStrategy === st.id
-                    ? 'border-accent/50 bg-accent/10 text-accent shadow-[0_0_10px_rgba(59,130,246,0.1)]'
-                    : 'border-border bg-base text-secondary hover:border-accent/40'
-                  }`}
+                type="button"
+                data-ai-create-entry
+                onClick={() => setShowBuilder(true)}
+                className="flex items-center gap-1 rounded-btn border border-amber-400/40 bg-amber-400/10 px-2 py-1 text-[11px] font-medium text-amber-400 transition-colors hover:border-amber-400/70"
               >
-                <span className="font-medium">{st.name}</span>
-                {st.timeframes?.includes('1m') && (
-                  <span className="ml-1 text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
-                )}
-                {st.source && st.source !== 'builtin' && (
-                  <span className={`ml-1 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[st.source] ?? ''}`}>
-                    {SRC_MAP[st.source] ?? ''}
-                  </span>
-                )}
+                <Sparkles className="h-3 w-3" />
+                创建策略 · AI
               </button>
-            ))}
+            )}
+            {/* 空态: 叠加分组有候选却无列表才是真异常; AI 分组已由上面的入口兜住 */}
+            {!strategies.isLoading && filteredStrategyList.length === 0 && !(strategyGroup === 'ai') && (
+              <span className="text-xs text-muted px-2 py-1">
+                {strategyGroup === 'composite' ? '策略池为空，先创建或载入策略后再叠加' : '当前分组暂无策略'}
+              </span>
+            )}
+            {filteredStrategyList.map(st => {
+              const overlayPicked = overlayActive && selectedOverlayIds.includes(st.id)
+              return (
+                <button
+                  key={st.id}
+                  type="button"
+                  data-strategy-id={st.id}
+                  data-overlay-picked={overlayActive ? overlayPicked : undefined}
+                  onClick={() => {
+                    if (overlayActive) toggleOverlay(st.id)
+                    else setSelectedStrategy(st.id)
+                  }}
+                  className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer
+                    ${(overlayActive ? overlayPicked : selectedStrategy === st.id)
+                      ? 'border-accent/50 bg-accent/10 text-accent shadow-[0_0_10px_rgba(59,130,246,0.1)]'
+                      : 'border-border bg-base text-secondary hover:border-accent/40'
+                    }`}
+                >
+                  {overlayActive && (
+                    <span className="mr-1 text-[10px] tabular-nums text-muted">{overlayPicked ? '✓' : '+'}</span>
+                  )}
+                  <span className="font-medium">{st.name}</span>
+                  {st.timeframes?.includes('1m') && (
+                    <span className="ml-1 text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
+                  )}
+                  {st.source && st.source !== 'builtin' && (
+                    <span className={`ml-1 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[st.source] ?? ''}`}>
+                      {SRC_MAP[st.source] ?? ''}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
             </div>
           </div>
         </div>
@@ -2092,7 +2282,16 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         ) : (
           <button
             onClick={handleRun}
-            disabled={!selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable}
+            data-run-disabled-reason={
+              overlayActive
+                ? (overlayReady ? undefined : `叠加需至少 ${MIN_OVERLAY_CHILDREN} 个子策略`)
+                : undefined
+            }
+            disabled={
+              overlayActive
+                ? !overlayReady || backtestDataUnavailable
+                : !selectedStrategy || strategyDetail.isLoading || backtestDataUnavailable
+            }
             className="group w-full inline-flex items-center justify-center gap-2.5 rounded-btn border border-accent/40
               bg-gradient-to-r from-accent to-blue-500 px-3 py-2.5 text-white shadow-[0_10px_24px_rgba(59,130,246,0.22)]
               transition-all duration-150 ease-smooth hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(59,130,246,0.28)]
@@ -2101,8 +2300,15 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/18 ring-1 ring-white/25 transition-transform group-hover:scale-105">
               <Play className="h-3.5 w-3.5 translate-x-px fill-current" />
             </span>
-            <span className="text-sm font-semibold tracking-wide">运行回测</span>
+            <span className="text-sm font-semibold tracking-wide">
+              {overlayActive ? '运行叠加回测' : '运行回测'}
+            </span>
           </button>
+        )}
+        {overlayActive && !overlayReady && (
+          <p className="mt-1 text-center text-[10px] text-muted">
+            叠加至少选 {MIN_OVERLAY_CHILDREN} 个策略；只跑一个请切到对应分组单选
+          </p>
         )}
       </section>
 
@@ -2394,11 +2600,20 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                     </span>
                   )}
                 </div>
-                {/* 叠加策略: 子策略构成归因 */}
+                {/* 叠加策略: 子策略构成归因。ephemeral_overlay 标记表示当次多选合成 (未落盘) */}
                 {result.strategy_info.composite_children && result.strategy_info.composite_children.length > 0 && (
-                  <div className="flex items-center gap-1.5 flex-wrap">
+                  <div className="flex items-center gap-1.5 flex-wrap" data-overlay-attribution>
                     <Layers className="h-3 w-3 text-teal-400 shrink-0" />
-                    <span className="text-[10px] text-muted">叠加 {result.strategy_info.composite_children.length} 策略</span>
+                    <span className="text-[10px] text-muted">
+                      叠加 {result.strategy_info.composite_children.length} 策略
+                      {result.strategy_info.merge_mode === 'intersect' ? '（交集）' : ''}
+                      {result.strategy_info.merge_mode === 'union' ? '（并集）' : ''}
+                    </span>
+                    {result.strategy_info.ephemeral_overlay && (
+                      <span className="text-[9px] px-1 py-px rounded border border-amber-400/30 bg-amber-400/10 text-amber-400">
+                        当次（未落盘）
+                      </span>
+                    )}
                     {result.strategy_info.composite_children.map(c => (
                       <span key={c.id} className="text-[9px] px-1.5 py-px rounded border border-teal-500/25 bg-teal-500/10 text-teal-400">
                         {c.id}<span className="text-teal-400/60 ml-0.5">{(c.weight * 100).toFixed(0)}%</span>
@@ -3234,6 +3449,16 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         navList={picksNavItems}
         onNavigate={(sym) => setChartOverlay({ kind: 'symbol', symbol: sym })}
         onClose={() => setChartOverlay(null)}
+      />
+      {/*
+        AI 自助创建: 复用 StrategyBuilderDialog 的 build → save (+publish) 全链路,
+        弹层挂在回测页内。不路由到 /screener —— 用户在这页就能把策略生出来并直接回测。
+      */}
+      <StrategyBuilderDialog
+        open={showBuilder}
+        onClose={() => setShowBuilder(false)}
+        mode="create"
+        onSavedId={handleBuilderSaved}
       />
     </div>
   )

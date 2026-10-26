@@ -2034,6 +2034,11 @@ export interface StrategyBacktestResult {
     execution_backend?: string
     // 叠加策略回测: 子策略构成与权重归因
     composite_children?: { id: string; weight: number }[]
+    /** 当次多选合成的临时叠加 (未落盘); 已存 composite_ 无此标记 */
+    ephemeral_overlay?: boolean
+    /** 叠加合并模式; 仅 ephemeral_overlay 时下发 */
+    merge_mode?: 'union' | 'intersect'
+    min_confirm?: number
   }
   elapsed_ms: number
   error: string | null

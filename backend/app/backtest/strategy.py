@@ -630,6 +630,13 @@ class StrategyBacktestConfig:
     volume_limit: float | None = None
     # 超额与相对指标使用的指数。默认上证, 避免静默改掉既有超额口径。
     benchmark_symbol: str = BENCHMARK_SYMBOL
+    # ── 回测当次临时叠加 (ephemeral overlay, 不落盘) ──
+    # 非空即走叠加路径: 服务端在内存合成 execution_backend="composite" 的定义,
+    # strategy_id 被替换成占位 __ephemeral_overlay__; 至少 2 个子策略。
+    # 见 app/backtest/overlay.py 的模块说明 (口径钉死处)。
+    overlay_children: list[dict] | None = None
+    merge_mode: Literal["union", "intersect"] = "intersect"
+    min_confirm: int = 0
 
     def __post_init__(self) -> None:
         if self.entry_fill is None:
@@ -642,6 +649,12 @@ class StrategyBacktestConfig:
             allowed = "、".join(BENCHMARK_NAMES)
             raise ValueError(f"基准指数仅支持 {allowed}")
         self.benchmark_symbol = symbol
+        if self.overlay_children:
+            # 走叠加路径时忽略请求里的 strategy_id, 统一换成占位 id: 否则前端传的 id
+            # 和合成 id 会形成两个真源, 日志/归因里分不清哪个是真的。
+            from app.backtest.overlay import EPHEMERAL_OVERLAY_STRATEGY_ID
+
+            self.strategy_id = EPHEMERAL_OVERLAY_STRATEGY_ID
 
 
 @dataclass
@@ -1116,6 +1129,34 @@ class StrategyBacktestService:
             compute_cache=compute_cache,
         )
 
+    def _ensure_overlay_registered(self, config: StrategyBacktestConfig) -> None:
+        """有 `overlay_children` 时在本次引擎里合成 ephemeral 叠加策略。
+
+        放在 service.run() 内部的唯一原因: 真正跑回测的是 worker 子进程, 子进程按
+        `_strategy_dirs` 重新 `StrategyEngine(...)` 从磁盘加载。所以合成必须发生在
+        "将要执行回测的那个引擎" 上, 而不是 API 进程的引擎上 —— 在 API 侧合成的话
+        子进程里 `get()` 会直接 unknown strategy。
+
+        不落盘、不 reload: 只往该引擎实例的注册表塞一个 StrategyDef, 进程结束即消失。
+        非法参数抛 OverlaySpecError, 由 run() 的 except ValueError 转成回测 error。
+        """
+        if not config.overlay_children:
+            return
+        from app.backtest.overlay import build_overlay_spec, register_overlay
+
+        spec = build_overlay_spec(
+            overlay_children=config.overlay_children,
+            merge_mode=config.merge_mode,
+            min_confirm=config.min_confirm,
+        )
+        if spec.strategy_id != config.strategy_id:
+            # __post_init__ 已钉死; 这里再兜一次, 防止有人手工构造 config 绕过。
+            raise ValueError(
+                f"叠加回测的 strategy_id 必须是 {spec.strategy_id!r}, "
+                f"当前 {config.strategy_id!r}"
+            )
+        register_overlay(self.strategy_engine, spec)
+
     def run(
         self,
         config: StrategyBacktestConfig,
@@ -1140,6 +1181,7 @@ class StrategyBacktestService:
 
         # 获取策略定义
         try:
+            self._ensure_overlay_registered(config)
             s = self.strategy_engine.get(config.strategy_id)
             StrategyEngine.validate_context(
                 s,
@@ -1456,8 +1498,15 @@ class StrategyBacktestService:
                 else None
             )
 
-            merge_mode = str(params.get("merge_mode") or "union")
-            min_confirm = int(params.get("min_confirm") or 0)
+            # ephemeral overlay 的合并模式来自配置 (请求字段), 落盘 composite 来自 params。
+            # 两者都不传时用法与落盘 composite 一致的默认 (union) —— 不改既有行为。
+            _is_ephemeral = bool(config.overlay_children)
+            if _is_ephemeral:
+                merge_mode = config.merge_mode
+                min_confirm = int(config.min_confirm or 0)
+            else:
+                merge_mode = str(params.get("merge_mode") or "union")
+                min_confirm = int(params.get("min_confirm") or 0)
             # max_hold 用于退出投影窗口封顶; 无值时给一个足够大的兜底(仅靠信号退出)。
             composite_max_hold = max(int(max_hold_days or 0), 1) if max_hold_days else 250
             try:
@@ -1816,7 +1865,18 @@ class StrategyBacktestService:
                             "weight": cw,
                         }
                         for cid, cw in getattr(self, "_composite_children_weights", [])
-                    ]
+                    ],
+                    # ephemeral overlay 额外标注: 让前端/日志能区分"当次多选合成"与
+                    # "已存 composite_ 落盘策略", 两者形态一样但不能混为一谈。
+                    **(
+                        {
+                            "ephemeral_overlay": True,
+                            "merge_mode": config.merge_mode,
+                            "min_confirm": int(config.min_confirm or 0),
+                        }
+                        if config.overlay_children
+                        else {}
+                    ),
                 }
                 if s.execution_backend == "composite"
                 else {}
