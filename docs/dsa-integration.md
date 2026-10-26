@@ -442,7 +442,7 @@ sidecar 启动时，如果 `OPENAI_API_KEY` 为空且 TSP 已配置 `AI_API_KEY`
 ## 还没接上的部分
 
 - DSA 的 Web / 桌面皮肤不会作为第二个产品出现。
-- 上游测试、评测集和文档配图没有放进快照。升级时按 `VENDOR.md` 里的提交重新同步。
+- 上游测试、评测集和文档配图没有放进快照。升级时按 `VENDOR.md` 里的提交重新同步；逐步流程（选定 commit → 同步 → 四处钉 → 重建 → 钩子矩阵 → 推送/health → changelog）见 [dsa-upgrade.md](./dsa-upgrade.md)，本仓不跟随上游滚动更新。
 - 决策信号在 `ADMIN_AUTH_ENABLED=true` 时还要上游登录态。配置 `DSA_PASSWORD` 后转发层会自动登录并在会话过期前刷新；未配置时仍只转发 `DSA_UPSTREAM_COOKIE`。
 - 只跑 `scripts/dsa.sh` 创建的 Python 虚拟环境时，系统里若没有 `wkhtmltoimage` 和中文字体，分享图会在页面上提示失败。Docker 镜像已经带上这两个依赖。
 - AlphaSift、AlphaEvo 是 DSA 文档提到的相关项目，不属于这次快照。
