@@ -37,6 +37,8 @@ import {
   dsaUpstream,
   fetchDsaCatalog,
   fetchDsaQuantEvidence,
+  fetchDsaLedgerAudit,
+  type DsaLedgerAudit,
   type DsaQuantEvidence,
   fetchDsaSchedule,
   fetchDsaStatus,
@@ -93,6 +95,15 @@ const SECTIONS = [
 type SectionId = (typeof SECTIONS)[number]['id']
 
 const primaryBtn = 'inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs text-white shadow-sm shadow-accent/25 hover:bg-accent/90 disabled:opacity-50'
+/**
+ * 上游回测 / 纸面战绩未过 TSP 审计时的固定徽章（P-ledger A7）。
+ *
+ * 这个字符串是**契约**：后端 `ledger_audit.TSP_AUDIT_BADGE` 是同一句，
+ * `gdsaledgerIsolation.test.ts` 会钉住两边一致。审计状态未翻转前，
+ * 任何展示上游结算数字的地方都要带它。
+ */
+export const TSP_AUDIT_BADGE = '未经 TSP 审计'
+
 const ghostBtn = 'inline-flex h-8 items-center gap-1.5 rounded-btn bg-elevated px-3 text-xs text-secondary hover:text-foreground disabled:opacity-50'
 const fieldCls = 'h-8 rounded-btn border border-border bg-base px-2.5 text-xs text-foreground outline-none focus:border-accent'
 
@@ -502,6 +513,16 @@ export function QuantEvidencePanel({
       {open && (
         <div className="border-t border-border px-4 py-3">
           <Notice>{data.caveat}</Notice>
+          {data.expired && (
+            <p data-quant-expired className="mt-2 text-[11px] leading-relaxed text-secondary">
+              证据已过期（as_of {data.meta.freshness?.as_of || '—'}，{data.meta.freshness?.reason || '过期'}），不再注入技能提示。
+            </p>
+          )}
+          {!data.expired && data.sample_below_threshold && data.skills.length > 0 && (
+            <p data-quant-sample-below className="mt-2 text-[11px] leading-relaxed text-secondary">
+              样本量不足门槛（{data.min_sample_for_guidance ?? 100}），这些数字只作方向参考，不注入技能提示。
+            </p>
+          )}
           <ul className="mt-3 space-y-2">
             {data.skills.map(skill => (
               <li key={skill.name} className="text-xs leading-relaxed text-secondary">
@@ -524,6 +545,98 @@ export function QuantEvidencePanel({
       )}
     </section>
   )
+}
+
+export function LedgerAuditPanel({ data }: { data: DsaLedgerAudit }) {
+  const summary = data.summary
+  const badge = summary.badge || TSP_AUDIT_BADGE
+  if (!data.available) {
+    return (
+      <Panel title="证据账本审计" hint="读上游 backtest_results（只读）。取不到账本时不显示任何比率。">
+        <Notice>
+          {badge} · {summary.unavailable_reason || '账本暂不可读'}
+        </Notice>
+      </Panel>
+    )
+  }
+  return (
+    <Panel
+      title="证据账本审计"
+      hint="上游 backtest_results 的只读视图。分母已排除不可成交与中性样本；样本不足时不给百分比。"
+      extra={<span data-tsp-audit-badge className="rounded-btn bg-elevated px-2 py-1 text-[11px] text-secondary">{badge}</span>}
+    >
+      <dl data-ledger-summary className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {[
+          ['样本', `${summary.rows_total}`],
+          ['计入分母', `${summary.denominator}`],
+          ['不可成交', `${summary.unfillable_count}`],
+          ['排除', `${summary.excluded_from_denominator}`],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-lg border border-border bg-base px-3 py-2">
+            <dt className="text-[11px] text-muted">{label}</dt>
+            <dd className="num text-sm text-foreground">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-2 text-[11px] leading-relaxed text-muted">
+        {summary.win_rate_pct == null
+          ? `样本不足（门槛 ${summary.min_sample_for_percent}），不对外给胜率百分比。`
+          : `胜率 ${summary.win_rate_pct.toFixed(2)}%。`}
+        红为赢、绿为负（红涨绿跌）。
+      </p>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted">
+        入场口径：{summary.entry_basis.join('；') || '—'}
+      </p>
+      {data.rows.length > 0 && (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full min-w-[30rem] text-left text-xs">
+            <thead className="text-muted">
+              <tr>
+                <th className="py-1 pr-3 font-normal">代码</th>
+                <th className="py-1 pr-3 font-normal">结果</th>
+                <th className="py-1 pr-3 font-normal">收盘入场</th>
+                <th className="py-1 pr-3 font-normal">次日开盘</th>
+                <th className="py-1 font-normal">分母</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.slice(0, 20).map(row => (
+                <tr key={`${row.code}-${row.analysis_history_id}`} className="border-t border-border">
+                  <td className="py-1 pr-3 font-mono text-foreground">{row.code}</td>
+                  <td className={cn('py-1 pr-3', priceColorClass(row.outcome === 'win' ? 1 : row.outcome === 'loss' ? -1 : 0))}>
+                    {row.outcome || '—'}
+                  </td>
+                  <td className="num py-1 pr-3 text-secondary">{row.entry_close ?? '—'}</td>
+                  <td className="num py-1 pr-3 text-secondary">{row.entry_next_open ?? '未注入'}</td>
+                  <td className="py-1 text-muted">{row.in_denominator ? '计入' : row.unfillable ? '不可成交' : '不计入'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {data.audit_items && data.audit_items.length > 0 && (
+        <ul data-ledger-audit-items className="mt-3 space-y-1">
+          {data.audit_items.map(item => (
+            <li key={item.id} className="text-[11px] leading-relaxed text-muted">
+              <span className="font-mono text-foreground">{item.id}</span> {item.title} · {item.state}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  )
+}
+
+function LedgerAudit() {
+  const query = useQuery({
+    queryKey: ['dsaLedgerAudit'],
+    queryFn: fetchDsaLedgerAudit,
+    staleTime: 300_000,
+    retry: false,
+  })
+  if (!query.data) return null
+  return <LedgerAuditPanel data={query.data} />
 }
 
 function QuantEvidence() {
@@ -1636,7 +1749,7 @@ function DecisionBacktest({ reachable, initialCode }: { reachable: boolean; init
     }),
   })
   return (
-    <Panel title="决策回测" hint="用分析之后的行情给历史建议打分。策略页的 T+1 回测不从这里进入。">
+    <Panel title="决策回测" hint="用分析之后的行情给历史建议打分。策略页的 T+1 回测不从这里进入。" extra={<span data-tsp-audit-badge className="rounded-btn bg-elevated px-2 py-1 text-[11px] text-secondary">{TSP_AUDIT_BADGE}</span>}>
       <form className="flex gap-2" onSubmit={event => { event.preventDefault(); run.mutate() }}>
         <input className={cn(fieldCls, 'w-36 font-mono')} value={code} placeholder="留空为全部" onChange={event => setCode(event.target.value)} aria-label="回测代码" />
         <button className={primaryBtn} type="submit" disabled={!reachable || run.isPending}>评估历史建议</button>
@@ -1648,6 +1761,9 @@ function DecisionBacktest({ reachable, initialCode }: { reachable: boolean; init
           <RawJson data={run.data} />
         </>
       )}
+      <div className="mt-4">
+        <LedgerAudit />
+      </div>
     </Panel>
   )
 }

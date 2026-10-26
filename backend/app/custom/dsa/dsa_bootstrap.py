@@ -54,6 +54,8 @@ def _ensure_dsa_import_path() -> None:
 
 
 def _wrap(original, renderer):
+    skipped: list[str] = []
+
     def wrapped(filepath):
         skill = original(filepath)
         if not _evidence_enabled():
@@ -63,14 +65,24 @@ def _wrap(original, renderer):
                 skill.name,
                 Path(os.environ["TSP_QUANT_EVIDENCE_FILE"].strip()),
             )
-        except Exception:  # noqa: BLE001 - 证据失败不能挡住技能加载
+        except Exception:
             logger.debug("量化证据未追加到 %s", getattr(skill, "name", ""), exc_info=True)
             return skill
         if note and "**量化回测参考**" not in (skill.instructions or ""):
             skill.instructions = f"{skill.instructions.rstrip()}\n\n{note}"
+        elif not note:
+            # 过期或样本不足 → renderer 已返回空串。这里显式记一笔，
+            # 免得「没注入」和「没有这条证据」在日志里长得一样（禁假绿）。
+            name = getattr(skill, "name", "")
+            skipped.append(name)
+            logger.info(
+                "量化证据未追加到 %s：过期或样本不足（已跳过，不追加空段落）",
+                name,
+            )
         return skill
 
     wrapped._tsp_quant_evidence = True  # type: ignore[attr-defined]
+    wrapped._tsp_skipped = skipped  # type: ignore[attr-defined]
     return wrapped
 
 

@@ -86,13 +86,77 @@ export interface DsaQuantEvidence {
     universe: number | null
     benchmark_return: string
     updated: string
+    as_of?: string
+    env_label?: string
+    expires_on?: string
+    l5_entry_exit_status?: string
+    env_label_missing?: boolean
+    freshness?: {
+      as_of: string
+      expires_on: string
+      age_days: number | null
+      expiry_days: number
+      expired: boolean
+      reason: string
+    }
   }
   caveat: string
   skills: DsaQuantSkill[]
+  expired?: boolean
+  sample_below_threshold?: boolean
+  min_sample_for_guidance?: number
 }
 
 export function fetchDsaQuantEvidence(): Promise<DsaQuantEvidence> {
   return fetch('/api/dsa/quant-evidence').then(res => parse<DsaQuantEvidence>(res))
+}
+
+/**
+ * P-ledger 证据账本审计视图（只读）。
+ *
+ * `audit_status` 恒 `unaudited` —— 上游 `backtest_results` 尚未通过 TSP 审计，
+ * 展示面必须带「未经 TSP 审计」。`win_rate_pct` 为 `null` 时表示样本不足，
+ * 前端不得自行算一个百分比顶上。
+ */
+export interface DsaLedgerAuditRow {
+  analysis_history_id: number
+  code: string
+  outcome: string
+  entry_close: number | null
+  entry_next_open: number | null
+  entry_gap_pct: number | null
+  entry_basis: string
+  unfillable: string | null
+  in_denominator: boolean
+  source: string
+  source_note: string
+  simulated_return_pct: number | null
+}
+
+export interface DsaLedgerAudit {
+  available: boolean
+  summary: {
+    audit_status: string
+    badge: string
+    rows_total: number
+    denominator: number
+    wins: number
+    losses: number
+    excluded_from_denominator: number
+    unfillable_count: number
+    entry_basis: string[]
+    win_rate_pct: number | null
+    sample_below_threshold: boolean
+    min_sample_for_percent: number
+    unavailable_reason: string
+  }
+  rows: DsaLedgerAuditRow[]
+  sources: Record<string, string>
+  audit_items?: { id: string; title: string; state: string; detail: string }[]
+}
+
+export function fetchDsaLedgerAudit(): Promise<DsaLedgerAudit> {
+  return fetch('/api/dsa/ledger-audit').then(res => parse<DsaLedgerAudit>(res))
 }
 
 export function dsaUpstream<T>(path: string, init?: RequestInit): Promise<T> {

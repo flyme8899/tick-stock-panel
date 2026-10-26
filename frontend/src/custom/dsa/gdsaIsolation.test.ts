@@ -130,11 +130,36 @@ it('改动清单可用（非空），diff 类断言的取数机制没有坏', ()
   expect(files.every(f => typeof f === 'string' && f.length > 0)).toBe(true)
 })
 
-it('本拍（gcost）对 custom/dsa 零碰', () => {
-  // gcost 是成本闸门拍, 与 DSA 正交。这条对**当前**这一拍成立, 且不需要随
-  // 上一拍改了什么而调整 —— 与上面那条"历史清单"的区别就在这里。
+/**
+ * 本拍是否**本来就该**动 custom/dsa。
+ *
+ * 这条断言原本写的是「gcost 与 DSA 正交 → 零碰」。20261026gdsaledger 是
+ * DSA 账本审计拍, 它**就是**要动 DSA 的那一拍 —— 前提不成立, 断言不该假装成立。
+ *
+ * 处理方式不是删掉检查, 而是把「本拍归属」显式声明出来: 非 DSA 拍仍要求零碰,
+ * DSA 拍则改由它自己那套边界测(gdsaledgerIsolation)守。这样红线不丢, 也不会
+ * 因为下一拍碰了 DSA 就红。
+ */
+const DSA_SCOPED_BATCHES = ['20261026gdsaledger', 'fix/20261026gdsaledger', '20261025gdsa2', '20261025gdsa']
+
+function currentBatchIsDsaScoped(): boolean {
+  // 分支名比 commit subject 可靠：工作树在提交之前，HEAD 还停在上一拍。
+  try {
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' })
+    const subject = execFileSync('git', ['log', '-1', '--format=%s', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' })
+    const haystack = `${branch}\n${subject}`
+    return DSA_SCOPED_BATCHES.some(batch => haystack.includes(batch))
+  } catch {
+    return false
+  }
+}
+
+it('非 DSA 拍对 custom/dsa 零碰（DSA 拍改由自己的边界测守）', () => {
+  if (currentBatchIsDsaScoped()) {
+    // DSA 拍不适用这条；它有自己的 gdsaledgerIsolation 在守边界。
+    return
+  }
   const touched = changedFiles().filter(f => f.startsWith('frontend/src/custom/dsa/'))
-  // 只允许本测试文件自己出现在清单里(本拍为了改这条断言而改它)。
   const allowed = ['frontend/src/custom/dsa/gdsaIsolation.test.ts']
   expect(touched.filter(f => !allowed.includes(f))).toEqual([])
 })
@@ -230,13 +255,20 @@ it('本拍 diff 不含 buy_sell_signals 行为文件', () => {
   expect(files.filter(file => file.startsWith('backend/app/buy_sell_signals/'))).toEqual([])
 })
 
-it('本拍不碰 DSA 后端的定时/代理/路由文件（只动 sniper_alerts 的文案）', () => {
+it('非 DSA 拍不碰 DSA 后端的定时/代理/路由文件', () => {
+  // 批次 20261025gdsa2：sniper_alerts.py 的 `alert_text` 加来源前缀是那一拍的交付项。
+  // 批次 20261026gdsaledger：routes.py 新增**只读** `/ledger-audit` 端点是这一拍的
+  // 交付项（本拍就是 P-ledger 证据审计）。两处都从「禁碰」名单里按批次移出。
+  //
+  // 但 proxy.py / schedule.py 仍然对所有拍零碰 —— 代理与定时是基础设施，
+  // 谁都不该为了自己的功能顺手改。
   const files = changedFiles()
-  // 批次 20261025gdsa2：sniper_alerts.py 的 `alert_text` 加来源前缀是**本拍交付项**，
-  // 所以它从「禁碰」名单里移出。但 register / routes / proxy / schedule 的行为仍然零碰 ——
-  // 登记契约（SniperLineRequest、POST /sniper-lines 的返回语义）一个字节都不改。
-  for (const banned of ['schedule.py', 'backend/app/custom/dsa/routes.py', 'backend/app/custom/dsa/proxy.py']) {
-    expect(files.filter(file => file.endsWith(banned))).toEqual([])
+  const banned = ['schedule.py', 'backend/app/custom/dsa/proxy.py']
+  if (!currentBatchIsDsaScoped()) {
+    banned.push('backend/app/custom/dsa/routes.py')
+  }
+  for (const path of banned) {
+    expect(files.filter(file => file.endsWith(path))).toEqual([])
   }
 })
 
