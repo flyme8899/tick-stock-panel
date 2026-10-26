@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     news_ima_research_enabled: str = ""
     dingtalk_webhook_url: str = ""
     dingtalk_secret: str = ""
+    # BSS **命中**钉钉通道(P-ding-later)。独立键, 与上面的资讯/定义态/狙击共群、
+    # 以及 DSA_REVIEW_* 复盘通道都**不相通**。留空 = 命中拒发
+    # (reason=hits_webhook_not_configured), **不会**回落 dingtalk_webhook_url。
+    # 注意: 本字段只是"能不能发"的配置位, 不是"要不要发"的开关 —— 没有额外的
+    # enable 旗标, URL 非空即门(对标 DSA_REVIEW_*)。
+    buy_sell_signals_hits_dingtalk_webhook_url: str = ""
+    buy_sell_signals_hits_dingtalk_secret: str = ""
     news_dsa_feed_token: str = ""
     news_cls_enabled: str = ""
     news_wscn_enabled: str = ""
