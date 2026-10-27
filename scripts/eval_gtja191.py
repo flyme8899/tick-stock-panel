@@ -115,10 +115,27 @@ def _evaluate_group(
     engine,
     instruments,
     tag: str,
+    cost_gate: bool = False,
 ) -> list[dict]:
-    """跑一组因子的 IC。返回每因子一行；单因子失败不中止整组。"""
+    """跑一组因子的 IC。返回每因子一行；单因子失败不中止整组。
+
+    `cost_gate=True` 时，每个因子额外按 **N5 成本锚（18.2bp）** 重跑一次分层多空，
+    把干净的费后收益和 N2 标签一起写进行里。为什么不能直接用第一次的
+    `result.long_short_stats`：那次的 `FactorConfig` 用的是默认成本（来回 14bp），
+    拿它过 18.2bp 的门等于少扣 4.2bp/日，结果系统性偏乐观。
+
+    `cost_gate=False`（alpha158 对照）不跑第二遍 —— 对照只需要 |IC| 分位，
+    不需要给 158 个因子各贴一个标签，也省一半时间。
+    """
     from app.backtest.factor import FactorBatchConfig, FactorConfig
     from app.enriched_generation import EnrichedGenerationUnavailableError
+    from app.factors.gtja191 import (
+        _COST_FEES_PCT,
+        _COST_SLIPPAGE_BPS,
+        GTJA191_COST_BP_ROUNDTRIP,
+        blocked_reason,
+    )
+    from app.factors.gtja191_labels import label_of
     from app.factors.registry import get_factor
 
     rows: list[dict] = []
@@ -209,8 +226,50 @@ def _evaluate_group(
                     "abs_ic": None,
                     "abs_ir": None,
                     "error": str(exc),
+                    "verdict": None,
                 })
                 continue
+
+            verdict = None
+            if cost_gate:
+                # 第二遍：成本换成 N5 锚（18.2bp）重算分层多空。
+                # IC 不重算 —— 成本只影响分层收益，不影响 Rank IC。
+                gate_config = FactorConfig(
+                    factor_name=factor_name,
+                    symbols=symbols,
+                    start=start,
+                    end=end,
+                    n_groups=5,
+                    rebalance="daily",
+                    asset_type="stock",
+                    fees_pct=_COST_FEES_PCT,
+                    slippage_bps=_COST_SLIPPAGE_BPS,
+                )
+                try:
+                    gate_result = service._evaluate_panel(
+                        panel,
+                        gate_config,
+                        f"{tag}-{offset + index}-gate",
+                        0.0,
+                        market_trading_dates=market_dates,
+                        min_symbols_per_date=min_symbols_per_date,
+                    )
+                    net = gate_result.long_short_stats.get("total_return")
+                except Exception:  # noqa: BLE001 — 成本门失败不能伪造一个过门结果
+                    net = None
+                verdict = label_of(
+                    result,
+                    # ⚠ 这里必须是 `len(ic_series)`，**不是** `result.n_dates`。
+                    # `FactorResult.n_dates` 是 `panel["date"].n_unique()` —— 面板的
+                    # 交易日数，跟 IC 有没有算出来无关。因子在截面上恒定（无方差）时
+                    # Rank IC 全为 NaN，`n_dates` 仍然等于 287，`ic_mean` 却是 None。
+                    # 拿 `n_dates` 当 IC 日数会让 V8 那条线彻底失效：29 天的样本会被
+                    # 读成 287 天，一路判成 alive。
+                    n_ic_dates=len(result.ic_series),
+                    net_long_short_return=net,
+                    cost_bp=GTJA191_COST_BP_ROUNDTRIP,
+                    blocked_reason=blocked_reason(factor_name),
+                )
             rows.append({
                 "factor_name": factor_name,
                 "label": label,
@@ -222,6 +281,7 @@ def _evaluate_group(
                 "abs_ic": abs(result.ic_mean) if result.ic_mean is not None else None,
                 "abs_ir": abs(result.ir) if result.ir is not None else None,
                 "error": result.error,
+                "verdict": verdict,
             })
         print(f"  完成 {min(offset + chunk, len(factor_ids))}/{len(factor_ids)}")
         # 显式释放：整组 158 列的面板留在内存里会把容器顶爆。
@@ -230,17 +290,59 @@ def _evaluate_group(
 
 
 def _print_rows(title: str, rows: list[dict]) -> None:
+    """标签列在最后。标签为空（对照组）时不打这一列。"""
     print()
     print(title)
-    header = f"{'因子':<14} {'名称':<24} {'IC':>8} {'ICIR':>8} {'换手':>8} {'覆盖':>8} {'天数':>6}"
+    with_label = any(row.get("verdict") is not None for row in rows)
+    base = f"{'因子':<14} {'名称':<24} {'IC':>8} {'ICIR':>8} {'换手':>8} {'覆盖':>8} {'天数':>6}"
+    header = base + (f" {'标签':<14}" if with_label else "")
     print(header)
     print("-" * (len(header) + 8))
     for row in rows:
-        print(
+        line = (
             f"{row['factor_name']:<14} {str(row['label'])[:24]:<24} "
             f"{_fmt(row['ic_mean']):>8} {_fmt(row['ir']):>8} {_fmt(row['turnover']):>8} "
             f"{_fmt(row.get('coverage')):>8} {row.get('n_dates') or 0:>6}"
         )
+        if with_label:
+            verdict = row.get("verdict")
+            line += f" {(verdict.label if verdict is not None else '—'):<14}"
+        print(line)
+
+
+def _print_verdicts(rows: list[dict]) -> list[dict]:
+    """打标签明细与「下线候选」提示。返回候选行，供调用方决定要不要写报告。
+
+    **只打印。** 这里不调用、也不允许调用 `unregister_factor` —— 退役要人拍板，
+    脚本能做的是把证据摆整齐，而不是替人做决定。
+    """
+    labeled = [row for row in rows if row.get("verdict") is not None]
+    if not labeled:
+        return []
+    from app.factors.gtja191 import GTJA191_COST_BP_ROUNDTRIP
+
+    print()
+    print(f"标签依据（N2 阈值 |IC| ≥ 0.02，IC 日数 ≥ 30，费后多空 > 0，成本 {GTJA191_COST_BP_ROUNDTRIP:.1f} bp）")
+    for row in labeled:
+        verdict = row["verdict"]
+        net = verdict.net_long_short_return
+        net_text = "—" if net is None else f"{net:+.4f}"
+        print(f"  {row['factor_name']:<12} {verdict.label:<14} 费后多空 {net_text:>9}  {verdict.reason}")
+
+    candidates = [row for row in labeled if row["verdict"].is_delist_candidate]
+    print()
+    if not candidates:
+        print("下线候选：无。")
+        return []
+    print(f"下线候选 {len(candidates)} 个（标签 ∈ {{dead, reversed}} 且按 18.2bp 未过门）:")
+    for row in candidates:
+        print(f"  {row['factor_name']:<12} {row['verdict'].label:<10} {row['verdict'].reason}")
+    print()
+    print("**以上只是提示。** 本脚本不注销任何因子，也不改注册表：")
+    print("  - 「候选」是说这批公式在 TSP 上的当前证据不足以支持投产；")
+    print("  - 退役/下线要人工拍板，且要走独立的变更流程；")
+    print("  - `underpowered` / `degenerate` / `error` / `blocked:*` 不在候选里 —— 那是缺证据，不是有反证。")
+    return candidates
 
 
 def _percentile_of(value: float, population: list[float]) -> float | None:
@@ -389,18 +491,24 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print(f"=== gtja191 自评（{len(GTJA191_IDS)} 个可算） ===")
-    gtja_rows = _evaluate_group(service, factor_ids=list(GTJA191_IDS), tag="gtja", **common)
+    gtja_rows = _evaluate_group(
+        service, factor_ids=list(GTJA191_IDS), tag="gtja", cost_gate=True, **common,
+    )
     gtja_valid = [row for row in gtja_rows if row["abs_ic"] is not None and row["error"] is None]
+    # 没有 IC 的因子也要出现在表里：它们不是"不存在"，而是"没算成"。
+    # 只把有 IC 的排上去，会让读者以为这批只有 11 个因子。
+    gtja_unmeasured = [row for row in gtja_rows if row["abs_ic"] is None or row["error"]]
     if not gtja_valid:
         print()
         print("gtja191 没有算出有效 IC。请确认 enriched 分区覆盖这段日期，且截面门槛不是过高。")
         for row in gtja_rows[:6]:
             if row["error"]:
                 print(f"  {row['factor_name']}: {row['error']}")
+        _print_verdicts(gtja_rows)
         return 1
     _print_rows(
         "按 |IC| 从高到低",
-        sorted(gtja_valid, key=lambda row: row["abs_ic"], reverse=True),
+        sorted(gtja_valid, key=lambda row: row["abs_ic"], reverse=True) + gtja_unmeasured,
     )
     failed = [row for row in gtja_rows if row["error"]]
     if failed:
@@ -408,6 +516,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"计算失败 {len(failed)} 个:")
         for row in failed:
             print(f"  {row['factor_name']}: {row['error']}")
+
+    _print_verdicts(gtja_rows)
 
     if args.no_baseline:
         print()

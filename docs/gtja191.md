@@ -93,6 +93,65 @@ NaN 和 null 在 TSP 里待遇不同：`_calc_ic` 用 `is_not_null()` 过滤，*
 
 所以 `compute_gtja191` 检测到本族存在截面式时**直接不分块**，整帧一次算完。`cross_sectional_ids()` 返回需要全市场一起算的 ID 清单。回测路径本来就不分块，不受影响。
 
+## N2 标签映射与阈值
+
+每个因子跑完检验后会被贴一个标签。标签逻辑在 `backend/app/factors/gtja191_labels.py`，是一个**薄映射纯函数**：输入 `FactorBatchItem`（回测已经算好的结果）+ IC 有效日数 + 费后多空收益 + 可选 `blocked_reason`，输出一个标签。
+
+**映射内不重算 IC。** 只读 `item.ic_mean` / `item.ir` / `item.error` 这些已有字段。重算会让同一个因子在不同调用点得到不同标签 —— 那比没有标签更糟。
+
+### 阈值表
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `MIN_IC_DATES` | **30** | IC 有效交易日下限。低于此**一律 `underpowered`，不得判 `alive`** |
+| `MIN_ABS_IC` | **0.02** | `\|IC\|` 地板。低于此判 `dead`，即使费后碰巧为正 |
+| `MIN_NET_LONG_SHORT` | **0** | 费后多空累计收益下限（`> 0` 才过门），必须是按 18.2bp 重扣后的净额 |
+| `GTJA191_COST_BP_ROUNDTRIP` | **18.2 bp** | 成本闸口径（N5 成本锚） |
+
+### 标签与优先级
+
+优先级从高到低：`blocked:*` > `error` > `degenerate` > `underpowered` > `reversed` > `dead` / `alive`。
+
+| 标签 | 触发条件 | 说明 |
+|---|---|---|
+| `blocked:ops` | `blocked_reason` 非空 | 算子缺失/冲突，根本没算。优先级高于一切 |
+| `error` | `item.error` 非空，或 `ic_mean` 为 `None` 而 IC 日数 > 0 | 算了但抛错，或结果自相矛盾 |
+| `degenerate` | `ic_mean` 为 `None` 且 IC 日数 == 0 | 因子值截面上恒定，Rank IC 无定义 |
+| `underpowered` | `n_ic_dates < 30` | 样本太薄。**压在 reversed/dead/alive 之前** |
+| `reversed` | `\|IC\| ≥ 0.02` 且费后多空符号与 IC 相反 | 方向反了：因子有用但用反了 |
+| `dead` | `\|IC\| < 0.02`，或无分层结果，或费后多空 ≤ 0 | 因子没用 / 费后不成立 |
+| `alive` | `\|IC\| ≥ 0.02` 且费后多空 > 0 | 过了全部门槛 |
+
+**为什么 `degenerate` 单独一类。** 因子值在某天截面上全相等（或整个区间恒定）时，Rank IC 的分母是 0，**IC 无定义**，`ic_mean` 是 `None`、有效 IC 日数是 0。这既不是 `error`（代码没出错、算子也支持），也不是 `dead`（一次都没被真正测过），更不是 `underpowered`（不是样本少，是样本全是同一个值）。归成 `error` 会让人去查一个不存在的 bug，归成 `dead` 会误杀。**这是一种测量失败，处置是修因子或换数据，不是退役。**
+
+> 合成面板上实测踩到过：`gtja_3`（收盘触及极值次数）在随机游走数据上恒为 `0.0`，`gtja_11` 恒为 `100.0`，两个都落进 `degenerate`。真实数据上应该不会这样，但标签必须能如实说出"我测不了"。
+
+**样本量的口径陷阱。** 判 `underpowered` 用的是 **`len(result.ic_series)`**（真正算出 IC 的天数），**不是** `result.n_dates`。后者是 `panel["date"].n_unique()`，即面板的交易日数，跟 IC 有没有算出来无关 —— 因子在截面上恒定时 Rank IC 全是 NaN，`n_dates` 依然等于 287，`ic_mean` 却是 `None`。拿 `n_dates` 当 IC 日数会让 V8 那条线彻底失效：29 天的样本被读成 287 天，一路判成 `alive`。测例 `test_eval_script_uses_len_ic_series_not_n_dates` 扫 AST 守住这一处。
+
+**为什么 `underpowered` 压在 `alive` 之前。** 29 个 IC 日、IC=0.15、费后多空 +50%，看起来什么都过门 —— 但 29 天里的 IC 0.15 可能只是运气。判 `alive` 是拿噪声当信号；判 `dead` 是拿噪声当结论。两种都错，唯一正确的处置是承认样本不够。这就是 V8 测例守的那条线。
+
+**为什么 `reversed` 和 `dead` 必须分开。** `dead` 是"因子没用"，该退役；`reversed` 是"因子有用但方向反了"，该改方向重验。判据是**符号相反**：IC 显著为正而费后多空为负（或反之）。两者处置完全不同，合并会让一个可能有用的因子被当废物扔掉。
+
+**一侧贴近 0 时不判 `reversed`。** `|IC| < 0.02` 或费后多空恰好为 0 时，符号本身是噪声，拿它判"方向反了"会误伤。
+
+### 成本口径错了必须抛错
+
+`FactorBatchItem.long_short_return` **已经扣过费**，扣的是 `FactorConfig` 默认值（来回 **14bp**），不是 18.2bp。直接拿这个字段过 18.2bp 的门，等于每天少扣 4.2bp，结果系统性偏乐观 —— 而且**看不出错**，因为数字仍然合理。
+
+所以 `label_of()` 强制要求调用方传入 `cost_bp`，且必须等于 18.2。传 14 进来直接 `ValueError`。
+
+脚本里的做法是**重跑一遍分层多空**（`FactorConfig` 换成成本锚参数），拿这次干净的 `long_short_stats["total_return"]` 过门。IC 不重算 —— 成本只影响分层收益，不影响 Rank IC。
+
+### 下线候选：只提示，不注销
+
+标签 ∈ `{dead, reversed}` 且按 18.2bp 未过门 → 打印为「下线候选」。
+
+- **只是提示。** 脚本不调用、也不允许调用 `unregister_factor`，不改注册表；
+- 退役/下线要人工拍板，走独立的变更流程；
+- `underpowered` / `degenerate` / `error` / `blocked:*` **不是**候选 —— 那是缺证据，不是有反证。
+
+测例 `test_eval_script_never_unregisters` 扫脚本 AST，任何 `unregister_factor` 都会让测试红。
+
 ## 成本口径
 
 任务书成本锚是**来回 18.2bp**。它和 `FactorBatchConfig` 的历史默认值（`fees_pct=0.0002`、`slippage_bps=5.0`，来回约 14bp）**不是一回事**：
@@ -111,11 +170,14 @@ NaN 和 null 在 TSP 里待遇不同：`_calc_ic` 用 `is_not_null()` 过滤，*
 PYTHONPATH=backend backend/.venv/bin/python scripts/eval_gtja191.py
 ```
 
-脚本做三件事：
+脚本做四件事：
 
 1. **自评** —— 13 个可算 ID 逐个跑 TSP 因子检验，给 Rank IC / ICIR / 换手 / 覆盖 / 天数；
 2. **对照** —— 同区间、同截面门槛跑一遍 alpha158（158 个），给出 gtja191 在 alpha158 `|IC|` 分布里的分位；
-3. **成本口径** —— 显式打印两个来回成本并说明不相等。
+3. **成本口径** —— 显式打印两个来回成本并说明不相等；
+4. **标签与下线候选** —— 逐个贴 N2 标签（见上节），`{dead, reversed}` 的列为「下线候选」**仅打印**。
+
+自评表格最后多一列「标签」。成本闸那一遍只对 gtja191 跑，alpha158 对照不跑第二遍 —— 对照只需要 `|IC|` 分位，不需要给 158 个因子各贴标签，也省一半时间。
 
 常用参数：
 
