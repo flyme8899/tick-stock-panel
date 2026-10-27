@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.factors.gtja191 import GTJA191_IDS
 from app.factors.registry import (
     FactorSpec,
     all_factors,
@@ -344,7 +345,7 @@ def test_factors_api_include_experimental() -> None:
     client = _client()
     payload = client.get("/api/factors", params={"include_experimental": "true"}).json()
     factors = payload["factors"]
-    assert len(factors) == 89 + 158
+    assert len(factors) == 89 + 158 + len(GTJA191_IDS)
     assert factors[0]["id"] == "momentum_5d"
     assert any(item["id"] == "a158_vwap_0" for item in factors)
     default = client.get("/api/factors").json()["factors"]

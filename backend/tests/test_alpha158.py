@@ -11,6 +11,7 @@ import pytest
 
 from app.factors.alpha158 import ALPHA158_GROUP, ALPHA158_IDS, ALPHA158_SPECS, compute_alpha158
 from app.factors.dsl import FACTOR_COLUMN, compile_formula
+from app.factors.gtja191 import GTJA191_IDS
 from app.factors.registry import (
     all_factors,
     factor_columns_view,
@@ -85,7 +86,8 @@ def test_default_views_exclude_group_until_opt_in() -> None:
     assert not any(spec.id.startswith("a158_") for spec in all_factors())
     assert any(spec.id == "a158_kmid" for spec in all_factors(include_experimental=True))
     assert all(item in experimental_ids for item in ALPHA158_IDS)
-    assert len(experimental_ids) == len(default_ids) + 158
+    # 实验组 = alpha158 + gtja191（本批新增）。用常量相加, 避免写死总数。
+    assert len(experimental_ids) == len(default_ids) + 158 + len(GTJA191_IDS)
     assert all_factors(asset_type="etf")
     assert not any(spec.id.startswith("a158_") for spec in all_factors(asset_type="etf"))
     stock_stable = all_factors(asset_type="stock", stable_only=True)
