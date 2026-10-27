@@ -242,3 +242,92 @@ TSP 内置回测报告，**尚未**逐句比对上游 `backtest_service` / `back
 ---
 
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。*
+
+## 9. P-arg-snap：四字段 + snapshot 冻结（批次 20261027gargsnap）
+
+在 A1–A7 **之上并列增量**，不改任何既有分母 / 入场 / 徽章语义。
+借 TradingAgents 的**机制**（多空两段论据 + 风控否决 + 决策时点 PIT 冻结），
+**零代码搬运** —— 不 import TradingAgents，不引任何多代理编排依赖。
+
+### 9.1 四字段契约
+
+| 字段 | 类型 | 语义 | 空态 |
+|---|---|---|---|
+| `bull_case` | `string \| null` | 建议生成时的**多头论据**摘要（只读快照） | 无材料 → `null`，UI 写「无多头论据」；**禁 fabricate** |
+| `bear_case` | `string \| null` | 建议生成时的**空头论据**摘要（只读快照） | 同上「无空头论据」 |
+| `risk_veto` | `{veto: bool, reason: string \| null} \| null` | 风控是否否决该建议；`veto=true` **必须**有非空 reason | 无风控结论 → `null`（**≠** `veto=false`）；缺 reason 的 true → 降 `null` |
+| `snapshot_asof` | `string \| null`（ISO-8601 **+08:00**） | 论据所依据的行情快照时点，须结算前冻结 | 未知 → `null`；**禁止**事后回填 |
+
+并列只读字段：
+
+| 字段 | 类型 | 语义 |
+|---|---|---|
+| `advice_generated_at` | `string \| null` | 建议生成时刻；默认＝`AnalysisHistory.created_at` 规范化后 |
+| `snapshot_late` | `bool` | `snapshot_asof` 存在且 **>** `advice_generated_at`（秒级同区）。缺失时为 `false` |
+| `in_argument_quality_denominator` | `bool` | 是否计入论据质量分母（见 9.3） |
+
+### 9.2 冻结与 late 判定
+
+| 规则 | 期望 |
+|---|---|
+| 合法 | `snapshot_asof` **≤** `advice_generated_at` → 可进论据质量统计 |
+| 迟到 | `snapshot_asof` **>** `advice_generated_at` → `snapshot_late=true`；**不计入**论据质量 |
+| 缺失 | `snapshot_asof=null` → **不计入**论据质量（另计「缺快照」数，但不折进分母） |
+| 冻结 | 结算 / `backtest/run` / 人工重评 **不得**改写已冻结的四字段；审计层只读建议时刻侧材料 |
+
+**与 A2 分账**：`snapshot_late` **≠** `unfillable`。迟到样本仍可按 A1–A7 进 / 出**胜率**分母，
+**仅**从**论据质量**统计中排除。两套账合并会让"论据迟到"污染胜率，或让"不可成交"污染论据质量。
+
+**N4 时间口径**：全部 ISO-8601 带 `+08:00`，比较走**秒级**同区（截断亚秒，不四舍五入）。
+裸 datetime 无时区按 Asia/Shanghai 解释（猜 UTC 会整体偏 8 小时，让本该 late 的快照看起来合法）；
+只有日期则按当日 `00:00:00+08:00`。
+
+**N5 `null` ≠ `false`**：
+
+| 上游 | 输出 |
+|---|---|
+| 无风控材料 | `null` |
+| 明确未否决（`trigger=none`） | `{veto: false, reason: null}` |
+| 明确否决且有 reason | `{veto: true, reason: "<非空>"}` |
+| 否决但缺 reason | `null`（非法结论不输出半个） |
+| `trigger=risk_downgrade` | `null`（降级是仓位打折，不是风控放行；输出 `veto:false` 会被读成"审过了没问题"） |
+
+### 9.3 论据质量分母（本拍最小契约）
+
+- **分母候选** = 有结算行 ∧ `snapshot_late≠true` ∧ `snapshot_asof` 非空。
+- **本拍不加**「多空至少一段非空」门槛（挂档）。
+- **不给**论据质量百分比：`argument_quality_pct` 恒 `null`。门槛仍挂档，样本不足亦不给。
+- `summary` 新增键：`argument_quality_denominator` / `argument_quality_excluded_late` /
+  `argument_quality_excluded_missing_snapshot` / `argument_quality_suppressed` / `argument_quality_pct`。
+
+### 9.4 只读解析（N1）与禁事后回填（N2）
+
+解析面按优先级：item 顶层 → `raw_result` → `context_snapshot`（只下探一层）。
+
+| 字段 | 候选键 |
+|---|---|
+| 多空 | `bull_case` / `strongest_bullish_signal` / `bullish_case` / `bull_argument`（bear 同构） |
+| `snapshot_asof` | `snapshot_asof` / `data_asof` / `market_data_asof` / `as_of`（须能解析成时间） |
+
+**`evaluated_at` / `analysis_date` / 结算日 / 「今天」全部不在候选键里。** 它们是"事后"的时刻，
+拿它们当快照时点等于用结算后行情回填，是 lookahead 伪装成 PIT。历史缺字段就是 `null`，然后不计入。
+
+上游 `BacktestResult` **没有** `created_at` 列；建议生成时刻只存在于 `AnalysisHistory.created_at`。
+因此 `_result_to_dict` 做了**最小只读透传**（新增 `created_at` / `context_snapshot` 两个键），
+**零结算语义变更**，也不改结算公式。
+
+### 9.5 展示（N3 最小）
+
+`LastAdviceRowView` 下挂一条**可折叠**「论据快照」行，展示多空摘要（过长截断 + title 全文）、
+风控结论、`snapshot_asof` / `advice_generated_at`、`snapshot_late` 徽章。
+完整「论据质量」大卡 / 独立仪表盘 **挂档**，不挡主验收。
+
+渲染纪律写死三条：`risk_veto === null` 显示「无风控结论」而**不是**「未否决」；
+缺失字段显示「未记录」而不补时间；`snapshot_late` 必须有可见标记。
+
+### 9.6 本拍明确不做
+
+不接 TradingAgents 运行时 / 不动 DSA skill / 不进 #228 hits / 不改 A1–A7 分母与徽章语义 /
+不另起旁路账本表 / 不为读钩触发 `backtest/run` / 不碰三 env 与 hits ding / 不碰 Opt-A 与 P-risk-sop。
+
+> 仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。

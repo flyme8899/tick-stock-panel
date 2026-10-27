@@ -543,7 +543,7 @@ class BacktestService:
             limit=limit,
         )
         items = []
-        for result, stock_name, trend_prediction, _created_at, context_snapshot, raw_result, report_type, analysis_sentiment_score in rows:
+        for result, stock_name, trend_prediction, created_at, context_snapshot, raw_result, report_type, analysis_sentiment_score in rows:
             summary = extract_market_phase_summary(context_snapshot)
             items.append(
                 self._result_to_dict(
@@ -555,6 +555,8 @@ class BacktestService:
                     raw_result=raw_result,
                     report_type=report_type,
                     analysis_sentiment_score=analysis_sentiment_score,
+                    created_at=created_at,
+                    context_snapshot=context_snapshot,
                 )
             )
         return {"total": total, "page": page, "limit": limit, "items": items}
@@ -728,6 +730,8 @@ class BacktestService:
                 Optional[str],
                 Optional[str],
                 Optional[int],
+                Optional[Any],
+                Optional[Any],
             ]
         ] = []
 
@@ -767,7 +771,20 @@ class BacktestService:
                 if bucket != phase_bucket:
                     continue
                 if matched_total >= page_offset and len(page_rows) < limit:
-                    page_rows.append((result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score))
+                    page_rows.append(
+                        (
+                            result,
+                            stock_name,
+                            trend_prediction,
+                            summary,
+                            bucket,
+                            raw_result,
+                            report_type,
+                            analysis_sentiment_score,
+                            _created_at,
+                            context_snapshot,
+                        )
+                    )
                 matched_total += 1
             if len(batch) < batch_limit:
                 break
@@ -782,8 +799,10 @@ class BacktestService:
                 raw_result=raw_result,
                 report_type=report_type,
                 analysis_sentiment_score=analysis_sentiment_score,
+                created_at=created_at,
+                context_snapshot=context_snapshot,
             )
-            for result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score in page_rows
+            for result, stock_name, trend_prediction, summary, bucket, raw_result, report_type, analysis_sentiment_score, created_at, context_snapshot in page_rows
         ]
         return {"total": matched_total, "page": page, "limit": limit, "items": items}
 
@@ -938,6 +957,8 @@ class BacktestService:
         raw_result: Optional[Any] = None,
         report_type: Optional[str] = None,
         analysis_sentiment_score: Optional[int] = None,
+        created_at: Optional[Any] = None,
+        context_snapshot: Optional[Any] = None,
     ) -> Dict[str, Any]:
         parsed_raw_result = parse_json_field(raw_result)
         raw = parsed_raw_result if isinstance(parsed_raw_result, dict) else {}
@@ -991,6 +1012,13 @@ class BacktestService:
             "simulated_exit_price": row.simulated_exit_price,
             "simulated_exit_reason": row.simulated_exit_reason,
             "simulated_return_pct": row.simulated_return_pct,
+            # P-arg-snap：**只读透传**，零结算语义变更。
+            # `created_at` 来自 `AnalysisHistory.created_at`（建议生成时刻），
+            # `BacktestResult` 本身没有这个列；`context_snapshot` 是建议当时
+            # 落库的快照原文。两者都只供下游（TSP 审计层）只读解析
+            # 多空论据 / 风控结论 / snapshot_asof，**不参与任何计算**。
+            "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else created_at,
+            "context_snapshot": context_snapshot,
         }
 
     @staticmethod

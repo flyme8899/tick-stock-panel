@@ -38,10 +38,15 @@ const ledger: DsaLedgerAudit = {
     sample_below_threshold: true,
     min_sample_for_percent: 30,
     unavailable_reason: '',
+    argument_quality_denominator: 1,
+    argument_quality_excluded_late: 1,
+    argument_quality_excluded_missing_snapshot: 0,
+    argument_quality_suppressed: true,
+    argument_quality_pct: null,
   },
   rows: [
-    { analysis_history_id: 11, code: '600000', outcome: 'win', entry_close: 10, entry_next_open: 10.35, entry_gap_pct: 3.5, entry_basis: 'close 与 next_open 并列', unfillable: null, in_denominator: true, source: 'analysis_bridge', source_note: '自动', simulated_return_pct: 3.2 },
-    { analysis_history_id: 15, code: '300750', outcome: 'win', entry_close: 11, entry_next_open: null, entry_gap_pct: null, entry_basis: 'close（上游原值·漏隔夜跳空）', unfillable: 'limit_up_one_word', in_denominator: false, source: 'analysis_bridge', source_note: '自动', simulated_return_pct: 0 },
+    { analysis_history_id: 11, code: '600000', outcome: 'win', entry_close: 10, entry_next_open: 10.35, entry_gap_pct: 3.5, entry_basis: 'close 与 next_open 并列', unfillable: null, in_denominator: true, source: 'analysis_bridge', source_note: '自动', simulated_return_pct: 3.2, bull_case: '订单拐点 + 毛利修复', bear_case: '估值分位偏高', risk_veto: { veto: false, reason: null }, snapshot_asof: '2026-10-27T09:00:00+08:00', advice_generated_at: '2026-10-27T09:30:00+08:00', snapshot_late: false, in_argument_quality_denominator: true },
+    { analysis_history_id: 15, code: '300750', outcome: 'win', entry_close: 11, entry_next_open: null, entry_gap_pct: null, entry_basis: 'close（上游原值·漏隔夜跳空）', unfillable: 'limit_up_one_word', in_denominator: false, source: 'analysis_bridge', source_note: '自动', simulated_return_pct: 0, bull_case: null, bear_case: null, risk_veto: null, snapshot_asof: '2026-10-27T09:30:01+08:00', advice_generated_at: '2026-10-27T09:30:00+08:00', snapshot_late: true, in_argument_quality_denominator: false },
   ],
   sources: {},
   audit_items: [

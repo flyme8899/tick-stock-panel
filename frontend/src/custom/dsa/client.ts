@@ -131,6 +131,31 @@ export interface DsaLedgerAuditRow {
   source: string
   source_note: string
   simulated_return_pct: number | null
+  // ── P-arg-snap 四字段 + 冻结（只读快照；缺则 null / false）──
+  /** 建议生成时的多头论据摘要。无材料 → null，**不要**渲染成「无风险」之类。 */
+  bull_case: string | null
+  /** 建议生成时的空头论据摘要。 */
+  bear_case: string | null
+  /**
+   * 风控结论。**`null` ≠ `{veto:false}`**：
+   * null 是"没有风控结论"，`{veto:false}` 是"明确未否决"。
+   * 渲染时不能用同一个文案。
+   */
+  risk_veto: DsaRiskVeto | null
+  /** 论据所依据的行情快照时点（ISO-8601 +08:00）。 */
+  snapshot_asof: string | null
+  /** 建议生成时刻（默认 analysis_history.created_at）。用于与 snapshot_asof 对拍。 */
+  advice_generated_at: string | null
+  /** snapshot_asof 晚于 advice_generated_at → true（只排除论据质量，不影响胜率）。 */
+  snapshot_late: boolean
+  /** 是否计入论据质量分母（N6 默认门槛）。 */
+  in_argument_quality_denominator: boolean
+}
+
+/** 风控否决结论。`veto=true` 时后端保证 `reason` 非空。 */
+export interface DsaRiskVeto {
+  veto: boolean
+  reason: string | null
 }
 
 export interface DsaLedgerAudit {
@@ -149,6 +174,17 @@ export interface DsaLedgerAudit {
     sample_below_threshold: boolean
     min_sample_for_percent: number
     unavailable_reason: string
+    // ── P-arg-snap 论据质量分母（与胜率分母**分账**）──
+    /** 论据质量分母：有结算行 ∧ 未迟到 ∧ 有快照。 */
+    argument_quality_denominator: number
+    /** 因 snapshot 迟到被排除的条数。 */
+    argument_quality_excluded_late: number
+    /** 因缺 snapshot 被排除的条数。 */
+    argument_quality_excluded_missing_snapshot: number
+    /** 样本不足门槛（复用 min_sample_for_percent）。 */
+    argument_quality_suppressed: boolean
+    /** 论据质量率。本拍恒 null —— 门槛仍挂档，不要自己算一个填上。 */
+    argument_quality_pct: number | null
   }
   rows: DsaLedgerAuditRow[]
   sources: Record<string, string>
