@@ -588,6 +588,13 @@ export function LedgerAuditPanel({ data }: { data: DsaLedgerAudit }) {
       <p className="mt-1 text-[11px] leading-relaxed text-muted">
         入场口径：{summary.entry_basis.join('；') || '—'}
       </p>
+      {/* P-arg-snap：论据质量分母与胜率分母**分账**，不混成一个比率。 */}
+      <p className="mt-1 text-[11px] leading-relaxed text-muted" data-ledger-arg-quality>
+        论据质量分母 {summary.argument_quality_denominator}
+        {' '}（不含快照迟到 {summary.argument_quality_excluded_late}、
+        缺快照 {summary.argument_quality_excluded_missing_snapshot}）
+        {' '}· 本拍不给质量百分比（门槛仍挂档，样本不足亦不给）
+      </p>
       {data.rows.length > 0 && (
         <div className="mt-3 overflow-x-auto">
           <table className="w-full min-w-[30rem] text-left text-xs">
@@ -669,6 +676,78 @@ function LedgerAudit() {
  *
  * 上游没注入就照实写「未注入」。**绝不**用收盘价或跳空倒推一个开盘价出来顶上。
  */
+/**
+ * P-arg-snap：论据快照的最小只读行（N3）。
+ *
+ * 折叠一行，默认收起。完整「论据质量」大卡挂档 —— 这里只把
+ * "当时说了什么、风控怎么判、快照是哪一刻"如实摆出来，不做任何解读。
+ *
+ * 三条纪律写死在渲染里：
+ * 1. `risk_veto === null` 显示「无风控结论」，**不是**「未否决」；
+ * 2. 缺失的字段显示「—」或「未记录」，绝不补一个看起来合理的时间；
+ * 3. `snapshot_late` 必须有可见标记 —— 那是"论据用了未来数据"的信号。
+ */
+function ArgumentSnapshotRow({ row }: { row: DsaLedgerAuditRow }) {
+  const vetoText =
+    row.risk_veto == null
+      ? '无风控结论'
+      : row.risk_veto.veto
+        ? `已否决${row.risk_veto.reason ? `：${row.risk_veto.reason}` : ''}`
+        : '未否决'
+  const vetoTone =
+    row.risk_veto == null ? 'text-muted' : row.risk_veto.veto ? 'text-bear' : 'text-secondary'
+  const truncate = (text: string) => (text.length > 80 ? `${text.slice(0, 80)}…` : text)
+  const hasArgument = row.bull_case != null || row.bear_case != null
+
+  return (
+    <details data-arg-snap className="mt-1 text-[11px] leading-relaxed text-muted">
+      <summary className="cursor-pointer select-none">
+        论据快照
+        {row.snapshot_late && (
+          <span data-arg-snap-late className="ml-2 rounded-btn bg-elevated px-1.5 text-[10px] text-bear">
+            快照迟到 · 不计入论据质量
+          </span>
+        )}
+      </summary>
+      <dl className="mt-1 space-y-0.5 pl-3">
+        <div>
+          <dt className="inline text-muted">多头：</dt>
+          <dd className="inline" data-arg-snap-bull title={row.bull_case ?? undefined}>
+            {row.bull_case ? truncate(row.bull_case) : <span className="text-muted">无多头论据</span>}
+          </dd>
+        </div>
+        <div>
+          <dt className="inline text-muted">空头：</dt>
+          <dd className="inline" data-arg-snap-bear title={row.bear_case ?? undefined}>
+            {row.bear_case ? truncate(row.bear_case) : <span className="text-muted">无空头论据</span>}
+          </dd>
+        </div>
+        <div>
+          <dt className="inline text-muted">风控：</dt>
+          <dd className={cn('inline', vetoTone)} data-arg-snap-veto>
+            {vetoText}
+          </dd>
+        </div>
+        <div>
+          <dt className="inline text-muted">快照时点：</dt>
+          <dd className="num inline" data-arg-snap-asof>
+            {row.snapshot_asof ?? '未记录'}
+          </dd>
+          <span className="text-muted"> · 建议时刻 </span>
+          <span className="num" data-arg-snap-advice>
+            {row.advice_generated_at ?? '未记录'}
+          </span>
+        </div>
+        {!hasArgument && (
+          <p className="text-muted" data-arg-snap-empty>
+            上游没有多空论据材料，这里留空而不生成。
+          </p>
+        )}
+      </dl>
+    </details>
+  )
+}
+
 export function LastAdviceResultCard({ code }: { code: string }) {
   const trimmed = code.trim()
   const query = useQuery({
@@ -795,6 +874,7 @@ function LastAdviceRowView({ row, primary }: { row: DsaLedgerAuditRow; primary: 
           {' '}· 成本来回 18.2bp（纸面/机械基线分账口径）未计入此原值
         </p>
       )}
+      <ArgumentSnapshotRow row={row} />
       {row.unfillable && (
         <p className="mt-1 text-[11px] leading-relaxed text-muted">
           不可成交原因：<span className="font-mono">{row.unfillable}</span>
