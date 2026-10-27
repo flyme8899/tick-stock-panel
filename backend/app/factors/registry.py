@@ -319,6 +319,14 @@ _CATALOG: tuple[FactorSpec, ...] = (
 
 _REGISTRY: dict[str, FactorSpec] = {}
 
+# 默认不暴露的实验组标签。新增实验组**必须**加进这里, 否则它会默进挖掘候选与
+# 信号白名单 —— 登记不等于投产。
+EXPERIMENTAL_TAGS: frozenset[str] = frozenset({"alpha158", "gtja191"})
+
+
+def _is_experimental(spec: FactorSpec) -> bool:
+    return bool(EXPERIMENTAL_TAGS.intersection(spec.tags))
+
 
 def register_factor(spec: FactorSpec) -> None:
     """注册因子; 重复 id 且版本未增时拒绝 (fail-closed)。"""
@@ -338,7 +346,7 @@ _EXPERIMENTAL_LOADED = False
 def _ensure_experimental() -> None:
     """实验组在首次读取时注册。
 
-    不能在本模块导入末尾再导入 alpha158：alpha158 反过来要引用本模块，
+    不能在本模块导入末尾再导入 alpha158 / gtja191：它们反过来要引用本模块，
     导入期互相调用会停在半初始化状态。
     """
     global _EXPERIMENTAL_LOADED
@@ -346,8 +354,10 @@ def _ensure_experimental() -> None:
         return
     _EXPERIMENTAL_LOADED = True
     from app.factors.alpha158 import register_alpha158
+    from app.factors.gtja191 import register_gtja191
 
     register_alpha158()
+    register_gtja191()
 
 
 def get_factor(fid: str) -> FactorSpec | None:
@@ -412,8 +422,9 @@ def all_factors(
 ) -> list[FactorSpec]:
     """按目录顺序返回因子; asset_type 过滤适用资产, stable_only 过滤实验/废弃因子。
 
-    带 alpha158 标签的实验组默认不返回。信号白名单、AI 提示词、因子库和工具目录
-    保持这个默认。需要实验组时显式传入 include_experimental=True。挖掘筛选仍用默认排除。
+    默认不返回带 EXPERIMENTAL_TAGS 标签的实验组 (alpha158 / gtja191)。信号白名单、
+    AI 提示词、因子库和工具目录保持这个默认。需要实验组时显式传入
+    include_experimental=True。挖掘筛选仍用默认排除。
 
     返回前惰性同步扩展表因子 (ext_ 前缀 base 条目), 使信号字段白名单、
     因子库列表和 AI 提示词看到同一份扩展字段清单。
@@ -424,7 +435,7 @@ def all_factors(
         spec for spec in _ordered_specs()
         if (asset_type is None or asset_type in spec.asset_types)
         and (not stable_only or spec.stability == "stable")
-        and (include_experimental or "alpha158" not in spec.tags)
+        and (include_experimental or not _is_experimental(spec))
     ]
 
 
@@ -446,14 +457,14 @@ def factor_dependencies(fids) -> frozenset[str]:
 def factor_columns_view(*, include_experimental: bool = False) -> list[dict]:
     """历史 FACTOR_COLUMNS 兼容视图 (顺序、键一致; 动态注册因子追加在末尾)。
 
-    带 alpha158 标签的实验组默认不出现在挖掘候选和检验列里。
-    include_experimental=True 时才追加。
+    带 EXPERIMENTAL_TAGS 标签的实验组 (alpha158 / gtja191) 默认不出现在挖掘候选和
+    检验列里。include_experimental=True 时才追加。
     fund_flow 标签的资金因子给选股和热门事件用，不进挖掘目录，避免改动前 48 个和黄金快照。
     """
     specs = _ordered_specs()
     specs = [spec for spec in specs if "fund_flow" not in spec.tags]
     if not include_experimental:
-        specs = [spec for spec in specs if "alpha158" not in spec.tags]
+        specs = [spec for spec in specs if not _is_experimental(spec)]
     return [spec.column_view() for spec in specs]
 
 
