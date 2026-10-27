@@ -53,6 +53,9 @@ from .realtime_types import (
     safe_float, safe_int  # 使用统一的类型转换函数
 )
 from .us_index_mapping import is_us_index_code, is_us_stock_code
+# 科创板判定复用腾讯侧唯一实现（688 + 689 CDR，剥 sh/sz/bj 前缀）。
+# tencent_fetcher 不 import 本模块，无循环依赖。
+from .tencent_fetcher import _is_star_market
 
 
 # 保留旧的 RealtimeQuote 别名，用于向后兼容
@@ -159,7 +162,7 @@ def _is_hk_code(stock_code: str) -> bool:
     return code.isdigit() and 4 <= len(code) <= 5
 
 
-def _normalize_tencent_volume(fields: List[str]) -> Optional[int]:
+def _normalize_tencent_volume(fields: List[str], symbol: str = "") -> Optional[int]:
     """
     将腾讯实时行情成交量归一为股。
 
@@ -167,6 +170,14 @@ def _normalize_tencent_volume(fields: List[str]) -> Optional[int]:
     换手率、价格、流通市值交叉校验，在原值和旧的“手转股”结果中选择
     更接近的一方。若无法交叉校验，则保留旧的“手转股”兜底逻辑，避免
     传统腾讯返回内容回归为原成交量的 1/100。
+
+    兜底分支的唯一例外是科创板：688/689（含 ``sh688…`` / ``688….SH`` 等
+    带交易所前缀或后缀的形态）腾讯返回的成交量已是「股」口径，再 ×100 会
+    放大 100 倍。判定复用 :func:`tencent_fetcher._is_star_market`（语义唯一
+    来源，覆盖 688 + 689 CDR），**不使用** ``is_kc_cy_stock``——后者只覆盖
+    688 + 30，缺 689，且会把创业板一并误豁免。
+
+    :param symbol: 股票代码提示，优先于 ``fields[2]``；为空时回落字段 2。
     """
     if len(fields) <= 6 or not fields[6]:
         return None
@@ -187,6 +198,12 @@ def _normalize_tencent_volume(fields: List[str]) -> Optional[int]:
             hand_to_share_volume = raw_volume * 100
             hand_delta = abs(hand_to_share_volume - expected_volume)
             return raw_volume if raw_delta <= hand_delta else hand_to_share_volume
+
+    # 兜底：交叉校验不可用（停牌 / 新股 / 字段错位等）。科创板腾讯量已是「股」，
+    # 不能再 ×100；其余板块（含创业板 300）保持既有的「手转股」语义。
+    code_hint = (symbol or "").strip() or (fields[2] if len(fields) > 2 else "")
+    if _is_star_market(code_hint):
+        return raw_volume
 
     return raw_volume * 100
 
@@ -1480,7 +1497,7 @@ class AkshareFetcher(BaseFetcher):
                 price=safe_float(fields[3]),
                 change_pct=safe_float(fields[32]),
                 change_amount=safe_float(fields[31]) if len(fields) > 31 else None,
-                volume=_normalize_tencent_volume(fields),
+                volume=_normalize_tencent_volume(fields, stock_code or symbol),
                 amount=amount,
                 open_price=safe_float(fields[5]),
                 high=safe_float(fields[33]) if len(fields) > 33 else None,  # 修正：字段 33 是最高价
