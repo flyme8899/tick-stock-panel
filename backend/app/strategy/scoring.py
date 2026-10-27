@@ -320,7 +320,18 @@ def materialize_scoring_columns(
         transformed = compiled.frame_transform(frame)
         if transformed is None:
             continue
-        frame = transformed.with_columns(pl.col(FACTOR_COLUMN).alias(str(name))).drop(FACTOR_COLUMN)
+        value = pl.col(FACTOR_COLUMN)
+        # gtja191 一族把 NaN 与 ±inf 统一收敛成 null。
+        # 该组部分公式用 ts_corr / ts_cov, 而 pl.rolling_corr 在窗口内方差为 0 或含 null
+        # 时会输出 NaN, 某些路径下还会吐出 ±inf。NaN 能穿过 `_calc_ic` 的 is_not_null
+        # 过滤, 把当天的 Rank IC 变成 NaN; ±inf 更糟, 它会作为极端值参与排序, 直接扭曲
+        # 分组。null 才是"这条样本无法定义"。
+        # `is_finite()` 对 null 返回 null, `when(...).then(...).otherwise(None)` 正好
+        # 把 null 保留为 null、把 NaN/±inf 一并变成 null。
+        # 只对本族生效: alpha158 等既有使用者的数值口径保持不变。
+        if str(name).startswith("gtja_"):
+            value = pl.when(value.is_finite()).then(value).otherwise(None)
+        frame = transformed.with_columns(value.alias(str(name))).drop(FACTOR_COLUMN)
     expressions = [
         expression.alias(name)
         for name in names
