@@ -1837,4 +1837,64 @@ BSS **命中**的钉钉外发只走独立键 `BUY_SELL_SIGNALS_HITS_DINGTALK_WEB
       复盘零碰 / 无真实凭证 / TRIGGERING / 冷却 / 同 URL warning）
 - [x] 默认不部署；合入另等盘后口令
 
+### 状态自述（P-bss-obs）
+
+> 批次 `20261027gbssobs`。**只读露出，零行为扩**：不新增 `try_push_hit` 调用方、
+> 不翻 TRIGGERING、不改三 env / 命中 webhook 生产值、不新增 hits/calib 写路径。
+
+上面几节说的是「钉钉该不该发、发给谁」。本节只解决另一个问题：**运维在哪儿看它到底配没配**。
+答案是复用已有的只读口 `GET /api/buy-sell-signals/hits/scope`（**并入**，不新开路由，N3）——
+「为什么基本面是空的」和「为什么没有钉钉消息」本来就该在同一个地方回答。
+
+响应在既有空态统计之外，并入一个嵌套对象 `hits_dingtalk`，其值**原样取**自既有
+`hits_dingtalk_status()`（`hits_dingtalk.py`），这里不重写 configured 判定：
+
+| 字段 | 含义 |
+|---|---|
+| `hits_dingtalk.configured` | 命中专用 webhook 是否非空（= `hits_webhook_ready()`） |
+| `hits_dingtalk.shares_with_common_group` | 是否与共群 `DINGTALK_WEBHOOK_URL` 相同（**仅布尔**） |
+| `hits_dingtalk.env_name` | 常量名 `BUY_SELL_SIGNALS_HITS_DINGTALK_WEBHOOK_URL` |
+| `hits_dingtalk.cooldown_min` | `30`（`HITS_DINGTALK_DEDUPE_COOLDOWN_MIN`） |
+| `hits_dingtalk.reason_when_missing` | `hits_webhook_not_configured` |
+| `volume_breakout_triggering_enabled` | 读 `Final`，现 **False** |
+| `auction_abnormal_triggering_enabled` | 读 `Final`，现 **False** |
+
+`notes` 刻意**不进**响应（N2）：那三句是给人读的说明，已写在本节与其上几节里，
+塞进 JSON 只会让响应变长。**也不加** `empty_reason_chain` 数组（N4）：空态顺序靠
+上表字段天然可观测，再造一个数组等于把同一份判断写两遍、两处会漂。
+
+**禁**：把本节读成「已接线自动推送」。露出状态 ≠ 有调用方；`try_push_hit` 的
+生产调用方本拍**一条都没加**，`HitStore` 仍是只读协议。
+
+### 空态原因链顺序
+
+读 scope 时按这个**固定顺序**往下查，前一步没通过就没必要看后面：
+
+1. **`hits_file_exists`** — 命中文件在不在。评估器还没跑过时常为 `false`，这是最常见原因。
+2. **两 TRIGGERING** — `volume_breakout_triggering_enabled` / `auction_abnormal_triggering_enabled`。
+   现均为 **False**：放量突破与竞价异常的触发链路**本来就没开**。翻 True ＝ 另口令。
+3. **`calib_passed_keys`** — 校准通过条数。`0` ＝ 没有任何已校准的信号可发布，
+   命中再多也一条都不可见（可见性闸见上几节）。
+4. **`hits_dingtalk.configured`** — 命中 webhook 配了没。`false` ＝ 缺配拒发，
+   这是**预期状态不是缺陷**（见本节开头「缺配就是拒发」）。
+
+顺序刻意如此：文件 → 开关 → 校准 → 配置。前三个回答「有没有东西可发」，
+最后一个回答「配了没」。反过来读容易把「没配」当成「没信号」。
+
+### 配置清单（env / 缺配拒发 / 不回落 / 冷却）
+
+| 项 | 值 |
+|---|---|
+| 命中 webhook env | `BUY_SELL_SIGNALS_HITS_DINGTALK_WEBHOOK_URL` |
+| 可选 secret env | `BUY_SELL_SIGNALS_HITS_DINGTALK_SECRET`（空 ＝ 该机器人未开加签） |
+| 缺配 | 拒发 `hits_webhook_not_configured`；`attempts = 0`，一个字节都不发 |
+| 回落共群 | **禁止**；不读 `DINGTALK_WEBHOOK_URL` 作发送目标（只用于同群比对告警） |
+| 冷却 | `HITS_DINGTALK_DEDUPE_COOLDOWN_MIN = 30`，**仅成功后写** |
+| 额外 enable 旗标 | **无**：URL 非空即门 |
+| 状态入口 | `GET /api/buy-sell-signals/hits/scope` → `hits_dingtalk.*` |
+| 空态链 | 见上一小节 |
+
+生产填命中专用机器人 webhook ＝ **部署口令**；本仓只保证缺配拒发与状态可观测。
+`hits_dingtalk` 响应里**不含** url / secret，别指望从这个口把地址读出来。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*

@@ -495,3 +495,78 @@ def test_broken_calib_file_hides_everything(tmp_path):
     body = TestClient(app).get(HITS_URL).json()
     assert body["count"] == 0
     assert body["rejected"]["calib_not_passed"] == 1
+
+
+# --------------------------------- 状态自述（批次 20261027gbssobs · P-bss-obs）
+#
+# 这三条测的是"只读露出": 状态字段在场、TRIGGERING 仍关、url/secret 不漏。
+# 它们**不**测推送 —— 本派不新增 `try_push_hit` 调用方, 也不翻开关。
+
+
+def test_scope_endpoint_includes_hits_dingtalk_status_nested(tmp_path):
+    """`/hits/scope` 并入嵌套 `hits_dingtalk`, 值来自既有 `hits_dingtalk_status()`。"""
+    body = _client(tmp_path).get(f"{HITS_URL}/scope").json()
+    assert "hits_dingtalk" in body
+    hd = body["hits_dingtalk"]
+    assert isinstance(hd, dict)
+    for key in (
+        "configured",
+        "shares_with_common_group",
+        "env_name",
+        "cooldown_min",
+        "reason_when_missing",
+    ):
+        assert key in hd
+    assert hd["env_name"] == "BUY_SELL_SIGNALS_HITS_DINGTALK_WEBHOOK_URL"
+    assert hd["cooldown_min"] == 30
+    assert hd["reason_when_missing"] == "hits_webhook_not_configured"
+    assert isinstance(hd["configured"], bool)
+    assert isinstance(hd["shares_with_common_group"], bool)
+    # N2 拍板: 省略 notes（避免响应偏长; 那三句在 docs 里）
+    assert "notes" not in hd
+    # 既有 scope 键一个都没少（G-T5）
+    for key in (
+        "scope_family",
+        "scope_size",
+        "empty_message",
+        "hits_file",
+        "hits_file_exists",
+        "calib_gate",
+        "calib_passed_keys",
+        "calib_file",
+        "calib_file_exists",
+    ):
+        assert key in body
+    assert body["empty_message"] == EMPTY_HITS_MESSAGE
+
+
+def test_scope_endpoint_triggering_booleans_are_false(tmp_path):
+    """两 TRIGGERING 只读露出且均为 False。翻 True 会让这条红 —— 那是期待中的红。"""
+    body = _client(tmp_path).get(f"{HITS_URL}/scope").json()
+    assert body["volume_breakout_triggering_enabled"] is False
+    assert body["auction_abnormal_triggering_enabled"] is False
+
+
+def test_scope_endpoint_does_not_leak_webhook_url_or_secret(tmp_path, monkeypatch):
+    """即使 settings 里塞了示例 URL/secret, scope JSON 也不得出现其字面。
+
+    与 `test_buy_sell_signal_hits_dingtalk.py::test_v12_status_does_not_leak_url_or_secret`
+    同一精神, 只是把断言挪到 API 响应这一层: 运维口能看「配了没」, 看不了 webhook 本身。
+    """
+    from app.config import settings
+
+    example_url = "https://example.invalid/robot/send?access_token=scope-leak-probe-token"
+    example_secret = "scope-leak-probe-secret-value"
+    monkeypatch.setattr(
+        settings, "buy_sell_signals_hits_dingtalk_webhook_url", example_url, raising=False
+    )
+    monkeypatch.setattr(
+        settings, "buy_sell_signals_hits_dingtalk_secret", example_secret, raising=False
+    )
+    body = _client(tmp_path).get(f"{HITS_URL}/scope").json()
+    dumped = json.dumps(body, ensure_ascii=False)
+    assert example_url not in dumped
+    assert example_secret not in dumped
+    assert "access_token=" not in dumped
+    # URL 非空 → configured 为 True; 但"配好了"不等于把地址打出来
+    assert body["hits_dingtalk"]["configured"] is True
