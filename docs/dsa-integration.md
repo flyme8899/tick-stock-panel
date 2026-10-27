@@ -4,6 +4,10 @@ TSP 保留自己的界面和数据链路。 [daily_stock_analysis](https://githu
 
 DSA 自带的 Web 和桌面界面没有打包进来。决策相关页面在 `frontend/src/custom/dsa/`，沿用 TSP 的布局、菜单、颜色和浅色 / 深色主题。
 
+> **单位口径提醒**：DSA 的 `volume` 是**股**，主仓插件契约是**手**，两者相差 100 倍。
+> 跨层拼接或互校前先读 [`docs/plugin-development.md`](./plugin-development.md) 的
+> 「跨层单位对照（主仓手 / DSA 股）」。本文是 TSP 集成文，不是 vendor 上游文档。
+
 ## 怎么跑
 
 只启动 TSP 时，侧栏「决策」可以打开，并标明服务未连接。样例只用于看版式。
