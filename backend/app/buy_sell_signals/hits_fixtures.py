@@ -343,10 +343,15 @@ def dated(days_ago: int) -> str:
 
 #: 夹具阈值参数集。**这些数字不是标定结果**，只是为了让"改参数→指纹变"可以被测到。
 #: 它们不出现在任何生产常量里，也不构成 `threshold_lock_data_pending` 被清掉的证据。
+#:
+#: `volume_unit`（P-bss-k4 / K4）：含 `volume_ratio_min` 就必须声明单位，否则
+#: `FreqLockStamp` 直接抛错。夹具写「手」——**这是夹具口径，不是生产口径**，
+#: 更不是"单位已审计"的证据。
 FIXTURE_FREQ_PARAMS: Final = {
     "volume_ratio_min": 2.5,
     "breakout_pct_min": 3.0,
     "window_minutes": 30,
+    "volume_unit": "手",
 }
 
 #: 另一套参数：只改了一个值，用来验"改参指纹必变"。
@@ -354,6 +359,17 @@ FIXTURE_FREQ_PARAMS_TWEAKED: Final = {
     "volume_ratio_min": 1.8,
     "breakout_pct_min": 3.0,
     "window_minutes": 30,
+    "volume_unit": "手",
+}
+
+#: 同阈值、只换单位「手」→「股」。用来验**单位进指纹**：换单位＝另一套口径。
+#: 注意这不是"换算"——数值一个都没动，正因为没动，两种口径才是同一个数、
+#: 两个意思，才必须算出不同指纹。
+FIXTURE_FREQ_PARAMS_GU: Final = {
+    "volume_ratio_min": 2.5,
+    "breakout_pct_min": 3.0,
+    "window_minutes": 30,
+    "volume_unit": "股",
 }
 
 
