@@ -1558,11 +1558,14 @@ UI 上过期条目不隐藏、不禁用, 只打「数据过期」标。藏起来
 非空 `volume_ratio`**。空桩两边都是 `None`，天然成立；这条约束真正约束的是将来那个真实
 评估器。`VOLUME_BREAKOUT_TRIGGERING_ENABLED` **仍 `False`**。
 
-> **本拍没给空桩加 `volume_unit` 字段**。N4 把该字段列为「可选」，而
-> `gauction2` 隔离测里有一条 `test_volume_stub_file_is_byte_identical_to_tip`，
-> 要求这个文件与 tip **逐字节一致**（「零碰 #210，一个字节都不许改」）。
-> 两者二选一时选择**保住既有守卫**：闸装在 `FreqLockStamp` 上，不依赖空桩有字段。
-> 将来要加字段，须**连同那条字节守卫一起改**（另口令），不能让它静默放宽。
+> **本拍没给空桩加 `volume_unit` 字段**。N4 把该字段列为「可选」，而闸装在
+> `FreqLockStamp` 上，不依赖空桩有字段 —— 回滚到这个文件的 tip 字节，零功能损失。
+>
+> 顺带记一笔：`gauction2` 隔离测里那两条要求「与 tip 逐字节一致」的守卫
+> （`test_volume_stub_file_is_byte_identical_to_tip` / `test_auction_scan_service_is_unchanged`）
+> 用 `git diff HEAD` 做基准，而 PR 里 `HEAD` 是 merge ref、工作区与其干净一致，
+> 于是 `git diff` **恒为 0**，守卫在 CI 里**空转**。本拍不改它们（超出授权），
+> 但将来要加字段，须**先把这两条守卫的基准改对**（改成 PR base），再见字段。
 
 | 本拍是 | 本拍**不是** |
 |---|---|
