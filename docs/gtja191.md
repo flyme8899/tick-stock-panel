@@ -95,44 +95,59 @@ NaN 和 null 在 TSP 里待遇不同：`_calc_ic` 用 `is_not_null()` 过滤，*
 
 ## N2 标签映射与阈值
 
-每个因子跑完检验后会被贴一个标签。标签逻辑在 `backend/app/factors/gtja191_labels.py`，是一个**薄映射纯函数**：输入 `FactorBatchItem`（回测已经算好的结果）+ IC 有效日数 + 费后多空收益 + 可选 `blocked_reason`，输出一个标签。
+每个因子跑完检验后会被贴一个标签。标签逻辑在 `backend/app/factors/gtja191_labels.py`，是一个**薄映射纯函数**：输入 `FactorBatchItem`（回测已经算好的结果）+ IC 有效日数 + 费后多空收益 + 可选 `blocked_reason` / `ic_series`，输出一个标签。
 
-**映射内不重算 IC。** 只读 `item.ic_mean` / `item.ir` / `item.error` 这些已有字段。重算会让同一个因子在不同调用点得到不同标签 —— 那比没有标签更糟。
+**映射内不重算 IC。** 只读 `item.ic_mean` / `item.ir` / `item.t_newey_west` / `item.q_value` / `item.error` 这些已有字段。重算会让同一个因子在不同调用点得到不同标签 —— 那比没有标签更糟。
 
-### 阈值表
+**门槛以任务书写死表为准。** 下表照抄 `FIX_TASKS_20261027ggtja191.md`（sha256 `7b5cac07…`）N2 节，数字一个字不改。这是**写死**的，不是"任意自洽的另一张表"。
 
-| 常量 | 值 | 含义 |
+### 标签映射表（自上而下优先；第一命中即停）
+
+| 优先 | 标签 | 可测条件（写死） |
 |---|---|---|
-| `MIN_IC_DATES` | **30** | IC 有效交易日下限。低于此**一律 `underpowered`，不得判 `alive`** |
-| `MIN_ABS_IC` | **0.02** | `\|IC\|` 地板。低于此判 `dead`，即使费后碰巧为正 |
-| `MIN_NET_LONG_SHORT` | **0** | 费后多空累计收益下限（`> 0` 才过门），必须是按 18.2bp 重扣后的净额 |
+| 1 | `blocked:data` | 公式声明 deps 含 tip enriched **不存在**的列，或第二批字段被误引入 |
+| 2 | `blocked:ops` | 报告原语无法用现有 33 OPERATORS **忠实**表达，且无已标注「TSP 映射」的等价改写 |
+| 3 | `error` | `FactorBatchItem.error` 非空（物化 / 回测异常） |
+| 4 | `underpowered` | `n_ic_dates < 30`；**或** `ir` / `t_newey_west` / `q_value` 因样本不足为 `None` 且无法完成显著性判断 |
+| 5 | `reversed` | `n_ic_dates >= 30` **且** 前后半窗 `ic_mean` **符号相反**，且两侧 `\|ic_mean\| >= 0.02` |
+| 6 | `alive` | `n_ic_dates >= 30` **且** `\|ir\| >= 0.50` **且** `\|t_newey_west\| >= 1.96` **且** `q_value is not None and q_value <= 0.10` **且** 未命中 `reversed` |
+| 7 | `dead` | `n_ic_dates >= 30` 且不满足 `alive` / `reversed` |
+
+对应常量：
+
+| 常量 | 值 | 用在 |
+|---|---|---|
+| `MIN_IC_DATES` | **30** | 样本量门（第 4 行） |
+| `MIN_ABS_IR` | **0.50** | `alive` 效应量门（第 6 行） |
+| `MIN_ABS_NW_T` | **1.96** | `alive` 显著性门（第 6 行） |
+| `MAX_Q_VALUE` | **0.10** | `alive` BH-FDR 校正门（第 6 行） |
+| `MIN_ABS_IC` | **0.02** | **只用于第 5 行半窗幅度门**，不用于 `alive` |
 | `GTJA191_COST_BP_ROUNDTRIP` | **18.2 bp** | 成本闸口径（N5 成本锚） |
 
-### 标签与优先级
+### 三条容易写错的边界
 
-优先级从高到低：`blocked:*` > `error` > `degenerate` > `underpowered` > `reversed` > `dead` / `alive`。
+**`alive` 的显著性门是 IR / NW-t / q 三者，不是 `|IC|`，也不是费后多空。**
+`|IC| >= 0.02` 看着很像"显著性"，但它是**效应量**，不是显著性：IC 自身的标准误随样本天数变化，单看 IC 大小会把 60 天的强 IC 和 600 天的强 IC 用一把尺子量。写死表选 `|IR| >= 0.50`（IC 均值 / IC 标准差）作效应量门、`|NW-t| >= 1.96` 作 NW HAC 稳健显著性门、`q <= 0.10` 作 BH-FDR 多重检验校正门，**三者缺一不可**。三个字段任一为 `None` 时无法完成判断，落 `underpowered`，不许猜。
 
-| 标签 | 触发条件 | 说明 |
-|---|---|---|
-| `blocked:ops` | `blocked_reason` 非空 | 算子缺失/冲突，根本没算。优先级高于一切 |
-| `error` | `item.error` 非空，或 `ic_mean` 为 `None` 而 IC 日数 > 0 | 算了但抛错，或结果自相矛盾 |
-| `degenerate` | `ic_mean` 为 `None` 且 IC 日数 == 0 | 因子值截面上恒定，Rank IC 无定义 |
-| `underpowered` | `n_ic_dates < 30` | 样本太薄。**压在 reversed/dead/alive 之前** |
-| `reversed` | `\|IC\| ≥ 0.02` 且费后多空符号与 IC 相反 | 方向反了：因子有用但用反了 |
-| `dead` | `\|IC\| < 0.02`，或无分层结果，或费后多空 ≤ 0 | 因子没用 / 费后不成立 |
-| `alive` | `\|IC\| ≥ 0.02` 且费后多空 > 0 | 过了全部门槛 |
+**`reversed` 判的是前后半窗符号相反，不是 IC 与多空反号。**
+半窗反号说明因子**在时间上不稳定**（前半段有效、后半段反向），处置是查 regime 变化或放弃。IC 与多空反号是另一回事（通常只是换手吃掉了收益），拿它冒充 `reversed` 会把"高换手"误诊成"方向错"，处置手段完全不同。测例 `test_v11_is_not_triggered_by_ic_vs_long_short_sign` 是这条的反例守卫。
 
-**为什么 `degenerate` 单独一类。** 因子值在某天截面上全相等（或整个区间恒定）时，Rank IC 的分母是 0，**IC 无定义**，`ic_mean` 是 `None`、有效 IC 日数是 0。这既不是 `error`（代码没出错、算子也支持），也不是 `dead`（一次都没被真正测过），更不是 `underpowered`（不是样本少，是样本全是同一个值）。归成 `error` 会让人去查一个不存在的 bug，归成 `dead` 会误杀。**这是一种测量失败，处置是修因子或换数据，不是退役。**
+**一侧贴近 0 时不判 `reversed`。** 写死表要求两侧 `|ic_mean| >= 0.02`：噪声的符号没有意义。
 
+**样本量的口径陷阱。** 判 `underpowered` 用的是 **`len(result.ic_series)`**（真正算出 IC 的天数），**不是** `result.n_dates`。后者是 `panel["date"].n_unique()`，即面板交易日数，跟 IC 有没有算出来无关 —— 因子在截面上恒定时 Rank IC 全是 NaN，`n_dates` 依然等于 287，`ic_mean` 却是 `None`。拿 `n_dates` 当 IC 日数会让第 4 行彻底失效：29 天的样本被读成 287 天，一路判成 `alive`。测例 `test_eval_script_uses_len_ic_series_not_n_dates` 扫 AST 守住这一处。
+
+**为什么 `underpowered` 压在 `alive` 之前。** 29 个 IC 日、IR/NW/q 三门全过，看起来什么都能过 —— 但 29 天里的一切都可能只是运气。判 `alive` 是拿噪声当信号；判 `dead` 是拿噪声当结论。两种都错，唯一正确的处置是承认样本不够。这是 V8 测例守的那条线。
+
+### `degenerate`（写死表 7 个标签之外的扩展）
+
+写死表的标签集合只有 7 个，**不含 `degenerate`**。本模块额外定义它，用于一种表里没有覆盖的实测情形：因子值在截面上恒定（无方差）→ Rank IC 分母为 0 → 全部日期 IC 无定义 → `ic_mean` 为 `None` 且 `n_ic_dates == 0`。
+
+> **旁注：这是测量失败，不是判定结论。**
+> - 它不是 `error`（代码没挂、算子也支持），不是 `dead`（一次都没真正测过），也不是 `underpowered`（不是样本少，是样本全是同一个值）。归 `error` 会让人去查一个不存在的 bug，归 `dead` 会误杀。
+> - **它不绕开任何门。** 触发条件比 `underpowered` **更窄**（还要求 `ic_mean is None`），只切走 `underpowered` 里"一条有效 IC 都没有"的那一小撮。有 IC、只是天数不够或 IR/NW/q 缺失的，仍然是 `underpowered`。
+> - 处置是修因子或换数据，**不是退役**，因此不进下线候选。
+>
 > 合成面板上实测踩到过：`gtja_3`（收盘触及极值次数）在随机游走数据上恒为 `0.0`，`gtja_11` 恒为 `100.0`，两个都落进 `degenerate`。真实数据上应该不会这样，但标签必须能如实说出"我测不了"。
-
-**样本量的口径陷阱。** 判 `underpowered` 用的是 **`len(result.ic_series)`**（真正算出 IC 的天数），**不是** `result.n_dates`。后者是 `panel["date"].n_unique()`，即面板的交易日数，跟 IC 有没有算出来无关 —— 因子在截面上恒定时 Rank IC 全是 NaN，`n_dates` 依然等于 287，`ic_mean` 却是 `None`。拿 `n_dates` 当 IC 日数会让 V8 那条线彻底失效：29 天的样本被读成 287 天，一路判成 `alive`。测例 `test_eval_script_uses_len_ic_series_not_n_dates` 扫 AST 守住这一处。
-
-**为什么 `underpowered` 压在 `alive` 之前。** 29 个 IC 日、IC=0.15、费后多空 +50%，看起来什么都过门 —— 但 29 天里的 IC 0.15 可能只是运气。判 `alive` 是拿噪声当信号；判 `dead` 是拿噪声当结论。两种都错，唯一正确的处置是承认样本不够。这就是 V8 测例守的那条线。
-
-**为什么 `reversed` 和 `dead` 必须分开。** `dead` 是"因子没用"，该退役；`reversed` 是"因子有用但方向反了"，该改方向重验。判据是**符号相反**：IC 显著为正而费后多空为负（或反之）。两者处置完全不同，合并会让一个可能有用的因子被当废物扔掉。
-
-**一侧贴近 0 时不判 `reversed`。** `|IC| < 0.02` 或费后多空恰好为 0 时，符号本身是噪声，拿它判"方向反了"会误伤。
 
 ### 成本口径错了必须抛错
 
@@ -142,15 +157,24 @@ NaN 和 null 在 TSP 里待遇不同：`_calc_ic` 用 `is_not_null()` 过滤，*
 
 脚本里的做法是**重跑一遍分层多空**（`FactorConfig` 换成成本锚参数），拿这次干净的 `long_short_stats["total_return"]` 过门。IC 不重算 —— 成本只影响分层收益，不影响 Rank IC。
 
-### 下线候选：只提示，不注销
+## N5 费后与下线候选（只提示，不注销）
 
-标签 ∈ `{dead, reversed}` 且按 18.2bp 未过门 → 打印为「下线候选」。
+**费后多空不进 `alive`。** 一个因子扣费后不赚钱不等于它没有排序能力（可能只是换手太高）。把费后塞进 `alive` 定义等于用成本口径置换显著性口径，会让"高 IC 高换手"的因子被误判为 `dead`。测例 `test_alive_does_not_look_at_net_long_short` 守住这条。
+
+费后只参与「下线候选」的三条 AND：
+
+1. 标签 ∈ `{dead, reversed}`；
+2. 按 18.2bp 重扣后的多空净收益未过门（`<= 0`，或拿不到费后值 —— 拿不到就是不能证明过门）；
+3. 仅输出报告字段，不改注册表。
+
+其余约束：
 
 - **只是提示。** 脚本不调用、也不允许调用 `unregister_factor`，不改注册表；
 - 退役/下线要人工拍板，走独立的变更流程；
-- `underpowered` / `degenerate` / `error` / `blocked:*` **不是**候选 —— 那是缺证据，不是有反证。
+- `alive` 过门了不是候选；`underpowered` / `degenerate` / `error` / `blocked:*` **不是**候选 —— 那是缺证据，不是有反证；
+- 费后赚钱的 `dead` 先留观，不退役。
 
-测例 `test_eval_script_never_unregisters` 扫脚本 AST，任何 `unregister_factor` 都会让测试红。
+测例 `test_eval_script_never_unregisters` / `test_mapping_never_unregisters` 扫 AST（看是否真的调用或导入，不看 docstring 里的词），任何注销调用都会让测试红。
 
 ## 成本口径
 

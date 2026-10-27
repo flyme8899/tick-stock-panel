@@ -100,6 +100,73 @@ def _print_blocked() -> None:
         print(f"  {item.label:<10} {item.reason}  {item.detail}")
 
 
+def _net_after_cost_gate(
+    service,
+    panel,
+    factor_name: str,
+    symbols: list[str] | None,
+    start: date,
+    end: date,
+    market_dates,
+    min_symbols_per_date: int,
+    run_id: str,
+) -> float | None:
+    """按 N5 成本锚（18.2bp）重跑一遍分层多空，返回费后累计收益。
+
+    **为什么不能直接用第一次的 `result.long_short_stats`：** 那一次的 `FactorConfig`
+    用的是默认成本（来回 14bp）。拿它过 18.2bp 的门等于每天少扣 4.2bp，结果系统性
+    偏乐观，而且从输出上看不出来。
+
+    IC 不重算 —— 成本只影响分层收益，不影响 Rank IC。
+    """
+    from app.backtest.factor import FactorConfig
+    from app.factors.gtja191 import _COST_FEES_PCT, _COST_SLIPPAGE_BPS
+
+    gate_config = FactorConfig(
+        factor_name=factor_name,
+        symbols=symbols,
+        start=start,
+        end=end,
+        n_groups=5,
+        rebalance="daily",
+        asset_type="stock",
+        fees_pct=_COST_FEES_PCT,
+        slippage_bps=_COST_SLIPPAGE_BPS,
+    )
+    try:
+        gate_result = service._evaluate_panel(
+            panel,
+            gate_config,
+            run_id,
+            0.0,
+            market_trading_dates=market_dates,
+            min_symbols_per_date=min_symbols_per_date,
+        )
+    except Exception:  # noqa: BLE001 — 成本门失败不能伪造一个过门结果
+        return None
+    return gate_result.long_short_stats.get("total_return")
+
+
+def _significance_of(result) -> tuple[float | None, float | None]:
+    """由 IC 序列推 NW HAC t 与双侧 p。与 `FactorBacktestService._run_batch` 同一套。
+
+    日频 1 日前瞻 → NW 滞后取 1（与 tip 的 `nw_lag=1` 一致）。
+    输入是 `FactorResult.ic_series` 里**已经算好**的每日 IC，**不重算 IC**。
+
+    返回 `(t_newey_west, p_value)`；样本不足以算 NW 时退回朴素 t。
+    """
+    from app.backtest import stats_v2
+
+    ic_values = [row.get("ic") for row in result.ic_series]
+    nw = stats_v2.newey_west_t(ic_values, lag=1)
+    t_naive = stats_v2.naive_t(ic_values)
+    if nw:
+        return nw[0], stats_v2.normal_two_sided_p(nw[0])
+    if t_naive is not None:
+        return t_naive, stats_v2.normal_two_sided_p(t_naive)
+    return None, None
+
+
 def _evaluate_group(
     service,
     *,
@@ -127,14 +194,10 @@ def _evaluate_group(
     `cost_gate=False`（alpha158 对照）不跑第二遍 —— 对照只需要 |IC| 分位，
     不需要给 158 个因子各贴一个标签，也省一半时间。
     """
-    from app.backtest.factor import FactorBatchConfig, FactorConfig
+    from app.backtest.factor import FactorBatchConfig, FactorBatchItem, FactorConfig
+    from app.backtest.stats_v2 import bh_fdr_qvalues
     from app.enriched_generation import EnrichedGenerationUnavailableError
-    from app.factors.gtja191 import (
-        _COST_FEES_PCT,
-        _COST_SLIPPAGE_BPS,
-        GTJA191_COST_BP_ROUNDTRIP,
-        blocked_reason,
-    )
+    from app.factors.gtja191 import GTJA191_COST_BP_ROUNDTRIP, blocked_reason
     from app.factors.gtja191_labels import label_of
     from app.factors.registry import get_factor
 
@@ -193,6 +256,10 @@ def _evaluate_group(
         except RuntimeError as exc:
             print(f"  过滤失败，跳过本组: {exc}")
             return rows
+        # ── 第一遍：把本批所有因子跑出来，先不判定 ──
+        # BH-FDR 的 q 是**批内**统计量（m = 本批可检验因子数），必须等整批的 p 值
+        # 都齐了才能算。所以判定推到第二遍，不能一边跑一边判。
+        evaluated: list[tuple[str, str, object, float | None]] = []
         for index, factor_name in enumerate(batch_ids, start=1):
             spec = get_factor(factor_name)
             label = spec.label if spec is not None else factor_name
@@ -229,36 +296,54 @@ def _evaluate_group(
                     "verdict": None,
                 })
                 continue
+            net = None
+            if cost_gate:
+                net = _net_after_cost_gate(
+                    service, panel, factor_name, symbols, start, end,
+                    market_dates, min_symbols_per_date,
+                    f"{tag}-{offset + index}-gate",
+                )
+            evaluated.append((factor_name, label, result, net))
 
+        # 批内 BH-FDR：与 `run_batch` 同一套（`stats_v2.bh_fdr_qvalues`），
+        # 保证脚本给出的 q 与经 API/回测出来的 q 口径一致。
+        significance = [_significance_of(result) for _, _, result, _ in evaluated]
+        p_values = [item[1] for item in significance]
+        nw_ts = [item[0] for item in significance]
+        q_values = bh_fdr_qvalues(p_values)
+
+        for (factor_name, label, result, net), p_value, q_value, nw_t in zip(
+            evaluated, p_values, q_values, nw_ts, strict=True,
+        ):
+            # ⚠ `_evaluate_panel` 返回的是 `FactorResult`，**没有** t_newey_west /
+            # p_value / q_value 三个字段（那是 `run_batch` 才挂到 `FactorBatchItem`
+            # 上的）。所以这里要显式组一个 `FactorBatchItem` 交给映射，
+            # **不能** `replace(result, …)` —— 那会直接 TypeError。
+            # IC 一个不重算：ic_mean / ir / ic_series 全部原样搬过来。
+            scored = FactorBatchItem(
+                factor_name=factor_name,
+                label=label,
+                group="GTJA191（实验）",
+                ic_mean=result.ic_mean,
+                ir=result.ir,
+                ic_win_rate=result.ic_win_rate,
+                long_short_return=net,
+                n_symbols=result.n_symbols,
+                n_dates=result.n_dates,
+                elapsed_ms=result.elapsed_ms,
+                error=result.error,
+                ic_decay=list(result.ic_decay or []),
+                yearly_ic=list(result.yearly_ic or []),
+                t_newey_west=nw_t,
+                nw_lag=1 if nw_t is not None else None,
+                p_value=p_value,
+                q_value=q_value,
+                ic_series=list(result.ic_series),
+            )
             verdict = None
             if cost_gate:
-                # 第二遍：成本换成 N5 锚（18.2bp）重算分层多空。
-                # IC 不重算 —— 成本只影响分层收益，不影响 Rank IC。
-                gate_config = FactorConfig(
-                    factor_name=factor_name,
-                    symbols=symbols,
-                    start=start,
-                    end=end,
-                    n_groups=5,
-                    rebalance="daily",
-                    asset_type="stock",
-                    fees_pct=_COST_FEES_PCT,
-                    slippage_bps=_COST_SLIPPAGE_BPS,
-                )
-                try:
-                    gate_result = service._evaluate_panel(
-                        panel,
-                        gate_config,
-                        f"{tag}-{offset + index}-gate",
-                        0.0,
-                        market_trading_dates=market_dates,
-                        min_symbols_per_date=min_symbols_per_date,
-                    )
-                    net = gate_result.long_short_stats.get("total_return")
-                except Exception:  # noqa: BLE001 — 成本门失败不能伪造一个过门结果
-                    net = None
                 verdict = label_of(
-                    result,
+                    scored,
                     # ⚠ 这里必须是 `len(ic_series)`，**不是** `result.n_dates`。
                     # `FactorResult.n_dates` 是 `panel["date"].n_unique()` —— 面板的
                     # 交易日数，跟 IC 有没有算出来无关。因子在截面上恒定（无方差）时
@@ -269,6 +354,7 @@ def _evaluate_group(
                     net_long_short_return=net,
                     cost_bp=GTJA191_COST_BP_ROUNDTRIP,
                     blocked_reason=blocked_reason(factor_name),
+                    ic_series=result.ic_series,
                 )
             rows.append({
                 "factor_name": factor_name,
@@ -278,10 +364,14 @@ def _evaluate_group(
                 "turnover": result.turnover,
                 "coverage": result.coverage,
                 "n_dates": result.n_dates,
+                "n_ic_dates": len(result.ic_series),
                 "abs_ic": abs(result.ic_mean) if result.ic_mean is not None else None,
                 "abs_ir": abs(result.ir) if result.ir is not None else None,
                 "error": result.error,
                 "verdict": verdict,
+                "p_value": p_value,
+                "q_value": q_value,
+                "t_newey_west": nw_t,
             })
         print(f"  完成 {min(offset + chunk, len(factor_ids))}/{len(factor_ids)}")
         # 显式释放：整组 158 列的面板留在内存里会把容器顶爆。
@@ -290,19 +380,27 @@ def _evaluate_group(
 
 
 def _print_rows(title: str, rows: list[dict]) -> None:
-    """标签列在最后。标签为空（对照组）时不打这一列。"""
+    """三列显著性字段（ICIR / NW-t / q）单独列出来，让过门的依据可核。
+
+    这三个正是 N2 写死表判 `alive` 的门槛。只打 IC 不打它们，读者无法复核标签。
+    """
     print()
     print(title)
     with_label = any(row.get("verdict") is not None for row in rows)
-    base = f"{'因子':<14} {'名称':<24} {'IC':>8} {'ICIR':>8} {'换手':>8} {'覆盖':>8} {'天数':>6}"
-    header = base + (f" {'标签':<14}" if with_label else "")
+    header = (
+        f"{'因子':<14} {'名称':<24} {'IC':>8} {'ICIR':>8} {'NW-t':>8} {'q':>7} "
+        f"{'换手':>8} {'覆盖':>8} {'IC日':>6}"
+    )
+    header += f" {'标签':<14}" if with_label else ""
     print(header)
     print("-" * (len(header) + 8))
     for row in rows:
         line = (
             f"{row['factor_name']:<14} {str(row['label'])[:24]:<24} "
-            f"{_fmt(row['ic_mean']):>8} {_fmt(row['ir']):>8} {_fmt(row['turnover']):>8} "
-            f"{_fmt(row.get('coverage')):>8} {row.get('n_dates') or 0:>6}"
+            f"{_fmt(row['ic_mean']):>8} {_fmt(row.get('ir')):>8} "
+            f"{_fmt(row.get('t_newey_west')):>8} {_fmt(row.get('q_value')):>7} "
+            f"{_fmt(row.get('turnover')):>8} "
+            f"{_fmt(row.get('coverage')):>8} {row.get('n_ic_dates') or 0:>6}"
         )
         if with_label:
             verdict = row.get("verdict")
@@ -322,7 +420,12 @@ def _print_verdicts(rows: list[dict]) -> list[dict]:
     from app.factors.gtja191 import GTJA191_COST_BP_ROUNDTRIP
 
     print()
-    print(f"标签依据（N2 阈值 |IC| ≥ 0.02，IC 日数 ≥ 30，费后多空 > 0，成本 {GTJA191_COST_BP_ROUNDTRIP:.1f} bp）")
+    print("标签依据（FIX N2 写死表）：")
+    print("  alive         IC日 ≥ 30 且 |IR| ≥ 0.50 且 |NW-t| ≥ 1.96 且 q ≤ 0.10 且 未命中 reversed")
+    print("  dead          IC日 ≥ 30 且不满足 alive / reversed")
+    print("  reversed      前后半窗 IC 均值符号相反，且两侧 |IC| ≥ 0.02")
+    print("  underpowered  IC日 < 30，或 IR / NW-t / q 因样本不足为 None")
+    print(f"  下线候选      = 标签∈{{dead,reversed}} 且 N5 费后多空 ≤ 0（成本 {GTJA191_COST_BP_ROUNDTRIP:.1f} bp 来回）")
     for row in labeled:
         verdict = row["verdict"]
         net = verdict.net_long_short_return
@@ -334,7 +437,10 @@ def _print_verdicts(rows: list[dict]) -> list[dict]:
     if not candidates:
         print("下线候选：无。")
         return []
-    print(f"下线候选 {len(candidates)} 个（标签 ∈ {{dead, reversed}} 且按 18.2bp 未过门）:")
+    print(
+        f"下线候选 {len(candidates)} 个"
+        f"（标签 ∈ {{dead, reversed}} 且按 N5 {GTJA191_COST_BP_ROUNDTRIP:.1f}bp 费后未过门）:"
+    )
     for row in candidates:
         print(f"  {row['factor_name']:<12} {row['verdict'].label:<10} {row['verdict'].reason}")
     print()

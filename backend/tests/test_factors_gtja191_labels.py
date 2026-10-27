@@ -1,33 +1,45 @@
-"""gtja191 N2 标签映射：纯函数、优先级、成本口径、下线候选只提示。
+"""gtja191 N2 标签映射：照抄 FIX 写死表、优先级、半窗反号、成本口径、下线候选只提示。
 
 这个文件守的是**判定逻辑本身**，不是公式能不能算（那在 `test_factors_gtja191.py`）。
-它要回答三个问题：
+判定门槛来自 `FIX_TASKS_20261027ggtja191.md`（sha256 `7b5cac07…`）N2 节的写死表，
+不是"看起来合理"的另一张表。三类失效方式各有一组测例：
 
-1. **样本不够时会不会误判 alive？** —— `V8`：29 个 IC 日、IC=0.15、费后多空 +50%，
-   看起来漂亮得不像话，但只有 29 天。这种情况必须判 `underpowered`。**判 alive 就是
-   把噪声当信号**，是这套标签最危险的失效方式。
-2. **方向反了会不会被当成没用？** —— `V11`：IC 为正而费后多空为负。这是"因子有效但
-   用反了"，处置是改方向重验，不是退役。判成 `dead` 会把一个可能有用的因子扔掉。
-3. **成本口径错了会不会悄悄放过？** —— 传 14bp 进来必须抛错。`long_short_return`
-   字段扣的就是 14bp，直接拿它过 18.2bp 的门每天少扣 4.2bp，结果系统性偏乐观，
-   而且**看不出错**。
+1. **样本不够判 alive** —— V8：30 个门全过但只有 29 个 IC 日。判 alive 就是把噪声
+   当信号，这是这套标签最危险的失效方式。
+2. **时间不稳定被当成没用，或者被别的东西冒充** —— V11：前半窗 IC 均值 -0.05、后半窗
+   +0.05。这是"因子在时间上反向"，处置是查 regime 或放弃，判 `dead` 会丢掉信息。
+   **反例守卫**：IC 为正而费后多空为负**不是** reversed（那是换手问题，不是方向问题）。
+3. **显著性门用错口径** —— `alive` 必须读 `|ir|` / `|t_newey_west|` / `q_value` 三者。
+   用 `|ic_mean|` 或费后多空冒充显著性门，会让"高 IC 高换手"或"低 IC 但稳定"的因子
+   得到错误处置，而且**看不出错**。
 
-另有一条硬约束：本模块**不许出现 `unregister_factor`**。标签是判断，下线是人的决定。
+另有三条硬约束：
+- 本模块**不许出现 `unregister_factor`**。标签是判断，下线是人的决定。
+- 评估脚本必须用 `len(result.ic_series)` 当 `n_ic_dates`，不能用 `result.n_dates`
+  （那是面板交易日数，因子截面恒定时仍是 287 而 IC 日为 0）。
+- 不许 skip / xfail 装绿。
+
+`degenerate` 是 FIX 7 个标签之外的扩展（截面恒定 → IC 全无定义），本文件单独钉住它
+的**唯一触发条件**，防止它被拿来当万能兜底。
 """
 from __future__ import annotations
 
 import ast
+from datetime import date, timedelta
 from pathlib import Path
-
-import pytest
 
 from app.backtest.factor import FactorBatchItem
 from app.factors.gtja191 import GTJA191_COST_BP_ROUNDTRIP, cost_gate_cost_bp, ic_table_cost_bp
 from app.factors.gtja191_labels import (
     DELIST_CANDIDATE_LABELS,
+    MAX_Q_VALUE,
     MIN_ABS_IC,
+    MIN_ABS_IR,
+    MIN_ABS_NW_T,
     MIN_IC_DATES,
     MIN_NET_LONG_SHORT,
+    HalfWindowFlip,
+    half_window_of,
     label_of,
 )
 
@@ -39,22 +51,68 @@ LABELS_MODULE = BACKEND / "app" / "factors" / "gtja191_labels.py"
 EVAL_SCRIPT = REPO_ROOT / "scripts" / "eval_gtja191.py"
 
 
-def _item(ic: float | None, *, error: str | None = None) -> FactorBatchItem:
+def _item(
+    ic: float | None = 0.05,
+    *,
+    ir: float | None = 0.60,
+    nw_t: float | None = 2.50,
+    q_value: float | None = 0.05,
+    error: str | None = None,
+) -> FactorBatchItem:
+    """默认值刻意选成**三门全过**，这样每个测例只需改一处就能精确推到某个分支。
+
+    如果默认值选成"三门都不过"，那么测 `alive` 时要同时改三个参数，一旦测例失败
+    就分不清是哪个门写错了。
+    """
     return FactorBatchItem(
         factor_name="gtja_2",
         label="影线相对位置-一阶差分",
         group="GTJA191（实验）",
         ic_mean=ic,
+        ir=ir,
+        t_newey_west=nw_t,
+        q_value=q_value,
         error=error,
     )
 
 
-# ── 阈值常量 ──
+def _ic_series(
+    values: list[float], *, start: date = date(2025, 1, 1),
+) -> list[dict]:
+    """按日递增造 `ic_series`。形态与 `FactorResult.ic_series` 一致。"""
+    return [
+        {"date": (start + timedelta(days=index)).isoformat(), "ic": value}
+        for index, value in enumerate(values)
+    ]
 
 
-def test_thresholds_are_the_pinned_values() -> None:
-    """任务书钉死 30 个 IC 日。改动这个数必须先改任务书，不能顺手放宽。"""
+def _flat_series(ic: float, days: int) -> list[dict]:
+    """全窗同一个 IC，保证半窗均值相等 → 不可能构成反号。"""
+    return _ic_series([ic] * days)
+
+
+def _eval(verdict_kwargs: dict | None = None, **overrides):
+    """统一入口：默认 30 个 IC 日、费后拿到 0.0、cost_bp 正确。"""
+    kwargs = {
+        "n_ic_dates": MIN_IC_DATES,
+        "net_long_short_return": 0.0,
+        "cost_bp": COST,
+    }
+    if verdict_kwargs:
+        kwargs.update(verdict_kwargs)
+    kwargs.update(overrides)
+    return kwargs
+
+
+# ════════════════════════════════════════════════════ 阈值常量：与 FIX 逐数字对齐
+
+
+def test_thresholds_match_the_fix_table() -> None:
+    """FIX N2 表里的 5 个数字，一个都不许动。改门槛必须先改 FIX，不能顺手放宽。"""
     assert MIN_IC_DATES == 30
+    assert MIN_ABS_IR == 0.50
+    assert MIN_ABS_NW_T == 1.96
+    assert MAX_Q_VALUE == 0.10
     assert MIN_ABS_IC == 0.02
     assert MIN_NET_LONG_SHORT == 0.0
 
@@ -66,17 +124,23 @@ def test_cost_gate_uses_the_n5_anchor_not_the_ic_table_default() -> None:
     assert cost_gate_cost_bp() != ic_table_cost_bp()
 
 
-# ── V8：样本太薄不得判 alive ──
+def test_delist_candidate_labels_are_exactly_dead_and_reversed() -> None:
+    """FIX 只说 `dead` / `reversed` 进候选。`underpowered` 是缺证据，不是该下线。"""
+    assert frozenset({"dead", "reversed"}) == DELIST_CANDIDATE_LABELS
+
+
+# ════════════════════════════════════════════════════ V8：样本太薄不得判 alive
 
 
 def test_v8_29_ic_dates_is_underpowered_not_alive() -> None:
-    """V8：29 个 IC 日、IC=0.15、费后多空 +50%，一切看起来都过门 —— 但样本只有 29 天。
+    """V8：29 个 IC 日，但 IR / NW-t / q **三门全过**。
 
     IC 0.15 在 358 天里是顶尖因子，在 29 天里可能只是运气。判 alive 就等于拿 29 天的
-    噪声去支持"这个因子能用"。**必须 underpowered。**
+    噪声去支持"这个因子能用"。**必须 underpowered**，且不得因费率低而例外。
     """
     verdict = label_of(
-        _item(0.15), n_ic_dates=29, net_long_short_return=0.50, cost_bp=COST,
+        _item(0.15, ir=0.90, nw_t=3.20, q_value=0.01, error=None),
+        **_eval(n_ic_dates=29, net_long_short_return=0.50),
     )
     assert verdict.label == "underpowered"
     assert verdict.label != "alive"
@@ -85,392 +149,455 @@ def test_v8_29_ic_dates_is_underpowered_not_alive() -> None:
 
 
 def test_v8_boundary_30_days_becomes_alive() -> None:
-    """同一条输入，只差 1 天：30 日即可判 alive。守边界，防止把 < 写成 <= 或反之。"""
-    verdict = label_of(
-        _item(0.15), n_ic_dates=MIN_IC_DATES, net_long_short_return=0.50, cost_bp=COST,
-    )
+    """同一条输入，只差 1 天：30 日即可判 alive。守边界，防止 `<` 写成 `<=`。"""
+    verdict = label_of(_item(0.15), **_eval(n_ic_dates=MIN_IC_DATES))
     assert verdict.label == "alive"
 
 
 def test_underpowered_beats_dead_and_reversed() -> None:
     """样本不够时，既不判 dead 也不判 reversed —— 噪声的方向和幅度都没有意义。"""
+    series = _ic_series([-0.10] * 3 + [0.10] * 2)  # 反号，但只有 5 天
     for net in (-0.9, 0.0, 0.9):
         verdict = label_of(
-            _item(0.40), n_ic_dates=5, net_long_short_return=net, cost_bp=COST,
+            _item(0.40, ir=0.10, nw_t=0.30, q_value=0.90),
+            **_eval(n_ic_dates=5, net_long_short_return=net, ic_series=series),
         )
         assert verdict.label == "underpowered", f"net={net}"
         assert not verdict.is_delist_candidate
 
 
-def test_zero_ic_dates_is_underpowered_not_alive() -> None:
-    verdict = label_of(_item(0.0), n_ic_dates=0, net_long_short_return=None, cost_bp=COST)
+# ════════════════════════════════════════════════════ V11：半窗反号才是 reversed
+
+
+def test_v11_half_window_sign_flip_is_reversed_not_dead() -> None:
+    """V11：前半窗 IC 均值 -0.05，后半窗 +0.05，两侧幅度都够 0.02。
+
+    因子"前半段反向有效、后半段正向有效" —— 它在时间上不稳定，按当前方向部署会在
+    某个 regime 里持续亏钱。处置是查 regime 变化或放弃，不是当成废物扔掉。
+    """
+    series = _ic_series([-0.05] * 20 + [0.05] * 20)
+    verdict = label_of(_item(0.02), **_eval(ic_series=series))
+    assert verdict.label == "reversed"
+    assert verdict.label != "dead"
+    assert verdict.half_window is not None
+    assert verdict.half_window.first_mean < 0 < verdict.half_window.second_mean
+    assert "符号相反" in verdict.reason
+
+
+def test_v11_is_not_triggered_by_ic_vs_long_short_sign() -> None:
+    """**反例守卫**：IC 为正、费后多空为负 —— 这**不是** reversed。
+
+    这是"因子能排序但扣费后不赚钱"，通常是换手太高，属于成本问题（N5 下线候选），
+    不是方向问题。拿它冒充 reversed 会把"高换手"误诊成"方向错"，
+    处置手段（改方向 vs 降换手）完全不同。
+    """
+    series = _flat_series(0.06, 60)  # 半窗同号，不可能 reversed
+    verdict = label_of(
+        _item(0.06), **_eval(net_long_short_return=-0.35, ic_series=series),
+    )
+    assert verdict.label == "alive", "显著性三门过了就是 alive，与费后无关"
+    assert verdict.is_delist_candidate is False
+
+
+def test_reversed_needs_both_sides_above_the_floor() -> None:
+    """一侧只有 0.001：符号确实反了，但幅度不够 0.02 —— 噪声的符号没有意义。"""
+    series = _ic_series([-0.001] * 20 + [0.05] * 20)
+    verdict = label_of(_item(0.03), **_eval(ic_series=series))
+    assert verdict.label == "alive"
+    assert verdict.label != "reversed"
+
+
+def test_reversed_does_not_require_the_significance_gates() -> None:
+    """FIX 表第 5 行只看天数与半窗幅度，不叠 IR/NW/q。
+
+    一个 IR 很低的因子也可能半窗反号 —— 那更说明它在飘。优先级上 reversed 在
+    alive/dead 之前，所以先命中 reversed。
+    """
+    series = _ic_series([-0.06] * 20 + [0.06] * 20)
+    verdict = label_of(
+        _item(0.00, ir=0.01, nw_t=0.05, q_value=0.99),
+        **_eval(ic_series=series),
+    )
+    assert verdict.label == "reversed"
+
+
+def test_half_window_of_splits_by_date_and_reports_counts() -> None:
+    """偶数日平均分，奇数日前半少 1 个 —— `n // 2`。"""
+    half = half_window_of(_ic_series([0.04] * 4))
+    assert half is not None
+    assert (half.first_days, half.second_days) == (2, 2)
+    assert half.first_mean == 0.04 and half.second_mean == 0.04
+
+    half = half_window_of(_ic_series([0.04] * 5))
+    assert half is not None
+    assert (half.first_days, half.second_days) == (2, 3)
+
+
+def test_half_window_is_order_independent() -> None:
+    """按日期排序后再切，不依赖入参顺序 —— 否则上游换个排序就换个标签。"""
+    forward = _ic_series([-0.05] * 10 + [0.05] * 10)
+    backward = list(reversed(forward))
+    half_a = half_window_of(forward)
+    half_b = half_window_of(backward)
+    assert half_a is not None and half_b is not None
+    assert (half_a.first_mean, half_a.second_mean) == (
+        half_b.first_mean, half_b.second_mean,
+    )
+
+
+def test_half_window_needs_enough_points() -> None:
+    """少于 4 个点不切：每半不到 2 个点，均值没有意义。"""
+    assert half_window_of(None) is None
+    assert half_window_of([]) is None
+    assert half_window_of(_ic_series([0.05] * 3)) is None
+
+
+def test_half_window_ignores_null_ic_rows() -> None:
+    rows = _ic_series([-0.05] * 10 + [0.05] * 10)
+    rows[3]["ic"] = None
+    half = half_window_of(rows)
+    assert half is not None
+    assert half.first_days + half.second_days == 19
+
+
+def test_half_window_flip_treats_zero_as_no_sign() -> None:
+    """一侧恰好 0.0：符号无意义，不算翻转。"""
+    half = HalfWindowFlip(
+        first_mean=0.0, second_mean=0.05, first_days=10, second_days=10,
+    )
+    assert half.flipped is False
+    assert half.significant_flip() is False
+
+
+# ════════════════════════════════════════════════════ alive：IR / NW-t / q 三门
+
+
+def test_alive_requires_all_three_gates() -> None:
+    verdict = label_of(_item(0.05, ir=0.50, nw_t=1.96, q_value=0.10), **_eval())
+    assert verdict.label == "alive"
+    assert "IR" in verdict.reason and "NW-t" in verdict.reason and "q" in verdict.reason
+
+
+def test_dead_when_ir_weak() -> None:
+    verdict = label_of(_item(0.05, ir=0.49, nw_t=2.50, q_value=0.05), **_eval())
+    assert verdict.label == "dead"
+    assert "IR" in verdict.reason
+
+
+def test_dead_when_newey_west_not_significant() -> None:
+    verdict = label_of(_item(0.05, ir=0.60, nw_t=1.95, q_value=0.05), **_eval())
+    assert verdict.label == "dead"
+    assert "NW-t" in verdict.reason
+
+
+def test_dead_when_q_too_large() -> None:
+    """BH-FDR 没过：多重检验下这个 p 值不稀奇。"""
+    verdict = label_of(_item(0.05, ir=0.60, nw_t=2.50, q_value=0.11), **_eval())
+    assert verdict.label == "dead"
+    assert "q" in verdict.reason
+
+
+def test_dead_lists_every_failing_gate() -> None:
+    """三个门都不过时 reason 要把三个都写出来，只报一个会让人以为只差一项。"""
+    verdict = label_of(_item(0.05, ir=0.10, nw_t=0.50, q_value=0.80), **_eval())
+    assert verdict.label == "dead"
+    for token in ("IR", "NW-t", "q"):
+        assert token in verdict.reason
+
+
+def test_alive_does_not_look_at_ic_magnitude() -> None:
+    """`|ic_mean|` 是效应量不是显著性：IC 0.005 只要 IR/NW/q 过硬就可以 alive。
+
+    反过来 IC 0.30 但 IR 不够也必须 dead —— 见 `test_dead_when_ir_weak` 的变体。
+    """
+    tiny_but_stable = label_of(_item(0.005, ir=0.80, nw_t=3.00, q_value=0.02), **_eval())
+    assert tiny_but_stable.label == "alive"
+
+    big_but_noisy = label_of(_item(0.30, ir=0.20, nw_t=0.90, q_value=0.40), **_eval())
+    assert big_but_noisy.label == "dead"
+
+
+def test_alive_does_not_look_at_net_long_short() -> None:
+    """费后多空（N5）**不进** alive 定义。扣费亏钱 ≠ 没有排序能力。"""
+    for net in (None, -1.0, -0.01, 0.0, 5.0):
+        verdict = label_of(_item(0.05), **_eval(net_long_short_return=net))
+        assert verdict.label == "alive", f"net={net}"
+
+
+def test_negative_ir_and_nw_use_absolute_value() -> None:
+    """负向因子同样是因子：IR/NW-t 取绝对值，不因为方向为负就判死。"""
+    verdict = label_of(_item(-0.05, ir=-0.60, nw_t=-2.50, q_value=0.05), **_eval())
+    assert verdict.label == "alive"
+
+
+def test_missing_significance_fields_are_underpowered() -> None:
+    """FIX 表第 4 行后半句：显著性字段为 None → 判不了，归 underpowered，不许猜。"""
+    cases = (
+        {"ir": None},
+        {"nw_t": None},
+        {"q_value": None},
+        {"ir": None, "nw_t": None, "q_value": None},
+    )
+    for override in cases:
+        verdict = label_of(_item(0.05, **override), **_eval())
+        assert verdict.label == "underpowered", override
+        assert not verdict.is_delist_candidate
+
+
+def test_blocked_beats_everything() -> None:
+    verdict = label_of(
+        _item(0.05, error="boom"), **_eval(blocked_reason="ops"),
+    )
+    assert verdict.label == "blocked:ops"
+    assert verdict.cost_bp is None, "没算就谈不上成本口径"
+
+
+def test_error_beats_significance() -> None:
+    verdict = label_of(_item(0.05, error="物化失败"), **_eval())
+    assert verdict.label == "error"
+
+
+def test_wrong_cost_bp_raises() -> None:
+    """传 14bp（`long_short_return` 实际扣的口径）必须抛错，不能静默偏乐观。"""
+    for bad in (14.0, 18.0, 18.3, 0.0):
+        try:
+            label_of(_item(0.05), n_ic_dates=MIN_IC_DATES,
+                     net_long_short_return=0.0, cost_bp=bad)
+        except ValueError as exc:
+            assert "成本口径" in str(exc)
+        else:  # pragma: no cover
+            raise AssertionError(f"cost_bp={bad} 应当抛 ValueError")
+
+
+# ════════════════════════════════════════════════════ degenerate：FIX 枚举外的窄扩展
+
+
+def test_degenerate_only_when_no_ic_at_all() -> None:
+    """截面恒定 → 全窗 IC 无定义 → `ic_mean is None` 且 `n_ic_dates == 0`。"""
+    verdict = label_of(
+        _item(None, ir=None, nw_t=None, q_value=None),
+        **_eval(n_ic_dates=0, net_long_short_return=None),
+    )
+    assert verdict.label == "degenerate"
+
+
+def test_degenerate_does_not_shadow_underpowered() -> None:
+    """有 IC 只是天数不够 → 仍是 underpowered。degenerate 只切走"一条 IC 都没有"。"""
+    verdict = label_of(_item(0.20), **_eval(n_ic_dates=7))
+    assert verdict.label == "underpowered"
+    assert verdict.label != "degenerate"
+
+
+def test_degenerate_needs_both_null_ic_and_zero_days() -> None:
+    """`ic_mean is None` **但** `n_ic_dates > 0` 是自相矛盾的结果，归 `error` 级问题。
+
+    这不是"测量失败"，是上游把数算坏了。放宽成只看 `ic_mean is None` 会让这类矛盾
+    结果被一句"截面恒定"掩盖过去，所以必须单独钉住。
+    """
+    verdict = label_of(
+        _item(None, ir=None, nw_t=None, q_value=None),
+        **_eval(n_ic_dates=40, net_long_short_return=None),
+    )
+    assert verdict.label != "degenerate", "有 40 个 IC 日却说 ic_mean 是 None，不能算测量失败"
     assert verdict.label == "underpowered"
 
 
-# ── V11：方向反了判 reversed，不判 dead ──
+# ════════════════════════════════════════════════════ 下线候选：标签 ∧ 费后
 
 
-def test_v11_sign_flip_is_reversed_not_dead() -> None:
-    """V11：IC 为正 (+0.08)、费后多空为负 (-0.12)。
+def test_dead_is_candidate_only_when_net_fails_the_gate() -> None:
+    """三条 AND：标签 ∈ {dead, reversed} ∧ 费后没过门。费后过门的 dead 不是候选。"""
+    dead_net_negative = label_of(
+        _item(0.05, ir=0.10, nw_t=0.50, q_value=0.80),
+        **_eval(net_long_short_return=-0.20),
+    )
+    assert dead_net_negative.label == "dead"
+    assert dead_net_negative.is_delist_candidate
 
-    因子有效（|IC| 够大）但排序方向与收益方向脱节。判 `dead` 会把它当废物扔掉；
-    正确处置是 `reversed` —— 换个方向重验。
-    """
+    dead_net_positive = label_of(
+        _item(0.05, ir=0.10, nw_t=0.50, q_value=0.80),
+        **_eval(net_long_short_return=0.40),
+    )
+    assert dead_net_positive.label == "dead"
+    assert not dead_net_positive.is_delist_candidate, "费后赚钱的 dead 先留观，不退役"
+
+
+def test_reversed_is_a_candidate_when_net_fails() -> None:
+    series = _ic_series([-0.05] * 20 + [0.05] * 20)
     verdict = label_of(
-        _item(0.08), n_ic_dates=250, net_long_short_return=-0.12, cost_bp=COST,
+        _item(0.02), **_eval(net_long_short_return=-0.10, ic_series=series),
     )
     assert verdict.label == "reversed"
-    assert verdict.label != "dead"
-    assert verdict.is_delist_candidate, "按当前方向做会亏，属下线候选"
-    assert verdict.net_long_short_return == -0.12
+    assert verdict.is_delist_candidate
 
 
-def test_v11_negative_ic_positive_spread_is_also_reversed() -> None:
-    """反号的另一半：IC 为负、多空为正。同样是方向脱节。"""
+def test_missing_net_cannot_prove_the_gate_passed() -> None:
+    """拿不到费后值 = 不能证明过门 → 仍是候选。缺证据时按"该查"处理，不按"没事"处理。"""
     verdict = label_of(
-        _item(-0.06), n_ic_dates=250, net_long_short_return=0.10, cost_bp=COST,
+        _item(0.05, ir=0.10, nw_t=0.50, q_value=0.80),
+        **_eval(net_long_short_return=None),
     )
-    assert verdict.label == "reversed"
-
-
-def test_same_sign_never_reversed() -> None:
-    """同号不判 reversed。IC 正/多空正、IC 负/多空负都算方向一致。"""
-    assert label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.10, cost_bp=COST).label == "alive"
-    assert label_of(_item(-0.05), n_ic_dates=250, net_long_short_return=-0.10, cost_bp=COST).label == "dead"
-
-
-def test_tiny_magnitude_side_does_not_trigger_reversed() -> None:
-    """一侧贴近 0 时不判 reversed —— 噪声的符号没有意义。
-
-    IC=0.001 时符号是正还是负纯属偶然，拿它判"方向反了"会误伤。
-    """
-    verdict = label_of(
-        _item(0.001), n_ic_dates=250, net_long_short_return=-0.30, cost_bp=COST,
-    )
-    assert verdict.label != "reversed"
-    assert verdict.label == "dead"
-
-
-# ── alive / dead 门槛 ──
-
-
-def test_alive_requires_both_ic_and_net_after_cost() -> None:
-    verdict = label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.03, cost_bp=COST)
-    assert verdict.label == "alive"
-    assert verdict.cost_bp == COST
-    assert not verdict.is_delist_candidate
-
-
-def test_dead_when_abs_ic_below_floor_even_if_net_positive() -> None:
-    """费后碰巧为正也不行：|IC| 不到地板说明排序能力本身不足，正值是运气。"""
-    verdict = label_of(_item(0.005), n_ic_dates=250, net_long_short_return=0.40, cost_bp=COST)
     assert verdict.label == "dead"
     assert verdict.is_delist_candidate
 
 
-def test_dead_when_net_is_exactly_zero() -> None:
-    """费后多空恰好为 0 不算过门（> 0 才过）。"""
-    verdict = label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.0, cost_bp=COST)
-    assert verdict.label == "dead"
+def test_alive_and_underpowered_are_never_candidates() -> None:
+    assert not label_of(_item(0.05), **_eval(net_long_short_return=-1.0)).is_delist_candidate
+    assert not label_of(_item(0.05), **_eval(n_ic_dates=3)).is_delist_candidate
 
 
-def test_dead_when_net_is_none() -> None:
-    """没有分层结果（样本不足以分组）不能证明费后为正，判 dead 而不是 alive。"""
-    verdict = label_of(_item(0.05), n_ic_dates=250, net_long_short_return=None, cost_bp=COST)
-    assert verdict.label == "dead"
-    assert "无法证明" in verdict.reason
+# ════════════════════════════════════════════════════ 源码级钉子（AST / 文本）
 
 
-def test_ic_floor_boundary_is_inclusive() -> None:
-    """|IC| 恰好等于 0.02 时算达标（>= 而不是 >）。"""
-    verdict = label_of(_item(MIN_ABS_IC), n_ic_dates=250, net_long_short_return=0.10, cost_bp=COST)
-    assert verdict.label == "alive"
+def _module_ast() -> ast.Module:
+    return ast.parse(LABELS_MODULE.read_text(encoding="utf-8"))
 
 
-# ── blocked / error 优先级 ──
+def test_mapping_reads_the_significance_fields() -> None:
+    """H13 回归：`label_of` 必须真的读 `item.ir` / `item.t_newey_west` / `item.q_value`。
 
-
-def test_blocked_beats_everything() -> None:
-    """blocked 优先于 error、优先于 IC 判定 —— 没算的东西谈不上好坏。"""
-    verdict = label_of(
-        _item(0.90, error="boom"),
-        n_ic_dates=999,
-        net_long_short_return=9.9,
-        cost_bp=COST,
-        blocked_reason="ops",
+    抓"文档写了三门、代码只用 |ic_mean| 过门"这种同名不同物的洗绿。
+    """
+    tree = _module_ast()
+    func = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "label_of"
     )
-    assert verdict.label == "blocked:ops"
-    assert not verdict.is_delist_candidate
-    assert verdict.cost_bp is None
+    read_fields = {
+        node.attr
+        for node in ast.walk(func)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+        and node.value.id == "item"
+    }
+    for field in ("ir", "t_newey_west", "q_value", "ic_mean", "error"):
+        assert field in read_fields, f"label_of 没读 item.{field}"
 
 
-def test_blocked_label_carries_the_reason() -> None:
-    for reason in ("ops", "data"):
-        verdict = label_of(
-            _item(0.05), n_ic_dates=250, net_long_short_return=0.1,
-            cost_bp=COST, blocked_reason=reason,
-        )
-        assert verdict.label == f"blocked:{reason}"
-
-
-def test_error_beats_underpowered() -> None:
-    """算失败了，不是"样本不够"。这两个处置不同：error 要修，underpowered 要等。"""
-    verdict = label_of(
-        _item(0.05, error="polars 崩了"), n_ic_dates=3, net_long_short_return=None, cost_bp=COST,
-    )
-    assert verdict.label == "error"
-    assert "polars" in verdict.reason
-
-
-def test_none_ic_with_zero_ic_dates_is_degenerate() -> None:
-    """因子值在截面上恒定 → Rank IC 分母为 0 → 全部日期无定义 → `ic_mean` 为 None。
-
-    这不是 `error`（代码没挂），也不是 `dead`（一次都没测过），更不是 `underpowered`
-    （不是样本少，是样本全是同一个值）。单独归类，处置是修因子/换数据。
-    """
-    verdict = label_of(_item(None), n_ic_dates=0, net_long_short_return=None, cost_bp=COST)
-    assert verdict.label == "degenerate"
-    assert verdict.label not in {"error", "dead", "underpowered", "alive"}
-    assert not verdict.is_delist_candidate
-
-
-def test_degenerate_is_not_confused_with_underpowered() -> None:
-    """`underpowered` 是"有数据但天数不够"，`degenerate` 是"一条有效数据都没有"。"""
-    assert label_of(_item(0.05), n_ic_dates=0, net_long_short_return=None, cost_bp=COST).label == "underpowered"
-    assert label_of(_item(None), n_ic_dates=0, net_long_short_return=None, cost_bp=COST).label == "degenerate"
-
-
-def test_none_ic_with_positive_ic_dates_is_inconsistent_error() -> None:
-    """ic_mean 为 None 却说有 250 个 IC 日 —— 结果自相矛盾，必须报 error 让人查。"""
-    verdict = label_of(_item(None), n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST)
-    assert verdict.label == "error"
-    assert "自相矛盾" in verdict.reason
-
-
-def test_error_and_blocked_are_not_delist_candidates() -> None:
-    """缺证据 ≠ 有反证。这两种都不是下线候选。"""
-    for verdict in (
-        label_of(_item(0.05, error="x"), n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST),
-        label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST, blocked_reason="ops"),
-    ):
-        assert not verdict.is_delist_candidate
-
-
-# ── 成本口径：14bp 必须被拒 ──
-
-
-def test_14bp_cost_is_rejected_loudly() -> None:
-    """`long_short_return` 扣的是 14bp。拿它过 18.2bp 的门每天少扣 4.2bp。
-
-    这种错**看不出来**（结果仍是个合理数字），所以必须抛错而不是打折放行。
-    """
-    with pytest.raises(ValueError, match="成本口径错误"):
-        label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.10, cost_bp=ic_table_cost_bp())
-
-
-def test_only_the_18_2_anchor_passes() -> None:
-    with pytest.raises(ValueError):
-        label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.10, cost_bp=0.0)
-    assert label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.10, cost_bp=COST).label == "alive"
-
-
-def test_cost_mismatch_checked_before_blocked() -> None:
-    """口径错误优先于 blocked 判定 —— 传错成本说明调用方用错了 API，不是数据问题。"""
-    with pytest.raises(ValueError):
-        label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.1, cost_bp=14.0, blocked_reason="ops")
-
-
-# ── 纯函数：不重算 IC ──
-
-
-def test_mapping_never_recomputes_ic() -> None:
-    """映射里不许出现 IC 计算痕迹。重算会让同一因子在不同调用点得到不同标签。
-
-    扫的是 AST 里的**调用名**，不是文本子串 —— 文本扫描会把文档里"不许重算 IC"这句
-    说明本身当成违规，逼人把约束写成暗号（参照 `_code_lines` 的同类教训）。
-    """
-    tree = ast.parse(LABELS_MODULE.read_text(encoding="utf-8"))
-    forbidden = {"corr", "spearmanr", "pearsonr", "rolling_corr", "mean", "std", "polyfit"}
+def _called_names(tree: ast.Module) -> set[str]:
+    """收集所有被调用函数的名字，兼容 `f(...)` 与 `mod.f(...)`。"""
+    names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        name = getattr(func, "attr", None) or getattr(func, "id", None)
-        assert name not in forbidden, f"映射里出现了计算调用 {name}()，这是重算 IC 的痕迹"
-    # 反向确认：模块根本不该 import numpy / polars —— 没有数值库就没法重算。
-    import ast as _ast
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, _ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, _ast.ImportFrom) and node.module:
-            imported.add(node.module.split(".")[0])
-    assert "numpy" not in imported
-    assert "polars" not in imported
+        if isinstance(func, ast.Name):
+            names.add(func.id)
+        elif isinstance(func, ast.Attribute):
+            names.add(func.attr)
+    return names
 
 
-def test_mapping_does_not_touch_the_registry() -> None:
-    """标签模块不许 import 任何注销/登记入口。下线是人的决定，不是脚本的副作用。"""
-    source = LABELS_MODULE.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            imported.update(alias.name for alias in node.names)
-    assert "unregister_factor" not in imported
-    assert "register_factor" not in imported
-    assert "registry" not in imported
+def _assert_no_unregister(
+    tree: ast.Module, module_name: str, *, forbid_registry_import: bool,
+) -> None:
+    """不靠文本匹配（docstring 里会提到这个词），只看**是否真的调用/导入**。
 
-
-def test_mapping_does_not_mutate_its_input() -> None:
-    """输入 dataclass 原样不动 —— 纯函数不能有副作用。"""
-    item = _item(0.05)
-    before = (item.ic_mean, item.error, item.n_dates)
-    label_of(item, n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST)
-    assert (item.ic_mean, item.error, item.n_dates) == before
-
-
-def test_verdict_is_immutable() -> None:
-    """判定结果不可改。有人想在后面顺手 `verdict.label = "alive"` 时应当直接炸掉。"""
-    import dataclasses
-
-    verdict = label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST)
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        verdict.label = "alive"  # type: ignore[misc]
-
-
-# ── 下线候选：只提示 ──
-
-
-def test_delist_candidate_set_is_exactly_dead_and_reversed() -> None:
-    assert frozenset({"dead", "reversed"}) == DELIST_CANDIDATE_LABELS
-
-
-def test_alive_underpowered_error_blocked_are_not_candidates() -> None:
-    cases = {
-        "alive": label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST),
-        "underpowered": label_of(_item(0.05), n_ic_dates=10, net_long_short_return=0.1, cost_bp=COST),
-        "error": label_of(_item(0.05, error="x"), n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST),
-        "blocked": label_of(_item(0.05), n_ic_dates=250, net_long_short_return=0.1, cost_bp=COST, blocked_reason="ops"),
-    }
-    for name, verdict in cases.items():
-        assert verdict.label.startswith(name), f"{verdict.label} 不以 {name} 开头"
-        assert not verdict.is_delist_candidate, f"{name} 不该是下线候选"
-
-
-def test_eval_script_never_unregisters() -> None:
-    """脚本路径里不许出现 unregister_factor —— 任务书原文「路径中禁止」。"""
-    source = EVAL_SCRIPT.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute):
-            assert node.attr != "unregister_factor", "自评脚本不许注销因子"
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = getattr(func, "attr", None) or getattr(func, "id", None)
-            assert name != "unregister_factor"
-
-
-def test_eval_script_prints_candidates_but_does_not_declare_them_removed() -> None:
-    """提示文案必须写清「只是提示」，否则读报告的人会以为已经下线了。"""
-    source = EVAL_SCRIPT.read_text(encoding="utf-8")
-    assert "下线候选" in source
-    assert "只是提示" in source or "不注销任何因子" in source
-
-
-def test_eval_script_cost_gate_uses_the_anchor_constants() -> None:
-    """成本门必须用 `_COST_*`（18.2bp），不许用 `_IC_TABLE_*`（14bp）或字面量。
-
-    这是本补丁最容易悄悄错的一处：两个常量名字长得很像，改错了脚本照样跑出漂亮结果，
-    只是每天都少扣 4.2bp。**没有这条测例，14bp 混进成本门是查不出来的。**
+    评估脚本**合法地**导入 `app.factors.registry`（要 `get_factor` 读因子定义），
+    所以只在标签模块上禁止导入 registry；两边都禁止调用注销函数。
     """
-    source = EVAL_SCRIPT.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    imported: set[str] = set()
+    assert "unregister_factor" not in _called_names(tree), f"{module_name} 调用了注销"
+    imported = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "app.factors.gtja191":
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
             imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+    assert "unregister_factor" not in imported, f"{module_name} 导入了注销函数"
+    if forbid_registry_import:
+        assert not any(
+            "registry" in name for name in imported
+        ), f"{module_name} 不该碰注册表: {imported}"
 
-    assert "_COST_FEES_PCT" in imported, "成本门必须显式用成本锚的费率"
-    assert "_COST_SLIPPAGE_BPS" in imported, "成本门必须显式用成本锚的滑点"
-    assert "_IC_TABLE_SLIPPAGE_BPS" not in imported, "IC 表滑点（14bp 口径）不许进成本门"
-    assert "_IC_TABLE_FEES_PCT" not in imported, "IC 表费率（14bp 口径）不许进成本门"
 
-    # 成本门那一遍的 FactorConfig 必须两个成本参数都给，不能落回默认值。
-    gate_configs = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and getattr(node.func, "id", None) == "FactorConfig"
-        and any(kw.arg == "fees_pct" for kw in node.keywords)
-    ]
-    assert gate_configs, "脚本里找不到带自定义成本的 FactorConfig"
-    for call in gate_configs:
-        keys = {kw.arg for kw in call.keywords}
-        assert {"fees_pct", "slippage_bps"} <= keys, "成本门的 FactorConfig 两个参数都要给"
+def test_mapping_never_unregisters() -> None:
+    """标签是判断，下线是人的决定。本模块不许出现注销调用。"""
+    _assert_no_unregister(
+        _module_ast(), "gtja191_labels", forbid_registry_import=True,
+    )
+
+
+def _eval_ast() -> ast.Module:
+    return ast.parse(EVAL_SCRIPT.read_text(encoding="utf-8"))
 
 
 def test_eval_script_uses_len_ic_series_not_n_dates() -> None:
-    """V8 能不能真的生效，全看这一处：`n_ic_dates` 必须来自 `len(result.ic_series)`。
+    """`n_dates` 是面板交易日数，`len(ic_series)` 才是有效 IC 日数。用错会把
+    截面恒定（IC 全 NaN）的因子当成 287 天样本而过门。"""
+    tree = _eval_ast()
+    assigned = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.keyword) and node.arg == "n_ic_dates"
+    ]
+    assert assigned, "脚本里找不到 n_ic_dates=... 传参"
+    for value in assigned:
+        assert isinstance(value, ast.Call), ast.dump(value)[:80]
+        assert isinstance(value.func, ast.Name) and value.func.id == "len"
+        assert isinstance(value.args[0], ast.Attribute)
+        assert value.args[0].attr == "ic_series"
 
-    `FactorResult.n_dates` 是 `panel["date"].n_unique()` —— **面板交易日数**，不是
-    有效 IC 日数。因子在截面上恒定（无方差）时 Rank IC 全是 NaN，`n_dates` 仍然是 287，
-    `ic_mean` 却为 None。
+    source = EVAL_SCRIPT.read_text(encoding="utf-8")
+    assert "n_ic_dates=result.n_dates" not in source
+    assert "n_ic_dates=len(result.ic_series)" in source
 
-    如果这里写成 `n_ic_dates=result.n_dates`，29 天的样本会被读成 287 天，`underpowered`
-    这条线**彻底失效**，29 天一路判成 `alive`。这是本补丁最容易写错也最难看出来的地方。
+
+def test_eval_script_passes_ic_series_to_the_mapping() -> None:
+    """半窗反号需要原始 IC 序列，脚本必须把它传进去，否则 reversed 永不命中。"""
+    source = EVAL_SCRIPT.read_text(encoding="utf-8")
+    assert "ic_series=result.ic_series" in source
+
+
+def test_eval_script_computes_bh_fdr_per_batch() -> None:
+    """q 值是批内统计量（m = 本批可检验因子数），必须整批 p 值齐了再算。"""
+    called = _called_names(_eval_ast())
+    for name in ("bh_fdr_qvalues", "newey_west_t"):
+        assert name in called, f"脚本没调用 {name}"
+
+    # 判定必须在 q 值算完之后：`label_of(` 的调用行号要大于 `bh_fdr_qvalues(` 的。
+    source_lines = EVAL_SCRIPT.read_text(encoding="utf-8").splitlines()
+    q_line = next(
+        index for index, line in enumerate(source_lines)
+        if "bh_fdr_qvalues(" in line and not line.lstrip().startswith(("#", "from", "import"))
+    )
+    label_line = next(
+        index for index, line in enumerate(source_lines) if "verdict = label_of(" in line
+    )
+    assert label_line > q_line, "label_of 在 q 值算出来之前就被调用了"
+
+
+def test_eval_script_cost_gate_uses_the_anchor_constants() -> None:
+    """费后重扣必须显式用 18.2bp 的锚，不能吃 `FactorConfig` 默认的 14bp。"""
+    source = EVAL_SCRIPT.read_text(encoding="utf-8")
+    assert "fees_pct=" in source and "slippage_bps=" in source
+    assert GTJA191_COST_BP_ROUNDTRIP == 18.2
+
+
+def test_eval_script_never_unregisters() -> None:
+    _assert_no_unregister(
+        _eval_ast(), "eval_gtja191", forbid_registry_import=False,
+    )
+
+
+def test_batch_item_carries_optional_ic_series() -> None:
+    """`FactorBatchItem` 必须能带 `ic_series`，否则脚本没法把半窗序列交给映射。
+
+    `_evaluate_panel` 返回的是 `FactorResult`，**没有** `t_newey_west` / `q_value`
+    三个字段（那是 `run_batch` 才挂到 `FactorBatchItem` 的）。脚本因此只能显式
+    组一个 `FactorBatchItem`：如果这个类不接受 `ic_series`，`reversed` 就永远拿不到
+    半窗序列、永不命中 —— 而且脚本会直接 TypeError 崩掉（实测踩过）。
     """
-    tree = ast.parse(EVAL_SCRIPT.read_text(encoding="utf-8"))
+    item = FactorBatchItem(
+        factor_name="gtja_2",
+        label="影线相对位置-一阶差分",
+        group="GTJA191（实验）",
+        ic_series=_ic_series([0.01, 0.02]),
+    )
+    assert item.ic_series == _ic_series([0.01, 0.02])
 
-    found = False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if getattr(node.func, "id", None) != "label_of":
-            continue
-        for kw in node.keywords:
-            if kw.arg != "n_ic_dates":
-                continue
-            found = True
-            # 必须是 len(<something>.ic_series)
-            assert isinstance(kw.value, ast.Call), "n_ic_dates 必须是一个 len(...) 调用"
-            assert getattr(kw.value.func, "id", None) == "len", "n_ic_dates 必须是 len(...)"
-            arg = kw.value.args[0] if kw.value.args else None
-            assert isinstance(arg, ast.Attribute), "len 的参数必须是某个属性"
-            assert arg.attr == "ic_series", (
-                f"n_ic_dates 必须取 ic_series，不许取 {arg.attr}。"
-                "`n_dates` 是面板交易日数，不是有效 IC 日数。"
-            )
-    assert found, "脚本里找不到 label_of 的 n_ic_dates 参数"
-
-
-def test_eval_script_labels_blocked_ids_as_blocked_ops() -> None:
-    """blocked 的 ID 要能落到 `blocked:ops`，而不是被当成"没数据"或"算挂了"。
-
-    这里查的是 `verdict = label_of(...)` 这种**直接赋值**，不是"文件里出现过 label_of"。
-    光查出现会把 `verdict = None and label_of(...)`（短路后永远拿不到标签）放过。
-    """
-    tree = ast.parse(EVAL_SCRIPT.read_text(encoding="utf-8"))
-
-    direct_assign = False
-    blocked_passed = False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        if "verdict" not in targets:
-            continue
-        value = node.value
-        # verdict = label_of(...)
-        if isinstance(value, ast.Call) and getattr(value.func, "id", None) == "label_of":
-            direct_assign = True
-            if any(
-                kw.arg == "blocked_reason"
-                and isinstance(kw.value, ast.Call)
-                and getattr(kw.value.func, "id", None) == "blocked_reason"
-                for kw in value.keywords
-            ):
-                blocked_passed = True
-
-    assert direct_assign, "verdict 必须直接由 label_of(...) 赋值，不许自己另写一套判定"
-    assert blocked_passed, "判定必须把 blocked_reason(...) 的结果传给映射"
+    # 默认值为空列表（= 未提供），不影响 `run_batch` 的原有载荷。
+    bare = FactorBatchItem(
+        factor_name="gtja_2", label="x", group="g",
+    )
+    assert bare.ic_series == []
+    assert bare.t_newey_west is None and bare.q_value is None

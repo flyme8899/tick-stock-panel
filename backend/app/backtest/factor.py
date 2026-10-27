@@ -144,6 +144,10 @@ class FactorBatchItem:
     nw_lag: int | None = None
     p_value: float | None = None
     q_value: float | None = None
+    # 可选补充: 每日 IC 序列 (与 `FactorResult.ic_series` 同形态)。
+    # 只有 `FactorBatchItem` 之外单独组装、需要判前后半窗反号时才填;
+    # `_run_batch` 不填, 保持原有载荷大小。空列表 = 未提供, 不是"没有 IC"。
+    ic_series: list[dict] = field(default_factory=list)
 
 
 @dataclass
