@@ -29,6 +29,12 @@
 **不开**匿名写。本路由只有 GET, 没有任何写入口 —— 命中层的写入属于另一个拍(评估器),
 现在连代码路径都没有。
 
+## 状态自述(P-bss-obs)
+
+`GET /hits/scope` 额外露出命中钉钉通道的只读状态(`hits_dingtalk`)与两个
+`*_TRIGGERING_ENABLED` 布尔。这是**零行为扩**: 只读既有 `hits_dingtalk_status()`
+与既有 `Final` 常量, 不新增 `try_push_hit` 调用方、不翻开关、不回传 url / secret。
+
 仅供研究，不构成投资建议；执行须人工确认。
 """
 from __future__ import annotations
@@ -39,10 +45,13 @@ from typing import Any
 
 from fastapi import APIRouter, Query, Request
 
+from app.buy_sell_signals.auction_abnormal_stub import AUCTION_ABNORMAL_TRIGGERING_ENABLED
 from app.buy_sell_signals.calib_store import DiskCalibStore, build_calib_store, build_index
 from app.buy_sell_signals.constants import EMPTY_HITS_MESSAGE
+from app.buy_sell_signals.hits_dingtalk import hits_dingtalk_status
 from app.buy_sell_signals.hits_store import DiskHitStore, build_hit_store
 from app.buy_sell_signals.hits_visibility import build_response, visible_hits
+from app.buy_sell_signals.volume_breakout_stub import VOLUME_BREAKOUT_TRIGGERING_ENABLED
 from app.market_time import cn_today
 from app.services import watchlist
 
@@ -174,10 +183,30 @@ def hits_scope(request: Request) -> dict[str, Any]:
 
     给运维用的: 「为什么我这里基本面是空的」—— 大概率是自选和持仓都为空。
     刻意不回 symbol 列表, 免得这个接口变成第二个自选接口。
+
+    ## P-bss-obs：状态自述(零行为扩)
+
+    在既有空态统计之外, 并入两样**只读**信息, 回答「为什么没有命中钉钉消息」:
+
+    - `hits_dingtalk`(嵌套对象): 直接取 `hits_dingtalk_status()` 的五个键,
+      不在这里重写 configured 判定。**不回** url / secret —— 运维只需要知道
+      「配了没」, 不需要在这个只读口上把 webhook 完整打印出来。
+    - `volume_breakout_triggering_enabled` / `auction_abnormal_triggering_enabled`:
+      原样读两个 `Final = False` 常量。**本接口不改它们**, 翻 True 是另口令。
+
+    `notes` 刻意省略(N2): 那三句是给人读的文档, 已经写进 `docs/buy-sell-signals-skeleton.md`,
+    塞进 JSON 只会让响应变长。**也不加** `empty_reason_chain` 数组(N4):
+    空态顺序靠上面这些字段天然可观测, 再造一个数组等于把同一份判断写两遍。
+
+    本函数**只读**: 不调 `try_push_hit` / `maybe_try_push_hit`, 不写 HitStore,
+    不碰 `calib.upsert`。露出状态 ≠ 已接线自动推送。
     """
     data_dir = _data_dir(request)
     hit_store = DiskHitStore(data_dir)
     calib_store = DiskCalibStore(data_dir)
+    # 既有函数, 不新造语义: configured / shares / cooldown / reason / env_name 的含义
+    # 以 `hits_dingtalk` 模块为准, 本文件只做搬运。
+    status = hits_dingtalk_status()
     return {
         "scope_family": SCOPE_FAMILY,
         "scope_size": len(scope_symbols(request)),
@@ -190,6 +219,16 @@ def hits_scope(request: Request) -> dict[str, Any]:
         "calib_passed_keys": len(build_index(calib_store)),
         "calib_file": str(calib_store.path),
         "calib_file_exists": calib_store.exists(),
+        # --- P-bss-obs: 只读露出(N1 嵌套 / N2 省略 notes / N4 不加 chain)---
+        "hits_dingtalk": {
+            "configured": status.configured,
+            "shares_with_common_group": status.shares_with_common_group,
+            "env_name": status.env_name,
+            "cooldown_min": status.cooldown_min,
+            "reason_when_missing": status.reason_when_missing,
+        },
+        "volume_breakout_triggering_enabled": VOLUME_BREAKOUT_TRIGGERING_ENABLED,
+        "auction_abnormal_triggering_enabled": AUCTION_ABNORMAL_TRIGGERING_ENABLED,
     }
 
 
