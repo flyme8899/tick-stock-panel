@@ -230,3 +230,5 @@ uv run pytest tests -q
 ---
 
 *参数以 ALIGN/DISPATCH / 既有旁支口径为准。仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。*
+
+> 本文是「信号层准入 / 风控桌 Checklist」第一闸的实现细节，索引见 [risk-desk-checklist.md](./risk-desk-checklist.md)。

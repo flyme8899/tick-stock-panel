@@ -4,6 +4,8 @@
 
 涉及代码二次开发、前端插槽、后端可替换策略、扩展注册或上游升级兼容时，还必须阅读 [`docs/secondary-development.md`](docs/secondary-development.md)。该文档区分当前已实现能力与目标扩展契约；不得根据设计示例虚构尚不存在的 API。
 
+涉及信号产出、回测结论或风控前置条件时，先核对 [`docs/risk-desk-checklist.md`](docs/risk-desk-checklist.md)。该文只索引仓内既有闸门（lookahead / 纸面 / 三 env·push_gate / t_rounds KPI），不是准入引擎；缺项与另口令范围已显式标注，不得据其宣称信号可交易或风控已上线。
+
 同时遵守以下规则：
 
 - 先理解调用链和现有测试，再进行修改。
