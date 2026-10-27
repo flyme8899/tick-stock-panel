@@ -331,3 +331,5 @@ TSP 内置回测报告，**尚未**逐句比对上游 `backtest_service` / `back
 不另起旁路账本表 / 不为读钩触发 `backtest/run` / 不碰三 env 与 hits ding / 不碰 Opt-A 与 P-risk-sop。
 
 > 仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。
+
+> 本文的「论据质量」是单条建议的证据成色，**不等于**信号层准入；准入四闸（lookahead / 纸面 / 三 env·push_gate / t_rounds KPI）见 [risk-desk-checklist.md](./risk-desk-checklist.md)。

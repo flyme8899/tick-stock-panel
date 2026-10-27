@@ -653,6 +653,7 @@ PORT=3018                      # 服务端口
 | [docs/plugin-development.md](./docs/plugin-development.md)                                         | 数据源插件开发规范(以 stock-sdk / fuyao 为参考实现)                  |
 | [docs/secondary-development.md](./docs/secondary-development.md)                                   | 代码二次开发、前端插槽、后端策略接口与 AI 开发模板                   |
 | [docs/dsa-integration.md](./docs/dsa-integration.md)                                               | 决策工作台：多市场 AI 研报、情报、定时推送和问股                     |
+| [docs/risk-desk-checklist.md](./docs/risk-desk-checklist.md)                                       | 信号层准入 / 风控桌 Checklist:索引 lookahead、纸面、三 env、t_rounds 既有闸 |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 
 ---

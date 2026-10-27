@@ -279,3 +279,5 @@ PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest \
 6. **Regime 产品规则**：本轮未标定
 
 *参数以 PARAM_NAIL / 回测门禁为准。仅供研究，不构成投资建议。*
+
+> 本文的期望值分母与 ε 口径是「信号层准入 / 风控桌 Checklist」第四闸的索引对象，见 [risk-desk-checklist.md](./risk-desk-checklist.md)。
