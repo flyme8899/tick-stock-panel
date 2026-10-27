@@ -244,13 +244,39 @@ def test_triggering_flags_remain_false():
     assert AUCTION_ABNORMAL_TRIGGERING_ENABLED is False
 
 
-def test_stub_never_fills_volume_ratio_and_carries_no_unit():
-    """空桩：量比 `None`，单位也 `None` —— 不替未来那个评估器预先挑单位。"""
+def test_stub_never_fills_volume_ratio():
+    """空桩：量比恒 `None` —— 没单位就不许有量比（N5 ⑧ / ALIGN 场景 ⑧）。
+
+    这条**不**依赖 stub 增字段：量比恒 `None` 本身就满足了"无单位不得填非空量比"。
+    """
     stub = evaluate_volume_breakout("600000")
     assert stub.volume_ratio is None
-    assert stub.volume_unit is None
     assert stub.to_dict()["volume_ratio"] is None
-    assert stub.to_dict()["volume_unit"] is None
+
+
+def test_stub_carries_no_volume_unit_key():
+    """空桩**不**带 `volume_unit` 字段：不替未来那个评估器预先挑单位。
+
+    ## 这两条为什么是 `xfail(strict=False)` 而不是硬断言
+
+    gauction2 隔离测里有一条 `test_volume_stub_file_is_byte_identical_to_tip`，
+    它要求 `volume_breakout_stub.py` **与 tip 逐字节一致**（"零碰 #210，一个字节都不许改"）。
+    本拍的 N4 把 `volume_unit` 字段列为**可选**（"可选：dataclass 增 …"），
+    于是这里出现二选一：
+
+    - 加字段 → gauction2 字节守卫红；
+    - 不加字段 → 本拍的契约只落在 docstring 与闸上。
+
+    选择后者：**保住既有守卫**，本拍的闸本身不依赖 stub 有字段（闸在 `FreqLockStamp` 上）。
+    将来若要加字段，正确做法是**连同那条字节守卫一起改**（另口令），而不是让守卫静默放宽。
+    在那之前，本探针记录"字段仍缺"这一事实，不算失败。
+    """
+    stub = evaluate_volume_breakout("600000")
+    if hasattr(stub, "volume_unit"):
+        assert stub.volume_unit is None
+        assert stub.to_dict()["volume_unit"] is None
+    else:
+        pytest.xfail("stub 未增 volume_unit 字段（保 gauction2 字节守卫；N4 该项为可选）")
 
 
 def test_stub_evidence_pending_untouched():
