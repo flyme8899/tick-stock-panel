@@ -383,6 +383,47 @@ FREQ_LOCK_CADENCES: Final = frozenset({"minute_event", "daily_fundamental"})
 FREQ_LOCK_SCHEMA_VERSION: Final = "1"
 """戳的序列化格式版本(字符串, 理由同 `REGISTRY_SCHEMA_VERSION`)。"""
 
+# ------------------------------------------------- 评估单位声明(批次 20261027gbssk4 · P-bss-k4 · 补 K4)
+#
+# 仅供研究, 不构成投资建议; 执行须人工确认。
+#
+# 这一组常量只解决一件事: 让「量比是按手还是按股算的」在评估口径里**显式**写出来。
+# 它**不是**「#7 量审计已过」, **不是**开放触发, **不是**放量能力, 也**不是** G1/B4
+# 那种跨层换算 —— 它只是一道"不写单位就拒评"的闸。
+#
+# 为什么必须有: 主仓口径是「手」, DSA 侧是「股」(#237 跨层对照表记的就是这条双轨)。
+# 同一条量比阈值, 单位不同可以差 100 倍。而 params 里的 `volume_ratio_min: 2.5` 从字面上
+# 看不出单位 —— 不逼人写出来, 这个歧义就会一路静默到结论里。
+
+VOLUME_UNIT_PARAM_KEY: Final = "volume_unit"
+"""`FreqLockStamp.params` 内评估单位字段名(写死)。
+
+正式值**只**认中文「手」「股」。英文 alias(lot / share / hand)一律非法 ——
+同一件事有两种写法, 就一定会有人在两种写法之间比大小。
+"""
+
+VOLUME_UNITS: Final = frozenset({"手", "股"})
+"""评估口径单位**封闭集**。
+
+"封闭"是刻意的: 任何新单位(千股、万手、张……)都必须先改这里, 而不是被 `volume_unit`
+悄悄接受。改这个集合是一次口径变更, 该走评审, 不该靠调用方随手填个字符串。
+"""
+
+VOLUME_UNIT_TRIGGER_KEYS: Final = frozenset(
+    {
+        "volume_ratio",
+        "volume_ratio_min",
+        "volume_ratio_max",
+    }
+)
+"""显式列出的量相关键: 出现任一个即强制声明 `volume_unit`。
+
+除这些键之外, **任何以 `volume_` 开头且不等于 `volume_unit` 的键**同样触发
+(见 `freq_lock.require_volume_unit`)。前缀规则是为了让将来新增的 `volume_ma` /
+`volume_window` 之类自动落入闸内, 不用每次回来改这张表 —— 漏改一张表的成本,
+比多拦一个键高得多。
+"""
+
 # ---------------------------------------------------------------- 校准登记(批次 20261026gbsscalib)
 
 CALIB_FILENAME: Final = "calib.json"
@@ -528,5 +569,8 @@ __all__ = [
     "REGISTRY_SCHEMA_VERSION",
     "SIGNAL_DESIGN_PIN",
     "SIGNAL_FAMILIES",
+    "VOLUME_UNITS",
+    "VOLUME_UNIT_PARAM_KEY",
+    "VOLUME_UNIT_TRIGGER_KEYS",
     "design_version",
 ]

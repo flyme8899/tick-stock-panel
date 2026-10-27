@@ -75,6 +75,9 @@ from .constants import (
     FREQ_LOCK_CADENCES,
     FREQ_LOCK_SCHEMA_VERSION,
     FREQ_LOCK_VERSION,
+    VOLUME_UNIT_PARAM_KEY,
+    VOLUME_UNIT_TRIGGER_KEYS,
+    VOLUME_UNITS,
 )
 from .models import SignalValidationError
 
@@ -90,6 +93,76 @@ class FreqLockError(SignalValidationError):
 def _require(condition: object, message: str) -> None:
     if not condition:
         raise FreqLockError(message)
+
+
+# ================================================ 评估单位声明(批次 20261027gbssk4 · K4)
+#
+# 仅供研究, 不构成投资建议; 执行须人工确认。
+#
+# **这个闸是什么**: `params` 里出现量相关键时, 逼调用方把「手」还是「股」写出来。
+# **这个闸不是什么**: 不是「#7 量审计已过」, 不是开放触发, 不是可放量, 不是 G1 换算。
+# 它只拦"没写单位", 不判断单位选得对不对 —— 那要有量审计(K8)才谈得上。
+
+
+def _params_need_volume_unit(params: Mapping[str, Any]) -> bool:
+    """`params` 里是否出现了量相关键(**封闭触发集** + `volume_` 前缀规则)。"""
+    for key in params:
+        if key in VOLUME_UNIT_TRIGGER_KEYS:
+            return True
+        if isinstance(key, str) and key.startswith("volume_") and key != VOLUME_UNIT_PARAM_KEY:
+            return True
+    return False
+
+
+def require_volume_unit(params: Mapping[str, Any]) -> None:
+    """含量相关键时强制 `volume_unit ∈ {手,股}`; 否则放行。
+
+    失败一律抛 `FreqLockError`(单一可捕获类型, 不另造第二个错误类)。
+
+    刻意**不**返回单位值: 返回它等于暗示"调用方现在可以按这个单位换算了",
+    而换算(G1/B4)不在本闸范围。本函数只回答"这个 params 能不能参与评估"。
+
+    **禁静默默认「手」**: 缺单位就是拒评。默认会让一条按股记录的量比被当成按手,
+    差 100 倍, 而这个错误在输出上完全看不出来。
+
+    空 `params` / 无量相关键 → 直接放行。"节拍已定、阈值未标定"是合法中间态,
+    不能因为单位没写就连戳都不让建。
+    """
+    _require(isinstance(params, Mapping), "params 必须是映射")
+    if not _params_need_volume_unit(params):
+        return
+
+    if VOLUME_UNIT_PARAM_KEY not in params:
+        raise FreqLockError(
+            f"params 含量相关键时必须声明 {VOLUME_UNIT_PARAM_KEY}∈{sorted(VOLUME_UNITS)}"
+            "(缺单位拒评, 不默认「手」)"
+        )
+
+    raw = params[VOLUME_UNIT_PARAM_KEY]
+    if raw is None:
+        raise FreqLockError(
+            f"{VOLUME_UNIT_PARAM_KEY} 不能是 None(缺单位拒评, 不默认「手」)"
+        )
+    if not isinstance(raw, str):
+        # list / set / tuple 之类: 多值即"混口径", 不允许在这里挑一个
+        raise FreqLockError(
+            f"{VOLUME_UNIT_PARAM_KEY} 必须是单值字符串「手」或「股」, "
+            f"收到 {type(raw).__name__}(混形态拒评)"
+        )
+    if raw != raw.strip() or not raw:
+        raise FreqLockError(
+            f"{VOLUME_UNIT_PARAM_KEY}={raw!r} 含首尾空白或为空(非法值拒评); "
+            f"仅允许 {sorted(VOLUME_UNITS)}"
+        )
+    if "," in raw or "，" in raw:
+        raise FreqLockError(
+            f"{VOLUME_UNIT_PARAM_KEY}={raw!r} 看起来是多单位拼接(混形态拒评); "
+            f"仅允许 {sorted(VOLUME_UNITS)}"
+        )
+    if raw not in VOLUME_UNITS:
+        raise FreqLockError(
+            f"{VOLUME_UNIT_PARAM_KEY}={raw!r} 不在封闭集 {sorted(VOLUME_UNITS)}(非法值拒评)"
+        )
 
 
 #: 参与指纹的字段名(**顺序即指纹输入顺序**, 但排序后序列化, 所以顺序不影响结果 ——
@@ -200,6 +273,16 @@ class FreqLockStamp:
 
     允许空: "节拍已定、阈值未标定"是合法中间态。空 `params` 不代表"阈值已锁定",
     只代表"这一版没有参数"。
+
+    ## 量相关键必须声明单位(P-bss-k4 / K4)
+
+    只要出现 `volume_ratio` / `volume_ratio_min` / `volume_ratio_max`, 或任何以
+    `volume_` 开头且非 `volume_unit` 的键, 就必须带 `volume_unit ∈ {手, 股}`,
+    否则构造**直接抛** `FreqLockError`(见 `require_volume_unit`)。
+    不做静默默认: 主仓「手」与 DSA「股」差 100 倍(#237 跨层对照), 猜错看不出来。
+
+    `volume_unit` 落在 `params` 内 → **自动进指纹**: 同一套阈值换个单位, 是另一套
+    口径, 指纹必须不同。
     """
 
     freq_lock_version: str = FREQ_LOCK_VERSION
@@ -224,6 +307,10 @@ class FreqLockStamp:
             f"cadence 必须是 {sorted(FREQ_LOCK_CADENCES)} 之一, 收到 {self.cadence!r}",
         )
         _require(isinstance(self.params, Mapping), "params 必须是映射")
+        # P-bss-k4 / K4: 量相关键存在时必须声明单位。放在这里而不是只放助手,
+        # 是为了让"直接构造 / from_dict / 夹具"三条入口过同一道闸 ——
+        # 助手存在但调用方漏调, 是这类闸最典型的静默洞。
+        require_volume_unit(self.params)
         _require(self.schema_version == FREQ_LOCK_SCHEMA_VERSION, "schema_version 不匹配")
 
         if self.locked_at is not None:
@@ -362,4 +449,5 @@ __all__ = [
     "FreqLockStamp",
     "canonical_json",
     "freq_lock_fingerprint",
+    "require_volume_unit",
 ]

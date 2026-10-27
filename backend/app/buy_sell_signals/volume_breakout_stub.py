@@ -12,6 +12,15 @@
 没有回测。`evaluate_volume_breakout()` 恒返回 `data_pending`，**永远不会**返回
 「今天放量了」。
 
+## P-bss-k4 / K4：单位声明（本拍只加契约，不改行为）
+
+量比是按「手」还是按「股」算，差 100 倍（#237 跨层单位对照）。所以本模块的契约多一条：
+**没有合法 `volume_unit`（`手` / `股`）就不许出现非空 `volume_ratio`**。
+空桩两边都是 `None`，天然满足；这条约束真正约束的是将来那个真实评估器。
+
+`VOLUME_BREAKOUT_TRIGGERING_ENABLED` **仍 `False`**，本拍**没有**因此开放任何触发。
+补 K4 **不等于**「#7 量审计已过」，也不等于可放量。
+
 ## 为什么这一拍只能出空桩
 
 三条硬缺口，缺任一条都跑不出一个诚实的结论：
@@ -225,7 +234,24 @@ class VolumeBreakoutStub:
     """为什么没有结论。"""
 
     volume_ratio: float | None = None
-    """量比。**恒 `None`** —— 阈值未锁定，填任何数都是假数。"""
+    """量比。**恒 `None`** —— 阈值未锁定，填任何数都是假数。
+
+    ## P-bss-k4 / K4：无单位声明不得填非空量比
+
+    量比是"按手算"还是"按股算"差 100 倍（见 #237 跨层单位对照）。所以 `volume_ratio`
+    与 `volume_unit` 是**同生同死**的：没有合法 `volume_unit`（`手` / `股`）就**不许**
+    在这里出现非空数值。空桩两边都是 `None`，这个不变式天然成立。
+
+    这条约束管的是将来那个真实评估器，不是本拍：本拍仍恒 `None`，也**不**开触发。
+    """
+
+    volume_unit: str | None = None
+    """评估单位声明。空桩恒 `None`。
+
+    有真实评估器时须 `∈ {手, 股}`（`constants.VOLUME_UNITS`）；与 `volume_ratio`
+    必须同时出现或同时为空。这里**不**做校验也不默认「手」—— 空桩没有量比，
+    补一个默认单位反而是在替未来那个评估器提前撒谎。
+    """
 
     breakout_pct: float | None = None
     """突破幅度。**恒 `None`** —— 同上。"""
@@ -273,6 +299,7 @@ class VolumeBreakoutStub:
             "triggered": self.triggered,
             "triggered_reason": self.triggered_reason,
             "volume_ratio": self.volume_ratio,
+            "volume_unit": self.volume_unit,
             "breakout_pct": self.breakout_pct,
             "auction_stat_bucket": self.auction_stat_bucket,
             "auction_rule_id": self.auction_rule_id,
