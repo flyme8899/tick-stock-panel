@@ -216,6 +216,22 @@ function isOverlayCandidate(st: { id: string; source?: string; execution_backend
     && st.execution_backend !== 'composite'
     && !String(st.id).startsWith('composite_')
 }
+
+/** 批次 20261028sdel · P-strat-delete: 哪些 source 允许在回测页芯片上删。
+ *
+ * **白名单**写法, 不是黑名单(`!== 'builtin'`)。理由与 P3a 的 mode 闸同一个道理:
+ * 将来后端若新增一种 source, 黑名单会让它**默认可删**, 白名单让它**默认不可删**。
+ * `composite` 在列: 但注意回测页的「叠加」tab 列的是**可叠加候选**(`isOverlayCandidate`
+ * 已排除 composite), 所以这里说的 composite 指的是「全部」/「自定义」分组下真实存在的
+ * composite 策略文件, 它和 custom/ai 一样是用户资产。
+ *
+ * `builtin` 与缺失 source 一律 `false` —— 服务端 403 仍在(`delete_strategy`),
+ * 本函数只是 UI 侧的第一道, **不能**替代服务端保护。
+ */
+const DELETABLE_STRATEGY_SOURCES = ['custom', 'ai', 'composite'] as const
+function isDeletableStrategy(st: { source?: string }): boolean {
+  return (DELETABLE_STRATEGY_SOURCES as readonly string[]).includes(String(st.source ?? ''))
+}
 /** 默认合并模式与 CompositeStrategyDialog / 后端 DEFAULT_MERGE_MODE 三处同值 */
 const DEFAULT_OVERLAY_MERGE_MODE: 'union' | 'intersect' = 'intersect'
 /** 叠加需要至少 2 个子策略: 少于 2 个时不允许点运行 (后端也会 400) */
@@ -1016,6 +1032,12 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
   /** 「叠加」tab 的多选子策略 (顺序即展示顺序; 权重均等) */
   const [selectedOverlayIds, setSelectedOverlayIds] = useState<string[]>([])
+  /** 批次 20261028sdel: 芯片删除的确认态 —— 存 `{ id, name }` 而不是只存 id,
+   *  因为确认文案要显示策略名, 而删除成功后该策略已从列表消失, 那时再按 id 查名字会
+   *  拿到 undefined, 弹窗文案会闪一下「(未知策略)」。名字在点 X 那一刻就冻住。 */
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null)
+  const [deletingStrategy, setDeletingStrategy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
   /** 合并模式: 默认 intersect (与后端 DEFAULT_MERGE_MODE / CompositeDialog 同值) */
   const [overlayMergeMode, setOverlayMergeMode] = useState<'union' | 'intersect'>(DEFAULT_OVERLAY_MERGE_MODE)
   /** AI 分组自助创建入口: 回测页内挂 Builder, 不跳选股页 */
@@ -1349,6 +1371,62 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     setSelectedOverlayIds(prev => (
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
     ))
+  }
+
+  /** 批次 20261028sdel · P-strat-delete: 打开/关闭芯片删除确认。
+   *
+   * 名字在这里冻住(见 deleteConfirm 的注释)。同时清掉上一轮的错误 —— 否则用户
+   * 第一次删失败(比如 409 被叠加引用)、关掉、再点另一个策略的 X, 会看到**上一个**
+   * 策略的错误文案, 那比不显示还糟。
+   */
+  const openDeleteConfirm = useCallback((id: string, name: string) => {
+    setDeleteError('')
+    setDeleteConfirm({ id, name })
+  }, [])
+
+  const closeDeleteConfirm = useCallback(() => {
+    if (deletingStrategy) return
+    setDeleteConfirm(null)
+    setDeleteError('')
+  }, [deletingStrategy])
+
+  /** 批次 20261028sdel: 确认删除 → `api.strategyDelete` → 三件善后。
+   *
+   * 复用的是 SettingsDialog 早就走通的同一条后端路径(`api.strategyDelete` →
+   * `DELETE /api/strategies/{id}`), **不改后端契约**: builtin 仍是 403、被叠加引用
+   * 仍是 409, 这里只负责把 `detail` 露出来。
+   *
+   * 三件善后(缺一都会留下"看得见但已经不存在"的残留态):
+   * ① 失效策略列表 query —— 不刷新的话被删的芯片会一直挂在那儿, 直到用户手动切页;
+   * ② 若删的正是当前选中 → 清空 `selectedStrategy`, 否则右侧会一直 `strategyGet` 404
+   *    并停在"加载策略配置…"转圈;
+   * ③ 从 `selectedOverlayIds` 剔除 —— 叠加多选里留着一个已删的 id, 下次运行会拿它去
+   *    拼 `overlay_children`, 后端逐个取策略时 404。
+   */
+  const handleConfirmDeleteStrategy = async () => {
+    const target = deleteConfirm
+    if (!target || deletingStrategy) return
+    setDeletingStrategy(true)
+    setDeleteError('')
+    try {
+      await api.strategyDelete(target.id)
+      // 善后必须在**刷新列表之前**做完。
+      // `invalidateQueries` 会 await 一次重取, 而重取要等网络 —— 期间右侧仍显示着
+      // 刚被删掉的策略(详情来自缓存), 叠加多选里也还留着它的 id。把它排到
+      // invalidate 之后, 就等于"网速越慢, 脏状态挂得越久"; 网速差到请求超时时,
+      // 甚至永远不会清。清理是纯本地 setState, 没有任何理由等网络。
+      setSelectedStrategy(prev => (prev === target.id ? null : prev))
+      setSelectedOverlayIds(prev => prev.filter(x => x !== target.id))
+      setDeleteConfirm(null)
+      await queryClient.invalidateQueries({ queryKey: QK.screenerStrategies(assetType, 'all') })
+    } catch (e: any) {
+      // `request()` 已经弹过 toast; 这里在弹窗内**再**显式显示一次, 并保持弹窗打开。
+      // 对齐 SettingsDialog.handleDelete 的做法: 失败不能让弹窗自己关掉 —— 关掉就等于
+      // 告诉用户"好了", 而实际什么都没变。
+      setDeleteError(String(e?.message ?? '删除失败,请重试'))
+    } finally {
+      setDeletingStrategy(false)
+    }
   }
 
   const handleRun = () => {
@@ -1960,18 +2038,23 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             )}
             {filteredStrategyList.map(st => {
               const overlayPicked = overlayActive && selectedOverlayIds.includes(st.id)
+              const deletable = isDeletableStrategy(st)
+              const active = overlayActive ? overlayPicked : selectedStrategy === st.id
               return (
                 <button
                   key={st.id}
                   type="button"
                   data-strategy-id={st.id}
+                  data-strategy-source={st.source ?? ''}
+                  data-deletable={deletable ? 'true' : undefined}
+                  data-strategy-active={active ? 'true' : 'false'}
                   data-overlay-picked={overlayActive ? overlayPicked : undefined}
                   onClick={() => {
                     if (overlayActive) toggleOverlay(st.id)
                     else setSelectedStrategy(st.id)
                   }}
-                  className={`px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer
-                    ${(overlayActive ? overlayPicked : selectedStrategy === st.id)
+                  className={`group px-2 py-1 rounded-btn text-[11px] border transition-all duration-150 ease-smooth cursor-pointer
+                    ${active
                       ? 'border-accent/50 bg-accent/10 text-accent shadow-[0_0_10px_rgba(59,130,246,0.1)]'
                       : 'border-border bg-base text-secondary hover:border-accent/40'
                     }`}
@@ -1986,6 +2069,34 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                   {st.source && st.source !== 'builtin' && (
                     <span className={`ml-1 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[st.source] ?? ''}`}>
                       {SRC_MAP[st.source] ?? ''}
+                    </span>
+                  )}
+                  {/* 批次 20261028sdel · P-strat-delete: 删除入口。
+                      用 `<span role="button">` 而不是嵌套 `<button>`: 芯片本体已经是
+                      button, HTML 不允许 button 套 button(浏览器会把它提到外面, 事件
+                      目标也就跟着错位)。键盘可达性用 tabIndex + onKeyDown 补回来。
+
+                      `stopPropagation` 是硬要求: 不拦的话点 X 会冒泡到芯片的 onClick,
+                      于是"想删"变成"想选" —— 在叠加 tab 下更糟, 那会把它勾上。 */}
+                  {deletable && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`删除策略 ${st.name}`}
+                      data-delete-strategy={st.id}
+                      title="删除策略"
+                      onClick={e => { e.stopPropagation(); openDeleteConfirm(st.id, st.name) }}
+                      onKeyDown={e => {
+                        if (e.key !== 'Enter' && e.key !== ' ') return
+                        e.preventDefault()
+                        e.stopPropagation()
+                        openDeleteConfirm(st.id, st.name)
+                      }}
+                      className="ml-1 inline-flex items-center justify-center rounded-sm text-muted/60
+                        opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-danger
+                        hover:bg-danger/10 transition-all duration-150 cursor-pointer"
+                    >
+                      <X className="h-3 w-3" />
                     </span>
                   )}
                 </button>
@@ -2003,6 +2114,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           type="button"
           onClick={() => detail && setSettingsOpen(true)}
           disabled={!detail || strategyDetail.isLoading}
+          data-strategy-settings
+          data-selected-strategy-id={selectedStrategy ?? ''}
           className="group w-full rounded-btn border border-border bg-surface px-3 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-elevated/70 disabled:cursor-not-allowed disabled:opacity-55"
         >
           <span className="flex items-center gap-2 text-xs font-semibold text-foreground">
@@ -2011,7 +2124,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             <span className="ml-auto text-[10px] font-normal text-muted group-hover:text-accent">编辑</span>
           </span>
           <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-secondary">
-            <span className="truncate">{selectedStrategyName}</span>
+            <span className="truncate" data-selected-strategy-name>{selectedStrategyName}</span>
             {selectedStrategySource && (
               <span className={`shrink-0 text-[8px] px-1 py-px rounded border ${BADGE_CLS_MAP[selectedStrategySource] ?? ''}`}>
                 {SRC_MAP[selectedStrategySource] ?? selectedStrategySource}
@@ -3460,6 +3573,61 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         mode="create"
         onSavedId={handleBuilderSaved}
       />
+
+      {/* 批次 20261028sdel · P-strat-delete: 芯片删除的二次确认。
+          文案与 StrategySettingsDialog 的删除确认**逐字一致**(「确定要删除「{name}」吗？」+
+          「删除后无法恢复，策略文件、配置和关联数据将被永久清除。」) —— 同一个不可逆操作
+          在两个入口不该给出两套说法。
+
+          挂在最外层(不在任何带 overflow-hidden / backdrop-blur 的面板内): 与 SettingsDialog
+          里那段注释同一个理由 —— backdrop-blur 会为 fixed 后代建立定位上下文, 放进去会让
+          本应全屏居中的确认框相对面板定位并被裁剪。 */}
+      {deleteConfirm && (
+        <AnimatePresence>
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            onClick={closeDeleteConfirm}
+            data-strategy-delete-confirm
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              className="w-[380px] bg-surface border border-border/50 rounded-2xl shadow-2xl p-6"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-danger/10 flex items-center justify-center mx-auto">
+                  <span className="text-danger text-lg">!</span>
+                </div>
+                <div>
+                  <div className="text-sm font-semibold text-foreground">删除策略</div>
+                  <div className="text-xs text-muted mt-1">确定要删除「{deleteConfirm.name}」吗？</div>
+                </div>
+                <div className="text-[11px] text-danger/70 bg-danger/[0.04] rounded-lg px-3 py-2 border border-danger/10">
+                  删除后无法恢复，策略文件、配置和关联数据将被永久清除。
+                </div>
+                {deleteError && (
+                  <div
+                    data-strategy-delete-error
+                    className="text-[11px] text-danger bg-danger/10 rounded-lg px-3 py-2 border border-danger/20 text-left break-words"
+                  >
+                    {deleteError}
+                  </div>
+                )}
+                <div className="flex gap-2 pt-2">
+                  <button onClick={closeDeleteConfirm} disabled={deletingStrategy}
+                    className="flex-1 h-8 rounded-lg border border-border text-xs text-secondary hover:text-foreground disabled:opacity-50">取消</button>
+                  <button onClick={handleConfirmDeleteStrategy} disabled={deletingStrategy}
+                    data-strategy-delete-submit
+                    className="flex-1 h-8 rounded-lg bg-danger text-white text-xs font-medium hover:bg-danger/90 disabled:opacity-50">
+                    {deletingStrategy ? '删除中...' : '确认删除'}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        </AnimatePresence>
+      )}
     </div>
   )
 }
