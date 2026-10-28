@@ -617,6 +617,7 @@ export function SectorAnalysis() {
             // 一次初值, 于是行业的 draft 里躺着概念的 configId/dimensionField,
             // 点保存就写进了 industry-analysis-config。
             // key 不同 → 强制 remount → draft 重新按本列的 currentConfig 初始化。
+            key="concept-config"
             currentConfig={{
               ...concept.fieldConfig,
               configId: concept.activeConfig?.id ?? concept.fieldConfig.configId,
@@ -628,6 +629,7 @@ export function SectorAnalysis() {
         )}
         {industry.showConfig && (
           <AnalysisConfigDialog
+            key="industry-config"
             currentConfig={{
               ...industry.fieldConfig,
               configId: industry.activeConfig?.id ?? industry.fieldConfig.configId,
