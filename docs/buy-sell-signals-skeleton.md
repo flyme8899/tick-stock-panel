@@ -2082,9 +2082,9 @@ calib 判定**之前**。
 #### 零碰
 
 不改三 env 与 hits webhook 生产值；不写 `HitStore`；不调 `calib.upsert`；
-不接评估器 / P3b / P2 / P2.5；不翻两 TRIGGERING；不回退 #240 的三闸。
-（P2.5 的口径锁已在批次 `20261028gp25` 落地，见下节；**锁面在场 ≠ 本条定义已接评估**，
-两者仍是零引用关系。）
+不接评估器 / P3b；不翻两 TRIGGERING；不回退 #240 的三闸。
+（P2.5 口径锁见批次 `20261028gp25`，P2 评估器与截断回放见批次 `20261028gp2`，两者均
+**只读**本条定义、不改它；且**锁面在场 ≠ 评估已过门 ≠ 本条定义可放量**。）
 生产 `main` **不**自动注册这条定义（本拍只有测例与显式调用会注册）。
 
 ### P2.5 口径预登记锁（批次 20261028gp25 · P-bss-p2.5）
@@ -2200,7 +2200,8 @@ p25_gate_verdict(*, sample_n, hits, cross_version_merged=False,
 #### 零碰
 
 不改三 env 与 hits webhook 生产值；不写 `HitStore`；不调 `calib.upsert`；
-不接评估器 / P3b / P2；不翻两 TRIGGERING；不回退 #240 的三闸；不引 scipy /
+本拍(P2.5)**不接**评估器 / P3b；P2 评估器已在批次 `20261028gp2` 落地并**读**本锁面
+（见下节「P2 评估器与截断回放」）；不翻两 TRIGGERING；不回退 #240 的三闸；不引 scipy /
 statsmodels（Wilson 只需一个正态分位数，写死在模块内）。生产 `main` **不**自动
 调用任何 P2.5 判定。
 
@@ -2213,6 +2214,93 @@ statsmodels（Wilson 只需一个正态分位数，写死在模块内）。生�
 返回 `failed`、判定**从不**返回 `pending`。
 
 复跑：`PYTHONPATH=.:backend python3 -m pytest backend/tests/test_buy_sell_signal_calib_p25_lock.py -q`
+
+### P2 评估器与截断回放（批次 20261028gp2 · P-bss-p2）
+
+`backend/app/buy_sell_signals/calib_p2_eval.py`。这是 P2 的**评估器 + 截断回放**，
+对象是 #241 注册的 `bss.daily_quality_value`，**不是**新增一条信号定义。
+
+#### 读锁面, 不自写口径
+
+评估器里**没有**任何一个可以自己改的口径字面量：
+
+| 口径 | 取值 | 来源 |
+|---|---|---|
+| 主 horizon | `CALIB_PRIMARY_HORIZON_TD`（T+5） | #242 `calib_p25_lock` |
+| 辅 horizon | `CALIB_AUX_HORIZONS_TD`（T+1 / T+20） | #242 |
+| 成本 | `CALIB_COST_BP_ROUNDTRIP`（18.2bp） | `constants` |
+| 胜出判据 | `wilson_hit_rate_lower_bound` > `WILSON_HIT_RATE_LB_MIN`（0.5） | #242 |
+| 样本下限 | `CALIB_SAMPLE_N_MIN`（30），按三键不跨版本 | `constants` + #242 |
+| 失败状态 | `P25_ANY_GATE_FAIL_STATUS`（`"failed"`） | #242 |
+
+判定**直接调 `p25_gate_verdict`**，不在评估器里再写第二套 if。测例 G-T2 用剥串扫描
+证明 `18.2` / `0.5` / `30` / `= 5` 这些数字**一个都不出现**在评估器源码里。
+
+#### PIT 与样本域
+
+- **PIT 截断键 = `announce_date`**（公告日），**不是** `period_end`（报告期末）。
+  两者在真实数据里常常反向：早公告晚期末 / 晚公告早期末。G-T4 刻意构造这种反向
+  数据，用 `asof` 截断后只应留下公告日在前的那一批。
+- **样本域 = `universe_shadow` 影子行**（`EvalRow.shadow is True`）。非影子行
+  与 `announce_date > asof` 的行一律不入样。
+- 行集合按 `(asof, symbol, announce_date)` 定序 —— 回放可复现的前提。
+
+#### 截断回放：两次逐字段一致
+
+`truncated_replay_once(...)` 返回一整个 dict；`truncated_replay_twice_equal(...)`
+跑两次并返回 `(first, second)`。测例逐字段比对**含 `fingerprint`**：
+
+```
+schema_version / signal_id / definition_version / freq_lock_version / cadence
+asof / pit_cutoff / sample_domain / sample_n / cost_bp_roundtrip
+primary / aux / gate_status / path_status / fingerprint
+```
+
+`fingerprint` 复用 `freq_lock_fingerprint`（sha256 全 64 位），因此**只对口径、
+不对样本**：换 `params` 或 `definition_version` 指纹必变；样本换一批而口径不变，
+指纹相同。这一条由 G-T14 双向钉住，避免拿指纹冒充「回放已复现」。
+
+#### 路径状态 ≠ calib 状态 ≠ 可放量
+
+评估器另起两个**与 `CALIB_STATUSES` 不重叠**的路径状态：
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `P2_PATH_STATUS_REACHED` | `"path_reached"` | 回放跑通了，门没过 |
+| `P2_PATH_STATUS_GATE_MET` | `"gate_formally_met"` | 回放跑通，且锁面判定为 `passed` |
+
+G-T7 断言 `P2_PATH_STATUS_REACHED not in CALIB_STATUSES`：路径状态**不能**
+被读成 calib 结论。三句话必须分清：
+
+> **路径已通 ≠ calib 已过 ≠ 可放量 ≠ `TRIGGERING_ENABLED`。**
+
+两 `TRIGGERING_ENABLED` 本拍仍 `False`；评估器不写 `HitStore`、不调 `calib.upsert`、
+不挂路由、不读任何 webhook 环境变量（G-T9 / G-T10 守着）。
+
+#### 零碰
+
+不改三 env 与 hits webhook 生产值；不写盘；不接 P3b 影子写入；不翻两
+TRIGGERING；不回退 #240 / #241 / #242 / #243 任何符号；不引 scipy / statsmodels。
+评估器是**纯函数 + 纯常量，零 I/O** —— 它不会自己去取数，输入由调用方给。
+
+#### 测例
+
+`backend/tests/test_buy_sell_signal_calib_p2_eval.py`，G-T1 – G-T17 共 63 条。
+重点不在「能跑出数」，而在**口径不可偷换**：主 horizon 不能被改成 20、辅指标
+全赢也不能顶替主指标（G-T11：T+1 全命中 / T+5 全亏 → 仍 `failed`）、截断键不能
+被换成 `period_end`、非影子行不能混入、两次回放不能不一致、指纹不能被当成
+「回放已复现」的证据。
+
+其中 **G-T15 / G-T16 是判别性样本**，专门用来抓「判据与指标被悄悄换掉」：
+
+- G-T15：n=30、hits=20 → 点估计 **0.6667（过）** 而 Wilson 下界 **0.4878（不过）**，
+  结论必须 `failed`。只断言 `wilson_rule` 字符串、或只看全赢样本，都抓不住
+  「判据被换成点估计」。配对样本 n=30、hits=21 → 下界 0.5212（过）→ `passed`。
+- G-T16：T+1 全赢 / T+5 全亏 / T+20 全赢，两个辅指标都给 `passed`，只有真正在
+  T+5 上算的那个给 `failed` → 结论 `failed`。这样「主 horizon 被换成辅之一」
+  必被抓，而硬编码一个 `primary_horizon_td = 5` 字段骗不过去。
+
+复跑：`PYTHONPATH=.:backend python3 -m pytest backend/tests/test_buy_sell_signal_calib_p2_eval.py -q`
 
 ### 配置清单（env / 缺配拒发 / 不回落 / 冷却）
 
