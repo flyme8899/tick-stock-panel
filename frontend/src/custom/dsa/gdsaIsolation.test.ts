@@ -113,21 +113,30 @@ function changedFiles(): string[] {
   return [...new Set([...tracked.split('\n'), ...untracked.split('\n')].filter(Boolean))].sort()
 }
 
-it('改动清单可用（非空），diff 类断言的取数机制没有坏', () => {
-  // 这条**只**验取数机制本身：`changedFiles()` 能拿到东西、git 路径前缀没写错。
+it('改动清单取数机制可用（git 可调用；不要求工作树非空）', () => {
+  // 本条**只**验取数机制本身, 不验"这一拍改了什么"(理由见上, 那段没变)。
   //
-  // 它**不**验"这一拍改了什么" —— 那件事写不进来。上一版把 gdsa2 改过的三个文件
-  // 写死成常量, 结果 #214 合入后的下一拍(gcost)一个字都没碰 DSA, 清单里自然没有
-  // 它们, 本用例就红了。把"某一次改动的文件清单"钉死成常驻断言, 等于要求之后每一拍
-  // 都重复改同一批文件 —— 那不是红线, 是一张会越拖越长的历史账单。
+  // 20261028fcitest 修正: 原来这里断言 `changedFiles().length > 0`, 也就是隐含
+  // 要求"工作树必须是脏的"。这个前提在**本地开发态**成立(总改着点什么), 但在
+  // CI 上必然不成立 —— `actions/checkout` 拉出来的是干净工作树, diff 与未跟踪
+  // 文件都是空。于是这条用例一旦进 CI 全量跑, 每次都红, 且红得毫无信息量:
+  // 它红的时候恰恰说明代码库是干净的。
   //
-  // 本拍(gcost)对 custom/dsa **零碰**这件事, 由下面的 forbidden 列表 + 下面两条
-  // "未被改动"断言来守 —— 那种写法对任何一拍都成立, 不需要每拍回来改预期清单。
+  // 改成验"机制没坏": git 能调、HEAD 可解析、`git ls-files` 扫得到核心包、
+  // `changedFiles()` 返回值形状正确且**不抛**。脏树时它仍会返回真实清单,
+  // 下面那些基于 forbidden 列表的红线断言照常生效 —— 一条都没削弱。
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim()
+  expect(head.length, 'git rev-parse HEAD 取不到 sha，可能不在 git 工作区里').toBeGreaterThan(0)
+  // `git ls-files` 这条路必须通: 它同时是 walkDir 与 --others 的基础。
+  expect(walkDir(CORE_DIRS[0]).length).toBeGreaterThan(0)
+
   const files = changedFiles()
-  expect(files.length, '改动用例取不到任何文件，git 路径前缀可能写错了').toBeGreaterThan(0)
-  // 取数机制必须能看见**新增**文件(未跟踪), 否则 diff 类断言会对新文件空转。
-  // 这里用一个必然存在且必然被跟踪的路径反证机制在跑:
+  expect(Array.isArray(files), 'changedFiles() 应始终返回数组（干净树时为空数组）').toBe(true)
+  // 形状断言对空数组天然成立, 对脏树则逐项生效。
   expect(files.every(f => typeof f === 'string' && f.length > 0)).toBe(true)
+  // 清单里不允许出现重复项（Set 去重逻辑没被破坏）。
+  expect(new Set(files).size).toBe(files.length)
+  // 明细: 干净 CI 树上是 0 个, 本地改动时 > 0 —— 两种都合法, 不再当失败。
 })
 
 /**

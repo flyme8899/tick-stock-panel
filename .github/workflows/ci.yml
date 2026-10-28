@@ -1,9 +1,14 @@
 name: CI
 
-# 持续集成: 后端全量测试 + 前端构建。
+# 持续集成: 后端全量测试 + 前端全量测试 + 前端构建。
 # 与 release.yml 的分工: 这里不打包, 只守质量门 —
 # 后端含 Tier A 开放契约快照测试 (test_openapi_contract.py),
 # 开放面的任何变化都会在这里被拦下, 须有意识地更新快照。
+#
+# 前端在 20261028fcitest 之前只跑 `pnpm build`(tsc + vite), 测例一条不跑 —
+# 于是「前端绿」只等于「能编译」, 业务测例红了 CI 也不会知道。现在加了
+# `pnpm test`(vitest run), 绿勾才代表测例也过。测试排在构建之前:
+# 测例挂了就没必要再花十几秒打包。
 on:
   push:
     branches: [main]
@@ -60,6 +65,9 @@ jobs:
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
+
+      - name: 前端全量测试
+        run: pnpm test
 
       - name: 构建 (tsc + vite)
         run: pnpm build

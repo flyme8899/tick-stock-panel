@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import path from 'node:path'
 
@@ -50,5 +50,29 @@ export default defineConfig({
         },
       },
     },
+  },
+  test: {
+    // 点名排除两个**不属于 vitest 体系**的文件, 理由:
+    //
+    // 它们用 `import { test } from 'node:test'` 写, 是 Node 内置测试运行器的
+    // 用例。vitest 收集时会报 "No test suite found in file"（找不到 describe/it),
+    // 直接算文件级失败。
+    //
+    // 而它们也**从来没有在任何地方跑过**: `node --test` 不认 `.ts` 扩展名
+    // (ERR_UNKNOWN_FILE_EXTENSION, 需要 loader 或先编译), package.json 里也没有
+    // 任何脚本调它们。所以这两个文件的真实状态是「零执行」—— 既没在 vitest 里跑,
+    // 也没在 node 里跑。这是 #64 时期留下的历史遗留, 与本拍无关。
+    //
+    // 本拍的处理: 不删、不改写、不假装它们在跑 —— 只是不让它们把整个 vitest
+    // 套件带红。要真正跑起来需要把它们改写成 vitest 语法(或给 node 配 tsx loader),
+    // 那是另一件事, 记在 PR 描述的「另拍」里。
+    //
+    // 注意: 必须展开 configDefaults.exclude, 否则会丢掉 vitest 对 node_modules /
+    // dist 的默认排除, 把依赖目录里的文件也扫进来。
+    exclude: [
+      ...configDefaults.exclude,
+      'src/components/DimensionMembersDialog.test.ts',
+      'src/lib/neighborPrefetch.test.ts',
+    ],
   },
 })
