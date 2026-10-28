@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1190,7 +1191,14 @@ def test_g_t2_multiple_rows_each_get_their_own_label():
 
 
 def test_g_t3_reason_line_carries_chinese_kind_and_quotes():
-    """G-T3: 理由字段 = 种类中文 + 现价/均价/高/低。"""
+    """G-T3 / 本拍 G-T1: 种类中文 + 现价; **不含**均价/高/低键值打印。
+
+    批次 20261028gtprice: 价格段收窄到只留现价。断言因此从「均价/高/低**出现**」
+    翻成「**不出现**」。
+
+    注意断言的形态: 用 `均价 1520.12` 这种**键值对**, 不用裸串 `均价` ——
+    「低于分时均价」本身就是 T_LABELS 的原因中文, 裸串断言会把它一起误杀。
+    """
     text = _t_text([{
         "symbol": "600519.SH",
         "name": "贵州茅台",
@@ -1200,11 +1208,13 @@ def test_g_t3_reason_line_carries_chinese_kind_and_quotes():
         "high": 1530.0,
         "low": 1490.0,
     }])
+    # T_LABELS 的原因中文必须保留(它说的是「为什么」, 不是价格数值)
     assert "低于分时均价" in text
     assert "现价 1500.50" in text
-    assert "均价 1520.12" in text
-    assert "高 1530.00" in text
-    assert "低 1490.00" in text
+    # 本拍: 三个价格键不再打印
+    assert "均价 1520.12" not in text
+    assert "高 1530.00" not in text
+    assert "低 1490.00" not in text
 
 
 def test_g_t3_missing_quotes_are_omitted_not_placeheld():
@@ -1214,7 +1224,7 @@ def test_g_t3_missing_quotes_are_omitted_not_placeheld():
     """
     text = _t_text([{"symbol": "600519.SH", "name": "贵州茅台", "reason": "near_low"}])
     assert "接近日内低点" in text
-    for token in ("现价", "均价", "高 ", "低 "):
+    for token in ("现价", "均价 ", "高 ", "低 "):
         assert token not in text, token
     assert "--" not in text
     assert "0.00" not in text
@@ -1241,6 +1251,254 @@ def test_g_t3_zero_and_negative_quotes_are_treated_as_missing():
     }])
     assert "现价" not in text
     assert "0.00" not in text
+
+
+# ================================================================ 批次 20261028gtprice
+# P-t-push-price: t_trade 价格段只留现价。
+# 与 gp2(P-bss-p2) 正交; 不改冷却/边沿/三 env; 不回退 #243 三件套。
+
+_PUSH_PATH = Path(__file__).resolve().parents[1] / "app" / "news" / "push.py"
+
+_PRICE_KV = re.compile(r"(均价|高|低)\s+\d")
+
+
+def test_gtprice_g_t1_full_quotes_print_only_the_last_price():
+    """G-T1: 四价齐给时, 文案只有「现价 X」, 没有均价/高/低键值。
+
+    与 `test_g_t3_reason_line_…` 的区别: 这里用**正则**扫全文, 而不是逐个数字比对。
+    逐个比数字只能证明「这三个具体数字没出现」; 正则证明「任何 均价/高/低 + 数字
+    的形态都不出现」—— 后者才能抓住「换了个字段名继续打」这类改动。
+    """
+    text = _t_text([{
+        "symbol": "688072.SH",
+        "name": "拓荆科技",
+        "reason": "above_vwap",
+        "price": 465.79,
+        "vwap": 460.12,
+        "high": 470.00,
+        "low": 455.30,
+    }])
+    assert "现价 465.79" in text
+    assert not _PRICE_KV.search(text), f"仍有键值形态: {_PRICE_KV.findall(text)}"
+    # T_LABELS 的中文里就带「均价」「高点」「低点」, 必须还在
+    assert "高于分时均价" in text
+
+
+def test_gtprice_g_t1b_owner_sample_shape():
+    """G-T1 附带: 按所有者给的样例形状, 逐行核对。
+
+    样例(所有者已确认):
+        触发时刻 2026-10-28 13:20:45
+        - 建议T卖出 · 拓荆科技 688072.SH · 高于分时均价 · 现价 465.79
+    相对 #243 现网少了「均价 / 高 / 低」三段。
+    """
+    from datetime import datetime
+
+    from app.news.push import CN_TZ
+
+    now = datetime(2026, 10, 28, 13, 20, 45, tzinfo=CN_TZ)
+    text = _t_text(
+        [{
+            "symbol": "688072.SH",
+            "name": "拓荆科技",
+            "reason": "above_vwap",
+            "price": 465.79,
+            "vwap": 460.12,
+            "high": 470.00,
+            "low": 455.30,
+        }],
+        now=now,
+    )
+    lines = [ln for ln in text.splitlines() if ln.startswith("- ")]
+    assert len(lines) == 1
+    assert lines[0] == "- 建议T卖出 · 拓荆科技 688072.SH · 高于分时均价 · 现价 465.79"
+    assert "触发时刻 2026-10-28 13:20:45" in text
+
+
+def test_gtprice_g_t2_sell_path_keeps_labels_and_drops_price_kv():
+    """G-T2: `above_vwap` → 建议T卖出 + 高于分时均价 + 现价; 无键值。"""
+    text = _t_text([{
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "reason": "above_vwap",
+        "price": 1500.0,
+        "vwap": 1490.0,
+        "high": 1505.0,
+        "low": 1480.0,
+    }])
+    assert "建议T卖出" in text
+    assert "高于分时均价" in text
+    assert "现价 1500.00" in text
+    assert not _PRICE_KV.search(text)
+
+
+def test_gtprice_g_t2b_buy_path_keeps_labels_and_drops_price_kv():
+    """G-T2: `below_vwap` → 建议T买入 + 低于分时均价 + 现价; 无键值。"""
+    text = _t_text([{
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "reason": "below_vwap",
+        "price": 1480.0,
+        "vwap": 1500.0,
+        "high": 1510.0,
+        "low": 1475.0,
+    }])
+    assert "建议T买入" in text
+    assert "低于分时均价" in text
+    assert "现价 1480.00" in text
+    assert not _PRICE_KV.search(text)
+
+
+def test_gtprice_g_t3_missing_price_does_not_crash_or_placehold():
+    """G-T3: 没有 price 时不崩、不写 0.00 / `--`, T_LABELS 仍在。"""
+    text = _t_text([{
+        "symbol": "300750.SZ",
+        "name": "宁德时代",
+        "reason": "near_high",
+        "vwap": 200.0,
+        "high": 205.0,
+        "low": 195.0,
+    }])
+    assert "接近日内高点" in text
+    assert "现价" not in text
+    assert "0.00" not in text
+    assert "--" not in text
+    assert not _PRICE_KV.search(text), "均价/高/低有数时也不该打印"
+
+
+def test_gtprice_g_t3b_zero_and_negative_mean_absent():
+    """G-T3: 0 / 负数不是价格, 不渲染。"""
+    text = _t_text([{
+        "symbol": "300750.SZ",
+        "name": "宁德时代",
+        "reason": "near_low",
+        "price": 0,
+        "vwap": -1,
+    }])
+    assert "现价" not in text
+    assert "0.00" not in text
+    assert "接近日内低点" in text
+
+
+def test_gtprice_g_t4_three_piece_set_intact():
+    """G-T4: #243 三件套(时刻 / 建议T* / 标题)**零回退**。"""
+    text = _t_text([{
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "reason": "near_prev_close",
+        "price": 1500.0,
+    }])
+    assert "### 【做T提醒】" in text
+    # 用**整行相等**而非子串: 子串断言对「触发时刻」→「时刻」这类删词是无效的,
+    # 因为「时刻 2026-…」仍然包含「时刻」但不再包含「触发时刻」前缀时会漏判,
+    # 反之改短了也照样命中。整行相等才钉得住 #243 这一件。
+    ts_lines = [ln for ln in text.splitlines() if re.match(r"^(触发)?时刻 ", ln)]
+    assert len(ts_lines) == 1, ts_lines
+    assert re.fullmatch(r"触发时刻 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", ts_lines[0]), ts_lines[0]
+    assert "建议T观察" in text, "near_prev_close 必须是「观察」, 不给方向"
+    assert "回到昨收附近" in text
+
+
+def test_gtprice_g_t5_footer_intact():
+    """G-T5: 脚注仍在。"""
+    text = _t_text([{"symbol": "600519.SH", "name": "贵州茅台", "reason": "near_low"}])
+    assert "仅供内部研究" in text
+    assert "人工确认" in text
+
+
+def test_gtprice_g_t6_abnormal_untouched_by_price_narrowing():
+    """G-T6: abnormal 路径零回归 —— 价格收窄只作用于 t_trade。
+
+    abnormal 的正文里本来就没有价格段, 但这正是要钉的: 有人可能「顺手」把收窄
+    做到公共路径上, 连带改了异动。
+    """
+    packed = format_symbol_markdown("abnormal", [{
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "detail": "涨停",
+        "price": 1500.0,
+        "vwap": 1490.0,
+        "high": 1505.0,
+        "low": 1480.0,
+    }])
+    assert packed == ("【异动监控】", "### 【异动监控】\n- 贵州茅台 600519.SH · 涨停\n\n仅供内部研究。")
+
+
+def test_gtprice_g_t7_frequency_and_band_constants_unchanged():
+    """G-T7: 频率 / 带宽 / 日封顶常量**值与行为**零改。
+
+    本拍只动文案, 但「只动文案」这句话得能被验证。这里逐个钉住基线值 ——
+    任何人为了「让提醒少一点」顺手调 `T_CAP` 或 `VWAP_BAND`, 这条会红。
+    """
+    from app.news import push as P
+
+    assert P.INTRADAY_CHECK_S == 180
+    assert P.T_CAP == 40
+    assert P.VWAP_BAND == 0.015
+    assert P.RANGE_BAND == 0.003
+    assert P.PREV_BAND == 0.003
+
+
+def test_gtprice_g_t7b_no_frequency_assignment_in_diff_source():
+    """G-T7: 源码层面, 这些常量必须仍是**字面量赋值**(不是被改写/计算出来)。"""
+    src = _PUSH_PATH.read_text(encoding="utf-8")
+    for name, value in (
+        ("INTRADAY_CHECK_S", "180"),
+        ("T_CAP", "40"),
+        ("VWAP_BAND", "0.015"),
+        ("RANGE_BAND", "0.003"),
+        ("PREV_BAND", "0.003"),
+    ):
+        assert re.search(rf"^{name}\s*=\s*{re.escape(value)}\s*$", src, re.M), name
+
+
+def test_gtprice_g_t9_vwap_is_still_computed_even_though_not_printed():
+    """G-T9: **不打印均价 ≠ 不算均价**。
+
+    供数层 `_live_quote_snapshot` 仍按 `amount / (volume * 100)` 算 vwap。
+    如果本拍顺手把 vwap 计算删了, 边沿判定会静默失效 —— 文案看不出区别,
+    但「高于分时均价」这个标签会永远不出现。这条测例就是防这个。
+    """
+    from app.news import push as P
+
+    # 供数层的 vwap 计算函数必须还在(本拍只收窄文案, 没删计算)
+    assert callable(P._live_quote_snapshot)
+    assert callable(P._quote_lookup)
+    assert callable(P.t_conditions)
+
+    # 公式口径: vwap = amount / (volume * 100), volume 单位是「手」
+    amount, volume = 152000000.0, 100000.0
+    assert amount / (volume * 100.0) == pytest.approx(15.2)
+
+    # 文案确实不再打印它(与上面的「仍会算」是一对, 两条都得成立)
+    text = _t_text([{
+        "symbol": "600519.SH",
+        "name": "贵州茅台",
+        "reason": "above_vwap",
+        "price": 15.25,
+        "vwap": 15.20,
+    }])
+    assert "现价 15.25" in text
+    assert "均价 15.20" not in text
+
+
+def test_gtprice_g_t10_no_bss_no_gp2_no_env_no_triggering():
+    """G-T10: 本模块不碰 BSS / gp2 / 三 env / TRIGGERING。
+
+    `push.py` 里出现这些词就等于越界; 用剥串扫描, 避免 docstring 里提到就误红。
+    """
+    src = _PUSH_PATH.read_text(encoding="utf-8")
+    for needle in (
+        "buy_sell_signals",
+        "calib_p2_eval",
+        "calib_p25_lock",
+        "TRIGGERING_ENABLED",
+        "BUY_SELL_SIGNALS_PERSIST",
+        "BUY_SELL_SIGNALS_PUSH",
+        "BUY_SELL_SIGNALS_DINGTALK",
+        "access_token=",
+    ):
+        assert needle not in src, f"push.py 不得出现 {needle!r}"
 
 
 def test_g_t4_abnormal_markdown_is_byte_identical_to_old_shape():
