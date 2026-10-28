@@ -609,6 +609,14 @@ export function SectorAnalysis() {
       <AnimatePresence>
         {concept.showConfig && (
           <AnalysisConfigDialog
+            // 互异的 key 是**隔离**的关键, 不是为了消除 React 警告。
+            // 两个弹窗是同型组件、同在 AnimatePresence 下的相邻条件子节点。当用户
+            // 先开概念配置再关、紧接着开行业配置时, 若这两步落在同一次协调里,
+            // React 会按「同型同位置」把概念那个实例**复用**给行业 —— 而
+            // AnalysisConfigDialog 内部 `useState(currentConfig)` 只在 mount 时取
+            // 一次初值, 于是行业的 draft 里躺着概念的 configId/dimensionField,
+            // 点保存就写进了 industry-analysis-config。
+            // key 不同 → 强制 remount → draft 重新按本列的 currentConfig 初始化。
             currentConfig={{
               ...concept.fieldConfig,
               configId: concept.activeConfig?.id ?? concept.fieldConfig.configId,

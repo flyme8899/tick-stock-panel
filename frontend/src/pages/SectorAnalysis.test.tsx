@@ -206,6 +206,30 @@ async function waitFor(predicate: () => boolean, label = 'condition') {
   if (!predicate()) throw new Error(`timed out waiting for ${label}`)
 }
 
+/**
+ * 等一个已经点了「取消」的弹窗**真正离开 DOM**, 再让测试继续。
+ *
+ * 为什么需要: 弹窗本体是 motion.div + AnimatePresence, 退场动画播完才摘节点;而本
+ * 文件里的 `settle()` 只推进 `setTimeout(0)`, 帧循环拿到的 `performance.now()`
+ * 几乎不动, 动画会卡在开头那一帧(实测残留元素的 `opacity` 停在 0.03 上下), 元素
+ * 一直挂着。于是"取消 → 开下一个弹窗"这两步之间没有任何对齐: 该关的还没关, 新
+ * 的已经挂上, 两个弹窗同时在 DOM 里。后面那句按文本找「保存」的点击命中哪一个,
+ * 就成了一场抽签 —— 抽中概念那个, 概念列就会被立刻多写一次 configId。
+ *
+ * 这只解决**测试自身的竞态**, 不是产品缺陷的修复; 产品侧的隔离由
+ * SectorAnalysis 的互异 key 与 AnalysisConfigDialog 的挂载认领负责。
+ *
+ * 给的是**真实时间**(4ms 一个 tick, 累计上限约 300ms)让帧循环真正推进, 但收尾仍
+ * 旧用条件判断而不是固定时长: 元素一消失立刻返回。
+ */
+async function waitForDialogGone(needle: string, label = 'dialog') {
+  for (let i = 0; i < 75; i++) {
+    if (!host.textContent?.includes(needle)) return
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 4)) })
+  }
+  if (host.textContent?.includes(needle)) throw new Error(`timed out waiting for ${label} to leave the DOM`)
+}
+
 function renderAt(path: string) {
   act(() => {
     root.render(
@@ -439,6 +463,11 @@ it('keeps each column config, and the industry level control, on their own side'
   })
 
   const conceptConfig = localStorage.getItem('concept-analysis-config')
+  // 取消只关状态, 弹窗本体由 AnimatePresence 播完退场动画才摘掉。不等它退干净就
+  // 开下一个, 两轮动画会叠在一起, 两个弹窗同时在 DOM 里 —— 后面那个"点保存"
+  // 按文本找按钮, 命中的是谁就成了看运气的, 概念列会被当场多写一次。
+  await waitForDialogGone('配置数据源', 'concept config dialog')
+
   await act(async () => {
     host.querySelector<HTMLButtonElement>('button[title="配置行业数据源"]')?.click()
   })
@@ -449,7 +478,12 @@ it('keeps each column config, and the industry level control, on their own side'
   })
   await settle()
   expect(localStorage.getItem('concept-analysis-config')).toBe(conceptConfig)
-  expect(JSON.parse(localStorage.getItem('industry-analysis-config') || '{}').hierarchyLevel).toBe(1)
+  // 不止"行业存进去了", 还要确认**存进去的不是概念那一套**。旧缺陷的表现是
+  // 行业弹窗复用了概念的实例, 于是这条键里出现概念的数据源 id 与概念维度字段。
+  const savedIndustry = JSON.parse(localStorage.getItem('industry-analysis-config') || '{}')
+  expect(savedIndustry.hierarchyLevel).toBe(1)
+  expect(savedIndustry.configId).not.toBe('ext_gn_ths')
+  expect(savedIndustry.dimensionField).not.toBe('所属概念')
 
   await act(async () => {
     ;[...column('industry').querySelectorAll('button')].find(el => el.textContent === '3级')?.click()
