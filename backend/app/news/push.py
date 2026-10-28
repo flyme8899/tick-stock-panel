@@ -23,6 +23,7 @@ from app.news.config import (
 )
 from app.news.dingtalk import send_markdown
 from app.news.hot_events import HOT_RULES_VERSION, display_view_key
+from app.market_time import CN_TZ
 from app.services.amount_guard import sanitize_bar_amount, vwap_outside_day_range
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,19 @@ T_LABELS = {
 }
 RANGE_RULES = frozenset({"near_high", "near_low"})
 TYPE_LABELS = {"hot": "热点候选", "abnormal": "异动监控", "t_trade": "做T提醒"}
+
+# ---------------------------------------------------------------- 做T文案(批次 20261028gtpush)
+
+#: 建议**买入**的理由。只影响文案里的一个词, 不影响边沿判定/冷却/日封顶。
+_T_BUY_REASONS = frozenset({"below_vwap", "near_low"})
+#: 建议**卖出**的理由。同上。
+_T_SELL_REASONS = frozenset({"above_vwap", "near_high"})
+#: 两个都不是的理由(`near_prev_close` = 回到昨收附近)只能是**观察**。
+#: 刻意不给它一个方向: 回到昨收既不是「便宜了」也不是「贵了」, 它是「重新对齐」。
+_T_WATCH_REASONS = frozenset({"near_prev_close"})
+
+TRIGGER_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 _CHANGE_MARKS = {"new": "新进", "jump": "升温"}
 _KIND_LABELS = {"event": "事件", "sector": "板块", "stock": "个股", "etf": "ETF"}
 
@@ -332,10 +346,104 @@ def format_hot_markdown(
     return title, text
 
 
-def format_symbol_markdown(kind: str, rows: list[dict]) -> tuple[str, str] | None:
+def _fmt_trigger_ts(now: datetime | None) -> str:
+    """触发时刻 → `YYYY-MM-DD HH:MM:SS`, **固定上海时区**。
+
+    `now` 为 `None` 时取当前时刻。aware 的一律 `astimezone(CN_TZ)`; naive 的按
+    `CN_TZ` 解释(本函数的输入恒来自 `_push_edges` 的 `now`, 那边是 aware 的)。
+    不猜 UTC: 猜错 8 小时会让「14:52 触发」写成「06:52」, 而读的人不会怀疑时区。
+    """
+    moment = now if now is not None else datetime.now(CN_TZ)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=CN_TZ)
+    return moment.astimezone(CN_TZ).strftime(TRIGGER_TS_FORMAT)
+
+
+def _t_side_label(reason: str) -> str:
+    """理由 → 「建议T买入 / 建议T卖出 / 建议T观察」。
+
+    **这是文案映射, 不是交易指令**: 它只决定括号里写哪个词, 不决定推不推、
+    推几次、什么时候推。边沿成立与冷却全在 `_push_edges`, 与这里无关。
+    """
+    if reason in _T_BUY_REASONS:
+        return "建议T买入"
+    if reason in _T_SELL_REASONS:
+        return "建议T卖出"
+    return "建议T观察"
+
+
+def _fmt_price(value) -> str | None:
+    """报价两位小数; 缺失/非数/非正一律 `None`(不填 0, 也不写「0.00」)。"""
+    number = _num(value)
+    if number is None or number <= 0:
+        return None
+    return f"{number:.2f}"
+
+
+def _t_reason_parts(row: dict) -> str:
+    """理由字段: 「种类中文 · 现价 X · 均价 Y · 高 H · 低 L」。
+
+    种类用 `T_LABELS` 的中文, **拿不到中文就退回原始 reason** —— 退回到原始码而不是
+    「未知」: 原始码至少能被搜到、能追到规则名, 「未知」等于把线索丢了。
+
+    报价缺失的项**直接不出现**, 不留 `--` 占位: 占位会被读成「有这个数但很小」。
+    """
+    reason = str(row.get("reason") or "")
+    label = T_LABELS.get(reason, reason)
+    parts = [label] if label else []
+    for key, name in (
+        ("price", "现价"),
+        ("vwap", "均价"),
+        ("high", "高"),
+        ("low", "低"),
+    ):
+        text = _fmt_price(row.get(key))
+        if text is not None:
+            parts.append(f"{name} {text}")
+    return " · ".join(parts)
+
+
+def format_symbol_markdown(
+    kind: str,
+    rows: list[dict],
+    *,
+    now: datetime | None = None,
+) -> tuple[str, str] | None:
+    """异动监控 / 做T提醒的钉钉文案。
+
+    ## 本批次(20261028gtpush)改了什么
+
+    `t_trade` 增加**文案三件套**, `abnormal` **一个字没动**:
+
+    1. **触发时刻**: 标题下第一行 `触发时刻 YYYY-MM-DD HH:MM:SS`(上海时区)。
+       没有时刻的提醒, 事后无法判断它是「刚发生」还是「补发的」, 也没法和行情
+       对时间轴。
+    2. **建议方向**: 每条前面标「建议T买入 / 建议T卖出 / 建议T观察」。
+    3. **理由字段**: 种类中文 + 现价/均价/高/低。让人不用回看行情就知道为什么被叫醒。
+
+    ## 本批次**没**改什么
+
+    冷却、频率、日封顶、边沿成立、过滤规则、`T_CAP`、`VWAP_BAND`、`RANGE_BAND`、
+    `PREV_BAND`、`INTRADAY_CHECK_S` —— **全部零改**。本函数只吃 `rows` 里的字段,
+    不读行情、不写状态、不决定发不发。
+    """
     label = TYPE_LABELS[kind]
     if not rows:
         return None
+    if kind == "t_trade":
+        lines = [f"### 【{label}】", f"触发时刻 {_fmt_trigger_ts(now)}"]
+        for row in rows[:15]:
+            reason = str(row.get("reason") or "")
+            side = _t_side_label(reason)
+            body = _t_reason_parts(row)
+            detail = row.get("detail") or ""
+            suffix = f" · {detail}" if detail and detail not in body else ""
+            lines.append(
+                f"- {side} · {row.get('name') or row['symbol']} {row['symbol']}"
+                f"{(' · ' + body) if body else ''}{suffix}"
+            )
+        lines.append("\n仅供内部研究，建议须人工确认。")
+        return f"【{label}】", "\n".join(lines)
     lines = [f"### 【{label}】"]
     for row in rows[:15]:
         extra = row.get("detail") or ""
@@ -1020,6 +1128,7 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
             state.data["t_pct_day"] = day
         return False
     detail_of = _detail_lookup(kind, fresh)
+    quote_of = _quote_lookup(kind, fresh)
     linked = _verified_event_names() if kind == "abnormal" and push_type_saved("abnormal_verified") else {}
     rows = []
     for symbol, reason in fresh[:15]:
@@ -1027,12 +1136,17 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
         event_name = linked.get(symbol)
         if event_name:
             detail = f"{detail} · {event_name}" if detail else event_name
-        rows.append({
+        row = {
             "symbol": symbol,
             "name": names.get(symbol) or symbol,
             "detail": detail,
-        })
-    packed = format_symbol_markdown(kind, rows)
+            "reason": reason,
+        }
+        # 报价只给做T文案用; 异动文案不读这几项, 行为与改动前逐字节一致。
+        if kind == "t_trade":
+            row.update(quote_of.get((symbol, reason)) or {})
+        rows.append(row)
+    packed = format_symbol_markdown(kind, rows, now=now if kind == "t_trade" else None)
     if packed is None or not _send(kind, packed[0], packed[1], opener, stamp, state):
         return False
     _store_edges(state, kind, day, current)
@@ -1098,16 +1212,70 @@ def _mark_t_sent(state: PushState, day: str, fresh) -> None:
 
 
 def _split_loader(loaded) -> tuple[dict, dict, dict]:
+    """拆 loader 返回值。**2/3/4 项都接受**, 4 项时最后一项是文案用的报价行。
+
+    保留 2/3 项兼容是刻意的: 若干测例与夹具用 `lambda: (current, pct)` 直接注入,
+    强制改成 4 项会让它们全红, 而它们本来就在测与文案无关的东西。
+    """
     if len(loaded) == 3:
         current, pct, names = loaded
         return current, pct or {}, names or {}
-    current, pct = loaded
-    return current, pct or {}, {}
+    current, pct = loaded[0], loaded[1]
+    names = loaded[2] if len(loaded) >= 3 else {}
+    return current, pct or {}, names or {}
 
 
 def _detail_lookup(kind: str, fresh) -> dict:
     labels = SIGNAL_LABELS if kind == "abnormal" else T_LABELS
     return {(symbol, reason): labels.get(reason, reason) for symbol, reason in fresh}
+
+
+def _quote_lookup(kind: str, fresh) -> dict:
+    """做T文案用的报价快照: `{(symbol, reason): {price, vwap, high, low}}`。
+
+    ## 只为文案供数, 不参与任何判定
+
+    边沿成立、`filter_prev_close`、`_filter_range_rules`、冷却、日封顶
+    **全部在拿到这里的数据之前就已经跑完**。这里只是把「已经决定要推的那几条」
+    的数字捞出来贴上, 让收到提醒的人不必再翻行情。
+
+    因此本函数**不改变**任何一条会不会推、推几次的结论; 它只影响文案长什么样。
+
+    数据来源就是 `_load_t()` 已经抓过的那批行(经 `_split_loader` 拆出来的
+    `current`)。**不额外发请求**: 为了文案再打一轮行情, 既慢又可能在两次快照之间
+    拿到不一致的价格。均价按 `amount / (volume * 100)` 现算, 与 `t_conditions`
+    同一口径(volume 手 → 股)。
+    """
+    if kind != "t_trade" or not fresh:
+        return {}
+    symbols = sorted({symbol for symbol, _reason in fresh})
+    try:
+        raw = _live_quote_snapshot(symbols)
+    except Exception:  # noqa: BLE001
+        # 文案是锦上添花: 取数失败最多让文案少几个数字, **不能**让一条本该发出的
+        # 提醒发不出去。这里吞掉, 由 `_live_quote_snapshot` 之外的调用方保证不重试。
+        logger.warning("做T文案取报价失败, 本次不带报价", exc_info=True)
+        raw = {}
+    out: dict[tuple[str, str], dict] = {}
+    for symbol, reason in fresh:
+        row = raw.get(symbol) or {}
+        price = _num(row.get("close"))
+        high = _num(row.get("high"))
+        low = _num(row.get("low"))
+        volume = _num(row.get("volume"))
+        amount = _num(row.get("amount"))
+        vwap = None
+        if volume and amount and volume > 0:
+            candidate = amount / (volume * 100.0)
+            if candidate > 0 and not vwap_outside_day_range(candidate, low, high):
+                vwap = candidate
+        out[(symbol, reason)] = {
+            "price": price,
+            "vwap": vwap,
+            "high": high,
+            "low": low,
+        }
+    return out
 
 
 def _load_hot() -> dict:
@@ -1199,6 +1367,17 @@ def _load_abnormal() -> tuple[dict[str, set[str]], dict, dict]:
 
 
 def _load_t() -> tuple[dict[str, set[str]], dict, dict]:
+    """做T候选: `(边沿集合, 涨跌幅, 名称)`。
+
+    ## 签名与返回值**零改**(批次 20261028gtpush)
+
+    本批次要给文案贴「现价/均价/高/低」, 但**没有**把报价行塞进这里的返回值:
+    返回值是 loader 协议的一部分, 加一项会让所有 `current, pct, names = _load_t()`
+    形态的调用方和测例一起红, 而它们本来在测与文案无关的东西。
+
+    文案需要的报价由 `_live_quote_snapshot()` 单独取(只在该轮真有「要推的行」时),
+    口径与这里同一个 `_live_rows`。
+    """
     from app.services.watchlist import list_symbols
 
     watchlist = [str(row.get("symbol") or "") for row in list_symbols()]
@@ -1219,6 +1398,26 @@ def _load_t() -> tuple[dict[str, set[str]], dict, dict]:
             pct[symbol] = change
         names[symbol] = str(row.get("name") or symbol)
     return current, pct, names
+
+
+def _live_quote_snapshot(symbols: list[str]) -> dict[str, dict]:
+    """按需给文案取报价行。**只在 `_push_edges` 已经决定要推之后调用。**
+
+    失败一律返回 `{}`: 文案缺报价不该让一条本来该发的提醒发不出去。
+    """
+    if not symbols:
+        return {}
+    try:
+        rows = _live_rows(symbols)
+    except Exception:  # noqa: BLE001
+        logger.warning("做T文案取报价失败, 本次只发不含报价的文案", exc_info=True)
+        return {}
+    out: dict[str, dict] = {}
+    for row in rows or []:
+        symbol = str(row.get("symbol") or "")
+        if symbol:
+            out[symbol] = row
+    return out
 
 
 def _position_symbols() -> list[str]:
