@@ -8,7 +8,7 @@
  * - DimensionGroupSidebar: 维度分组侧边栏
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
@@ -62,7 +62,29 @@ export function AnalysisConfigDialog({
   onClose: () => void
   showHierarchyLevel?: boolean
 }) {
-  const [draft, setDraft] = useState<AnalysisFieldConfig>(currentConfig)
+  const latestConfig = useRef(currentConfig)
+  latestConfig.current = currentConfig
+  // 草稿只在**挂载后第一次 effect**里认领一次, 不随 props 反复重置。
+  //
+  // 为什么不直接在 `useState(currentConfig)` 里认领: 父级传进来的 currentConfig 里
+  // configId 是 `activeConfig?.id ?? fieldConfig.configId`, 而 activeConfig 由
+  // selectSectorConfig 从**异步到达**的 extDataList 里探测 —— 弹窗打开的那一帧
+  // 拿到的可能还是半成品(条目尚未到齐时的回退值)。挂载后的第一次 effect 跑在
+  // commit 之后, 读到的是同一批渲染里最新的 props, 拿到完整值的概率更高。
+  //
+  // 为什么不"每次 props 变就重置": 用户在下拉框里选了数据源(内部 setDraft 写了
+  // configId), 紧跟着的任何一次父级重渲染都会把这份**用户输入**冲回旧值, 控件
+  // 等于点不动。所以这里用空依赖数组 —— 草稿一旦认领就归用户。
+  //
+  // 注意: 空依赖是**有意的**, 不要"补全"成 currentConfig / configId /
+  // dimensionField。这些字段会随 extDataList 到达而凭空变化(undefined → 预设 id),
+  // 一旦进依赖, 数据一到就把用户正在编辑的草稿重置一遍, 保存时反而多写一个 configId。
+  // 「这份草稿属于哪一列」由调用方的 key 负责区分, 不由 props 的后续变化负责。
+  const [draft, setDraft] = useState<AnalysisFieldConfig>({})
+  useEffect(() => {
+    setDraft(latestConfig.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const backdrop = useDialogBackdrop(onClose)
   const { data: extList } = useQuery({
     queryKey: QK.extData,
