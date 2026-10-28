@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -53,6 +54,20 @@ from app.buy_sell_signals.hits_visibility import (
 )
 from app.buy_sell_signals.store import InMemorySignalRegistryStore
 from app.market_time import cn_today
+
+
+def _live(hit):
+    """把夹具命中转成 `source.mode="live"`。
+
+    P-bss-p3a 的可见性闸只放 live（见 `hits_visibility.VisibilityReject.NON_LIVE_MODE`），
+    而 `hits_fixtures.*_hit()` 默认造的是 `mode=fixture`。本文件测的是「定义状态 / 范围 /
+    校准」这些**后面的**闸，命中来源必须先放在 live 上 —— 否则每条都会先被
+    `NON_LIVE_MODE` 拦掉，测的就不是原本想测的那道闸了。
+
+    要测「非 live 被挡」本身，去 `test_buy_sell_signal_calib_visibility.py`（那里是
+    该拒因的归属地），在夹具上直接 `replace(..., mode="shadow")`。
+    """
+    return replace(hit, source=replace(hit.source, mode="live"))
 
 
 def _registry(*records) -> InMemorySignalRegistryStore:
@@ -344,7 +359,7 @@ def test_hit_store_has_no_write_api():
 
 
 def test_publishable_hit_is_visible():
-    filtered = visible_hits([fx.publishable_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
+    filtered = visible_hits([_live(fx.publishable_hit())], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert [h.hit_id for h in filtered.hits] == ["fx.hit.pub.000001"]
 
 
@@ -376,26 +391,26 @@ def test_limit_reopen_rejected_even_if_definition_was_hand_edited_to_publishable
             "app.market_time", fromlist=["cn_now"]
         ).cn_now(),
     )
-    filtered = visible_hits([fx.limit_reopen_hit()], _registry(forged), scope_symbols=frozenset(), calib=_passed_index())
+    filtered = visible_hits([_live(fx.limit_reopen_hit())], _registry(forged), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.LIMIT_REOPEN) == 1
 
 
 def test_hit_without_definition_is_invisible():
-    filtered = visible_hits([fx.orphan_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
+    filtered = visible_hits([_live(fx.orphan_hit())], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.DEFINITION_MISSING) == 1
 
 
 def test_missing_registry_fails_closed():
     """注册表压根没有 → 全丢。不猜、不默认放行。"""
-    filtered = visible_hits([fx.publishable_hit()], None, scope_symbols=frozenset(), calib=_passed_index())
+    filtered = visible_hits([_live(fx.publishable_hit())], None, scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
 
 
 def test_composite_hits_are_not_exposed():
     """`composite` 首批不暴露 —— 即使定义是 publishable。"""
-    filtered = visible_hits([fx.composite_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
+    filtered = visible_hits([_live(fx.composite_hit())], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.FAMILY_NOT_EXPOSED) == 1
     assert "composite" not in EXPOSED_FAMILIES
@@ -403,7 +418,7 @@ def test_composite_hits_are_not_exposed():
 
 def test_unknown_family_filter_returns_empty():
     filtered = visible_hits(
-        [fx.publishable_hit()],
+        [_live(fx.publishable_hit())],
         _full_registry(),
         family="composite",
         scope_symbols=frozenset(),
@@ -420,7 +435,7 @@ def test_definition_status_is_read_at_request_time_not_at_hit_time():
     candidate → 不可见; publishable → 可见。命中自带的 `definition_status_at_hit`
     全程不变, 且**不参与**判断。
     """
-    hit = fx.publishable_hit()  # signal_id = fx.pub.intraday_volume
+    hit = _live(fx.publishable_hit())  # signal_id = fx.pub.intraday_volume
     assert hit.definition_status_at_hit == "publishable"
 
     # 同 signal_id, 但当前状态是 candidate → 不可见
@@ -437,7 +452,7 @@ def test_definition_status_is_read_at_request_time_not_at_hit_time():
 
     # 反向: 命中写入时是 candidate, 定义现在 publishable → 仍可见
     # (可见性只认当前状态, 不因"写的时候还没批"而永久封印)
-    early = fx.publishable_hit(hit_id="early")
+    early = _live(fx.publishable_hit(hit_id="early"))
     filtered = visible_hits(
         [early],
         _registry(fx.publishable_definition()),
@@ -448,7 +463,7 @@ def test_definition_status_is_read_at_request_time_not_at_hit_time():
 
 
 def test_fundamental_out_of_scope_is_hidden():
-    hit = fx.daily_fundamental_hit(symbol="600000")
+    hit = _live(fx.daily_fundamental_hit(symbol="600000"))
     filtered = visible_hits(
         [hit],
         _full_registry(),
@@ -462,7 +477,7 @@ def test_fundamental_out_of_scope_is_hidden():
 
 
 def test_fundamental_in_scope_is_visible():
-    hit = fx.daily_fundamental_hit(symbol="600000")
+    hit = _live(fx.daily_fundamental_hit(symbol="600000"))
     filtered = visible_hits(
         [hit], _full_registry(), scope_symbols=frozenset({"600000"}), calib=_passed_index()
     )
@@ -471,7 +486,7 @@ def test_fundamental_in_scope_is_visible():
 
 def test_minute_event_is_not_scope_limited():
     """事件命中不过范围闸 —— 否则别处的异动永远看不见。"""
-    hit = fx.publishable_hit(symbol="999999")
+    hit = _live(fx.publishable_hit(symbol="999999"))
     filtered = visible_hits(
         [hit], _full_registry(), scope_symbols=frozenset({"600000"}), calib=_passed_index()
     )
@@ -481,17 +496,45 @@ def test_minute_event_is_not_scope_limited():
 
 def test_scope_none_means_no_scope_filter():
     filtered = visible_hits(
-        [fx.daily_fundamental_hit()], _full_registry(), scope_symbols=None, calib=_passed_index()
+        [_live(fx.daily_fundamental_hit())], _full_registry(), scope_symbols=None, calib=_passed_index()
     )
     assert len(filtered.hits) == 1
     assert filtered.scope_applied is False
 
 
 def test_visible_hits_are_sorted_newest_first():
-    old = fx.publishable_hit(hit_id="old", asof=fx.dated(3))
-    new = fx.publishable_hit(hit_id="new", asof=fx.dated(0))
+    old = _live(fx.publishable_hit(hit_id="old", asof=fx.dated(3)))
+    new = _live(fx.publishable_hit(hit_id="new", asof=fx.dated(0)))
     filtered = visible_hits([old, new], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     assert [h.hit_id for h in filtered.hits] == ["new", "old"]
+
+
+def test_p3a_fixture_hit_is_rejected_before_any_other_gate():
+    """P-bss-p3a 的护栏：本文件所有「应该可见」的测例都靠 `_live()`。
+
+    这条把那个前提钉住 —— 同一条命中，只把 `source.mode` 从 `live` 换回 `fixture`
+    （`hits_fixtures` 的默认值），即使定义 publishable、校准登记齐全、范围不设限，
+    也必须一条都出不来，且拒因是 `NON_LIVE_MODE`、**只**是它。
+
+    「只是它」这半句很重要：如果哪天有人把来源闸挪到 calib 后面，或者给某条非 live
+    记录开了洗白口，这条会以「拒因集合变了」的形式红 —— 而断言 count 的测例不会。
+    """
+    live_hit = _live(fx.publishable_hit())
+    fixture_hit = fx.publishable_hit()  # 默认 mode="fixture"
+
+    assert fixture_hit.source.mode == "fixture", "前置条件: 夹具默认确实不是 live"
+
+    filtered = visible_hits(
+        [fixture_hit], _full_registry(), scope_symbols=frozenset(), calib=_passed_index()
+    )
+    assert filtered.hits == []
+    assert filtered.rejected == {VisibilityReject.NON_LIVE_MODE: 1}
+
+    # 对照: 换成 live 之后同一条命中就可见 —— 否则上面那段"被挡"说明不了什么
+    control = visible_hits(
+        [live_hit], _full_registry(), scope_symbols=frozenset(), calib=_passed_index()
+    )
+    assert [h.hit_id for h in control.hits] == ["fx.hit.pub.000001"]
 
 
 # =============================================================== 4. API 视图
@@ -532,7 +575,7 @@ def test_definition_status_events_never_become_hits():
 
     # 而且响应体里不含这个键
     payload = build_response(
-        visible_hits([fx.publishable_hit()], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
+        visible_hits([_live(fx.publishable_hit())], _full_registry(), scope_symbols=frozenset(), calib=_passed_index())
     )
     dumped = json.dumps(payload, ensure_ascii=False)
     assert MONITOR_EVENT_TYPE not in dumped

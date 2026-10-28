@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +31,46 @@ from app.buy_sell_signals.constants import (
 )
 from app.buy_sell_signals.hits_store import InMemoryHitStore
 from app.buy_sell_signals.store import InMemorySignalRegistryStore
+
+def _live(hit):
+    """把夹具命中转成 `source.mode="live"`。
+
+    P-bss-p3a 可见性闸只放 live（见 `hits_visibility.VisibilityReject.NON_LIVE_MODE`），
+    而 `hits_fixtures` 默认造的是 `mode=fixture`。所以本文件里凡「期望可见」的命中都要
+    过这一层 —— 否则测的就不是"命中能不能显示"，而是"夹具能不能显示"（后者恒否）。
+
+    要测 fixture / shadow 被挡的负向路径时，**不要**用它，直接在夹具上 `replace` 回
+    `mode="fixture"` / `"shadow"`。
+    """
+    return replace(hit, source=replace(hit.source, mode="live"))
+
+
+def _write_hits(tmp_path: Path, hits: list) -> Path:
+    """把命中真写到 `<tmp_path>/buy_sell_signals/hits.json`。
+
+    `GET /hits/scope` 里跑的是 `DiskHitStore(data_dir)`, 它**不读**
+    `app.state.buy_sell_signal_hit_store`。所以凡是断言 scope 里那个计数的测例, 都必须
+    走这个函数落盘 —— 用 `_client(hits=[...])` 注入内存店的话, scope 那边看到的是空
+    store, 计数恒 0, 测例就成了恒真的。
+
+    `GET /hits` 就不一样了: 它 `_store_hits()` 优先用 `app.state` 那个店, 所以两条路径
+    各自有各自的注入方式, 别混。
+    """
+    path = tmp_path / PERSIST_SUBDIR / HITS_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "namespace": "buy_sell_signals",
+                "hits": [h.to_dict() for h in hits],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return path
+
 
 HITS_URL = "/api/buy-sell-signals/hits"
 
@@ -143,7 +184,7 @@ def test_hits_file_on_disk_is_read_through_the_route(tmp_path):
             {
                 "schema_version": "1",
                 "namespace": "buy_sell_signals",
-                "hits": [fx.publishable_hit().to_dict()],
+                "hits": [_live(fx.publishable_hit()).to_dict()],
             },
             ensure_ascii=False,
         ),
@@ -180,7 +221,11 @@ def test_only_publishable_hit_survives_the_server_side_gate(tmp_path):
     """三条夹具(pub / cand / limit_reopen)进 → 响应里只剩 pub 那条。"""
     client = _client(
         tmp_path,
-        hits=[fx.publishable_hit(), fx.candidate_hit(), fx.limit_reopen_hit()],
+        hits=[
+            _live(fx.publishable_hit()),
+            _live(fx.candidate_hit()),
+            _live(fx.limit_reopen_hit()),
+        ],
     )
     body = client.get(HITS_URL).json()
     assert body["count"] == 1
@@ -189,7 +234,7 @@ def test_only_publishable_hit_survives_the_server_side_gate(tmp_path):
 
 
 def test_observe_hit_never_appears(tmp_path):
-    client = _client(tmp_path, hits=[fx.observe_hit()])
+    client = _client(tmp_path, hits=[_live(fx.observe_hit())])
     body = client.get(HITS_URL).json()
     assert body["count"] == 0
 
@@ -203,7 +248,7 @@ def test_gate_is_server_side_not_presentational(tmp_path):
     client = _client(
         tmp_path,
         hits=[
-            fx.publishable_hit(),
+            _live(fx.publishable_hit()),
             fx.candidate_hit(),
             fx.observe_hit(),
             fx.limit_reopen_hit(),
@@ -219,7 +264,7 @@ def test_registry_missing_returns_empty_not_500(tmp_path):
     app = FastAPI()
     app.include_router(router)
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    app.state.buy_sell_signal_hit_store = InMemoryHitStore([fx.publishable_hit()])
+    app.state.buy_sell_signal_hit_store = InMemoryHitStore([_live(fx.publishable_hit())])
     body = TestClient(app).get(HITS_URL).json()
     assert body["count"] == 0
     assert body["rejected"]["definition_missing"] == 1
@@ -259,7 +304,7 @@ def test_definition_status_event_never_shows_up_as_a_hit(tmp_path, monkeypatch):
 def test_family_filter_only_accepts_exposed_families(tmp_path):
     client = _client(
         tmp_path,
-        hits=[fx.publishable_hit(), fx.daily_fundamental_hit()],
+        hits=[_live(fx.publishable_hit()), _live(fx.daily_fundamental_hit())],
         watch=["600000"],
     )
     assert client.get(HITS_URL, params={"family": "minute_event"}).json()["count"] == 1
@@ -271,7 +316,7 @@ def test_family_filter_only_accepts_exposed_families(tmp_path):
 
 
 def test_symbol_filter(tmp_path):
-    client = _client(tmp_path, hits=[fx.publishable_hit(symbol="000001")])
+    client = _client(tmp_path, hits=[_live(fx.publishable_hit(symbol="000001"))])
     assert client.get(HITS_URL, params={"symbol": "000001"}).json()["count"] == 1
     assert client.get(HITS_URL, params={"symbol": "600519"}).json()["count"] == 0
 
@@ -280,26 +325,26 @@ def test_symbol_filter(tmp_path):
 
 
 def test_fundamental_hit_hidden_when_not_in_watchlist_or_holdings(tmp_path):
-    client = _client(tmp_path, hits=[fx.daily_fundamental_hit(symbol="600000")], watch=[], holdings=[])
+    client = _client(tmp_path, hits=[_live(fx.daily_fundamental_hit(symbol="600000"))], watch=[], holdings=[])
     body = client.get(HITS_URL).json()
     assert body["count"] == 0
     assert body["rejected"]["out_of_scope"] == 1
 
 
 def test_fundamental_hit_visible_when_in_watchlist(tmp_path):
-    client = _client(tmp_path, hits=[fx.daily_fundamental_hit(symbol="600000")], watch=["600000"])
+    client = _client(tmp_path, hits=[_live(fx.daily_fundamental_hit(symbol="600000"))], watch=["600000"])
     assert client.get(HITS_URL).json()["count"] == 1
 
 
 def test_fundamental_hit_visible_when_only_in_holdings(tmp_path):
     client = _client(
-        tmp_path, hits=[fx.daily_fundamental_hit(symbol="600000")], watch=[], holdings=["600000"]
+        tmp_path, hits=[_live(fx.daily_fundamental_hit(symbol="600000"))], watch=[], holdings=["600000"]
     )
     assert client.get(HITS_URL).json()["count"] == 1
 
 
 def test_event_hit_ignores_scope(tmp_path):
-    client = _client(tmp_path, hits=[fx.publishable_hit(symbol="999999")], watch=[], holdings=[])
+    client = _client(tmp_path, hits=[_live(fx.publishable_hit(symbol="999999"))], watch=[], holdings=[])
     assert client.get(HITS_URL).json()["count"] == 1
 
 
@@ -310,7 +355,7 @@ def test_stale_fundamental_hit_is_returned_but_marked(tmp_path):
     """过期**不隐藏**, 但要带 stale=true —— 藏起来等于假装没发生过。"""
     client = _client(
         tmp_path,
-        hits=[fx.stale_daily_hit(symbol="600000")],
+        hits=[_live(fx.stale_daily_hit(symbol="600000"))],
         watch=["600000"],
     )
     body = client.get(HITS_URL).json()
@@ -322,7 +367,7 @@ def test_stale_fundamental_hit_is_returned_but_marked(tmp_path):
 def test_fresh_fundamental_hit_is_not_marked_stale(tmp_path):
     client = _client(
         tmp_path,
-        hits=[fx.daily_fundamental_hit(symbol="600000")],
+        hits=[_live(fx.daily_fundamental_hit(symbol="600000"))],
         watch=["600000"],
     )
     body = client.get(HITS_URL).json()
@@ -333,7 +378,7 @@ def test_today_override_only_affects_staleness(tmp_path):
     """`today` 参数只影响过期判定, 不影响可见性。"""
     client = _client(
         tmp_path,
-        hits=[fx.daily_fundamental_hit(symbol="600000", asof="2026-10-20")],
+        hits=[_live(fx.daily_fundamental_hit(symbol="600000", asof="2026-10-20"))],
         watch=["600000"],
     )
     same_day = client.get(HITS_URL, params={"today": "2026-10-20"}).json()
@@ -347,7 +392,7 @@ def test_today_override_only_affects_staleness(tmp_path):
 
 
 def test_response_contract_keys(tmp_path):
-    body = _client(tmp_path, hits=[fx.publishable_hit()]).get(HITS_URL).json()
+    body = _client(tmp_path, hits=[_live(fx.publishable_hit())]).get(HITS_URL).json()
     for key in ("schema_version", "namespace", "empty_message", "hits", "count"):
         assert key in body
     assert body["namespace"] == "buy_sell_signals"
@@ -359,7 +404,7 @@ def test_response_contract_keys(tmp_path):
 
 def test_response_never_carries_trading_fields(tmp_path):
     """整个响应里不得出现价格 / 数量 / 下单字段。"""
-    body = _client(tmp_path, hits=[fx.publishable_hit()]).get(HITS_URL).json()
+    body = _client(tmp_path, hits=[_live(fx.publishable_hit())]).get(HITS_URL).json()
     dumped = json.dumps(body, ensure_ascii=False)
     for forbidden in ('"price"', '"qty"', '"order_id"', '"position"'):
         assert forbidden not in dumped
@@ -368,7 +413,7 @@ def test_response_never_carries_trading_fields(tmp_path):
 def test_disclaimer_present_on_every_hit(tmp_path):
     body = _client(
         tmp_path,
-        hits=[fx.publishable_hit(), fx.daily_fundamental_hit()],
+        hits=[_live(fx.publishable_hit()), _live(fx.daily_fundamental_hit())],
         watch=["600000"],
     ).get(HITS_URL).json()
     assert body["count"] == 2
@@ -397,7 +442,7 @@ def test_without_calib_store_everything_is_invisible(tmp_path):
     这条**不是**在测"功能没做完", 它测的是"没有通过登记时系统的诚实反应":
     count=0 而不是把 publishable 的命中照发出去。
     """
-    client = _client(tmp_path, hits=[fx.calibrated_hit()], calib=InMemoryCalibStore())
+    client = _client(tmp_path, hits=[_live(fx.calibrated_hit())], calib=InMemoryCalibStore())
     body = client.get(HITS_URL).json()
     assert body["count"] == 0
     assert body["empty_message"] == EMPTY_HITS_MESSAGE
@@ -407,7 +452,7 @@ def test_without_calib_store_everything_is_invisible(tmp_path):
 
 
 def test_passed_calibration_unlocks_the_hit_at_api_level(tmp_path):
-    client = _client(tmp_path, hits=[fx.calibrated_hit()])
+    client = _client(tmp_path, hits=[_live(fx.calibrated_hit())])
     body = client.get(HITS_URL).json()
     assert body["count"] == 1
     assert body["hits"][0]["hit_id"] == "fx.hit.pub.000001"
@@ -417,7 +462,7 @@ def test_passed_calibration_unlocks_the_hit_at_api_level(tmp_path):
 def test_pending_calibration_does_not_unlock(tmp_path):
     client = _client(
         tmp_path,
-        hits=[fx.calibrated_hit()],
+        hits=[_live(fx.calibrated_hit())],
         calib=InMemoryCalibStore([fx.pending_calib()]),
     )
     assert client.get(HITS_URL).json()["count"] == 0
@@ -426,7 +471,7 @@ def test_pending_calibration_does_not_unlock(tmp_path):
 def test_failed_calibration_does_not_unlock(tmp_path):
     client = _client(
         tmp_path,
-        hits=[fx.calibrated_hit()],
+        hits=[_live(fx.calibrated_hit())],
         calib=InMemoryCalibStore([fx.failed_calib()]),
     )
     assert client.get(HITS_URL).json()["count"] == 0
@@ -434,7 +479,7 @@ def test_failed_calibration_does_not_unlock(tmp_path):
 
 def test_calib_gate_is_not_frontend_side(tmp_path):
     """裸请求（没有任何前端状态）也拿不到未校准的命中 —— 闸在服务端。"""
-    client = _client(tmp_path, hits=[fx.calibrated_hit()], calib=InMemoryCalibStore())
+    client = _client(tmp_path, hits=[_live(fx.calibrated_hit())], calib=InMemoryCalibStore())
     assert client.get(HITS_URL).json()["hits"] == []
 
 
@@ -454,7 +499,7 @@ def test_calib_store_on_disk_is_read_through_the_route(tmp_path):
     root.mkdir(parents=True, exist_ok=True)
     (root / HITS_FILENAME).write_text(
         json.dumps(
-            {"schema_version": "1", "namespace": "buy_sell_signals", "hits": [fx.calibrated_hit().to_dict()]},
+            {"schema_version": "1", "namespace": "buy_sell_signals", "hits": [_live(fx.calibrated_hit()).to_dict()]},
             ensure_ascii=False,
         ),
         encoding="utf-8",
@@ -490,7 +535,7 @@ def test_broken_calib_file_hides_everything(tmp_path):
     app.include_router(router)
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.state.buy_sell_signal_store = _full_registry()
-    app.state.buy_sell_signal_hit_store = InMemoryHitStore([fx.calibrated_hit()])
+    app.state.buy_sell_signal_hit_store = InMemoryHitStore([_live(fx.calibrated_hit())])
     app.state.buy_sell_signal_calib_store = None  # 强制走磁盘店
     body = TestClient(app).get(HITS_URL).json()
     assert body["count"] == 0
@@ -570,3 +615,124 @@ def test_scope_endpoint_does_not_leak_webhook_url_or_secret(tmp_path, monkeypatc
     assert "access_token=" not in dumped
     # URL 非空 → configured 为 True; 但"配好了"不等于把地址打出来
     assert body["hits_dingtalk"]["configured"] is True
+
+
+# ======================================================= P3a · scope 报警计数(批次 20261028gp3a)
+
+
+def test_p3a_scope_has_flat_non_live_mode_rejected(tmp_path):
+    """N1 拍板：扁平 int 键，不是嵌套对象。"""
+    body = _client(tmp_path, watch=["600000"]).get(f"{HITS_URL}/scope").json()
+    assert "non_live_mode_rejected" in body
+    assert isinstance(body["non_live_mode_rejected"], int)
+    assert not isinstance(body["non_live_mode_rejected"], bool)
+
+
+def test_p3a_scope_count_is_zero_on_empty_store(tmp_path):
+    """常态 0：空 store 是干净的，不是缺省值。"""
+    body = _client(tmp_path).get(f"{HITS_URL}/scope").json()
+    assert body["non_live_mode_rejected"] == 0
+    assert body["hits_file_exists"] is False
+
+
+def test_p3a_scope_count_is_zero_when_all_hits_are_live(tmp_path):
+    """全是 live 也是 0 —— 这个字段只在"有东西不该在这儿"时才亮。
+
+    命中**必须真写到磁盘**: `/hits/scope` 里跑的是 `DiskHitStore(data_dir)`, 它不看
+    `app.state.buy_sell_signal_hit_store`。走 `_client(hits=[...])` 注入内存店会让这条
+    "测了个空 store"—— 那就成了恒真的测, 什么也没验证。
+    """
+    _write_hits(tmp_path, [_live(fx.calibrated_hit())])
+    body = _client(tmp_path, watch=["000001"]).get(f"{HITS_URL}/scope").json()
+
+    assert body["hits_file_exists"] is True, "前置条件: 命中确实落盘了"
+    assert body["non_live_mode_rejected"] == 0
+
+
+def test_p3a_scope_count_alarms_when_shadow_hit_is_in_store(tmp_path):
+    """报警面：store 里混进 shadow 命中 → 计数 ≥1。
+
+    这条测的是**运维视角**：不要看日志、不要翻文件，看一眼这个数字就知道
+    "生产 store 里混进了不该有的东西"。
+    """
+    base = fx.calibrated_hit()
+    shadow = replace(base, source=replace(base.source, mode="shadow"))
+    _write_hits(tmp_path, [_live(base), shadow])
+    body = _client(tmp_path, watch=["000001"]).get(f"{HITS_URL}/scope").json()
+
+    assert body["non_live_mode_rejected"] == 1
+
+
+def test_p3a_scope_count_aggregates_multiple_non_live(tmp_path):
+    """计数是累加的：两条非 live → 2。"""
+
+    def _as(mode, hid):
+        b = fx.calibrated_hit(hit_id=hid)
+        return replace(b, source=replace(b.source, mode=mode))
+
+    _write_hits(tmp_path, [_as("shadow", "fx.hit.s1"), _as("fixture", "fx.hit.f1")])
+    body = _client(tmp_path, watch=["000001"]).get(f"{HITS_URL}/scope").json()
+
+    assert body["non_live_mode_rejected"] == 2
+
+
+def test_p3a_scope_count_does_not_list_shadow_details(tmp_path):
+    """G-T6：只回数字，**不回** symbol / hit_id / 明细数组。
+
+    这条是本拍最容易写错的地方 —— "报警"很容易被理解成"顺便把报警的对象列出来"。
+    但列出来就等于从 scope 这个只读口把影子数据放出来了，与本拍的目的正相反。
+    """
+    base = fx.calibrated_hit(hit_id="fx.hit.shadow.secret", symbol="600519")
+    shadow = replace(base, source=replace(base.source, mode="shadow"))
+    _write_hits(tmp_path, [shadow])
+    body = _client(tmp_path, watch=["600519"]).get(f"{HITS_URL}/scope").json()
+    dumped = json.dumps(body, ensure_ascii=False)
+
+    assert body["non_live_mode_rejected"] == 1
+    assert "fx.hit.shadow.secret" not in dumped, "不得回 hit_id"
+    assert "600519" not in dumped, "不得回 symbol"
+    assert not any(
+        isinstance(v, list) and v and isinstance(v[0], str) for v in body.values()
+    ), f"scope 响应里不该出现字符串数组: {body}"
+
+
+def test_p3a_scope_keeps_p_obs_fields_unchanged(tmp_path):
+    """G-T7：不回退 #238 —— 既有字段一个不少、语义不变。"""
+    body = _client(tmp_path, watch=["600000"]).get(f"{HITS_URL}/scope").json()
+    for key in (
+        "scope_family",
+        "scope_size",
+        "empty_message",
+        "hits_file",
+        "hits_file_exists",
+        "calib_gate",
+        "calib_passed_keys",
+        "calib_file",
+        "calib_file_exists",
+        "hits_dingtalk",
+        "volume_breakout_triggering_enabled",
+        "auction_abnormal_triggering_enabled",
+    ):
+        assert key in body, f"#238 既有字段丢失: {key}"
+
+    assert set(body["hits_dingtalk"]) == {
+        "configured",
+        "shares_with_common_group",
+        "env_name",
+        "cooldown_min",
+        "reason_when_missing",
+    }
+    assert body["volume_breakout_triggering_enabled"] is False
+    assert body["auction_abnormal_triggering_enabled"] is False
+
+
+def test_p3a_scope_does_not_write_store(tmp_path):
+    """零写入：调 scope 前后 hits.json 的文件内容一个字节都不变。"""
+    client = _client(tmp_path, hits=[_live(fx.calibrated_hit())], watch=["000001"])
+    client.get(f"{HITS_URL}/scope")
+
+    path = tmp_path / PERSIST_SUBDIR / HITS_FILENAME
+    before = path.read_bytes() if path.exists() else None
+    client.get(f"{HITS_URL}/scope")
+    after = path.read_bytes() if path.exists() else None
+    assert before == after

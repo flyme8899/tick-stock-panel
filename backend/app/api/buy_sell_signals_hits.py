@@ -198,6 +198,17 @@ def hits_scope(request: Request) -> dict[str, Any]:
     塞进 JSON 只会让响应变长。**也不加** `empty_reason_chain` 数组(N4):
     空态顺序靠上面这些字段天然可观测, 再造一个数组等于把同一份判断写两遍。
 
+    ## P-bss-p3a：`NON_LIVE_MODE` 报警计数
+
+    新增扁平键 `non_live_mode_rejected`(int)。它跑的是与 `GET /hits` **同构**的那一次
+    `visible_hits`, 只取被 `NON_LIVE_MODE` 拒掉的条数。
+
+    - **常态 0**: 空 store 是 0, 全是 live 也是 0。
+    - **非 0 ＝ 报警**: 生产 store 里混进了影子/夹具记录。这不是"用户看不到信号"的
+      正常原因, 而是"有东西不该在这儿"。它**不**参与 #238 那条空态主因链, 只是旁注。
+    - **只回数字**: 不回 symbol / hit_id / 明细数组。回明细等于把影子数据从后门列出来,
+      而本拍做的正是把它挡在可见层之外。
+
     本函数**只读**: 不调 `try_push_hit` / `maybe_try_push_hit`, 不写 HitStore,
     不碰 `calib.upsert`。露出状态 ≠ 已接线自动推送。
     """
@@ -207,6 +218,26 @@ def hits_scope(request: Request) -> dict[str, Any]:
     # 既有函数, 不新造语义: configured / shares / cooldown / reason / env_name 的含义
     # 以 `hits_dingtalk` 模块为准, 本文件只做搬运。
     status = hits_dingtalk_status()
+
+    # --- P-bss-p3a: live store 的 NON_LIVE_MODE 报警计数(只读; 不列明细)
+    #
+    # 复用与 `GET /hits` 完全同构的那一次判定(同一个 registry / scope / calib 索引),
+    # 区别只是这里**只取计数**。同构很重要: 如果这里另写一套过滤, 两边迟早会不一致,
+    # 而这个字段的全部价值就在于"它和监控页看到的是同一件事"。
+    #
+    # 语义: 常态 0(空 store 自然是 0, 全 live 也是 0)。非 0 ＝ 生产 store 里混进了
+    # 影子/夹具记录 —— 那是报警, 不是正常空态, 也不是"用户看不到信号"的原因。
+    #
+    # 刻意**不**返回任何 symbol / hit_id / 明细数组: 这个接口只回统计, 回明细就等于
+    # 把影子数据从后门列出来了(那正是本拍要挡的东西)。
+    filtered = visible_hits(
+        hit_store.list_all(),
+        _registry(request),
+        scope_symbols=scope_symbols(request),
+        calib=_calib_index(request),
+    )
+    non_live_mode_rejected = int(filtered.rejected.get("NON_LIVE_MODE", 0))
+
     return {
         "scope_family": SCOPE_FAMILY,
         "scope_size": len(scope_symbols(request)),
@@ -229,6 +260,11 @@ def hits_scope(request: Request) -> dict[str, Any]:
         },
         "volume_breakout_triggering_enabled": VOLUME_BREAKOUT_TRIGGERING_ENABLED,
         "auction_abnormal_triggering_enabled": AUCTION_ABNORMAL_TRIGGERING_ENABLED,
+        # --- P-bss-p3a: 报警计数(N1 拍板扁平键; 不列影子明细)---
+        #
+        # 旁注性质: 空态主因仍按「hits_file_exists → 两 TRIGGERING →
+        # calib_passed_keys → hits_dingtalk.configured」排查, 这个数字不参与那条链。
+        "non_live_mode_rejected": non_live_mode_rejected,
     }
 
 

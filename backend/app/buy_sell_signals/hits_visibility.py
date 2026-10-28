@@ -7,12 +7,27 @@
 
 判定规则(`visible_hits`):
 
+0. **来源必须是 `live`**(批次 20261028gp3a · P-bss-p3a) → 否则丢弃
+   (`NON_LIVE_MODE`)。`shadow` / `fixture` / 缺失 / 空串一律不可见, 任意 calib 都
+   不能洗白 —— 见下方「P3a: 只放 live」;
 1. 命中 → 按 `signal_id` 查定义注册表**当前**那条(指针版优先);
 2. 定义不存在 → 丢弃;
 3. 定义 `status != "publishable"` → 丢弃(`candidate` / `observe` / `retired` /
    `data_abnormal` 全不可见);
 4. `event_class == "limit_reopen"` → 丢弃(双保险);
 5. 其余通过。
+
+## P3a: 只放 live(批次 20261028gp3a)
+
+上面第 0 条是本拍新增的**最外层**闸。它的位置在 family / definition / scope / calib
+全部之前, 理由是这一条判的是"记录从哪来", 而不是"定义批没批、成绩过没过"。
+
+`HitStore.list_all()` **不按 mode 过滤**(它只是把文件里的记录读出来), 所以同一份
+`hits.json` 里既可能有 live 命中, 也可能混着影子/夹具记录。可见性这一层是把它们分开
+的唯一地方 —— 靠的是记录自己声明的 `source.mode`, 不是"谁写进来的"。
+
+`!= "live"` 是**白名单**写法: 只有明确声明 live 的才可见。将来新增任何 mode 值, 默认
+后果是"不可见", 而不是"悄悄出现在监控页上"。
 
 ## 第 4 条为什么不冗余
 
@@ -105,6 +120,29 @@ class VisibilityReject:
     真要排查, 去看 `calib.json` 与 `/hits/calib` 的口径摘要。
     """
 
+    NON_LIVE_MODE = "NON_LIVE_MODE"
+    """非 live 来源(`shadow` / `fixture` / 缺失 / 空串)在监控可见层一律不可见。
+
+    批次 `20261028gp3a` · P-bss-p3a。
+
+    ## 为什么必须是代码闸, 而不是路径约定
+
+    影子命中与生产命中**可能落在同一个 store 里**(同 schema、同目录形态)。靠"谁写进来的"
+    区分是路径约定, 一旦有人手写 JSON 或者复用了生产写入函数, 约定就没了。这里按
+    `source.mode` 判, 判的是**记录自己声明**的来源。
+
+    ## 任意 calib 都不能洗白
+
+    影子/夹具命中即使三键对齐到一条 `passed` 校准登记, 也仍然 0 可见。校准闸回答的是
+    "这套口径有没有拿得出手的成绩", 它不回答"这条命中该不该给人看"—— 后者由来源决定。
+    把两者做成可互相补偿, 等于允许用一份回测成绩给影子数据背书。
+
+    ## fail-closed
+
+    用 `getattr(..., "mode", "") != "live"` 判定: 字段缺失、`""`、任何将来新增的
+    mode 值, 全部落进这一条。**只有明确写成 `live` 的才可见**, 不是"除了 shadow 都可见"。
+    """
+
     ALL = (
         DEFINITION_MISSING,
         NOT_PUBLISHABLE,
@@ -113,6 +151,7 @@ class VisibilityReject:
         UNKNOWN_FAMILY_FILTER,
         OUT_OF_SCOPE,
         CALIB_NOT_PASSED,
+        NON_LIVE_MODE,
     )
 
 
@@ -178,6 +217,19 @@ def visible_hits(
     for hit in hits:
         if not family_filter_ok:
             _reject(rejected, VisibilityReject.UNKNOWN_FAMILY_FILTER)
+            continue
+
+        # ---- P-bss-p3a: 非 live 不可见(放在 family/definition/calib 之前)
+        #
+        # 位置的理由: 这一条判的是"这条记录是从哪来的", 比"定义发没发布""回测过没过"
+        # 都更靠前 —— 来源不明的数据不该先去查它有没有被批准、有没有成绩。放在最前,
+        # 也保证后面的 calib passed 永远没机会把它"洗白"。
+        #
+        # 用 `!= "live"` 而不是 `in {"shadow", "fixture"}`: fail-closed。将来若新增
+        # 一个 mode 值, 默认后果是"不可见", 而不是"漏进监控页"。
+        mode = getattr(getattr(hit, "source", None), "mode", "")
+        if mode != "live":
+            _reject(rejected, VisibilityReject.NON_LIVE_MODE)
             continue
 
         # 只暴露的两类 family。`composite` 到这里就被拦掉, 与前端是否渲染无关。
