@@ -2002,6 +2002,89 @@ calib 判定**之前**。
 - 不翻两 `*_TRIGGERING_ENABLED`，不签发 K8
 - 不改 `EMPTY_HITS_MESSAGE`，不改既有 7 条拒因的语义
 
+### P1 真实日频定义注册（daily_fundamental · 批次 20261028gp1）
+
+> 批次 `20261028gp1` · P-bss-p1。**未部署**；**非触发**；**非放量**。
+> 注册完成 ≠ calib 已过 ≠ 可开 TRIGGERING。
+
+前三节讲的是「命中要不要显示、外发不发」。本节补一层更底下的东西：**注册表里到底有没有
+一条真的日频定义**。
+
+到 #240 为止，答案是「没有」——仓里只有夹具能造出 `daily_fundamental` 记录，而夹具是
+`publishable` 的（它必须如此，否则测不了「publishable 才可见」）。一条 publishable 的
+夹具当成生产真值，等于凭空跳过人工发布闸。所以本拍新增一个**独立工厂**，
+产出**初态 `candidate`** 的真实定义。
+
+#### 注册对象
+
+| 项 | 值 |
+|---|---|
+| `signal_id` | `bss.daily_quality_value`（**不是**夹具 `fx.pub.daily_quality_value`） |
+| `version` / `definition_version` | `v1`（**不是**夹具 `fixture_v1`，也不是 `design_version()` 默认值） |
+| `family` / `event_class` | `daily_fundamental` / `daily_quality_value` |
+| 初态 `status` | **`candidate`**（本拍**不调** `manual_publish`） |
+| `auto_promote_forbidden` / `manual_publish_required` | `True` / `True` |
+| `FreqLockStamp.cadence` | `daily_fundamental` |
+| 模块 | `backend/app/buy_sell_signals/daily_fundamental_definition.py` |
+
+`version` 必须显式传 `v1`：`SignalRecord.version` 的默认是 `design_version()`，拼出来是
+`design_pin_v1+independent_family_v1:m6` —— 那是 Bonferroni 多重检验口径的标签，不是
+定义版本。混用会让三键对齐（`signal_id` + `definition_version` + `freq_lock_version`）
+永远对不上，而从输出上看不出为什么。
+
+#### PIT：`announce_date <= asof`
+
+**锚在 `quality_proxy`，本拍只声明、不改它的行为。**
+
+| 项 | 契约 |
+|---|---|
+| 截断键 | `announce_date`（公告日 / 可得日） |
+| 判据 | `announce_date <= asof` |
+| 禁止 | 用 `period_end`（报告期末）做可知性截断 |
+| 空值 | 公告前财务字段保持 `None`，**不填 0** |
+| 落点 | `FreqLockStamp.params` 与 `SignalRecord.metadata` **两处都有** |
+
+用 `period_end` 判是前视：三季报 9 月 30 日截止、10 月底才公告，按 `period_end <= asof`
+判的话，10 月 1 日就能「知道」10 月 28 日才公布的数字。方向永远对策略有利，所以它是
+唯一一处「错得很隐蔽且永远帮多头」的错。
+
+两处都写是**冗余但不是重复**：`FreqLockStamp` 是评估侧容器、可能被单独序列化流转；
+`metadata` 跟着 `SignalRecord` 走，而注册表才是最常被读的那个入口。只写一处，读的人
+就会以为「这条定义没声明 PIT」。
+
+#### 样本 ≥30：全市场影子计数
+
+| 项 | 契约 |
+|---|---|
+| 阈值 | `CALIB_SAMPLE_N_MIN`（现 30），**引用不另写字面量** |
+| 计数域 | `universe_shadow` —— 全市场影子（`source.mode=shadow`） |
+| 禁止 | 用 `/hits` 按 scope（自选 ∪ 持仓）过滤后的可见条数充当 ≥30 |
+
+拿 scope 后的条数凑 30，等于把「这只票在你的自选里」当成统计前提：同一个信号，自选
+40 只的用户「已达标」，自选 5 只的用户「没达标」。门槛跟着用户配置变，那就不是门槛。
+
+本拍**只钉口径**（常量 + 元数据 + 测例断言），**不**实现影子写入（P3b）、**不**跑回放
+凑满 30（P2）。所以：**样本还没凑、calib 还没跑、门槛还没过。**
+
+#### 禁选 `volume_breakout`
+
+它是 `minute_event` 家族的桩，R2-5 明文不选作日频。测例用负向断言钉住：真实定义的
+`signal_id` 不是它、`family` 不是 `minute_event`，且两处 TRIGGERING 仍 `False`。
+
+#### 字段细化（N1）不挡最小注册
+
+沿用 `quality_proxy.QUALITY_METRIC_COLUMNS` 七列（`roe` / `gross_margin` /
+`debt_to_asset_ratio` / `net_income_yoy` / `revenue_yoy` / `eps` / `bps`），
+`weighting_status="design_pending"`，`w_quality` / `w_value` 保持 `None`。
+
+「不挡」不等于「先填个 0.5 凑着」——填了值，下游就会当成已标定的权重。
+
+#### 零碰
+
+不改三 env 与 hits webhook 生产值；不写 `HitStore`；不调 `calib.upsert`；
+不接评估器 / P3b / P2 / P2.5；不翻两 TRIGGERING；不回退 #240 的三闸。
+生产 `main` **不**自动注册这条定义（本拍只有测例与显式调用会注册）。
+
 ### 配置清单（env / 缺配拒发 / 不回落 / 冷却）
 
 | 项 | 值 |
