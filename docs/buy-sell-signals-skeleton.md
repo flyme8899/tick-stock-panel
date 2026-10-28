@@ -1932,6 +1932,76 @@ BSS **命中**的钉钉外发只走独立键 `BUY_SELL_SIGNALS_HITS_DINGTALK_WEB
 顺序刻意如此：文件 → 开关 → 校准 → 配置。前三个回答「有没有东西可发」，
 最后一个回答「配了没」。反过来读容易把「没配」当成「没信号」。
 
+### P3a 可见性闸：只放 live（批次 20261028gp3a）
+
+> 批次 `20261028gp3a` · P-bss-p3a。**三个闸，零写入**：不改 `HitStore`（仍只读）、
+> 不写 hits/calib、不翻两 TRIGGERING、不新增 `try_push_hit` 调用方、不碰三 env。
+
+前几节回答的是「一条命中要不要显示」。本节补一个更靠前的问题：**这条记录是从哪来的**。
+影子回放（`mode=shadow`）、测例夹具（`mode=fixture`）与生产命中**可能落在同一个 store 里**
+——共用一个 `hits.json` 是最省事的实现，也正因如此，单靠「路径约定」或「目录分开」挡不住它。
+
+#### 闸 1：`visible_hits` 只放 `mode == "live"`
+
+在 `hits_visibility.visible_hits` 里新增拒因 `NON_LIVE_MODE`，位置在所有 family / definition /
+calib 判定**之前**。
+
+| 输入 `source.mode` | 结果 |
+|---|---|
+| `"live"` | 继续往下过既有的 7 道闸 |
+| `"shadow"` / `"fixture"` | `NON_LIVE_MODE` |
+| 缺失 / `""` / 未知值（如 `"replay"`） | `NON_LIVE_MODE` |
+
+判定用 `getattr(getattr(hit, "source", None), "mode", "") != "live"`，是 **fail-closed**
+而不是 `in {"shadow", "fixture"}`：后者会把「以后有人加了第四种 mode」默认放行。
+
+位置刻意放最前，理由有两条。一是语义顺序——来源不明的数据不该先去查它有没有被批准、
+有没有成绩。二是**任意 calib 都不能洗白**：后面那道 calib passed 永远没机会把它放出来。
+（所以测例里「shadow 命中 + 全套 passed 校准登记 → 0 可见」是该闸的关键负控。）
+
+#### 闸 2：`try_push_hit` 拒发影子命中，且**没有** `allow_shadow`
+
+`hits_dingtalk.REASON_SHADOW = "shadow_not_pushable"`，门 1 之后即为门 1b，**在缺配判定之前**。
+
+它与 `fixture_not_pushable` **故意不对称**：
+
+- `fixture` 有 `allow_fixture` 开关。理由成立——夹具命中是测例自己造的，测「格式对不对」
+  时得让它走到发送那一步。
+- `shadow` **没有** `allow_shadow`，也不许将来加。影子回放的意义就是「假装是生产」，
+  而唯一真正想看它发出去的人，是**正在测发送链路的人**——那种测例应该用 fixture。
+  给了 `allow_shadow`，「影子进了生产通道」就从「配置错误」降级成「一个参数」。
+  有一条测例直接对 `inspect.signature` 断言：有 `allow_fixture`，**没有** `allow_shadow`。
+
+门序 1 → **1b** → 2 → 3 → 4 → 5（1b 在缺配之前，所以缺配时 shadow 命中报的是
+`shadow_not_pushable` 而不是 `hits_webhook_not_configured`——这才是真实原因）。
+影子命中不写冷却记录。
+
+#### 闸 3：`GET /hits/scope` 露出扁平计数 `non_live_mode_rejected`
+
+```json
+{ "non_live_mode_rejected": 1 }
+```
+
+- **扁平 int**，不是嵌套对象（N1）。
+- **常态 0**：空 store 是 0，全是 live 也是 0。**非 0 ＝ 报警**——「生产 store 里混进了
+  不该在这儿的东西」，而不是「用户看不到信号」的正常原因。
+- **只回数字**：不回 symbol / hit_id / 明细数组。把明细列出来等于从只读口把影子数据
+  放出来，与本拍目的正相反。
+- 跑的是与 `GET /hits` **同构**的那一次 `visible_hits`（同一个 registry / scope / calib 索引），
+  区别只是只取计数。同构很重要，否则两边会漂。
+- 它**不参与**上面那条空态主因链，只是旁注。
+
+> 读 scope 时若要把这个数字当真，注意 `hits_scope` 用的是 `DiskHitStore(data_dir)`
+> （生产 live store 那条路径），**不读** `app.state.buy_sell_signal_hit_store`。
+> 这也意味着测试里想让它非 0，必须把 `mode=shadow` 的命中真写进 `hits.json`。
+
+#### 本拍明确不做
+
+- 不清洗存量 `hits.json` 里的影子记录（**零写入**：闸在读取侧，不在写入侧）
+- 不做 `shadow → live` 的迁移脚本、不加 `--promote` 之类开关
+- 不翻两 `*_TRIGGERING_ENABLED`，不签发 K8
+- 不改 `EMPTY_HITS_MESSAGE`，不改既有 7 条拒因的语义
+
 ### 配置清单（env / 缺配拒发 / 不回落 / 冷却）
 
 | 项 | 值 |

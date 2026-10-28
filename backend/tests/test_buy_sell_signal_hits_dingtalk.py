@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import json
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -53,6 +54,7 @@ from app.buy_sell_signals.hits_dingtalk import (
     REASON_NOT_VISIBLE,
     REASON_PUSHED,
     REASON_SEND_FAILED,
+    REASON_SHADOW,
     HitPushOutcome,
     HitsDedupe,
     build_hit_dingtalk_text,
@@ -185,9 +187,37 @@ def _passed_all() -> CalibIndex:
     )
 
 
-def _fresh_hit(**overrides):
-    """夹具命中默认 `source.mode=fixture`，测外发要显式放行。"""
+def _live(hit):
+    """把夹具命中转成 `source.mode="live"`。
+
+    P-bss-p3a 可见性闸只放 live（见 `hits_visibility.VisibilityReject.NON_LIVE_MODE`），
+    而 `hits_fixtures` 默认造的是 `mode=fixture`。所以「期望走通到发送」的命中都要过这一层
+    —— 否则测的就不是"命中能不能外发"，而是"夹具能不能外发"（后者恒否）。
+
+    要测 fixture / shadow 被挡的负向路径时，**不要**用它，用 `_fixture_hit` / `_shadow_hit`。
+    """
+    return replace(hit, source=replace(hit.source, mode="live"))
+
+
+def _fixture_hit(**overrides):
+    """`source.mode=fixture` 的命中 —— 供 fixture 门 / 门序负向测用。"""
     return fx.calibrated_hit(**overrides)
+
+
+def _shadow_hit(**overrides):
+    """`source.mode=shadow` 的命中 —— 供 shadow 门负向测用（无 `allow_shadow`）。"""
+    base = fx.calibrated_hit(**overrides)
+    return replace(base, source=replace(base.source, mode="shadow"))
+
+
+def _fresh_hit(**overrides):
+    """默认的「活路径」命中：`source.mode=live`。
+
+    批次 20261028gp3a 起改了默认值。原来是 fixture + `_push(allow_fixture=True)` 装绿
+    `pushed`，但可见性闸生效后 fixture 一律被 `NON_LIVE_MODE` 挡住 —— 那条路径已经
+    走不到发送了。继续用它断言 `pushed` 等于在测一条不存在的路径（任务书 N3 / X9）。
+    """
+    return _live(fx.calibrated_hit(**overrides))
 
 
 def _push(hit, *, opener, dedupe=None, webhook=HITS_URL, secret=HITS_SECRET, **kwargs):
@@ -197,7 +227,7 @@ def _push(hit, *, opener, dedupe=None, webhook=HITS_URL, secret=HITS_SECRET, **k
         calib=_passed_all(),
         scope_symbols=SCOPE,
         opener=opener,
-        allow_fixture=True,
+        allow_fixture=kwargs.pop("allow_fixture", False),
         webhook=webhook,
         secret=secret,
         dedupe=dedupe,
@@ -456,7 +486,7 @@ def test_g_t4_hits_url_read_from_env_when_settings_empty(monkeypatch):
 def test_g_t5_candidate_with_passed_registration_is_not_pushed(send_side):
     """V4: 登记里有 candidate 的 passed，但定义不是 publishable → 定义闸挡在前面。"""
     rec = _Recorder()
-    out = _push(fx.candidate_calibrated_hit(), opener=rec, dedupe=send_side)
+    out = _push(_live(fx.candidate_calibrated_hit()), opener=rec, dedupe=send_side)
     assert out.reason == REASON_NOT_VISIBLE
     assert out.reject == VisibilityReject.NOT_PUBLISHABLE
     assert rec.count == 0
@@ -498,7 +528,7 @@ def test_g_t5_pending_registration_is_not_pushed(send_side):
 
 def test_g_t5_limit_reopen_is_not_pushed(send_side):
     rec = _Recorder()
-    out = _push(fx.limit_reopen_calibrated_hit(), opener=rec, dedupe=send_side)
+    out = _push(_live(fx.limit_reopen_calibrated_hit()), opener=rec, dedupe=send_side)
     assert out.reason == REASON_NOT_VISIBLE
     assert rec.count == 0
 
@@ -506,7 +536,7 @@ def test_g_t5_limit_reopen_is_not_pushed(send_side):
 def test_g_t5_unlabelled_publishable_hit_is_not_pushed(send_side):
     """缺 `freq_lock_version` 的命中同样不可见（连口径都不知道）。"""
     rec = _Recorder()
-    out = _push(fx.unlabelled_hit(), opener=rec, dedupe=send_side)
+    out = _push(_live(fx.unlabelled_hit()), opener=rec, dedupe=send_side)
     assert out.reason == REASON_NOT_VISIBLE
     assert out.reject == VisibilityReject.CALIB_NOT_PASSED
     assert rec.count == 0
@@ -514,8 +544,12 @@ def test_g_t5_unlabelled_publishable_hit_is_not_pushed(send_side):
 
 def test_g_t5_observable_hit_without_registration_is_not_pushed(send_side):
     rec = _Recorder()
-    out = _push(fx.observe_hit(), opener=rec, dedupe=send_side)
+    # live 才能走到定义闸: 若用夹具默认 fixture, 会先被 NON_LIVE_MODE 挡住,
+    # 这条测就变成在测 mode 闸而不是"定义没注册"。见 P3a 闸序。
+    out = _push(_live(fx.observe_hit()), opener=rec, dedupe=send_side)
     assert out.reason == REASON_NOT_VISIBLE
+    # 关键：被挡的是**定义**那几条闸, 不是 mode 闸 —— 否则这条测就没测到它该测的东西。
+    assert out.reject != VisibilityReject.NON_LIVE_MODE
     assert rec.count == 0
 
 
@@ -532,7 +566,7 @@ def test_g_t5_gate_is_the_same_function_as_monitoring(monkeypatch, send_side):
 
     monkeypatch.setattr(mod, "visible_hits", _fake)
     rec = _Recorder()
-    out = _push(fx.candidate_calibrated_hit(), opener=rec, dedupe=send_side)
+    out = _push(_live(fx.candidate_calibrated_hit()), opener=rec, dedupe=send_side)
     assert out.reason == REASON_PUSHED, "闸被替换后应当放行 —— 说明确实复用了它"
 
 
@@ -543,7 +577,7 @@ def test_v5_fixture_hit_is_not_pushed_in_production_path(send_side):
     """V5: 默认（生产）调用 → fixture 拒发。"""
     rec = _Recorder()
     out = try_push_hit(
-        _fresh_hit(),
+        _fixture_hit(),
         _full_registry(),
         calib=_passed_all(),
         scope_symbols=SCOPE,
@@ -560,7 +594,7 @@ def test_v5_fixture_check_runs_before_webhook_check(send_side):
     """顺序契约: fixture 门在缺配门之前。两者都命中时 reason 是 fixture。"""
     rec = _Recorder()
     out = try_push_hit(
-        _fresh_hit(),
+        _fixture_hit(),
         _full_registry(),
         calib=_passed_all(),
         scope_symbols=SCOPE,
@@ -572,15 +606,26 @@ def test_v5_fixture_check_runs_before_webhook_check(send_side):
     assert rec.count == 0
 
 
-def test_v5_shadow_mode_is_not_blocked_by_fixture_gate(send_side):
-    """只有 `fixture` 被这道门拦；`shadow` 不在本门的拦截范围（它由可见性/来源另行判定）。"""
-    from dataclasses import replace
+def test_v5_shadow_mode_is_rejected_as_shadow_not_pushable(send_side):
+    """P3a / G-T8: shadow 现在**有**自己的门，拒因 `shadow_not_pushable`。
 
-    base = _fresh_hit()
-    shadow = replace(base, source=replace(base.source, mode="shadow"))
+    ## 这条为什么必须改写，而不是删掉
+
+    改写前的断言是 `out.reason == REASON_PUSHED` —— 即"shadow 不被 fixture 门拦，所以
+    它发出去了"。那句断言描述的是**旧的、真实存在的缺口**：影子命中能顺着生产外发通道
+    发到钉钉群里，且消息上没有任何可辨识特征。
+
+    本拍把缺口堵上之后，那条断言如果留着，就等于用一条绿灯记录"缺口还在"。所以改成
+    断言拒发；测试名也改掉，免得名字还在说"不被拦"。
+
+    注意这里**不需要** `allow_*`：shadow 没有逃逸开关，将来也不许加。
+    """
     rec = _Recorder()
-    out = _push(shadow, opener=rec, dedupe=send_side)
-    assert out.reason == REASON_PUSHED
+    out = _push(_shadow_hit(), opener=rec, dedupe=send_side)
+    assert out.reason == REASON_SHADOW
+    assert out.reason == "shadow_not_pushable"
+    assert out.attempts == 0
+    assert rec.count == 0
 
 
 # ======================================================= G-T7 · 正文边界
@@ -666,7 +711,7 @@ def test_v11_after_cooldown_can_send_again(send_side):
 def test_v11_different_symbol_does_not_collide(send_side):
     rec = _Recorder()
     a = _push(_fresh_hit(), opener=rec, dedupe=send_side)
-    b = _push(fx.calibrated_hit(symbol="600000"), opener=rec, dedupe=send_side)
+    b = _push(_live(fx.calibrated_hit(symbol="600000")), opener=rec, dedupe=send_side)
     assert a.reason == REASON_PUSHED
     assert b.reason == REASON_PUSHED
     assert rec.count == 2
@@ -732,9 +777,9 @@ def test_v11_cooldown_not_written_on_send_failure(send_side):
 
 def test_v11_cooldown_not_written_when_not_visible(send_side):
     rec = _Recorder()
-    out = _push(fx.candidate_calibrated_hit(), opener=rec, dedupe=send_side)
+    out = _push(_live(fx.candidate_calibrated_hit()), opener=rec, dedupe=send_side)
     assert out.reason == REASON_NOT_VISIBLE
-    assert send_side.cooled_down(dedupe_key(fx.candidate_calibrated_hit()), now=cn_now()) is False
+    assert send_side.cooled_down(dedupe_key(_live(fx.candidate_calibrated_hit())), now=cn_now()) is False
 
 
 def test_v11_dedupe_key_has_five_parts():
@@ -744,7 +789,7 @@ def test_v11_dedupe_key_has_five_parts():
 
 
 def test_v11_missing_freq_lock_version_becomes_empty_string():
-    key = dedupe_key(fx.unlabelled_hit())
+    key = dedupe_key(_live(fx.unlabelled_hit()))
     assert key[4] == "", "缺失字段补空串，不抛（去重键计算不该比闸更严）"
 
 
@@ -812,6 +857,7 @@ def test_reason_closed_set():
             HD.REASON_ALREADY_IN_FLIGHT,
             REASON_NOT_VISIBLE,
             REASON_FIXTURE,
+            REASON_SHADOW,
             REASON_DEDUPE,
             REASON_SEND_FAILED,
             HITS_WEBHOOK_NOT_CONFIGURED,
@@ -982,3 +1028,134 @@ def test_g_t12_docs_pending_hook_is_checked_off():
 
 def test_g_t12_disclaimer_module_text_unchanged():
     assert D.DISCLAIMER_TEXT == "仅供研究，不构成投资建议；执行须人工确认。"
+
+
+# ======================================================= P3a · shadow 门(批次 20261028gp3a)
+
+
+def test_p3a_shadow_gate_runs_before_webhook_check(send_side):
+    """门序契约: shadow 门在缺配门之前 —— 两者都命中时 reason 是 shadow。"""
+    rec = _Recorder()
+    out = try_push_hit(
+        _shadow_hit(),
+        _full_registry(),
+        calib=_passed_all(),
+        scope_symbols=SCOPE,
+        opener=rec,
+        webhook="",
+        dedupe=send_side,
+    )
+    assert out.reason == REASON_SHADOW
+    assert rec.count == 0
+
+
+def test_p3a_shadow_gate_runs_before_cooldown(send_side):
+    """门序契约: shadow 门在冷却门之前 —— 拒发时不该写冷却。
+
+    先发一条 live 占住冷却键，再发同一键的 shadow：若 shadow 门在冷却之后，
+    这里会拿到 `hits_dedupe_cooldown`。
+    """
+    rec = _Recorder()
+    live_out = _push(_fresh_hit(), opener=rec, dedupe=send_side)
+    assert live_out.reason == REASON_PUSHED
+
+    shadow_out = _push(_shadow_hit(), opener=rec, dedupe=send_side)
+    assert shadow_out.reason == REASON_SHADOW
+    assert rec.count == 1, "只有那条 live 发出去过"
+
+
+def test_p3a_shadow_does_not_write_cooldown(send_side):
+    """shadow 被拒后，同键的 live 仍能发 —— 说明冷却没被影子那次污染。"""
+    rec = _Recorder()
+    assert _push(_shadow_hit(), opener=rec, dedupe=send_side).reason == REASON_SHADOW
+    assert rec.count == 0
+
+    out = _push(_fresh_hit(), opener=rec, dedupe=send_side)
+    assert out.reason == REASON_PUSHED
+    assert rec.count == 1
+
+
+def test_p3a_live_hit_still_pushes(send_side):
+    """对照面：live + 可见 + 配了 webhook → 仍能 `pushed`（G-T5 回归）。"""
+    rec = _Recorder()
+    out = _push(_fresh_hit(), opener=rec, dedupe=send_side)
+    assert out.reason == REASON_PUSHED
+    assert out.attempts == 1
+    assert rec.count == 1
+
+
+def test_p3a_no_allow_shadow_parameter():
+    """`try_push_hit` 的签名里**没有** `allow_shadow` —— 而且不该有。
+
+    这条比 rg 静态扫描更硬：即使有人在别的文件里定义了这个名字，只要签名里没有，
+    调用方就无法传。影子命中与生产命中形状一致，一个开关就能让它混进生产群。
+    """
+    import inspect
+
+    params = inspect.signature(try_push_hit).parameters
+    assert "allow_shadow" not in params
+    assert "allow_fixture" in params, "fixture 的测例放行口应当保留"
+
+
+def test_p3a_shadow_gate_has_no_escape_hatch():
+    """shadow 拒发不看任何开关：连 `allow_fixture=True` 也放不过去。"""
+    rec = _Recorder()
+    out = try_push_hit(
+        _shadow_hit(),
+        _full_registry(),
+        calib=_passed_all(),
+        scope_symbols=SCOPE,
+        opener=rec,
+        allow_fixture=True,  # 只对 fixture 有效，对 shadow 无效
+        webhook=HITS_URL,
+        secret=HITS_SECRET,
+        dedupe=HitsDedupe(),
+    )
+    assert out.reason == REASON_SHADOW
+    assert rec.count == 0
+
+
+def test_p3a_shadow_cannot_be_unlocked_by_any_keyword_escape_hatch():
+    """**行为层**的逃逸口封堵：把 `try_push_hit` 全部 bool 形参都置 True，shadow 仍不发。
+
+    上一条测的是"已知只有一个 `allow_fixture`"。这一条防的是**未来**：哪天有人给
+    `try_push_hit` 加了 `allow_shadow` / `force` / `bypass_mode_check` 之类的新开关，
+    只要它是 `bool` 默认 `False`, 就会被这里自动置 `True` 并打到 shadow 命中上 ——
+    发送数必须是 0。
+
+    `test_p3a_no_allow_shadow_parameter` 用 `inspect.signature` 抓名字, 只能抓
+    `allow_shadow` 这一个已知名字; 换个名字它就漏了。两条一起才是完整的:
+    名字层管"别叫这个名字", 行为层管"不管叫什么名字都不许生效"。
+    """
+    import inspect
+
+    sig = inspect.signature(try_push_hit)
+    bool_kwargs = {
+        name: True
+        for name, p in sig.parameters.items()
+        if p.default is False and isinstance(p.default, bool)
+    }
+    # 至少得捞到 allow_fixture, 否则说明这个测例本身失效了(签名变了)
+    assert "allow_fixture" in bool_kwargs, f"签名形参变了, 这条测例需要重看: {sig}"
+
+    rec = _Recorder()
+    out = try_push_hit(
+        _shadow_hit(),
+        _full_registry(),
+        calib=_passed_all(),
+        scope_symbols=SCOPE,
+        opener=rec,
+        webhook=HITS_URL,
+        secret=HITS_SECRET,
+        dedupe=HitsDedupe(),
+        **bool_kwargs,
+    )
+    assert out.reason == REASON_SHADOW, f"被 {sorted(bool_kwargs)} 放过去了"
+    assert rec.count == 0
+
+
+def test_p3a_reason_shadow_is_exported():
+    """`REASON_SHADOW` 必须导出，且值写死 —— 运维凭这个字符串排障。"""
+    assert HD.REASON_SHADOW == "shadow_not_pushable"
+    assert "REASON_SHADOW" in HD.__all__
+    assert HD.REASON_SHADOW in HD.REASON_KEYS

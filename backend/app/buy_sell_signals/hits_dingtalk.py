@@ -94,6 +94,20 @@ REASON_NOT_VISIBLE: Final = "not_visible"
 REASON_FIXTURE: Final = "fixture_not_pushable"
 """`source.mode == "fixture"` 的命中不进生产外发。测例须显式开 `allow_fixture`。"""
 
+REASON_SHADOW: Final = "shadow_not_pushable"
+"""`source.mode == "shadow"` 的命中不进生产外发(批次 20261028gp3a · P-bss-p3a)。
+
+字符串与 `fixture_not_pushable` 对称, 但**故意不对称为开关**:
+
+- `fixture` 有 `allow_fixture`, 因为夹具命中是**测例**自己造的, 放行是测试手段;
+- `shadow` **没有** `allow_shadow`, 也不许将来加。影子命中是"用真实数据、按未锁定
+  的口径算出来的", 它长得和生产命中一模一样 —— 一旦有一个开关能把它放进生产钉钉群,
+  那条群消息就没有任何特征能让人看出它是影子。测例要验影子路径, 应当直接断言拒发。
+
+与可见性闸的关系: 即使这道门被绕过, `visible_hits` 的 `NON_LIVE_MODE` 仍会挡住它 ——
+两道闸判的是同一件事的不同面(推不推 / 看不看), 冗余是刻意的。
+"""
+
 REASON_DEDUPE: Final = "hits_dedupe_cooldown"
 """同一五元组在 30 分钟冷却窗内已发过。"""
 
@@ -106,6 +120,7 @@ REASON_KEYS: Final = frozenset(
         REASON_ALREADY_IN_FLIGHT,
         REASON_NOT_VISIBLE,
         REASON_FIXTURE,
+        REASON_SHADOW,
         REASON_DEDUPE,
         REASON_SEND_FAILED,
         HITS_WEBHOOK_NOT_CONFIGURED,
@@ -356,7 +371,12 @@ def try_push_hit(
 
     1. fixture: `hit.source.mode == "fixture"` → `fixture_not_pushable`
        (测例须显式 `allow_fixture=True`; 生产调用方传默认值即可)
+    1b. shadow: `hit.source.mode == "shadow"` → `shadow_not_pushable`(批次 20261028gp3a)
+       **没有** `allow_shadow`, 将来也不许加: 影子命中与生产命中长得完全一样, 一个
+       开关就能让它混进生产钉钉群, 而群里没人看得出。夹具是测例造的, 影子是真实数据
+       算的 —— 前者可以放行, 后者不行。
     2. 可见性: 复用 `visible_hits([hit], ...)`, 返回 0 条 → `not_visible` + `reject`
+       (非 live 若漏过 1/1b, 这里还会被 `NON_LIVE_MODE` 兜住 —— 冗余是刻意的)
     3. 缺配: 命中 webhook 空 → `hits_webhook_not_configured`, **attempts = 0**
     4. 冷却: 同五元组 30 分钟内已发 → `hits_dedupe_cooldown`
     5. 发送: `send_markdown(hits_url, hits_secret, title, text)`
@@ -380,6 +400,19 @@ def try_push_hit(
             getattr(hit, "hit_id", ""),
         )
         return HitPushOutcome(reason=REASON_FIXTURE)
+
+    # ---- 门 1b: shadow 不进生产外发(无 allow_shadow, 且不打算加)
+    #
+    # 与门 1 不对称是刻意的: fixture 有 `allow_fixture` 给测例用, shadow 一个开关都不给。
+    # 理由见 `REASON_SHADOW` 的 docstring —— 影子命中与生产命中形状完全一致, 放进群里
+    # 没有任何可辨识特征。
+    if mode == "shadow":
+        logger.warning(
+            "买卖信号命中外发跳过: 影子命中(source.mode=shadow)不进生产钉钉通道 "
+            "(hit_id=%s)",
+            getattr(hit, "hit_id", ""),
+        )
+        return HitPushOutcome(reason=REASON_SHADOW)
 
     # ---- 门 2: 可见性(复用监控页那道闸, 不另写软闸)
     filtered = visible_hits(
@@ -504,6 +537,7 @@ __all__ = [
     "REASON_NOT_VISIBLE",
     "REASON_PUSHED",
     "REASON_SEND_FAILED",
+    "REASON_SHADOW",
     "HitPushOutcome",
     "HitsDedupe",
     "HitsDingtalkStatus",

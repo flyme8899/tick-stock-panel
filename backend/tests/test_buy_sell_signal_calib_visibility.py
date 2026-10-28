@@ -83,13 +83,26 @@ def _passed_all() -> CalibIndex:
     )
 
 
+def _live(hit):
+    """把夹具命中转成 `source.mode="live"`。
+
+    P-bss-p3a 可见性闸只放 live（见 `hits_visibility.VisibilityReject.NON_LIVE_MODE`），
+    而 `hits_fixtures` 默认造的是 `mode=fixture`。所以本文件里凡「期望可见」的命中都要
+    过这一层 —— 否则测的就不是"命中能不能显示"，而是"夹具能不能显示"（后者恒否）。
+
+    要测 fixture / shadow 被挡的负向路径时，**不要**用它，直接在夹具上 `replace` 回
+    `mode="fixture"` / `"shadow"`。
+    """
+    return replace(hit, source=replace(hit.source, mode="live"))
+
+
 # ======================================================= M1 · 无登记
 
 
 def test_m1_publishable_without_any_calibration_is_invisible():
     """M1: 定义 publishable、命中带口径标签, 但 calib 里**一条都没有** → 不可见。"""
     filtered = visible_hits(
-        [fx.calibrated_hit()],
+        [_live(fx.calibrated_hit())],
         _full_registry(),
         scope_symbols=SCOPE,
         calib=CalibIndex([]),
@@ -100,7 +113,7 @@ def test_m1_publishable_without_any_calibration_is_invisible():
 
 def test_m1b_calib_none_means_empty_not_skip():
     """`calib=None` 等同于空索引, **不是**"跳过这道闸"。"""
-    filtered = visible_hits([fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=None)
+    filtered = visible_hits([_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=None)
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.CALIB_NOT_PASSED) == 1
 
@@ -108,7 +121,7 @@ def test_m1b_calib_none_means_empty_not_skip():
 def test_m1c_publishable_without_freq_lock_label_is_invisible():
     """连按哪套口径算的都不知道（标签缺失）→ 不可见, 不许拿"当前戳"顶上去。"""
     filtered = visible_hits(
-        [fx.unlabelled_hit()], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
+        [_live(fx.unlabelled_hit())], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
     )
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.CALIB_NOT_PASSED) == 1
@@ -121,7 +134,7 @@ def test_m1c_publishable_without_freq_lock_label_is_invisible():
 def test_m2_publishable_with_pending_or_failed_is_invisible(factory):
     """M2: `pending` / `failed` 与"没有登记"**完全等价** —— 一条都不可见。"""
     filtered = visible_hits(
-        [fx.calibrated_hit()],
+        [_live(fx.calibrated_hit())],
         _full_registry(),
         scope_symbols=SCOPE,
         calib=_index(factory()),
@@ -133,7 +146,7 @@ def test_m2_publishable_with_pending_or_failed_is_invisible(factory):
 def test_m2b_pending_does_not_show_as_a_softer_state():
     """不存在"显示但标灰"这种中间态 —— 闸只有放行/不放行。"""
     filtered = visible_hits(
-        [fx.calibrated_hit()],
+        [_live(fx.calibrated_hit())],
         _full_registry(),
         scope_symbols=SCOPE,
         calib=_index(fx.pending_calib()),
@@ -149,7 +162,7 @@ def test_m2b_pending_does_not_show_as_a_softer_state():
 def test_m3_candidate_with_passed_is_still_invisible():
     """M3: 给 candidate 配齐 `passed` 也不可见 —— 定义状态那道闸没有被新闸削弱。"""
     filtered = visible_hits(
-        [fx.candidate_calibrated_hit()],
+        [_live(fx.candidate_calibrated_hit())],
         _full_registry(),
         scope_symbols=SCOPE,
         calib=_passed_all(),
@@ -168,7 +181,7 @@ def test_m4_limit_reopen_with_passed_is_still_invisible_even_if_definition_forge
     assert forged.status == "publishable"
 
     filtered = visible_hits(
-        [fx.limit_reopen_calibrated_hit()], _registry(forged), scope_symbols=SCOPE, calib=_passed_all()
+        [_live(fx.limit_reopen_calibrated_hit())], _registry(forged), scope_symbols=SCOPE, calib=_passed_all()
     )
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.LIMIT_REOPEN) == 1
@@ -180,21 +193,21 @@ def test_m4_limit_reopen_with_passed_is_still_invisible_even_if_definition_forge
 def test_publishable_with_passed_is_visible():
     """AND 的另一半: 两条件都满足时必须可见 —— 否则这道闸就是个"全隐藏"开关。"""
     filtered = visible_hits(
-        [fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
+        [_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
     )
     assert [h.hit_id for h in filtered.hits] == ["fx.hit.pub.000001"]
 
 
 def test_visible_count_reports_passed_keys():
     filtered = visible_hits(
-        [fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
+        [_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
     )
     assert filtered.calib_passed_keys == 4
 
 
 def test_daily_fundamental_still_needs_both_scope_and_passed():
     """基本面: 范围闸与校准闸是**并列**的两道, 缺任一条都不可见。"""
-    hit = fx.daily_calibrated_hit(symbol="600000")
+    hit = _live(fx.daily_calibrated_hit(symbol="600000"))
     calib = _index(fx.passed_calib(signal_id="fx.pub.daily_quality_value"))
 
     inside = visible_hits([hit], _full_registry(), scope_symbols=frozenset({"600000"}), calib=calib)
@@ -206,7 +219,7 @@ def test_daily_fundamental_still_needs_both_scope_and_passed():
 
 
 def test_daily_fundamental_in_scope_but_uncalibrated_is_invisible():
-    hit = fx.daily_calibrated_hit(symbol="600000")
+    hit = _live(fx.daily_calibrated_hit(symbol="600000"))
     filtered = visible_hits(
         [hit], _full_registry(), scope_symbols=frozenset({"600000"}), calib=CalibIndex([])
     )
@@ -216,7 +229,7 @@ def test_daily_fundamental_in_scope_but_uncalibrated_is_invisible():
 
 def test_event_hit_still_ignores_scope_but_not_calibration():
     """事件命中不过范围闸, 但仍要过校准闸 —— 两道闸的适用面不同, 不互相顶替。"""
-    hit = fx.calibrated_hit(symbol="999999")
+    hit = _live(fx.calibrated_hit(symbol="999999"))
     ok = visible_hits(
         [hit], _full_registry(), scope_symbols=frozenset({"600000"}), calib=_passed_all()
     )
@@ -250,7 +263,7 @@ def test_m6b_a_record_whose_version_does_not_match_the_stamp_cannot_align():
     """登记写的是 `freq_lock_v9`，命中的是 `freq_lock_v1` → 三键对不上 → 不可见。"""
     stale = fx.passed_calib(freq_lock_version="freq_lock_v9")
     filtered = visible_hits(
-        [fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=_index(stale)
+        [_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=_index(stale)
     )
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.CALIB_NOT_PASSED) == 1
@@ -259,7 +272,7 @@ def test_m6b_a_record_whose_version_does_not_match_the_stamp_cannot_align():
 def test_m6c_definition_version_mismatch_blocks_alignment():
     """定义改版后旧 `passed` 不许顺延: 登记的 `definition_version` 是 v1，命中是 v2。"""
     old = fx.passed_calib(definition_version="fixture_v1")
-    new_hit = fx.calibrated_hit(definition_version="fixture_v2")
+    new_hit = _live(fx.calibrated_hit(definition_version="fixture_v2"))
     filtered = visible_hits([new_hit], _full_registry(), scope_symbols=SCOPE, calib=_index(old))
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.CALIB_NOT_PASSED) == 1
@@ -275,7 +288,7 @@ def test_m7_sample_n_29_blocks_the_write_and_the_hit_never_shows():
 
     store = InMemoryCalibStore()
     filtered = visible_hits(
-        [fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=build_index(store)
+        [_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=build_index(store)
     )
     assert filtered.hits == []
 
@@ -286,7 +299,7 @@ def test_m8_wrong_cost_blocks_the_write_and_the_hit_never_shows():
         fx.passed_calib(cost_bp_roundtrip=0)
 
     filtered = visible_hits(
-        [fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=build_index(InMemoryCalibStore())
+        [_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=build_index(InMemoryCalibStore())
     )
     assert filtered.hits == []
 
@@ -305,7 +318,7 @@ def test_hand_written_calib_file_with_bad_gates_is_dropped(tmp_path):
 
     idx = build_index(DiskCalibStore(tmp_path))
     assert len(idx) == 0
-    filtered = visible_hits([fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=idx)
+    filtered = visible_hits([_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=idx)
     assert filtered.hits == []
 
 
@@ -335,7 +348,7 @@ def test_m9_empty_message_is_byte_identical():
 
 def test_m9b_empty_message_present_even_when_hits_exist():
     payload = build_response(
-        visible_hits([fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+        visible_hits([_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
     )
     assert payload["count"] == 1
     assert payload["empty_message"] == C.EMPTY_HITS_MESSAGE
@@ -345,7 +358,7 @@ def test_empty_state_when_nothing_calibrated_is_honest_not_broken():
     """生产最可能的状态: 有命中、但没有任何 passed → count=0、文案照旧、不 500。"""
     payload = build_response(
         visible_hits(
-            [fx.calibrated_hit(), fx.daily_calibrated_hit()],
+            [_live(fx.calibrated_hit()), _live(fx.daily_calibrated_hit())],
             _full_registry(),
             scope_symbols=SCOPE,
             calib=CalibIndex([]),
@@ -381,15 +394,15 @@ def test_m10b_threshold_lock_pending_is_still_pending():
 
 def test_m11_signal_hit_has_no_calibrated_field():
     """M11: `SignalHit` 上**没有** `calibrated`。一个可手改的布尔会让所有闸形同虚设。"""
-    assert not hasattr(fx.calibrated_hit(), "calibrated")
+    assert not hasattr(_live(fx.calibrated_hit()), "calibrated")
     assert "calibrated" not in SignalHit.__dataclass_fields__
-    payload = fx.calibrated_hit().to_dict()
+    payload = _live(fx.calibrated_hit()).to_dict()
     assert "calibrated" not in payload
 
 
 def test_m11b_injecting_a_calibrated_key_does_not_make_a_hit_visible():
     """即便有人在命中 JSON 里塞 `calibrated: true`, 闸也不认 —— 它只看 calib 登记。"""
-    payload = fx.calibrated_hit().to_dict()
+    payload = _live(fx.calibrated_hit()).to_dict()
     payload["calibrated"] = True
     revived = SignalHit.from_dict(payload)
     assert not hasattr(revived, "calibrated")
@@ -416,7 +429,7 @@ def test_m12_regime_caliber_version_does_not_imply_calibration():
     assert forged.status == "publishable"
 
     filtered = visible_hits(
-        [fx.calibrated_hit()], _registry(forged), scope_symbols=SCOPE, calib=CalibIndex([])
+        [_live(fx.calibrated_hit())], _registry(forged), scope_symbols=SCOPE, calib=CalibIndex([])
     )
     assert filtered.hits == []
     assert filtered.rejected.get(VisibilityReject.CALIB_NOT_PASSED) == 1
@@ -425,7 +438,7 @@ def test_m12_regime_caliber_version_does_not_imply_calibration():
 def test_m12a_regime_caliber_version_does_not_substitute_for_a_passed_record():
     """反向再钉一次: 环境和口径标签都齐, 但没有 `passed` —— 就是不可见。"""
     forged = replace(fx.publishable_definition(), regime_caliber_version="regime_caliber_v2")
-    hit = replace(fx.calibrated_hit(), freq_lock_version=C.FREQ_LOCK_VERSION)
+    hit = replace(_live(fx.calibrated_hit()), freq_lock_version=C.FREQ_LOCK_VERSION)
     filtered = visible_hits([hit], _registry(forged), scope_symbols=SCOPE, calib=CalibIndex([fx.pending_calib()]))
     assert filtered.hits == []
 
@@ -458,11 +471,11 @@ def test_mixed_batch_each_hit_judged_independently():
     才好在将来守序变化时立刻发现。
     """
     hits = [
-        fx.calibrated_hit(hit_id="ok"),  # 可见
-        fx.unlabelled_hit(),  # 无标签
-        fx.candidate_calibrated_hit(),  # candidate
-        fx.limit_reopen_calibrated_hit(),  # limit_reopen(定义为 observe)
-        fx.composite_hit(),  # composite 不暴露
+        _live(fx.calibrated_hit(hit_id="ok")),  # 可见
+        _live(fx.unlabelled_hit()),  # 无标签
+        _live(fx.candidate_calibrated_hit()),  # candidate
+        _live(fx.limit_reopen_calibrated_hit()),  # limit_reopen(定义为 observe)
+        _live(fx.composite_hit()),  # composite 不暴露
     ]
     filtered = visible_hits(hits, _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
     assert [h.hit_id for h in filtered.hits] == ["ok"]
@@ -477,14 +490,14 @@ def test_limit_reopen_reported_after_definition_is_publishable():
     """把炸板定义手改成 publishable 之后, 拒绝原因就变成 `limit_reopen` —— 双保险生效。"""
     forged = fx.publishable_definition(signal_id="fx.limit_reopen")
     filtered = visible_hits(
-        [fx.limit_reopen_calibrated_hit()], _registry(forged), scope_symbols=SCOPE, calib=_passed_all()
+        [_live(fx.limit_reopen_calibrated_hit())], _registry(forged), scope_symbols=SCOPE, calib=_passed_all()
     )
     assert filtered.rejected == {VisibilityReject.LIMIT_REOPEN: 1}
 
 
 def test_response_carries_calib_gate_summary():
     payload = build_response(
-        visible_hits([fx.calibrated_hit()], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+        visible_hits([_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
     )
     assert payload["calib_gate"] == "applied"
     assert payload["calib_passed_keys"] == 4
@@ -502,7 +515,7 @@ def test_exposed_families_unchanged():
 
 
 def test_all_reject_reasons_still_present():
-    """原有六条 reject 原因一条都没丢, 新加的是第七条。"""
+    """原有六条 reject 原因一条都没丢, 新加的是第七条, P3a 再加一条。"""
     for reason in (
         VisibilityReject.DEFINITION_MISSING,
         VisibilityReject.NOT_PUBLISHABLE,
@@ -511,6 +524,125 @@ def test_all_reject_reasons_still_present():
         VisibilityReject.UNKNOWN_FAMILY_FILTER,
         VisibilityReject.OUT_OF_SCOPE,
         VisibilityReject.CALIB_NOT_PASSED,
+        VisibilityReject.NON_LIVE_MODE,
     ):
         assert reason in VisibilityReject.ALL
-    assert len(VisibilityReject.ALL) == 7
+    # 8 条: 上表 8 个常量。这条是**封闭集**断言 —— 加原因码必须同步改这里,
+    # 不能只在代码里悄悄多一条而让运维的口径表对不上。
+    assert len(VisibilityReject.ALL) == 8
+
+
+# ======================================================= P3a · 只放 live(批次 20261028gp3a)
+
+
+def _with_mode(hit, mode):
+    """把命中的 `source.mode` 换掉。用于显式测非 live 路径。"""
+    return replace(hit, source=replace(hit.source, mode=mode))
+
+
+def test_p3a_live_hit_is_visible_when_everything_else_passes():
+    """对照面：live + publishable + passed + 其余闸过 → 可见。
+
+    没有这一条，下面那些"0 可见"的断言就无法区分「被 mode 闸挡的」和
+    「被别的什么挡的」。
+    """
+    filtered = visible_hits(
+        [_live(fx.calibrated_hit())], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
+    )
+    assert filtered.count == 1
+    assert VisibilityReject.NON_LIVE_MODE not in filtered.rejected
+
+
+def test_p3a_shadow_hit_is_invisible_even_with_passed_calib():
+    """影子命中：三键对齐到 passed 也不行 —— 校准成绩不给来源背书。"""
+    hit = _with_mode(fx.calibrated_hit(), "shadow")
+    filtered = visible_hits([hit], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+    assert filtered.hits == []
+    assert filtered.rejected.get(VisibilityReject.NON_LIVE_MODE) == 1
+
+
+def test_p3a_fixture_hit_is_invisible_even_with_passed_calib():
+    """夹具命中：同上。注意这是**新的**默认结果 —— 夹具不再天然可见。"""
+    hit = _with_mode(fx.calibrated_hit(), "fixture")
+    filtered = visible_hits([hit], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+    assert filtered.hits == []
+    assert filtered.rejected.get(VisibilityReject.NON_LIVE_MODE) == 1
+
+
+def test_p3a_missing_mode_is_fail_closed():
+    """`source` 整个没有 / `mode` 是空串 → 一律不可见（N4 fail-closed）。
+
+    `HitSource.__post_init__` 会校验 mode ∈ {fixture, shadow, live}，所以正常构造
+    造不出这两种形态。这里用 `object.__new__` + `object.__setattr__` 绕过 —— 模拟的是
+    **手写 JSON 或旧版本记录**读进来的样子。闸若只在构造期生效，这类数据就能漏过去。
+    """
+
+    class _Bare:
+        """只有 family/symbol 等必要字段、没有 source 的最小对象。"""
+
+    base = _live(fx.calibrated_hit())
+
+    bare = _Bare()
+    for field in (
+        "hit_id",
+        "signal_id",
+        "definition_version",
+        "symbol",
+        "asof",
+        "family",
+        "event_class",
+        "direction_label",
+        "definition_status_at_hit",
+        "freq_lock_version",
+    ):
+        setattr(bare, field, getattr(base, field))
+    # 刻意不给 source
+
+    filtered = visible_hits([bare], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+    assert filtered.hits == []
+    assert filtered.rejected.get(VisibilityReject.NON_LIVE_MODE) == 1
+
+
+def test_p3a_empty_string_mode_is_fail_closed():
+    """`mode=""`（绕过构造校验）同样落进 NON_LIVE_MODE，而不是"当没写、放过去"。"""
+    hit = _live(fx.calibrated_hit())
+    object.__setattr__(hit.source, "mode", "")
+    filtered = visible_hits([hit], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+    assert filtered.hits == []
+    assert filtered.rejected.get(VisibilityReject.NON_LIVE_MODE) == 1
+
+
+def test_p3a_unknown_future_mode_is_fail_closed():
+    """将来新增的 mode 值默认不可见 —— 白名单写法的意义就在这里。
+
+    如果实现写成 `if mode in {"shadow", "fixture"}`，一个新 mode 就会悄悄可见。
+    """
+    hit = _live(fx.calibrated_hit())
+    object.__setattr__(hit.source, "mode", "replay")
+    filtered = visible_hits([hit], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+    assert filtered.hits == []
+    assert filtered.rejected.get(VisibilityReject.NON_LIVE_MODE) == 1
+
+
+def test_p3a_mixed_store_only_live_survives():
+    """同一个列表里混着 live / shadow / fixture → 只有 live 留下。
+
+    这正是生产 store 可能出现的形态：`HitStore.list_all()` 不按 mode 过滤。
+    """
+    live = _live(fx.calibrated_hit(hit_id="fx.hit.live"))
+    shadow = _with_mode(fx.calibrated_hit(hit_id="fx.hit.shadow"), "shadow")
+    fixture = _with_mode(fx.calibrated_hit(hit_id="fx.hit.fixture"), "fixture")
+
+    filtered = visible_hits(
+        [live, shadow, fixture], _full_registry(), scope_symbols=SCOPE, calib=_passed_all()
+    )
+    assert [h.hit_id for h in filtered.hits] == ["fx.hit.live"]
+    assert filtered.rejected.get(VisibilityReject.NON_LIVE_MODE) == 2
+
+
+def test_p3a_non_live_reject_does_not_leak_symbol_into_reason():
+    """拒因里不含个股字段（`rejected` 是可以进日志的）。"""
+    hit = _with_mode(fx.calibrated_hit(symbol="600519"), "shadow")
+    filtered = visible_hits([hit], _full_registry(), scope_symbols=SCOPE, calib=_passed_all())
+    assert set(filtered.rejected) == {VisibilityReject.NON_LIVE_MODE}
+    assert "600519" not in str(filtered.rejected)
