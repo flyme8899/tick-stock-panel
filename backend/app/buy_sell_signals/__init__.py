@@ -123,6 +123,33 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 
 现行口径: **落盘已开 · 推送已开(SSE/站内) · 钉钉可选(env) · 飞书已取消 · 竞价由 blocked 转部分解阻(B1 有 scan 存档 / B2 分钟 09:25 仍缺) · 放量身份/契约已钉、触发仍 pending · 竞价身份/只读适配已钉、四缺口 pending · 估值/健康仍 pending · 白名单试跑未锁**。
 
+**gp3b 做了什么(批次 20261028gp3b · P-bss-p3b · 影子生产写入)**: 补上**影子生产
+写入路径** —— 在这之前, 影子命中只能活在测例的临时目录里, 落不到 `data/`。
+
+- **新模块** `hits_shadow_store.py`: 写/读/计数四件套
+  (`upsert_shadow_hit` / `write_shadow_hits` / `list_shadow_hits` /
+  `count_shadow_hits`), 外加 `shadow_bucket_dir` / `shadow_bucket_path` 两个纯路径函数。
+- **独立三键分桶**: `<data_dir>/buy_sell_signals/shadow/<signal_id>/
+  <definition_version>/<freq_lock_version>/hits.json`(常量 `SHADOW_SUBDIR` +
+  `SHADOW_BUCKET_KEY_FIELDS`)。**不是**把影子混进 live `hits.json`, 也**不是**
+  一个"shadow 标志位" —— 分桶是物理隔离, `DiskHitStore.list_all()` 读不到影子。
+- **契约**: 只收 `source.mode == "shadow"` 的命中(`live` / `fixture` 直接
+  `ShadowWriteError`); `freq_lock_version` 必填且必须非空; 三键拒路径穿越
+  (`.`, `..`, `/`, `\\`, NUL)。
+- **原子写**: `tempfile.mkstemp(dir=<桶目录>)` + `os.replace`, 同文件系统内原子;
+  批写全有或全无(任一键非法 → 一条都不落)。
+- **幂等**: 同 `hit_id` 覆盖、不同 `hit_id` 追加; 三键不同 → 各自独立的桶, 互不串。
+- **零放闸**: 写进去之后 `visible_hits` 仍 0 条(拒因 `NON_LIVE_MODE`)、
+  `try_push_hit` 仍 `shadow_not_pushable`、opener 零调用 —— P3a 三闸**一点没松**。
+  `HitStore` Protocol 仍只有 `list_all()`, 没加 upsert/write/save/append;
+  三 env(`PERSIST`/`PUSH`/`DINGTALK`)一个字节没改。
+
+**gp3b 没做**: 日管道自动写影子(接线另拍)、影子命中进 UI、影子→live 晋升、
+任何 `TRIGGERING_ENABLED = True`、任何 `allow_shadow` 开关、改可见性/推送判定、
+改三 env、改 `push.py` / `store.py` / `main.py`。
+
+**P3b 之后的口径**: 影子**能落盘了**, 但**落盘 ≠ 可见 ≠ 可推** —— 三重门原样还在。
+
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
 
@@ -189,6 +216,8 @@ from .constants import (
     PERSIST_SUBDIR,
     PUSH_ENV_NAME,
     REGISTRY_FILENAME,
+    SHADOW_BUCKET_KEY_FIELDS,
+    SHADOW_SUBDIR,
     SIGNAL_DESIGN_PIN,
     design_version,
 )
@@ -197,6 +226,17 @@ from .health_veto_stub import (
     HEALTH_VETO_REASON_CATALOG_DRAFT,
     HealthVetoStub,
     health_veto_asof,
+)
+from .hits_shadow_store import (
+    SHADOW_BUCKET_KEYS,
+    SHADOW_MODE,
+    ShadowWriteError,
+    count_shadow_hits,
+    list_shadow_hits,
+    shadow_bucket_dir,
+    shadow_bucket_path,
+    upsert_shadow_hit,
+    write_shadow_hits,
 )
 from .models import SignalRecord, SignalValidationError
 from .push import (
@@ -318,7 +358,12 @@ __all__ = [
     "QualityProxy",
     "REGISTRY_FILENAME",
     "RebalanceSnapshot",
+    "SHADOW_BUCKET_KEYS",
+    "SHADOW_BUCKET_KEY_FIELDS",
+    "SHADOW_MODE",
+    "SHADOW_SUBDIR",
     "SIGNAL_DESIGN_PIN",
+    "ShadowWriteError",
     "SignalRecord",
     "SignalRegistryCorruptError",
     "SignalRegistryError",
@@ -347,6 +392,7 @@ __all__ = [
     "build_rebalance_snapshot",
     "build_signal_registry_store",
     "build_volume_breakout_record",
+    "count_shadow_hits",
     "design_version",
     "dingtalk_env_enabled",
     "dingtalk_webhook_ready",
@@ -354,15 +400,20 @@ __all__ = [
     "evaluate_quality",
     "evaluate_volume_breakout",
     "health_veto_asof",
+    "list_shadow_hits",
     "make_rebalance_id",
     "manual_publish",
     "p25_gate_verdict",
     "percentile_rank",
     "push_env_enabled",
     "rank_within_industry",
+    "shadow_bucket_dir",
+    "shadow_bucket_path",
     "transition",
     "truncated_replay_once",
     "truncated_replay_twice_equal",
     "try_push",
+    "upsert_shadow_hit",
     "wilson_hit_rate_lower_bound",
+    "write_shadow_hits",
 ]

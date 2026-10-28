@@ -2283,6 +2283,10 @@ G-T7 断言 `P2_PATH_STATUS_REACHED not in CALIB_STATUSES`：路径状态**不�
 TRIGGERING；不回退 #240 / #241 / #242 / #243 任何符号；不引 scipy / statsmodels。
 评估器是**纯函数 + 纯常量，零 I/O** —— 它不会自己去取数，输入由调用方给。
 
+> 「不接 P3b 影子写入」是 **P2 那一拍**的范围声明。P3b 已在批次 `20261028gp3b`
+> 落地（见下节「影子生产写入 · 独立三键分桶」）；P2 评估器本身**至今仍是纯函数**，
+> 不会被 P3b 反向接进来 —— 谁写盘由调用方决定，评估器不知道桶的存在。
+
 #### 测例
 
 `backend/tests/test_buy_sell_signal_calib_p2_eval.py`，G-T1 – G-T17 共 63 条。
@@ -2301,6 +2305,102 @@ TRIGGERING；不回退 #240 / #241 / #242 / #243 任何符号；不引 scipy / s
   必被抓，而硬编码一个 `primary_horizon_td = 5` 字段骗不过去。
 
 复跑：`PYTHONPATH=.:backend python3 -m pytest backend/tests/test_buy_sell_signal_calib_p2_eval.py -q`
+
+### 影子生产写入 · 独立三键分桶（批次 20261028gp3b · P-bss-p3b）
+
+`backend/app/buy_sell_signals/hits_shadow_store.py`。补齐 R2-7② 的**影子生产写入
+路径** —— 在这之前, 影子命中只能活在测例的 `tmp_path` 里, 落不到 `data/`。
+
+#### 分桶是物理隔离, 不是一个标志位
+
+路径写死为三键目录:
+
+```
+<data_dir>/buy_sell_signals/shadow/<signal_id>/<definition_version>/<freq_lock_version>/hits.json
+```
+
+| 常量 | 值 | 说明 |
+|---|---|---|
+| `SHADOW_SUBDIR` | `"shadow"` | 挂在 `PERSIST_SUBDIR`（`buy_sell_signals`）之下 |
+| `SHADOW_BUCKET_KEY_FIELDS` | `("signal_id", "definition_version", "freq_lock_version")` | 顺序即路径层级顺序 |
+| `SHADOW_MODE` | `"shadow"` | 与 `HIT_SOURCE_MODES` 中的那一项同一个字面量 |
+
+**为什么不混进 live `hits.json`**: 一旦同文件, "这条是否已过闸"就必须靠读每条的
+`source.mode` 来判断 —— 那是**逻辑隔离**, 任何一处漏读 `mode` 就直接把影子暴给用户。
+分桶是**物理隔离**: live 读口 `DiskHitStore.list_all()` 走的是
+`<data_dir>/buy_sell_signals/hits.json`, 与 `shadow/` 子树毫无交集, 读不到就是读不到。
+G-T8 双向钉住: 先写影子若干条 → `DiskHitStore.list_all() == []`; 再让 live 文件
+存在 → 影子写入后 live 文件**逐字节不变**。
+
+**为什么不共用一个 `shadow` 标志位**: 三键（信号 / 定义版本 / 频率锁版本）任意一个
+变化都意味着「这批数不是同一口径的」。目录层级让**跨口径串数在文件系统层面不可能发
+生**, 而不是靠查询时过滤。G-T11 用同一 `hit_id`、不同 `freq_lock_version` 写两次,
+断言两个桶各自 1 条、互不覆盖。
+
+#### 写入契约：只收 shadow, 三键不可空, 拒穿越
+
+| 检查 | 违规时 | 理由 |
+|---|---|---|
+| `hit.source.mode == "shadow"` | `ShadowWriteError` | `live` / `fixture` 不该借这个口落盘 |
+| `freq_lock_version` 非空 | `ShadowWriteError` | 空串会让所有口径塌进同一个桶 |
+| 三键均非空且不含 `.` / `..` / `/` / `\` / NUL | `ShadowWriteError` | 键来自信号定义, 不该也不可能带路径分隔符; 带了一定是构造错误或注入 |
+
+`upsert_shadow_hit(hit)` 单条写; `write_shadow_hits(hits)` 批量写, 返回
+`{桶路径: 该桶条数}`, **全有或全无** —— 批量里任意一条不合契约, 一条都不落盘
+（先全量校验, 再分组写）。
+
+**幂等按 `hit_id`**: 同 `hit_id` 再写一次是**替换**（不是追加, 也不会出现两条同 id）;
+不同 `hit_id` 是追加。这让"同一天重跑两次管道"不会把桶撑大。
+
+#### 原子写
+
+`tempfile.mkstemp(dir=<桶目录>)` 写临时文件 → `os.replace` 覆盖目标。同文件系统内
+`os.replace` 是原子的, 因此**任何时刻磁盘上的 `hits.json` 要么是旧版, 要么是新版,
+不会是半截 JSON**。进程被杀在写一半时, 留下的是一个 `.tmp` 孤儿文件, 而不是一个
+读不出来的桶。临时文件刻意建在**桶目录内**（不是 `/tmp`）, 否则跨文件系统
+`os.replace` 会退化成非原子的 `copy + unlink`。
+
+#### 落盘 ≠ 可见 ≠ 可推
+
+这一句是本拍最需要反复确认的:
+
+> **影子能落盘了。P3a 三道闸一点没松。**
+
+G-T6 是逐字验证: 写入 → 从桶里读回（`len(back) == 1`）→ 喂给
+`visible_hits(..., registry=None)` → `filtered.hits == []` 且拒因里
+`NON_LIVE_MODE >= 1`; 再喂 `try_push_hit` → `reason == shadow_not_pushable`,
+`opener` **零调用**。
+
+`HitStore` Protocol 本拍**零改动**, 仍只有 `list_all()` —— 没加 upsert / write /
+save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路径是**新增的独立
+模块**, 不是给既有只读口开一个写口。
+
+#### 零碰
+
+不改三 env（`PERSIST` / `PUSH` / `DINGTALK`）; 不改 `push.py` / `store.py` /
+`main.py`; 不翻两 `TRIGGERING_ENABLED`; **不加 `allow_shadow` 之类的开关**
+（有一个开关, 就有一个把它打开的地方 —— 影子要不要可见不是配置项, 是不做）;
+不接日管道自动写; 不回退 #240 / #241 / #242 / #243 / #244 / #245 任何符号。
+
+#### 测例
+
+`backend/tests/test_buy_sell_signal_hits_shadow_store.py`, G-T2 – G-T14 共 40 条。
+重点不在「能写能读」, 而在**隔离不可绕过**: 路径层级不能被压平、影子不能被 live
+读口读到、写入后闸不能松、三键不能塌、批量不能写一半、原子写不能被换成直接
+`write_text`。
+
+其中三条是**判别性样本**:
+
+- **G-T6**：写进去之后 `visible_hits` 仍 0 条 —— 只测「写入成功」抓不住「顺手把
+  影子塞进可见集」。
+- **G-T8b**：live 文件存在时逐字节比对 —— 只测「live 读口读不到影子」抓不住
+  「影子写入顺手把 live 文件重写了」。
+- **G-T11**：同 `hit_id` 跨 `freq_lock_version` —— 只测「同桶内幂等」抓不住
+  「三键被拼成一个桶」。
+- **G-T13**：30 条夹具落同一桶 —— 特意在测例里写明 **「30 条只是样本落位,
+  不等于样本达标」**, 免得把「桶里有 30 条」读成 `CALIB_SAMPLE_N_MIN` 已满足。
+
+复跑：`PYTHONPATH=.:backend python3 -m pytest backend/tests/test_buy_sell_signal_hits_shadow_store.py -q`
 
 ### 配置清单（env / 缺配拒发 / 不回落 / 冷却）
 

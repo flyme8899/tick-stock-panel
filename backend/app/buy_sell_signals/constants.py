@@ -274,6 +274,39 @@ EMPTY_HITS_MESSAGE: Final = "暂无已校准的买卖信号"
 
 DIRECTION_LABELS: Final = frozenset({"research_buy", "research_sell", "research_watch"})
 
+# --------------------------------------------------- 影子生产写入(P-bss-p3b · 批次 20261028gp3b)
+
+SHADOW_SUBDIR: Final = "shadow"
+"""影子分桶根段名(写死), 挂在 `PERSIST_SUBDIR` 之下。
+
+完整路径(由三键确定性指认):
+
+```
+<data_dir>/buy_sell_signals/shadow/<signal_id>/<definition_version>/<freq_lock_version>/hits.json
+```
+
+**独立于**同在 `PERSIST_SUBDIR` 下的 live `HITS_FILENAME`。为什么必须独立一个目录,
+而不是在 live `hits.json` 里加个 `mode` 字段:
+
+1. 读口不被污染 —— `DiskHitStore.list_all()` 返回的就是全部, 不需要下游再做一次
+   "把 shadow 剔掉"的过滤; 过滤写错一次, 影子就进了可见流。
+2. 样本量不互相污染 —— live 条数不会被影子堆高, "样本够不够"能问得清。
+3. 回滚不互相牵连 —— 清影子样本只动影子文件。
+
+桶内文件名仍叫 `hits.json`(与 live 同名): 格式相同, 只有位置不同。同名让"用同一个
+反序列化器读两种文件"成为默认; 位置不同让"读错文件"必须显式拼错路径才会发生。
+
+**路径已通 ≠ calib 已过 ≠ 可放量 ≠ TRIGGERING。** 这里的常量只描述"样本写在哪",
+不描述"样本够不够"或"过没过门"。
+"""
+
+SHADOW_BUCKET_KEY_FIELDS: Final = ("signal_id", "definition_version", "freq_lock_version")
+"""分桶三键, 顺序即路径层级顺序。
+
+顺序写死而不是按字母排: 改顺序就改了路径, 已写出的样本会突然"找不到"—— 而文件还在
+磁盘上, 只是没人按新路径去读它。这种失效不会报错, 只会让样本数悄悄变成 0。
+"""
+
 # ------------------------------------------------------- 命中钉钉外发(P-ding-later)
 #
 # 三分边界(**本包唯一的钉钉通道分类**, 文档 / 代码 / PR 三处口径必须一致):
@@ -568,6 +601,8 @@ __all__ = [
     "REGISTRY_FILENAME",
     "REGISTRY_SCHEMA_VERSION",
     "SIGNAL_DESIGN_PIN",
+    "SHADOW_BUCKET_KEY_FIELDS",
+    "SHADOW_SUBDIR",
     "SIGNAL_FAMILIES",
     "VOLUME_UNITS",
     "VOLUME_UNIT_PARAM_KEY",
