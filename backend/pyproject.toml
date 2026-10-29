@@ -43,6 +43,11 @@ dependencies = [
     # AI(可选,但默认装上)
     "openai>=1.40",               # OpenAI 兼容适配器复用 openai SDK
     "httpx>=0.27",
+    # 微信正文页补采的回退通道 (etf_flow._fetch_wechat_html_via_curl_cffi):
+    # 微信对数据中心 IP 会回「环境异常」页, 裸 httpx 的 TLS 指纹拿不到正文,
+    # 换 curl 的浏览器指纹能过。此前只靠 akshare 传递装着, 用到的却是本仓
+    # 自己的代码 — 传递依赖说断就断, 所以在这里写死直接依赖并钉版本。
+    "curl-cffi==0.16.3",
     "platformdirs>=4.0",          # 桌面版用户数据目录 (跨平台持久可写)
     "winotify>=1.1; sys_platform == 'win32'",  # Windows 系统通知 (进操作中心)
     "plyer>=2.1",                 # 系统通知跨平台兜底 (macOS/Linux)

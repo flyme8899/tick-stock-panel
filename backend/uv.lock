@@ -3116,6 +3116,7 @@ dependencies = [
     { name = "argon2-cffi" },
     { name = "baostock" },
     { name = "bcrypt" },
+    { name = "curl-cffi" },
     { name = "duckdb" },
     { name = "efinance" },
     { name = "fastapi" },

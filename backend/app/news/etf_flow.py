@@ -1399,6 +1399,62 @@ def _netease_today(client, now: datetime, expect: bool) -> ArticleRef | None:
     return None
 
 
+# 微信正文页被风控挡住时的特征词。只用于「判断要不要再试一次」，不参与解析。
+# 词表刻意收窄：这些是微信验证页/环境异常页实际会出现的句子，放宽会把正常
+# 文章里提到「验证码」的段落也误判成拦截页。
+_WECHAT_BLOCK_MARKERS = (
+    "antispider",
+    "请输入验证码",
+    "环境异常",
+    "完成验证后即可继续访问",
+)
+
+# curl_cffi 的浏览器指纹。用 curl 发请求时 TLS/JA3 与 httpx 明显不同，微信对
+# 裸 TLS 的握手更敏感；这里只是把客户端伪装成常规 Chrome，不改任何 header 语义。
+_WECHAT_CURL_IMPERSONATE = "chrome"
+
+
+def _wechat_html_looks_blocked(html_text: str) -> bool:
+    """页面像验证页/环境异常页吗。
+
+    只是**软触发**的辅助判断：硬触发是「读不出发布时间」（见 ``ingest_wechat_url``），
+    因为微信换过几次拦截页模板，特征词不可能覆盖全。
+    """
+    text = html_text or ""
+    return any(marker in text for marker in _WECHAT_BLOCK_MARKERS)
+
+
+def _fetch_wechat_html_via_curl_cffi(url: str) -> tuple[str, str]:
+    """用 curl_cffi 重拉一次微信正文页。
+
+    只在 ``ingest_wechat_url`` 里被调用，且**最多一次**。两个要求：
+
+    1. host 闸前后都校验 ``WECHAT_HOST``：这是唯一允许 curl 出手的站点，
+       别的域名一律走原 httpx 路径，免得把「一次回退」做成通用抓取通道。
+    2. 返回 ``(html, final_url)`` 与原 ``_fetch`` 同形，调用方可以无差别续用。
+
+    失败一律抛 ``ExtractFailedError``，由调用方决定是降级还是照常报错 ——
+    这里不吞异常，也不返回空串假装成功。
+    """
+    from curl_cffi import requests as curl_requests
+
+    if (urlparse(url).hostname or "").lower() != WECHAT_HOST:
+        raise ExtractFailedError("微信文章地址无效")
+    try:
+        response = curl_requests.get(
+            url,
+            impersonate=_WECHAT_CURL_IMPERSONATE,
+            timeout=PAGE_FETCH_TIMEOUT,
+            allow_redirects=True,
+        )
+    except Exception as exc:  # curl_cffi 的异常类型随版本变，统一收敛
+        raise ExtractFailedError(f"curl_cffi 请求失败: {_public_error(exc) or exc}") from exc
+    final = str(getattr(response, "url", url) or url)
+    if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
+        raise ExtractFailedError("微信文章地址无效")
+    return (getattr(response, "text", "") or "")[:2_000_000], final
+
+
 def ingest_wechat_url(
     url: str,
     client: httpx.Client | None = None,
@@ -1414,14 +1470,41 @@ def ingest_wechat_url(
         raise ExtractFailedError("未配置 VISION_AI_API_KEY")
     own = client is None
     client = client or _page_client()
+    tried_curl = False
     try:
         html_text, final = _fetch(client, target, allow_hosts={WECHAT_HOST})
+        if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
+            raise ExtractFailedError("微信文章地址无效")
+
+        # 微信对数据中心 IP 时常回一个「环境异常」页：HTTP 200、正文完整、就是没有
+        # 发布时间。读不出 publish 就等于拿不到 trade_date，往下走必然失败，所以在
+        # 这里再试一次 curl_cffi —— **仅一次**，命中就用它的 HTML 续跑原流程。
+        # 反过来，如果页面看起来被挡、但 httpx 已经读出了发布时间，就不再重拉：
+        # 结果已经能用，多一次外部请求只会增加失败面。
+        if wechat_published_at(html_text) is None or _wechat_html_looks_blocked(html_text):
+            tried_curl = True
+            retry_url = final if (urlparse(final).hostname or "").lower() == WECHAT_HOST else target
+            try:
+                html_text, final = _fetch_wechat_html_via_curl_cffi(retry_url)
+                if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
+                    raise ExtractFailedError("微信文章地址无效")
+                logger.info("ETF领航者微信补采 via=curl_cffi url=%s", final)
+            except ExtractFailedError as exc:
+                # host 被重定向走了属于硬错，不能拿原 HTML 硬撑。
+                if "地址无效" in str(exc):
+                    raise
+                logger.warning("ETF领航者微信补采 curl_cffi 回退失败: %s", _public_error(exc))
+
         if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
             raise ExtractFailedError("微信文章地址无效")
         resolved = resolve_wechat_article_url(html_text, final)
         published = wechat_published_at(html_text)
         if published is None:
-            raise ExtractFailedError("微信文章缺少发布时间")
+            # 不假绿：回退过就说回退过，让命令行/接口能看出是「挡了」而不是「没写时间」。
+            message = "微信文章缺少发布时间"
+            if tried_curl:
+                message += "（curl_cffi 回退失败）"
+            raise ExtractFailedError(message)
         ref = ArticleRef(
             article_id="",
             title=_activity_title(html_text),
