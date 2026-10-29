@@ -43,6 +43,15 @@
 **影子写入 ≠ 观测口 ≠ 放量。** 写入是"落到磁盘", 观测口是"给人在界面上看",
 放量是"让它影响交易"。本拍只做第一件, 而且做在一条**独立于 live 的路径**上。
 
+## 事件轨另有一道门(批次 20261030ga2 · A2)
+
+`family == "minute_event"` 的命中, 在 `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE` 为 `False`
+时**一律拒写**, 错误消息带 `event_track_shadow_blocked_until_a2`。理由: 事件轨的 `asof`
+必须锚在「我方首次可得」上, 而那套首见口径此刻还没定死 —— 现在收下的样本将来整桶作废,
+且因为分桶按三键定位, 无法把旧口径那批单独摘出去。口径见 `first_seen_audit`。
+
+`daily_fundamental` 与其他非事件轨**不受这道门影响**。翻 `True` ＝ A2 完成, 另口令。
+
 ## 为什么必须独立分桶, 而不是在 live hits.json 里加个 mode 字段
 
 如果 shadow 和 live 挤在同一个 `hits.json` 里, 那么:
@@ -94,9 +103,17 @@ from .constants import (
     PERSIST_SUBDIR,
     SHADOW_SUBDIR,
 )
+from .first_seen_audit import (
+    EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE,
+    EVENT_TRACK_SHADOW_BLOCK_TOKEN,
+)
 from .hits_models import HitValidationError, SignalHit, signal_hit_from_dict
 
 logger = logging.getLogger(__name__)
+
+#: 事件轨家族名。写死字面量而非从 `SIGNAL_FAMILIES` 里挑 —— 理由同 `SHADOW_MODE`:
+#: 这里要挡的正是**这一个**值, 取值来自宽集会哪天多出个近义词就悄悄放行。
+EVENT_TRACK_FAMILY: Final = "minute_event"
 
 #: 影子写入唯一允许的 `source.mode`。
 #:
@@ -268,7 +285,7 @@ def _write_bucket(path: Path, hits: list[SignalHit]) -> None:
 
 
 def _require_shadow_hit(hit: SignalHit) -> None:
-    """写入前的契约检查。三条, 少一条都不行。"""
+    """写入前的契约检查。四条, 少一条都不行。"""
     if not isinstance(hit, SignalHit):
         raise ShadowWriteError(f"只接受 SignalHit, 收到 {type(hit).__name__}")
     if hit.source.mode != SHADOW_MODE:
@@ -279,6 +296,19 @@ def _require_shadow_hit(hit: SignalHit) -> None:
         )
     if hit.namespace != NAMESPACE:
         raise ShadowWriteError(f"namespace 必须是 {NAMESPACE!r}, 收到 {hit.namespace!r}")
+    if hit.family == EVENT_TRACK_FAMILY and not EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE:
+        # A2 硬闸(批次 20261030ga2)。事件轨的命中带一个 `asof`, 而它的首见口径(Date
+        # Layer)此刻还没定死 —— 现在收进来的样本, 将来算 horizon 时起点是错的, 且错得
+        # 无从追溯: 文件里只写着 asof, 没写"这条按哪套首见口径采的"。
+        #
+        # 所以先拒, 不先收。收下再改口径 = 把一批注定要重做的样本混进分桶, 而分桶按
+        # 三键定位, 事后无法把"旧口径那批"单独摘出去 —— 只能整桶作废。
+        #
+        # 这不是"暂不支持", 是"这里不该有数据"。判别只看 family 与那扇门, 不看调用方。
+        raise ShadowWriteError(
+            f"{EVENT_TRACK_SHADOW_BLOCK_TOKEN}: "
+            "事件轨(family=minute_event)在 A2 首见审计完成前禁止写入影子分桶"
+        )
 
 
 def upsert_shadow_hit(
@@ -294,6 +324,7 @@ def upsert_shadow_hit(
     硬约束:
 
     - `hit.source.mode` 必须 `== "shadow"`, 否则抛 `ShadowWriteError`
+    - `hit.family == "minute_event"` 且 A2 未完成 → 抛 `ShadowWriteError`(见模块头)
     - 绝不写 live `hits.json`(本函数根本不碰那个路径)
     - 原子写(tmp + `os.replace`)
 
