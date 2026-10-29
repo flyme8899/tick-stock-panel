@@ -38,6 +38,7 @@ import {
   saveScreenerColumnConfig,
   type ColumnConfig,
 } from '@/lib/screener-columns'
+import { handleScreenerAiStrategySaved } from './screenerAiPublish'
 
 // 获取策略为占位功能, 暂时隐藏入口; 恢复时改回 true
 const SHOW_STRATEGY_STORE = false
@@ -1342,21 +1343,17 @@ export function Screener() {
         mode={builderMode}
         existingStrategyIds={allStrategyIds}
         onSavedId={async (id, researchOnly) => {
-          if (researchOnly) {
-            // AI 策略保存为 research_only 草稿, 不进入策略池, 提示用户去策略池发布
-            toast('AI 策略已保存为草稿，请在策略池「AI」标签发布后使用', 'success')
-            return
-          }
-          const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 })
-          if (!data.presets.some(s => s.id === id)) {
-            throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
-          }
-          addToPool(id)
-          // 新建策略为日线时立即扫描, 免去手动点刷新 (分钟策略仍手动单跑)
-          const preset = data.presets.find(s => s.id === id)
-          if (assetType === 'stock' && preset && !preset.timeframes?.includes('1m')) {
-            requestRunAll({ date: asOf || undefined, strategyIds: [id] })
-          }
+          // AI 草稿就地发布再入池 —— 对标回测页 handleBuilderSaved, 不逼用户跨页去
+          // 策略池点发布。失败则不入池、不跑选 (详见 screenerAiPublish.ts 注释)。
+          await handleScreenerAiStrategySaved(id, researchOnly, {
+            fetchStrategies: () => qc.fetchQuery({ queryKey: QK.screenerStrategies('all'), queryFn: () => api.screenerStrategies(), staleTime: 0 }),
+            publishStrategy: api.strategyPublish,
+            addToPool,
+            requestRunAll,
+            toast,
+            assetType,
+            asOf,
+          })
         }}
       />
 
