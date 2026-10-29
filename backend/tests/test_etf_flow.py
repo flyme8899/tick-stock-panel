@@ -2029,6 +2029,109 @@ def test_template_wechat_url_yields_to_real_sn_and_create_time():
     assert published == datetime(2026, 10, 14, 7, 31, tzinfo=CN_TZ)
 
 
+# ── 微信 URL 补采: httpx 被挡时 curl_cffi 一次回退 ──────────────────────────
+# 微信对数据中心 IP 会回 200 的「环境异常」页: 正文壳子在, 发布时间读不出来。
+# 产线在此处只报「缺少发布时间」, 用户没有任何自救办法 —— 本拍加一次 curl 回退。
+
+
+def _blocked_wechat_html() -> str:
+    """读不出 publish_time / ct / create_time 的拦截页（结构同微信环境异常页）。"""
+    return (
+        "<html><body><div class=\"weui-msg\">"
+        "<p>环境异常</p><p>完成验证后即可继续访问</p>"
+        "</div></body></html>"
+    )
+
+
+def test_ingest_wechat_url_curl_cffi_fallback_stores(news_db, monkeypatch):
+    """httpx 缺发布时间 → curl_cffi 补一次 → 照常入库（走 _store_page 整条后段）。"""
+    published = datetime(2026, 10, 10, 7, 31, tzinfo=CN_TZ)
+    client = Client(media="", wechat=_blocked_wechat_html())
+    calls: list[str] = []
+
+    def fake_curl(url: str):
+        calls.append(url)
+        return _short_wechat_html(published=published), url
+
+    monkeypatch.setattr("app.news.etf_flow._fetch_wechat_html_via_curl_cffi", fake_curl)
+    short = "https://mp.weixin.qq.com/s/AbCdEfGhIj"
+    saved = ingest_wechat_url(short, client, now=published + timedelta(hours=3), data_dir=news_db)
+
+    assert len(calls) == 1, "回退只允许一次"
+    assert saved["inserted"] == 1
+    assert saved["found"] is True
+    row = get_store()._conn.execute(
+        "SELECT source_id, url, published_at, raw_json FROM news_items"
+    ).fetchone()
+    # 入库结果与「httpx 一次就成功」的短链测完全一致: 回退不改变后段语义。
+    assert row["source_id"] == "wechat:a1b2c3d4"
+    assert "sn=a1b2c3d4" in row["url"]
+    assert row["published_at"].startswith("2026-10-10T07:31:00")
+    assert json.loads(row["raw_json"])["trade_date"] == "2026-10-09"
+    status = json.loads((news_db / "news" / "etf_flow_backfill.json").read_text(encoding="utf-8"))
+    assert status["dates"]["2026-10-09"] == "已入库"
+
+
+def test_ingest_wechat_url_curl_cffi_fallback_still_extract_fail(news_db, monkeypatch):
+    """curl 也拿不到发布时间 → 仍然 EXTRACT_FAIL，且**不入库**（不假绿）。"""
+    client = Client(media="", wechat=_blocked_wechat_html())
+    calls: list[str] = []
+
+    def fake_curl(url: str):
+        calls.append(url)
+        return _blocked_wechat_html(), url
+
+    monkeypatch.setattr("app.news.etf_flow._fetch_wechat_html_via_curl_cffi", fake_curl)
+    with pytest.raises(ExtractFailedError, match=r"缺少发布时间[\s\S]*curl_cffi 回退失败"):
+        ingest_wechat_url("https://mp.weixin.qq.com/s/AbCdEfGhIj", client, data_dir=news_db)
+
+    assert len(calls) == 1
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 0
+
+
+def test_ingest_wechat_url_curl_cffi_fallback_exception_not_swallowed(news_db, monkeypatch):
+    """curl 自己抛错（网络/指纹不支持）不能吞成「HTTP 200 无事发生」。"""
+    published = datetime(2026, 10, 10, 7, 31, tzinfo=CN_TZ)
+    client = Client(media="", wechat=_blocked_wechat_html())
+
+    def boom(url: str):
+        raise ExtractFailedError("curl_cffi 请求失败: Could not resolve host")
+
+    monkeypatch.setattr("app.news.etf_flow._fetch_wechat_html_via_curl_cffi", boom)
+    with pytest.raises(ExtractFailedError, match=r"缺少发布时间[\s\S]*curl_cffi 回退失败"):
+        ingest_wechat_url("https://mp.weixin.qq.com/s/AbCdEfGhIj", client, data_dir=news_db)
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 0
+
+
+def test_ingest_wechat_url_skips_curl_when_httpx_already_has_published(news_db, monkeypatch):
+    """httpx 已经读出发布时间就不重拉：能用就别多打一次外部请求。"""
+    published = datetime(2026, 10, 10, 7, 31, tzinfo=CN_TZ)
+    client = Client(media="", wechat=_short_wechat_html(published=published))
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "app.news.etf_flow._fetch_wechat_html_via_curl_cffi",
+        lambda url: calls.append(url) or (_ for _ in ()).throw(AssertionError("不该回退")),
+    )
+    saved = ingest_wechat_url(
+        "https://mp.weixin.qq.com/s/AbCdEfGhIj", client, now=published + timedelta(hours=3), data_dir=news_db
+    )
+    assert calls == []
+    assert saved["inserted"] == 1
+
+
+def test_curl_wechat_helper_rejects_foreign_host(monkeypatch):
+    """curl 只服务 mp.weixin.qq.com；别的域名一律拒，避免做成通用抓取通道。"""
+    from app.news.etf_flow import _fetch_wechat_html_via_curl_cffi
+
+    monkeypatch.setattr(
+        "curl_cffi.requests.get",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该发请求")),
+    )
+    with pytest.raises(ExtractFailedError, match=r"地址无效"):
+        _fetch_wechat_html_via_curl_cffi("https://evil.example/s/abc")
+
+
 def test_manual_short_link_stores_like_daily_article(news_db):
     published = datetime(2026, 10, 10, 7, 31, tzinfo=CN_TZ)
     client = Client(media="", wechat=_short_wechat_html(published=published))
