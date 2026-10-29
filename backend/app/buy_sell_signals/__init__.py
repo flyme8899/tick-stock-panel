@@ -222,6 +222,18 @@ from .constants import (
     design_version,
 )
 from .disclaimer import DISCLAIMER_TEXT
+from .first_seen_audit import (
+    EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE,
+    EVENT_TRACK_SHADOW_BLOCK_TOKEN,
+    FIRST_SEEN_MEANING,
+    FIRST_SEEN_NOT,
+    PREFERRED_SOURCE,
+    REASON_ASOF_BEFORE_FIRST_SEEN,
+    REASON_FIRST_SEEN_MISSING,
+    REASON_UNPARSABLE,
+    RESEARCH_FIRST_SEEN_SUBDIR,
+    assert_asof_not_before_first_seen,
+)
 from .health_veto_stub import (
     HEALTH_VETO_REASON_CATALOG_DRAFT,
     HealthVetoStub,
@@ -321,6 +333,16 @@ __all__ = [
     "DISCLAIMER_TEXT",
     "DiskSignalRegistryStore",
     "EvalRow",
+    "EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE",
+    "EVENT_TRACK_SHADOW_BLOCK_TOKEN",
+    "FIRST_SEEN_MEANING",
+    "FIRST_SEEN_NOT",
+    "PREFERRED_SOURCE",
+    "REASON_ASOF_BEFORE_FIRST_SEEN",
+    "REASON_FIRST_SEEN_MISSING",
+    "REASON_UNPARSABLE",
+    "RESEARCH_FIRST_SEEN_SUBDIR",
+    "assert_asof_not_before_first_seen",
     "HEALTH_VETO_REASON_CATALOG_DRAFT",
     "HealthVetoStub",
     "InMemorySignalRegistryStore",
