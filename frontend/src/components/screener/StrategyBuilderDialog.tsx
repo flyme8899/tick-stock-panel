@@ -593,7 +593,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                   </span>
                 </button>
                 {iterateEnabled && (
-                  <div className="text-[10px] text-muted/60 leading-relaxed">开启后 AI 会先回测再诊断修改，最多迭代 4 轮，耗时更长；结果保存为草稿，仍需你点「保存策略」加入策略池。</div>
+                  <div className="text-[10px] text-muted/60 leading-relaxed">开启后 AI 会先回测再诊断修改，最多迭代 4 轮，耗时更长；保存后会发布并加入策略池。</div>
                 )}
                 {error && <div className="text-[11px] text-danger bg-danger/10 border border-danger/20 rounded-lg px-3 py-2">{error}</div>}
                 <button onClick={handleGenerate} disabled={loading || !name.trim() || !rules.trim()}
@@ -733,7 +733,7 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                     AI 修改
                   </button>
                 </div>
-                <p className="text-[10px] text-muted/40">修改指令可调整参数、信号、评分等任意内容。确认无误后点击「保存策略」。</p>
+                <p className="text-[10px] text-muted/40">修改指令可调整参数、信号、评分等任意内容。确认无误后点击「保存并发布」。</p>
               </>
             )}
             </>
@@ -813,7 +813,9 @@ export function StrategyBuilderDialog({ open, onClose, onSavedId, mode = 'create
                   <button onClick={handleSave} disabled={saving || loading}
                     className="inline-flex items-center gap-1.5 h-7 px-3 rounded-lg bg-accent text-white text-xs font-medium hover:bg-accent/90 disabled:opacity-50 transition-all">
                     <Save className="h-3 w-3" />
-                    {saving ? '保存中...' : '保存策略'}
+                    {/* #251 起保存＝就地 publish + 入池, 按钮别再叫「保存策略」——
+                        那会让人以为还要再去策略池点一次发布。 */}
+                    {saving ? '保存中...' : '保存并发布'}
                   </button>
                 </>
               )}
