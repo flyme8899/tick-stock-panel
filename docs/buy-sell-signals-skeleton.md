@@ -2431,4 +2431,17 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 **不是**可放量。规则版本 `tier_cut_v1`；改量 / 阈值 / 映射须 bump。
 定序写死 **T1 ≺ T2**：T1 未锁，T2 无从接线。
 
+### T2 展示层字段契约（批次 20261030gt2）
+
+展示层弱/中/强 × 方向的**字段契约**（载荷**必填四元组**＝轨 + asof 粒度 + mode + tier
+或**显式无档**；**禁六词动作指令式**；**禁价量仓单**；只读接线 T1；门禁影子 ≠ live）见：
+[buy-sell-signal-tier-display.md](./buy-sell-signal-tier-display.md)。
+
+常量锁面：[`backend/app/buy_sell_signals/tier_display_lock.py`](../backend/app/buy_sell_signals/tier_display_lock.py)
+（纯常量 + 断言，无 I/O；只读 import `tier_cut_lock`；**不算行情、不写 hits、不接线 UI / 钉钉**）。
+
+本拍＝**T2 字段契约文档 + 薄锁面**；**不是** schema 进 hits；**不是**真推落地；
+**不是**算档 / UI 真接线；**不是**可放量。锁面版本 `tier_display_v1`；
+**T1≺T2（T1 已满足）**。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*
