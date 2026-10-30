@@ -2418,4 +2418,17 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 生产填命中专用机器人 webhook ＝ **部署口令**；本仓只保证缺配拒发与状态可观测。
 `hits_dingtalk` 响应里**不含** url / secret，别指望从这个口把地址读出来。
 
+### T1 切档规则（批次 20261030gt1）
+
+展示层 **弱 / 中 / 强** 切档规则（**无量＝无档**；日频 / 事件两族**各一量**；规则版本
+可审计；展示三项必填；展示边 Bonferroni 不占 `m=6`；**T1≺T2**）见：
+[buy-sell-signal-tier-cut.md](./buy-sell-signal-tier-cut.md)。
+
+常量锁面：[`backend/app/buy_sell_signals/tier_cut_lock.py`](../backend/app/buy_sell_signals/tier_cut_lock.py)
+（纯常量 + 断言，无 I/O；**不算行情、不写 hits、不接线 UI / 钉钉**）。
+
+本拍＝**T1 规则文档 + 常量锁面**；**不是** T2 展示字段接线；**不是** schema 进 hits；
+**不是**可放量。规则版本 `tier_cut_v1`；改量 / 阈值 / 映射须 bump。
+定序写死 **T1 ≺ T2**：T1 未锁，T2 无从接线。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*
