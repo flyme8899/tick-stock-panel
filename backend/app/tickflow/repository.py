@@ -1674,6 +1674,50 @@ class KlineRepository:
         p = f"{base}/date={trade_date.isoformat()}/part.parquet"
         return p if Path(p).exists() else None
 
+    def _minute_partition_base(self, asset_type: str) -> str:
+        """分钟分区根目录(不含 date= 与文件名)。"""
+        return self._minute_glob_for(asset_type).rsplit("/", 2)[0]
+
+    def _readable_minute_partitions(self, asset_type: str, *, label: str) -> list[str]:
+        """列出**确实读得出来的**分钟分区文件路径, 读不出的逐个告警跳过。
+
+        ## 为什么要把"可读"和"存在"分开(批次 20261030gkparquet)
+
+        以前这里是 `pl.scan_parquet(glob)` 一把梭: 只要有一个分区文件坏了, **整次查询**
+        就抛, 外层 try 收成空 DataFrame。于是"一天坏, 一个月全空" —— 而调用方看到的
+        是"这段时间没有分钟数据", 不是"这一天坏了"。**外层 try→空 ≠ 按分区跳过。**
+
+        现在逐个分区探一下 footer: 坏的跳过并 **warning 含完整路径**, 好的照常交给
+        后续 concat。坏的那一天确实少一天, 但其余的天还是能看见, 而且日志里有人能
+        照着路径去修。
+
+        ## 成本
+
+        只读 parquet footer(不读数据页), 且逐个分区做 predicate pushdown 本来也要开
+        每个文件。对分钟K这种"一天一个分区"的布局, 分区数就是交易日数, 量级可接受;
+        换来的是**一个坏文件不再连坐整段区间**。
+
+        ## 不做的事
+
+        不修、不搬坏文件 —— 查询侧只读。隔离移出是写侧
+        (`kline_sync._quarantine_corrupt_parquet`)的职责, 因为那里才要覆盖写。
+        """
+        base = self._minute_partition_base(asset_type)
+        root = Path(base)
+        if not root.is_dir():
+            return []
+        readable: list[str] = []
+        for part in sorted(root.glob("date=*/part.parquet")):
+            try:
+                pl.read_parquet_schema(part)
+            except Exception as exc:  # noqa: BLE001 — 坏分区跳过, 不连坐其它日期
+                logger.warning(
+                    "分钟K%s: 跳过损坏分区 %s (%s: %s)", label, part, type(exc).__name__, exc,
+                )
+                continue
+            readable.append(str(part))
+        return readable
+
     def get_minute(
         self,
         symbol: str,
@@ -1687,7 +1731,15 @@ class KlineRepository:
         """
         try:
             part = self._minute_partition_path(asset_type, trade_date)
-            source = part if part is not None else self._minute_glob_for(asset_type)
+            if part is not None:
+                source = part
+            else:
+                # 回退全树: 只喂**可读**分区, 免得他日一个坏文件把当日查询也拖空。
+                # (批次 20261030gkparquet · G-T5: 他日坏不该误伤当日)
+                readable = self._readable_minute_partitions(asset_type, label="单日查询回退")
+                if not readable:
+                    return pl.DataFrame()
+                source = readable
             df = guarded_collect(
                 pl.scan_parquet(source).filter(
                     (pl.col("symbol") == symbol)
@@ -1696,7 +1748,7 @@ class KlineRepository:
             )
             return self._maybe_adjust_minute(df, asset_type)
         except Exception as e:  # noqa: BLE001
-            logger.warning("分钟K查询失败: %s", e)
+            logger.warning("分钟K查询失败(%s %s): %s", symbol, trade_date, e)
             return pl.DataFrame()
 
     def get_minute_batch(
@@ -1714,7 +1766,13 @@ class KlineRepository:
             return pl.DataFrame()
         try:
             part = self._minute_partition_path(asset_type, trade_date)
-            source = part if part is not None else self._minute_glob_for(asset_type)
+            if part is not None:
+                source = part
+            else:
+                readable = self._readable_minute_partitions(asset_type, label="批量单日查询回退")
+                if not readable:
+                    return pl.DataFrame()
+                source = readable
             df = guarded_collect(
                 pl.scan_parquet(source).filter(
                     pl.col("symbol").is_in(symbols)
@@ -1723,7 +1781,7 @@ class KlineRepository:
             )
             return self._maybe_adjust_minute(df, asset_type)
         except Exception as e:  # noqa: BLE001
-            logger.warning("批量分钟K查询失败: %s", e)
+            logger.warning("批量分钟K查询失败(%s 只 %s): %s", len(symbols), trade_date, e)
             return pl.DataFrame()
 
     def get_minute_range(
@@ -1737,11 +1795,27 @@ class KlineRepository:
 
         一次 scan_parquet + predicate pushdown 读多只股票在 [start, end] 内的所有分钟K。
         返回列: symbol, datetime, open, high, low, close, volume, amount。
+
+        ## 一个坏分区不再连坐整段区间(批次 20261030gkparquet)
+
+        改之前是 `pl.scan_parquet(glob)` 一把梭 + 外层 try→空: **一个**读不出的
+        `part.parquet` 会让整个 [start, end] 返回空 DataFrame, 而调用方看不出是
+        "这段没数据"还是"某一天坏了"。**外层 try→空 ≠ 按分区跳过。**
+
+        现在先按分区探 footer, 坏分区 warning 含路径跳过, 只把可读分区交给 scan。
+        坏的那天确实少了, 其余的天照常返回 —— 精度损失被限制在坏的那一天,
+        而不是扩散成整段空。
         """
         if not symbols:
             return pl.DataFrame()
         try:
-            lf = pl.scan_parquet(self._minute_glob_for(asset_type))
+            parts = [
+                path for path in self._readable_minute_partitions(asset_type, label="范围查询")
+                if self._partition_date_in_range(path, start, end)
+            ]
+            if not parts:
+                return pl.DataFrame()
+            lf = pl.scan_parquet(parts)
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             df = guarded_collect(
@@ -1756,8 +1830,20 @@ class KlineRepository:
             )
             return self._maybe_adjust_minute(df, asset_type)
         except Exception as e:  # noqa: BLE001
-            logger.warning("分钟K范围查询失败: %s", e)
+            logger.warning("分钟K范围查询失败(%s 只 %s..%s): %s", len(symbols), start, end, e)
             return pl.DataFrame()
+
+    @staticmethod
+    def _partition_date_in_range(path: str, start: date, end: date) -> bool:
+        """`.../date=YYYY-MM-DD/part.parquet` 是否落在 [start, end]。解析不了就放行。"""
+        for piece in Path(path).parts:
+            if piece.startswith("date="):
+                try:
+                    day = date.fromisoformat(piece[len("date="):])
+                except ValueError:
+                    return True
+                return start <= day <= end
+        return True
 
     def get_minute_by_dates(
         self,
@@ -1777,13 +1863,22 @@ class KlineRepository:
         """
         if not symbols or not dates:
             return pl.DataFrame()
-        base = self._etf_minute_glob.rsplit("/", 2)[0] if asset_type == "etf" else self._minute_glob.rsplit("/", 2)[0]
-        # 收集存在的分区文件路径, 避免对不存在的文件 scan 报错
+        base = self._minute_partition_base(asset_type)
+        # 收集存在**且读得出**的分区文件路径: 不存在的跳过(该日无数据), 存在但
+        # 读不出的也跳过并告警含路径 —— 列表里任一坏文件不该让整次查询返回空。
         parts: list[str] = []
         for d in dates:
             p = f"{base}/date={d.isoformat()}/part.parquet"
-            if Path(p).exists():
-                parts.append(p)
+            if not Path(p).exists():
+                continue
+            try:
+                pl.read_parquet_schema(p)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "分钟K按日期查询: 跳过损坏分区 %s (%s: %s)", p, type(exc).__name__, exc,
+                )
+                continue
+            parts.append(p)
         if not parts:
             return pl.DataFrame()
         try:
@@ -1798,7 +1893,7 @@ class KlineRepository:
             )
             return self._maybe_adjust_minute(df, asset_type)
         except Exception as e:  # noqa: BLE001
-            logger.warning("分钟K按日期查询失败: %s", e)
+            logger.warning("分钟K按日期查询失败(%s 只 %s 天): %s", len(symbols), len(dates), e)
             return pl.DataFrame()
 
     # ================================================================
