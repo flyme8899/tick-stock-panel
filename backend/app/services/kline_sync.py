@@ -908,10 +908,85 @@ def _datetime_to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _quarantine_corrupt_parquet(path: Path) -> Path | None:
+    """把读不出来的分区文件移出会被 glob 扫到的地方, 返回新路径(失败返回 None)。
+
+    ## 为什么是"移走"而不是"就地留着"
+
+    分钟目录被 `**/*.parquet` 扫描(视图、`get_minute_range`、回退全树读)。一个读不出的
+    `part.parquet` 留原地, 只是把这次失败推迟到下一次: **每一轮**读写都要再踩一次,
+    而且每次都要先炸一遍才知道它坏了。
+
+    所以改名后缀是 `.corrupt.<时间戳>`, **不是 `.parquet`** —— 这样它不会匹配任何
+    `*.parquet` glob, 也不会被 DuckDB 视图扫进来。文件仍留在同目录, 人还能找到它。
+
+    ## 失败怎么办
+
+    改名失败(权限、Windows 占用、跨设备)不是本轮的主错误。这里返回 None 并**不**抛:
+    调用方会把 existing 当空、照常写新文件 —— 让"这一轮还能存进去"优先于"必须先把坏
+    文件搬走"。但会在日志里留一句, 免得坏文件一直原地而没人知道。
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+    target = path.with_name(f"{path.name}.corrupt.{stamp}")
+    try:
+        path.replace(target)
+    except OSError as exc:
+        logger.warning(
+            "分钟分区坏文件隔离失败, 本轮仍继续写新文件; 坏文件仍在原地 %s: %s", path, exc,
+        )
+        return None
+    return target
+
+
+def _read_existing_minute_partition(out: Path) -> pl.DataFrame:
+    """读已有分钟分区。**读失败不抛** —— 隔离坏文件、告警、按"无已有"继续。
+
+    ## 这是本批次(20261030gkparquet)的写侧主交付
+
+    改之前这里是裸 `pl.read_parquet(out)`: `out.exists()` 为真即读, 读失败直接冒到
+    `sync_minute_single` / 5日10日补齐 / `minute_refresh` 的上层, 变成一次 HTTP 500。
+    一个坏分区就足以让"补齐这一天"这件事彻底做不了 —— 而补齐本来正是修它的手段。
+
+    现在: 读失败 → ERROR 日志(含完整路径) → 隔离移出 → 返回空 DataFrame, 由调用方
+    按"无已有"写新数据。**下一轮补齐就能自愈覆盖这一天。**
+
+    ## 这不是"静默吞"
+
+    每一次跳过都打 ERROR 且**带完整路径**。静默吞是"catch 住什么都不说"; 这里说的是
+    "这个文件坏了、我把它挪到哪儿了、我继续用新数据写"。少了这句日志, 坏文件会反复
+    出现而没人知道为什么每天都在补同一天。
+
+    ## 也不是"外层 try 把整段收成空"
+
+    那只防 500、不修数据: 好分区会陪着坏分区一起丢。这里的粒度是**单个分区文件**,
+    好坏分开处理。
+    """
+    try:
+        existing = pl.read_parquet(out)
+    except Exception as exc:  # noqa: BLE001 — 坏分区是数据问题, 不该冒成 API 500
+        logger.error(
+            "分钟分区读取失败, 已按无已有继续写入(本轮会覆盖该日); 坏文件: %s (%s: %s)",
+            out, type(exc).__name__, exc,
+        )
+        quarantined = _quarantine_corrupt_parquet(out)
+        if quarantined is not None:
+            logger.error("坏分钟分区已隔离移出(后缀非 .parquet, 不会被 glob 扫入): %s", quarantined)
+        return pl.DataFrame()
+    if "datetime" in existing.columns:
+        existing = existing.filter(pl.col("datetime").is_not_null())
+    return existing
+
+
 def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
     """按 _trade_date 分区落盘分钟 K (读旧→concat→unique→原子写)。返回写入行数。
 
     抽自原 sync_and_persist_minute 末尾的循环, 供流式落盘 (每段一次) 与一次性迁移共用。
+
+    `minute_dir` 由调用方给, 已覆盖 `kline_minute` 与 `kline_etf_minute` 两处 —— 本函数
+    不认资产类型, 谁把目录传进来就守谁。
+
+    读旧失败的处理见 `_read_existing_minute_partition`: 隔离坏文件 + ERROR(含路径) +
+    按无已有写。**不是**整函数抛错让 sync 掉 500。
     """
     if df.is_empty():
         return 0
@@ -922,19 +997,21 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
         out = minute_dir / f"date={trade_date}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists():
-            existing = pl.read_parquet(out)
-            if "datetime" in existing.columns:
-                existing = existing.filter(pl.col("datetime").is_not_null())
+            existing = _read_existing_minute_partition(out)
             new_rows = day_df.drop("_trade_date")
-            # 只对本次触及的 symbol 合并去重, 未触及行原样保留: 单股补齐时避免
-            # 为合并几行数据把全市场分区整体 unique 的写放大 (issue #305)。
-            touched = new_rows["symbol"].unique().to_list()
-            same = existing.filter(pl.col("symbol").is_in(touched))
-            other = existing.filter(~pl.col("symbol").is_in(touched))
-            merged = pl.concat([same, new_rows]).unique(
-                subset=["symbol", "datetime"], keep="last",
-            )
-            day_df = pl.concat([other, merged])
+            if existing.is_empty():
+                # 坏分区已在上面隔离/告警; 这里等同一次全新写入。
+                day_df = new_rows
+            else:
+                # 只对本次触及的 symbol 合并去重, 未触及行原样保留: 单股补齐时避免
+                # 为合并几行数据把全市场分区整体 unique 的写放大 (issue #305)。
+                touched = new_rows["symbol"].unique().to_list()
+                same = existing.filter(pl.col("symbol").is_in(touched))
+                other = existing.filter(~pl.col("symbol").is_in(touched))
+                merged = pl.concat([same, new_rows]).unique(
+                    subset=["symbol", "datetime"], keep="last",
+                )
+                day_df = pl.concat([other, merged])
         else:
             day_df = day_df.drop("_trade_date")
         day_df = day_df.sort("symbol", "datetime")
