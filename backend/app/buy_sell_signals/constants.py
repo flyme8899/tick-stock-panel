@@ -172,6 +172,8 @@ EVENT_CLASSES: Final = frozenset(
         "intraday_volume",    # 盘中放量
         "limit_reopen",       # 炸板 / 回封
         "daily_quality_value",# 日线质量与估值
+        "daily_macd",         # 日线 MACD 柱穿越(批次 20261030ga1 · D2a 命名位)
+        "daily_kdj",          # 日线 KDJ 金叉(批次 20261030ga1 · D2b 命名位)
         "other",
     }
 )
