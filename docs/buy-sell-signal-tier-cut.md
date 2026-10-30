@@ -247,6 +247,13 @@ schema 加哪些列。
 
 本拍**只做 T1**。T2 展示字段设计、UI 接线、观测口开通、算档接线，**全部另口令**。
 
+> **T2 字段契约已开（批次 20261030gt2）**：展示载荷字段契约见
+> [buy-sell-signal-tier-display.md](./buy-sell-signal-tier-display.md)
+> （锁面 `tier_display_lock.py`，版本 `tier_display_v1`）。
+> 本 §9 规则正文语义**不变**；T2 **只消费不重定义**。
+> 算档接线 / UI 真接线 / 观测口（#-A-#9）/ schema 进 hits / 真推旁注落地**仍全部另口令**。
+
+
 ## 10. 锁面模块
 
 规则的可验形态在
