@@ -716,7 +716,10 @@ def test_t_loader_starts_from_watchlist(monkeypatch):
         seen["symbols"] = list(symbols)
         return []
 
-    monkeypatch.setattr("app.news.push._live_rows", live)
+    # 批次 20261030gtedge: 做T 的边沿源已从报价快照换成分钟 bar(与图同构),
+    # `_live_rows` 不再在这条路径上被调用; 宇宙口径(`t_universe`)仍是同一条。
+    # 断言改为从分钟路径的观察钩子拿宇宙, 测的东西没变: 只取自选, 不取持仓。
+    monkeypatch.setattr("app.news.push._T_MINUTE_PROBE", live)
     monkeypatch.setattr("app.news.push._flag_on", lambda field: False)
     assert _load_t() == ({}, {}, {})
     assert seen["symbols"] == ["600519.SH"]
