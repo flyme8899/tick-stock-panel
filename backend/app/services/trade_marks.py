@@ -178,15 +178,50 @@ def _within_deviation(price: float, reference: float) -> bool:
     return abs(price - reference) / reference <= _LEVEL_MAX_DEVIATION
 
 
-def replay_t_marks(
+def minute_edge_events(
     bars: list[dict],
     *,
     symbol: str,
     prev_close: float | None,
     cooldown_min: int = T_COOLDOWN_MIN,
+    processed_upto: set[str] | None = None,
 ) -> list[dict]:
-    """用做T推送规则在分钟序列上找边沿。第一根不触发，同一原因默认冷却 60 根。"""
-    from app.news.push import RANGE_RULES, T_LABELS, session_signal_sets
+    """**图与 live 共用的分钟边沿引擎**（批次 20261030gtedge 抽取）。
+
+    做T推送规则在分钟序列上「从无到有」的那些边沿，一根一根地看。图
+    (`replay_t_marks`) 与 live 推送 (`app.news.push._load_t`) 都只走这里 ——
+    **同一个函数、同一套阈值、同一条差分**。图有钉无的根因是两边边沿源不同构
+    (图＝分钟序列，旧钉＝报价快照@180s)，不是阈值不一致；抽取共用引擎就是让
+    「不同构」这件事在结构上无法再发生。
+
+    ## 为什么按时间戳去重, 而不是「最后一根」
+
+    真实分钟序列里 `datetime` 可能同戳重复(增量写盘、盘中追加)。若只比较「最后一根」,
+    `.sort("datetime")` 的同戳相对次序不稳定, 同一批数据两次读会得出两个结论;
+    而 live 每轮都在新进程状态里重放同一批历史 bar, 必须靠**稳定去重**才能与图逐条对齐。
+
+    ## 语义(与抽取前逐条相同, 零改)
+
+    - **第一根不触发**: 第一根建立基线, 不产生边沿(与 `replay_t_marks` 原语义一致)。
+    - **同一原因冷却 `cooldown_min` 根**: 窗口内不再报。默认 60 根＝图的口径。
+    - **`T_SPANS` 之外不报**; **`near_high` / `near_low` 在 10:00 前不报**
+      (`RANGE_RULES` + `RANGE_QUIET_UNTIL`)。
+    - 价格缺失 / 时间戳不可解析 → 该边沿不产出 mark(不留占位)。
+
+    ## `processed_upto`(live 用)
+
+    已处理过的 bar 时间戳集合。给了就只产出**这些戳之外**的边沿 —— live 每轮重放当日
+    全部 bars, 靠它避免同一根 bar 被反复报。**不给**(图路径)行为与抽取前完全一致。
+
+    ## 不做的事
+
+    不改 `VWAP_BAND` / `RANGE_BAND` / `PREV_BAND` / `PREV_AWAY` / `RANGE_MIN`,
+    不改 `t_conditions` 成立条件, 不写文件、不发请求、不碰冷却墙钟与日封顶 ——
+    冷却墙钟 / 日封顶 / 文案由调用方 `_push_edges` 照旧处理(值未放宽)。
+
+    仅供研究, 不构成投资建议; 执行须人工确认。红涨绿跌。
+    """
+    from app.news.push import RANGE_RULES, RANGE_QUIET_UNTIL, T_LABELS, session_signal_sets
 
     if not bars:
         return []
@@ -199,38 +234,69 @@ def replay_t_marks(
     )
     previous: set[str] | None = None
     last_fire: dict[str, int] = {}
-    marks: list[dict] = []
+    seen: set[str] = set()
+    events: list[dict] = []
     cooldown = max(1, int(cooldown_min))
     for index, current in enumerate(sets):
-        if previous is None:
-            previous = set(current)
-            continue
-        clock = _clock_of(bars[index].get("datetime"))
-        fresh = []
-        for reason in sorted(current - previous):
-            last = last_fire.get(reason)
-            if last is not None and index - last < cooldown:
-                continue
-            if clock is not None and not _in_t_span(clock):
-                continue
-            if reason in RANGE_RULES and clock is not None and clock < dt_time(10, 0):
-                continue
-            fresh.append(reason)
+        if previous is not None:
+            raw = bars[index]
+            clock = _clock_of(raw.get("datetime"))
+            stamp = _hhmm(raw.get("datetime"))
+            fresh = []
+            for reason in sorted(current - previous):
+                last = last_fire.get(reason)
+                if last is not None and index - last < cooldown:
+                    continue
+                if clock is not None and not _in_t_span(clock):
+                    continue
+                if reason in RANGE_RULES and clock is not None and clock < RANGE_QUIET_UNTIL:
+                    continue
+                fresh.append(reason)
+            if fresh:
+                price = _finite(raw.get("close"))
+                dup = (stamp in seen) if (processed_upto is None) else (
+                    bool(stamp) and (stamp in seen or stamp in processed_upto)
+                )
+                for reason in fresh:
+                    last_fire[reason] = index
+                    if price is None or not stamp or dup:
+                        continue
+                    side = "buy" if reason in _BUY_T else "sell" if reason in _SELL_T else "neutral"
+                    events.append({
+                        "reason": reason,
+                        "time": stamp,
+                        "rule": T_LABELS.get(reason, reason),
+                        "side": side,
+                        "price": round(price, 4),
+                    })
         previous = set(current)
-        price = _finite(bars[index].get("close"))
-        stamp = _hhmm(bars[index].get("datetime"))
-        for reason in fresh:
-            last_fire[reason] = index
-            if price is None or not stamp:
-                continue
-            side = "buy" if reason in _BUY_T else "sell" if reason in _SELL_T else "neutral"
-            marks.append({
-                "time": stamp,
-                "rule": T_LABELS.get(reason, reason),
-                "side": side,
-                "price": round(price, 4),
-            })
-    return marks
+        stamp_of_bar = _hhmm(bars[index].get("datetime"))
+        if stamp_of_bar:
+            seen.add(stamp_of_bar)
+    return events
+
+
+def replay_t_marks(
+    bars: list[dict],
+    *,
+    symbol: str,
+    prev_close: float | None,
+    cooldown_min: int = T_COOLDOWN_MIN,
+) -> list[dict]:
+    """用做T推送规则在分钟序列上找边沿。第一根不触发，同一原因默认冷却 60 根。
+
+    实现已抽到 `minute_edge_events`（图与 live 共用同一引擎）；本函数的入参、返回值
+    形状与语义**零改**，`marks` 里只保留 `time` / `rule` / `side` / `price` 四个键。
+    """
+    return [
+        {key: event[key] for key in ("time", "rule", "side", "price")}
+        for event in minute_edge_events(
+            bars,
+            symbol=symbol,
+            prev_close=prev_close,
+            cooldown_min=cooldown_min,
+        )
+    ]
 
 
 def paper_fills(data_dir: Path, symbol: str, start: str, end: str) -> list[dict]:

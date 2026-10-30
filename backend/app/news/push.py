@@ -2,6 +2,28 @@
 
 默认全关。登录失效提醒仍走 host_collector 的短文本，不从这里发送。
 异动用实时报价对盘前价位，不读盘后信号列。报价缓存新鲜时不再打 TickFlow。
+
+## 批次 20261030gtedge: 做T 的边沿源换成分钟 bar(图≠钉)
+
+**图有钉无 = 边沿源不同构**, 不是文案缺字、不是阈值不一致。
+
+| | 取数 | 判定 |
+|---|---|---|
+| 图(`trade_marks.replay_t_marks`) | 当日分钟 bar 序列 | `session_signal_sets` → 逐根差分 |
+| 旧钉(本模块) | `_live_rows` 报价快照 @180s | `t_conditions(单行)` |
+
+一分钟级的窗在两次快照之间就开合完毕, 图上留下 mark, 钉上什么都没发。
+本拍把 `_load_t` 改成走与图**同一个** `minute_edge_events` 引擎, 只推新边沿。
+
+**冷却 / 日封顶 / 文案 / 三 env 一律未动**(值未放宽)。缩 `INTRADAY_CHECK_S` **不是**
+本拍手段, 也不足以单独修好 —— 换了边沿源才修得好。
+
+**文案齐 ≠ 漏触发已修**: gtpush / #243 系三件套本拍一字未改, 本拍也**不**宣称它已修
+漏触发。**合入 ≠ 部署**; **tip ≠ prod**(prod 仍 `7e5c983…`), 本拍默不部署, 也不部署
+#254 / #255。**建议T ≠ BSS**: 钉钉「建议T买入/卖出/观察」是研究用的做T提醒, 不是
+BSS 买卖信号, 更不是下单指令。
+
+仅供研究, 不构成投资建议; 执行须人工确认。红涨绿跌。成本来回 18.2bp(非回测, 旁注)。
 """
 from __future__ import annotations
 
@@ -86,6 +108,56 @@ QUOTE_FRESH_S = 180
 
 _STATE: PushState | None = None
 _STATE_LOCK = threading.Lock()
+
+#: 批次 20261030gtedge: 做T 分钟边沿「本进程内已处理过的 bar 时间戳」。
+#:   key   = (symbol, "YYYY-MM-DD")
+#:   value = 该标的该日已处理过的 bar `HH:MM` 集合
+#: 只用于去重(同一根 bar 不重复报), **不参与任何判定**, 也不落盘: 进程重启后
+#: 从当日第一根重放, 边沿仍由 `minute_edge_events` 按 bar 根数冷却算出, 与图一致。
+#: 上限 512 条, 超过就丢最早插入的——一天几十只标的、240 根/只, 正常量级远低于此。
+_T_MINUTE_SEEN: dict[tuple[str, str], set[str]] = {}
+
+#: 批次 20261030gtedge: 观察钩子(仅供测), 收到本次做T 宇宙。生产恒为 `None`。
+_T_MINUTE_PROBE = None
+
+
+class TMinuteEdges(tuple):
+    """`_load_t()` 的返回值: 前三项与旧三元组**逐字节等价**, 第四项是分钟戳 meta。
+
+    ## 为什么用 tuple 子类
+
+    既有调用方与测例大量写着 `current, pct, names = _load_t()` /
+    `assert _load_t() == ({}, {}, {})`。**返回值加一项会让它们整批红掉**, 而它们
+    本来在测与边沿源无关的东西(改 `_load_t` 签名是上一批次专门记过的一条禁忌)。
+
+    所以这里做成一个 tuple 子类: `len()` 仍是 3, 相等比较只比前三项, 解包也只解三项;
+    第四项 `meta` 挂在属性上, 由 `_split_loader` 认出来交给 `_push_edges`。
+    没有 meta 的路径(报价快照、夹具注入)行为与改动前逐字节一致。
+    """
+
+    # 注意: tuple 子类不能有非空 `__slots__`(CPython 限制), 所以属性存在实例
+    # `__dict__` 里。代价是每个实例多一个 dict, 而一天只有几十次构造。
+
+    def __new__(cls, current, pct, names, meta=None):
+        obj = super().__new__(cls, (current, pct, names))
+        obj.meta = meta or {}
+        return obj
+
+    def __getitem__(self, index):
+        if index == 3:
+            return self.meta
+        return super().__getitem__(index)
+
+    def __len__(self) -> int:
+        return 3
+
+    def __eq__(self, other) -> bool:
+        # 与普通三元组比较时只比前三项(测例大量写着 `== ({}, {}, {})`); 与另一个
+        # `TMinuteEdges` 比较时连 meta 一起比 —— 两个 loader 结果不相等, 不该因为
+        # 「前三项恰好一样」被当成同一个。
+        if isinstance(other, TMinuteEdges):
+            return tuple(self) == tuple(other) and self.meta == other.meta
+        return tuple(self) == other
 
 
 def _clock(name: str, default: dt_time) -> dt_time:
@@ -1135,9 +1207,15 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
     state.data[check_key] = stamp
     day = now.date().isoformat()
     loaded = (loader or (_load_abnormal if kind == "abnormal" else _load_t))()
-    current, pct, names = _split_loader(loaded)
+    current, pct, names, meta = _split_loader(loaded)
     previous = _edge_map(state, kind, day)
     entered = new_edges(previous, current)
+    if kind == "t_trade" and meta is not None:
+        # 分钟路径(批次 20261030gtedge): 边沿本身已由 `minute_edge_events` 按「相对最近
+        # 一根旧 bar 的差分 + bar 根数冷却」算出, 本轮只把「还没处理过的分钟」交出去。
+        # 这里**不再**套 `new_edges` 的「第一次见到只建基线」—— 那会让重启后的第一轮静默
+        # 丢掉一整轮; 只建基线由 `minute_edge_events` 的「第一根不触发」承担。
+        entered = _t_minute_entries(previous, current, meta)
     if kind == "t_trade":
         old_pct = state.data.get("t_pct") if state.data.get("t_pct_day") == day else {}
         entered = filter_prev_close(entered, old_pct or {}, pct)
@@ -1152,6 +1230,7 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
         if kind == "t_trade":
             state.data["t_pct"] = pct
             state.data["t_pct_day"] = day
+            _remember_minute_progress(day, meta)
         return False
     detail_of = _detail_lookup(kind, fresh)
     quote_of = _quote_lookup(kind, fresh)
@@ -1171,6 +1250,11 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
         # 报价只给做T文案用; 异动文案不读这几项, 行为与改动前逐字节一致。
         if kind == "t_trade":
             row.update(quote_of.get((symbol, reason)) or {})
+            # 分钟路径: 边沿所在那根 bar 的价格先垫底, 报价取不到时文案仍有个真数
+            # (不是占位、不是 0.00); 拿得到报价就用报价, 与旧行为一致。
+            edge = (meta or {}).get((symbol, reason)) or {}
+            if row.get("price") is None and edge.get("price") is not None:
+                row["price"] = edge["price"]
         rows.append(row)
     packed = format_symbol_markdown(kind, rows, now=now if kind == "t_trade" else None)
     if packed is None or not _send(kind, packed[0], packed[1], opener, stamp, state):
@@ -1183,7 +1267,47 @@ def _push_edges(now, state, opener, trading, kind: str, loader) -> bool:
         state.cool_until(f"{kind}:{symbol}:{reason}", stamp, _cooldown_seconds(kind, reason))
     if kind == "t_trade":
         _mark_t_sent(state, day, fresh)
+        _remember_minute_progress(day, meta)
     return True
+
+
+def _t_minute_entries(previous, current, meta) -> list[tuple[str, str]]:
+    """分钟路径本轮要交出去的 `(symbol, reason)`。
+
+    ## 与 `new_edges` 的差别, 以及为什么这个差别是必要的
+
+    `new_edges` 在 `previous is None`(当天第一次见到)时返回 `[]` —— 对**报价快照**是
+    对的: 开机第一轮看到「现在是 below_vwap」, 并不知道它是什么时候开始的, 推出去
+    等于补发一条不知道多旧的提醒。但分钟路径**知道**边沿发生在哪一根 bar, 而且
+    `minute_edge_events` 已经把「第一根不触发」处理掉了。此时再用 `previous is None`
+    一刀切, 会让进程在 10:03 重启后把 10:01 那根 already 收齐的边沿静默丢掉 ——
+    那正是「图有钉无」的一种形态。
+
+    所以这里按**分钟戳**判新旧: 只交「meta 里那一根 bar 的时间戳还没处理过」的边沿。
+    冷却 / 日封顶 / 区间规则 / `filter_prev_close` 一律仍在调用方照旧执行, 值未放宽。
+
+    `current[symbol]` 只含本轮新边沿(不是当日累计集合), 因此 `previous` 不参与筛选;
+    保留该参数只为签名可读与将来并列过渡时对齐。
+    """
+    del previous  # 见 docstring: 分钟路径按戳判新旧, 不按「当天是否第一次见到」
+    found: list[tuple[str, str]] = []
+    for symbol, reasons in current.items():
+        for reason in sorted(reasons):
+            edge = meta.get((symbol, reason)) or {}
+            if not str(edge.get("time") or ""):
+                continue
+            found.append((symbol, reason))
+    return found
+
+
+def _remember_minute_progress(day: str, meta) -> None:
+    """把本轮交出去的分钟戳记进进程内去重表。**不落盘、不参与判定。**"""
+    if not meta:
+        return
+    for (symbol, _reason), edge in meta.items():
+        stamp = str(edge.get("time") or "")
+        if stamp:
+            _remember_stamps(symbol, date.fromisoformat(day), {stamp})
 
 
 def _range_quiet(now: datetime) -> bool:
@@ -1237,18 +1361,27 @@ def _mark_t_sent(state: PushState, day: str, fresh) -> None:
     state.data["t_range_sent"] = sent
 
 
-def _split_loader(loaded) -> tuple[dict, dict, dict]:
+def _split_loader(loaded) -> tuple[dict, dict, dict, dict | None]:
     """拆 loader 返回值。**2/3/4 项都接受**, 4 项时最后一项是文案用的报价行。
 
     保留 2/3 项兼容是刻意的: 若干测例与夹具用 `lambda: (current, pct)` 直接注入,
     强制改成 4 项会让它们全红, 而它们本来就在测与文案无关的东西。
+
+    第 4 个返回值(批次 20261030gtedge)是分钟边沿的 meta: `{(symbol, reason): {...}}`,
+    挂着该边沿的分钟戳与价格,**没有就返回 `None`**。它不改变前三个返回值, 也不改变
+    任何既有 loader 协议 —— `_load_t` 返回的 `TMinuteEdges` 把 meta 挂在 `.meta` 上,
+    这里认出来就一并交回; 夹具给的普通 dict / 普通元组没有这个属性, 于是 meta 为
+    `None`, 行为与改动前逐字节一致。
     """
+    meta = getattr(loaded, "meta", None)
+    if meta is None and loaded:
+        meta = getattr(loaded[0], "_t_edge_meta", None)
     if len(loaded) == 3:
         current, pct, names = loaded
-        return current, pct or {}, names or {}
+        return current, pct or {}, names or {}, meta
     current, pct = loaded[0], loaded[1]
     names = loaded[2] if len(loaded) >= 3 else {}
-    return current, pct or {}, names or {}
+    return current, pct or {}, names or {}, meta
 
 
 def _detail_lookup(kind: str, fresh) -> dict:
@@ -1393,17 +1526,49 @@ def _load_abnormal() -> tuple[dict[str, set[str]], dict, dict]:
 
 
 def _load_t() -> tuple[dict[str, set[str]], dict, dict]:
-    """做T候选: `(边沿集合, 涨跌幅, 名称)`。
+    """做T候选: `(边沿集合, 涨跌幅, 名称)` —— **边上挂分钟戳**。
 
-    ## 签名与返回值**零改**(批次 20261028gtpush)
+    ## 批次 20261030gtedge: 边沿源换成分钟 bar(与图同构)
 
-    本批次要给文案贴「现价/均价/高/低」, 但**没有**把报价行塞进这里的返回值:
-    返回值是 loader 协议的一部分, 加一项会让所有 `current, pct, names = _load_t()`
-    形态的调用方和测例一起红, 而它们本来在测与文案无关的东西。
+    **图有钉无的根因是边沿源不同构**, 不是阈值不一致:
 
-    文案需要的报价由 `_live_quote_snapshot()` 单独取(只在该轮真有「要推的行」时),
-    口径与这里同一个 `_live_rows`。
+    - 图 = `replay_t_marks`(分钟序列 → `session_signal_sets` → 逐根差分);
+    - 旧钉 = `_live_rows` 报价快照 @ `INTRADAY_CHECK_S=180`。
+
+    报价快照每 180s 取一次日累计高低/均价, 一分钟级的窗(见 688008 10:06 那根
+    `below_vwap`)在两次快照之间就已经开合完毕 —— 于是「图上有钉, 钉上没推」。
+
+    本函数改为: 用与图**同一个** `minute_edge_events` 引擎, 在当日分钟 bar 上算出
+    「相对已处理分钟的新边沿」, 只把新边沿交出去。判定、阈值、差分全是共用的那一份
+    (`session_signal_sets` 同一口径), 没有第二套边沿规则。
+
+    ### 驱动时机
+
+    每轮按 `_due(INTRADAY_CHECK_S)` 的轮询上限进入, 但**进入之后处理自上次以来所有
+    新收齐的分钟**, 而不是只看「当前一分钟」—— 于是 180s 的轮询间隔不会漏掉中间任何
+    一根已收齐的 bar。缩 `INTRADAY_CHECK_S` **不是**本拍手段, 也不足以单独修好它。
+
+    ### 数据源(N6 · 写死)
+
+    与分时图同构的本地分钟仓: 优先 `repo.get_minute_batch`(多标的一次 scan), 不可用
+    时逐只 `repo.get_minute`; bars 形态与图一致(`sort("datetime").to_dicts()`)。
+
+    ### fail-closed(写死)
+
+    repo 不可得 / `get_minute*` 抛错 / 空帧 / bars 不足 2 根(做不了「第一根不触发」
+    之后的差分) / 缺昨收 → **该标的本轮不进入结果**, 记 warning。
+    **禁止**退回「用单点报价冒充分钟序列」或「乱造 bar」当作同构交付: 那种回退会让
+    本轮看起来有输出, 而输出与图仍然不同构 —— 比不输出更难查。
+
+    ### 返回值的第一个字典**带 `(symbol, reason)` 内层值**
+
+    外层键仍是 `symbol`, 值仍是 `set[str]`(既有调用方与测例的形状零改); 内层每个
+    reason 都在 `_t_edge_meta[(symbol, reason)]` 里挂着它的分钟戳与价格。`_split_loader`
+    认出这个属性后把 meta 一并交回 `_push_edges`, 由它决定「这一根之前是不是已经推过」。
+
+    仅供研究, 不构成投资建议; 执行须人工确认。红涨绿跌。
     """
+    from app.services.trade_marks import T_COOLDOWN_MIN, minute_edge_events
     from app.services.watchlist import list_symbols
 
     watchlist = [str(row.get("symbol") or "") for row in list_symbols()]
@@ -1414,16 +1579,189 @@ def _load_t() -> tuple[dict[str, set[str]], dict, dict]:
     current: dict[str, set[str]] = {}
     pct: dict[str, float] = {}
     names = {}
-    for row in _live_rows(symbols):
-        symbol = str(row.get("symbol") or "")
-        if not symbol:
+    meta: dict[tuple[str, str], dict] = {}
+    for symbol, bars, prev_close, name, up_to in _minute_bars_for_symbols(symbols):
+        events = minute_edge_events(
+            bars,
+            symbol=symbol,
+            prev_close=prev_close,
+            cooldown_min=T_COOLDOWN_MIN,
+            processed_upto=up_to,
+        )
+        reasons: set[str] = set()
+        for event in events:
+            reasons.add(event["reason"])
+            meta[(symbol, event["reason"])] = event
+        last_close = _num(bars[-1].get("close"))
+        if last_close is not None and prev_close:
+            pct[symbol] = last_close / prev_close - 1
+        current[symbol] = reasons
+        names[symbol] = name
+    return TMinuteEdges(current, pct, names, meta)
+
+
+def _repo_or_none():
+    try:
+        from app.news.service import _repo
+        return _repo()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _minute_bars_for_symbols(symbols: list[str]) -> list[tuple]:
+    """按 N6 数据源取当日分钟 bars。**失败即跳过该标的**, 不抛、不造假 bar。
+
+    返回 `[(symbol, bars, prev_close, name, processed_upto), ...]`(可为空列表);
+    `processed_upto` 是本进程内已经处理过的 bar 时间戳(按 (symbol, day) 记在本模块字典里),
+    每轮重放当日全部 bars 靠它避免重复报同一根。
+
+    昨收口径与分时图同一套: `minute_prev_close` + `minute_reads_are_adjusted`, 数据源
+    是 `_prior_levels`(live_agg 前 59 日)。**缺昨收的标的本轮不判** —— 拿脏参照算出来
+    的偏离不比不判更安全。
+    """
+    from app.market_time import cn_today
+
+    # 观察钩子(仅供测): 拿到宇宙后**先**回调一次, 便于核 `t_universe` 口径未被改动。
+    # 生产上恒为 None, 不产生任何开销与行为差异。
+    if _T_MINUTE_PROBE is not None:
+        try:
+            _T_MINUTE_PROBE(list(symbols))
+        except Exception:  # noqa: BLE001
+            logger.debug("做T 分钟边沿: 观察钩子失败", exc_info=True)
+
+    repo = _repo_or_none()
+    if repo is None:
+        logger.warning("做T 分钟边沿: 仓库未就绪, %d 只标的本轮不判", len(symbols))
+        return []
+    day = cn_today()
+    frames = _minute_frames(repo, symbols, day)
+    if not frames:
+        return []
+    levels = _prior_levels(symbols)
+    reads_adjusted = _minute_reads_adjusted(repo)
+    found: list[tuple] = []
+    for symbol in symbols:
+        bars = frames.get(symbol) or []
+        if not bars:
             continue
-        signals, change = t_conditions(row)
-        current[symbol] = signals
-        if change is not None:
-            pct[symbol] = change
-        names[symbol] = str(row.get("name") or symbol)
-    return current, pct, names
+        if len(bars) < 2:
+            logger.info("做T 分钟边沿: %s 当日 bars %d 根, 做不了差分, 本轮不判", symbol, len(bars))
+            continue
+        level = levels.get(symbol) or {}
+        prev_close = _aligned_prev_close(level, reads_adjusted)
+        if prev_close is None:
+            logger.info("做T 分钟边沿: %s 缺昨收, 本轮不判(不拿脏参照算偏离)", symbol)
+            continue
+        found.append((
+            symbol,
+            bars,
+            prev_close,
+            str(level.get("name") or symbol),
+            _processed_stamps(symbol, day),
+        ))
+    return found
+
+
+def _minute_frames(repo, symbols: list[str], day) -> dict[str, list[dict]]:
+    """当日分钟 bars, 按标的分组: 优先批量, 逐只回退。整批失败不拖累其它标的。
+
+    返回的已是 `list[dict]`(与图同一排序口径), 不再把帧往外传 —— 帧是 polars 的
+    实现细节, 而调用方只需要 bars。
+    """
+    frames: dict[str, list[dict]] = {}
+    batch = getattr(repo, "get_minute_batch", None)
+    if callable(batch):
+        try:
+            frame = batch(list(symbols), day, "stock")
+        except Exception:  # noqa: BLE001
+            logger.warning("做T 分钟边沿: 批量分钟读取失败, 退回逐只", exc_info=True)
+            frame = None
+        bars_by_symbol = _bars_by_symbol(frame)
+        if bars_by_symbol:
+            return bars_by_symbol
+    single = getattr(repo, "get_minute", None)
+    if not callable(single):
+        return frames
+    for symbol in symbols:
+        try:
+            frame = single(symbol, day, "stock")
+        except Exception:  # noqa: BLE001
+            logger.warning("做T 分钟边沿: %s 分钟读取失败, 本轮不判", symbol, exc_info=True)
+            continue
+        bars = _bars_of(frame)
+        if bars:
+            frames[symbol] = bars
+    return frames
+
+
+def _bars_by_symbol(frame) -> dict[str, list[dict]]:
+    """批量帧 → `{symbol: bars}`。帧空 / 缺 symbol 列 / 切分失败都返回 `{}`。"""
+    if frame is None:
+        return {}
+    try:
+        if frame.is_empty() or "symbol" not in frame.columns:
+            return {}
+        parts = frame.partition_by("symbol", as_dict=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("做T 分钟边沿: 批量帧按标的切分失败, 退回逐只", exc_info=True)
+        return {}
+    out: dict[str, list[dict]] = {}
+    for key, part in parts.items():
+        symbol = key[0] if isinstance(key, tuple) else key
+        bars = _bars_of(part)
+        if bars:
+            out[str(symbol)] = bars
+    return out
+
+
+def _bars_of(frame) -> list[dict]:
+    """帧 → bars(与 `trade_marks._t_trade_block` 同一排序口径)。"""
+    if frame is None:
+        return []
+    try:
+        if frame.is_empty():
+            return []
+        return frame.sort("datetime").to_dicts() if "datetime" in frame.columns else frame.to_dicts()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _minute_reads_adjusted(repo) -> bool:
+    from app.services.price_basis import minute_reads_are_adjusted, repo_data_dir
+
+    try:
+        return bool(minute_reads_are_adjusted(repo_data_dir(repo)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _aligned_prev_close(level: dict, reads_adjusted: bool) -> float | None:
+    """昨收对齐到分钟读取口径。与分时图同一函数, 不另算一套。"""
+    from app.services.price_basis import minute_prev_close
+
+    prev = _num(level.get("prev_close"))
+    if prev is None or prev <= 0:
+        return None
+    try:
+        return minute_prev_close(prev, reads_adjusted=reads_adjusted)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _processed_stamps(symbol: str, day) -> set[str]:
+    """本进程内该标的当日已处理过的 bar 时间戳。**只用于去重, 不参与判定。**"""
+    key = (symbol, day.isoformat())
+    return set(_T_MINUTE_SEEN.get(key) or ())
+
+
+def _remember_stamps(symbol: str, day, stamps: set[str]) -> None:
+    if not stamps:
+        return
+    key = (symbol, day.isoformat())
+    _T_MINUTE_SEEN[key] = set(_T_MINUTE_SEEN.get(key) or ()) | set(stamps)
+    if len(_T_MINUTE_SEEN) > 512:
+        for stale in list(_T_MINUTE_SEEN)[: len(_T_MINUTE_SEEN) - 512]:
+            _T_MINUTE_SEEN.pop(stale, None)
 
 
 def _live_quote_snapshot(symbols: list[str]) -> dict[str, dict]:
