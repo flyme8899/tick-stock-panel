@@ -2459,4 +2459,21 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 **不是**真推落地；**不是**可放量；**不是**部署 #260。锁面版本 `shadow_obs_v1`；
 默认关；P3b `list_shadow_hits`＝核验钩子≠本观测口。**tip ≠ prod**（prod 仍 `7b55d024…`）。
 
+### 触发/放量门禁契约（批次 20261031gtrig）
+
+触发/放量**门禁**契约（**不是**触发引擎、**不是**放量开闸、**不是**授权翻闸；两
+`*_TRIGGERING_ENABLED` **Final=False 非 env**；翻闸另口令；前置条件表**表≠已可翻**；
+与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **8 条 / 0 清零**；禁六词与价量仓单；
+门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**；**K8 PASS ≠ 可放量 ≠ 可开 TRIGGERING**；
+**门禁契约 ≠ 授权翻闸**）见：
+[buy-sell-signal-trigger-gate.md](./buy-sell-signal-trigger-gate.md)。
+
+常量锁面：[`backend/app/buy_sell_signals/trigger_gate_lock.py`](../backend/app/buy_sell_signals/trigger_gate_lock.py)
+（纯常量 + 断言，无 I/O 写路径；只读交叉 stub 两 TRIGGERING + COMPLETE +
+shadow_obs/T1/T2；**不改 stub 取值、不算行情、不调度、不真推**）。
+
+本拍＝**触发/放量门禁契约文档 + 薄锁面**；**不是**真翻 TRIGGERING；**不是**宣称可放量；
+**不是**完整触发引擎；**不是** schema 进 hits；**不是**改三 env。锁面版本 `trigger_gate_v1`；
+COMPLETE 仍 False；**tip = prod = `c1b19fc8…`**（#261 已 live）。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*
