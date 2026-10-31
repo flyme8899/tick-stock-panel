@@ -2495,4 +2495,26 @@ trigger_gate/shadow_obs/T1/T2；**模块别名活引用**；**不改 models/模�
 **不是**真翻 TRIGGERING；**不是**宣称可放量；**不是**改三 env。锁面版本 `schema_push_v1`；
 COMPLETE 仍 False；schema 仍 `"1"`；**tip = prod = `5569c8b5…`**（#262+#261+#260+#259… live）。
 
+### hits schema 真推 live 开档（批次 20261031gschemalive）
+
+hits schema **真推 live 开档/落地层**契约（**不是** bump schema、**不是** 新增 live
+写入/调度、**不是** 翻 TRIGGERING、**不是** 可放量；`HITS_SCHEMA_VERSION` 仍 `"1"`；
+旁注「研究档 · 未放量」已落到模板；前置核对清单**表齐 ≠ 可放量 ≠ 可翻闸 ≠ 可调度写 live**；
+`build_hit_dingtalk_text` **仅追加**旁注、`try_push_hit` 门序零碰；
+门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**；**K8 ≠ 可放量 ≠ 可开 TRIGGERING**；
+**门禁契约 ≠ 授权翻闸**；**schema 门禁契约 ≠ 授权真推 live**；
+**开档/旁注落地 ≠ 可放量 ≠ 翻闸 ≠ 已有 live 写入**）见：
+[buy-sell-signal-schema-push-live.md](./buy-sell-signal-schema-push-live.md)。
+
+常量锁面：[`backend/app/buy_sell_signals/schema_push_live_lock.py`](../backend/app/buy_sell_signals/schema_push_live_lock.py)
+（纯常量 + 断言，无 I/O 写路径；只读交叉 schema_push_v1 + schema version + 两 TRIGGERING +
+COMPLETE + trigger_gate/shadow_obs/T1/T2；**模块别名活引用**；不 import `hits_dingtalk`
+——旁注一致性由测例交叉咬住；**不改 models 字段集、不 bump schema、不算行情、不调度、
+不写 live、不改 try_push_hit 门序**）。
+
+本拍＝**真推 live 开档契约文档 + 旁注最小触碰 + 薄锁面**；**不是** bump schema；
+**不是** 真翻 TRIGGERING；**不是** 宣称可放量；**不是** 改三 env；**不是** 新增 live
+写入。锁面版本 `schema_push_live_v1`；COMPLETE 仍 False；schema 仍 `"1"`；
+**tip = prod = `5ca44098…`**（#263+#262+#261+#260+#259… live）。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*

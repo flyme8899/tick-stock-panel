@@ -253,6 +253,14 @@ def build_hit_dingtalk_text(hit: SignalHit) -> tuple[str, str]:
     正文**只放可审计的标识**: symbol / direction_label / signal_id / definition_version
     / asof / family / event_class / hit_id。**不放价格、数量、仓位、订单、任何可执行
     指令** —— 本包没有这些数据, 凭空补一个"参考价"就是 fabricate。
+
+    另固定带一行旁注「研究档 · 未放量」(批次 20261031gschemalive)。T1/T2/shadow-obs
+    三份契约早就写明"真推须带旁注", 但一直只在文档里 —— 本拍把它落到模板。旁注**不是**
+    免责话术的重复, 而是**内容定性**: 这条命中的档位来自研究档, 未放量。少了它, 群里
+    看到的就是一条没有档位语境的命中, 读者只能自己猜。
+
+    旁注文案固定, 不接受参数、不做拼接 —— 可配置的旁注等于没有旁注。
+    它不含价格/数量/仓位/订单, 也不含动作指令式。
     """
     title = f"买卖信号命中 · {hit.symbol}"[:64]
     lines = [
@@ -260,6 +268,7 @@ def build_hit_dingtalk_text(hit: SignalHit) -> tuple[str, str]:
         f"signal_id={hit.signal_id} · definition_version={hit.definition_version} · asof={hit.asof}",
         f"family={hit.family} · event_class={hit.event_class} · hit_id={hit.hit_id}",
         "",
+        "研究档 · 未放量",
         f"_{_disclaimer.DISCLAIMER_TEXT}_",
     ]
     return title, "\n".join(lines)
