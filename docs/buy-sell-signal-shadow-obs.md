@@ -223,6 +223,12 @@ track + asof_grain + mode + (tier 或 显式无档)
 
 ---
 
+> **触发/放量门禁契约已开（批次 20261031gtrig）**：门禁契约见
+> [buy-sell-signal-trigger-gate.md](./buy-sell-signal-trigger-gate.md)
+> （锁面 `trigger_gate_lock.py`，版本 `trigger_gate_v1`）。
+> 本文件规则正文语义**不变**；门禁**只读交叉**观测口默认关取向，
+> **不是**授权翻闸，**不是**可放量。
+
 ## 9. 挂点与另口令
 
 **挂点** ＝ 观测/研究侧只读口契约（本文 + `shadow_obs_lock.py`）。
