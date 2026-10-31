@@ -2444,4 +2444,19 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 **不是**算档 / UI 真接线；**不是**可放量。锁面版本 `tier_display_v1`；
 **T1≺T2（T1 已满足）**。
 
+### R2-3 独立影子观测口契约（批次 20261031gshadow）
+
+独立只读影子观测口契约（**默认关 / 显式开**；空态/过期标记 `closed`/`empty`/`stale`/`ok`；
+**空桶不得报 `ok`**；内容**不并入** `/hits/scope`；只读 P3b 三键分桶；兼容 T1/T2 四元组；
+禁六词与价量仓单；门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**）见：
+[buy-sell-signal-shadow-obs.md](./buy-sell-signal-shadow-obs.md)。
+
+常量锁面：[`backend/app/buy_sell_signals/shadow_obs_lock.py`](../backend/app/buy_sell_signals/shadow_obs_lock.py)
+（纯常量 + 断言，无 I/O 写路径；只读交叉 T1/T2 + P3a；**不算档、不写 hits、
+不接线完整 UI / 钉钉**）。
+
+本拍＝**R2-3 观测口契约文档 + 薄锁面**；**不是**完整 UI 开通；**不是** schema 进 hits；
+**不是**真推落地；**不是**可放量；**不是**部署 #260。锁面版本 `shadow_obs_v1`；
+默认关；P3b `list_shadow_hits`＝核验钩子≠本观测口。**tip ≠ prod**（prod 仍 `7b55d024…`）。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*

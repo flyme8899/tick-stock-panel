@@ -237,6 +237,12 @@ T2（字段契约：本文件）        ←  本拍
 T1 **已满足**（`tier_cut_v1` 在 tip＝prod 上）。本文件是 T2 的**字段契约**部分。
 T2 之下还有若干"接线"事项，全部另口令 —— **本拍交付的是契约，不是接线**。
 
+> **R2-3 观测口契约已开（批次 20261031gshadow）**：独立影子观测口契约见
+> [buy-sell-signal-shadow-obs.md](./buy-sell-signal-shadow-obs.md)
+> （锁面 `shadow_obs_lock.py`，版本 `shadow_obs_v1`）。
+> 本文件规则正文语义**不变**；观测口**只读兼容**四元组与禁六词/价量仓单，**不重定义**。
+> 完整观测 UI / schema 进 hits / 真推旁注落地**仍全部另口令**。
+
 ## 10. 锁面模块
 
 [`tier_display_lock.py`](../backend/app/buy_sell_signals/tier_display_lock.py)：
