@@ -188,4 +188,9 @@ schema 存的是「研究了什么、结论方向、时点」，不是「去下�
 
 ---
 
+> **hits schema 真推 live 开档已开（批次 20261031gschemalive）**：开档契约见
+> [buy-sell-signal-schema-push-live.md](./buy-sell-signal-schema-push-live.md)
+> （锁面 `schema_push_live_lock.py`；旁注「研究档 · 未放量」已落到模板）。本文件门禁正文语义不变；
+> **开档 ≠ 可放量 ≠ 翻闸 ≠ 已有 live 写入**；schema 仍 `"1"`（不 bump）；`try_push_hit` 门序零碰。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*
