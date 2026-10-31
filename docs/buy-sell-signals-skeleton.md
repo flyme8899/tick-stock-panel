@@ -2476,4 +2476,23 @@ shadow_obs/T1/T2；**不改 stub 取值、不算行情、不调度、不真推**
 **不是**完整触发引擎；**不是** schema 进 hits；**不是**改三 env。锁面版本 `trigger_gate_v1`；
 COMPLETE 仍 False；**tip = prod = `c1b19fc8…`**（#261 已 live）。
 
+### hits schema 真推门禁契约（批次 20261031gschema）
+
+hits schema **真推门禁**契约（**不是**立刻真推上线、**不是**完整 schema 迁移、
+**不是**授权真推 live；`HITS_SCHEMA_VERSION` 仍 `"1"`；真推另口令；
+前置条件表**表 ≠ 已可真推**；与 P3a/shadow/trigger_gate/live 模板关系；
+禁六词与价量仓单；门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**；
+**K8 ≠ 可放量 ≠ 可开 TRIGGERING**；**门禁契约 ≠ 授权翻闸**；
+**schema 门禁契约 ≠ 授权真推 live**）见：
+[buy-sell-signal-schema-push.md](./buy-sell-signal-schema-push.md)。
+
+常量锁面：[`backend/app/buy_sell_signals/schema_push_lock.py`](../backend/app/buy_sell_signals/schema_push_lock.py)
+（纯常量 + 断言，无 I/O 写路径；只读交叉 schema version + 两 TRIGGERING + COMPLETE +
+trigger_gate/shadow_obs/T1/T2；**模块别名活引用**；**不改 models/模板、不 bump schema、
+不算行情、不调度、不真推**）。
+
+本拍＝**hits schema 真推门禁契约文档 + 薄锁面**；**不是**真推 live；**不是** bump schema；
+**不是**真翻 TRIGGERING；**不是**宣称可放量；**不是**改三 env。锁面版本 `schema_push_v1`；
+COMPLETE 仍 False；schema 仍 `"1"`；**tip = prod = `5569c8b5…`**（#262+#261+#260+#259… live）。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*

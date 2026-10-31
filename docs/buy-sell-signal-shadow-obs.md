@@ -284,4 +284,9 @@ track + asof_grain + mode + (tier 或 显式无档)
 
 ---
 
+> **hits schema 真推门禁契约已开（批次 20261031gschema）**：门禁契约见
+> [buy-sell-signal-schema-push.md](./buy-sell-signal-schema-push.md)
+> （锁面 `schema_push_lock.py`）。本文件规则正文语义不变；schema 门禁只读交叉本门禁，
+> **不是**授权真推 live，**不是**授权翻闸，**不是**可放量。
+
 *仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*
