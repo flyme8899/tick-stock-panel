@@ -150,6 +150,25 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 
 **P3b 之后的口径**: 影子**能落盘了**, 但**落盘 ≠ 可见 ≠ 可推** —— 三重门原样还在。
 
+**gthresh 做了什么(批次 20261101gthresh · P-bss-evidence · 阈值负锁语义)**: **不清标签**。
+
+- **新模块** `threshold_neg_lock.py`(`threshold_neg_lock_v1`): 把 tip 上散在三处的
+  同一句话 —— `threshold_lock_data_pending` 仍开 / `strongly_negative` ≠ 阈值已锁 /
+  `FreqLockStamp` ≠ 可清标签 —— 收成**纯常量 + 纯断言**, **无 I/O**。
+- **语义**: 这条标签缺的是一个**解释**(四个突破口径回测全负 `-23.86 / -32.44 /
+  -13.80 / -19.81`), 不是一个外部凭证。**负锁 ≠ 删标签**; 负号解释清楚之前,
+  量比 / 突破幅度 / 窗口分钟数钉什么都是**更精确的亏损**。
+- **断言**: `assert_threshold_lock_still_pending`(标签必须还在) /
+  `assert_no_tradeable_threshold_nail`(禁钉可交易数, 钉＝fabricate) /
+  两条只读交叉(`strongly_negative` / `FreqLockStamp`) —— 全部**正常出口＝什么都不发生**,
+  **import 不硬 raise**。
+- **刻意不 import** `freq_lock` / 不从触发表 import verdict: 交叉是语义层面的,
+  为一条断言 import 一整个模块会把"零碰"变成"零碰但依赖"; 两边取值相等由**测例**咬住。
+
+**gthresh 没做**: 清 `threshold_lock_data_pending`(VOLUME / AUCTION 任一侧都不删) ·
+降 COUNT(仍派生＝6) · 钉可交易阈值 · 翻两 TRIGGERING / COMPLETE · 改三 env ·
+抢 http / auction 清零 · 完整触发引擎 / 调度 · bump `trigger_gate_v1`(显式不 bump, 同 #265/#266)。
+
 估值与健康**未测通**, 只返回 `data_pending` / `design_pending`; `health_veto_hit`
 保持 `None`(不是 `False` —— `False` 是一个"查过、没命中"的结论)。
 
@@ -350,6 +369,19 @@ from .volume_breakout_stub import (
     build_volume_breakout_record,
     evaluate_volume_breakout,
 )
+from .threshold_neg_lock import (
+    EXPECTED_EVIDENCE_TABLE_VERDICT_WHEN_UNLOCKED,
+    THRESHOLD_LOCK_TAG_MUST_REMAIN,
+    THRESHOLD_NEG_LOCK_NOTE,
+    THRESHOLD_NEG_LOCK_VERSION,
+    TRADEABLE_THRESHOLD_FIELDS,
+    ThresholdTagRemovedError,
+    TradeableThresholdNailError,
+    assert_freq_lock_stamp_is_not_clear_reason,
+    assert_no_tradeable_threshold_nail,
+    assert_strongly_negative_does_not_lock_threshold,
+    assert_threshold_lock_still_pending,
+)
 
 __all__ = [
     "AUCTION_ABNORMAL_AUCTION_STAT_BUCKET",
@@ -372,6 +404,17 @@ __all__ = [
     "EvalRow",
     "EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE",
     "EVENT_TRACK_SHADOW_BLOCK_TOKEN",
+    "EXPECTED_EVIDENCE_TABLE_VERDICT_WHEN_UNLOCKED",
+    "THRESHOLD_LOCK_TAG_MUST_REMAIN",
+    "THRESHOLD_NEG_LOCK_NOTE",
+    "THRESHOLD_NEG_LOCK_VERSION",
+    "TRADEABLE_THRESHOLD_FIELDS",
+    "ThresholdTagRemovedError",
+    "TradeableThresholdNailError",
+    "assert_freq_lock_stamp_is_not_clear_reason",
+    "assert_no_tradeable_threshold_nail",
+    "assert_strongly_negative_does_not_lock_threshold",
+    "assert_threshold_lock_still_pending",
     "FIRST_SEEN_MEANING",
     "FIRST_SEEN_NOT",
     "PREFERRED_SOURCE",
