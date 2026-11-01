@@ -386,8 +386,10 @@ def test_m10b_threshold_lock_pending_is_still_pending():
     from app.buy_sell_signals import volume_breakout_stub as vb
 
     assert "threshold_lock_data_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
-    # 批次 20261101gevid 清了触发表那条，剩 3（阈值锁**不在**被清之列）
-    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 3
+    # 批次 20261101gevid 清了触发表那条、20261101gevid3 清了本机分钟库那条，
+    # 剩 2（阈值锁**不在**被清之列）
+    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
+    assert "http_minute_listing_auth_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
 
 
 # ======================================================= M11 · calibrated 字段

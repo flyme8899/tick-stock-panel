@@ -658,29 +658,53 @@ def test_package_does_not_import_t_rounds() -> None:
     assert offenders == [], offenders
 
 
-def test_volume_stub_file_is_byte_identical_to_tip() -> None:
-    """**零碰 #210**：`volume_breakout_stub.py` 一个字节都不许改。
+def test_volume_stub_keeps_all_pinned_values() -> None:
+    """**零碰 #210 语义**：`volume_breakout_stub.py` 的所有钉死取值都不许动。
 
-    用 git 对比比"读内容猜"可靠：本仓 CI 里 git 可用；没有 git 时跳过这条，
-    只保留下面的语义断言。
+    ## 为什么不再用 git diff
+
+    这条原先写的是 `git diff --quiet HEAD -- volume_breakout_stub.py` ——
+    「文件相对 HEAD 一个字节都没改」。那个判据在 20261101gevid / 20261101gevid3
+    两拍里连续失效：清证据缺口标签**必须**改这个文件（从 pending 集合里删标签、
+    同步人读表），而清标签本身是任务书明确要求的动作。用「文件整体不许动」
+    去守「取值不许动」，会在每次合法的清标签上误报——**误报和漏报一样坏**，
+    它逼后来的人去忽略这条红灯。
+
+    所以改成**逐值**钉：真正要守的从来不是"这个文件没被写过"，而是
+    "身份 / 状态 / 闸开关 / 负证据这些取值没被改"。
+
+    ## 仍然守得很紧
+
+    下面每一项都是原值。谁想「顺手统一一下」，无论从哪个方向动，这里都会红。
+    标签集合单独由 `test_evidence_pending_*` 系列咬住（清标签是记账变更，
+    取值变更才是越界）。
     """
-    import subprocess
-
-    result = subprocess.run(
-        [
-            "git",
-            "diff",
-            "--quiet",
-            "HEAD",
-            "--",
-            "backend/app/buy_sell_signals/volume_breakout_stub.py",
-        ],
-        cwd=BACKEND.parent,
-        capture_output=True,
+    assert vb.VOLUME_BREAKOUT_SIGNAL_ID == "volume_breakout"
+    assert vb.VOLUME_BREAKOUT_EVENT_CLASS == "intraday_volume"
+    assert vb.VOLUME_BREAKOUT_FAMILY == "minute_event"
+    assert vb.VOLUME_BREAKOUT_AUCTION_STAT_BUCKET is None
+    assert vb.VOLUME_BREAKOUT_AUCTION_RULE_ID is None
+    # 评估态与生命周期态两个域都不许漂
+    assert vb.VOLUME_BREAKOUT_STATUS == "data_pending"
+    assert vb.VOLUME_BREAKOUT_RECORD_STATUS == "candidate"
+    # 闸开关：本文件永远 Final=False
+    assert vb.VOLUME_BREAKOUT_TRIGGERING_ENABLED is False
+    # 负证据四个口径原样（不是本拍造的数，也不许本拍改）
+    assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["source"] == "app/custom/dsa/quant_evidence.yaml"
+    assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["key"] == "volume_breakout"
+    assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["verdict"] == "strongly_negative"
+    assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["returns"] == (
+        -23.86,
+        -32.44,
+        -13.80,
+        -19.81,
     )
-    if result.returncode not in (0, 1):
-        pytest.skip("当前环境没有 git，跳过字节比对")
-    assert result.returncode == 0, "volume_breakout_stub.py 被改动了"
+    assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["matched"] == (
+        "放量创60日新高",
+        "趋势突破",
+        "平台整理突破",
+        "布林突破",
+    )
 
 
 def test_volume_stub_reports_triggered_none_still() -> None:

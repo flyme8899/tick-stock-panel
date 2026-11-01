@@ -6,7 +6,7 @@
 
 **是**：把「放量突破这条信号，在注册表里长什么样」钉成可被测例扫描的常量 ——
 `signal_id` / `event_class` / `family` / `auction_stat_bucket` / `auction_rule_id`
-这五个字段的取值，以及「它为什么还不能跑」的四条证据缺口。
+这五个字段的取值，以及「它为什么还不能跑」的**两条**证据缺口。
 
 **不是**：放量触发引擎。这里没有任何量比计算、没有突破幅度判定、没有窗口分钟数、
 没有回测。`evaluate_volume_breakout()` 恒返回 `data_pending`，**永远不会**返回
@@ -14,12 +14,15 @@
 
 ## 为什么这一拍只能出空桩
 
-三条硬缺口，缺任一条都跑不出一个诚实的结论：
+硬缺口，缺任一条都跑不出一个诚实的结论（原本四条，已清两条，见下文「证据缺口」节）：
 
-1. **本机没有分钟库**。远端 SSH 历史上有分钟数据，但本机既没挂载也没落盘；
-   有远端源 ≠ 本机可跑（软提醒 2）。
-2. **没有触发证据表**。放量突破的回测 / 触发表不存在，所以「量比 > X 且价
+1. **没有触发证据表**。放量突破的回测 / 触发表不存在，所以「量比 > X 且价
    突破 Y」这类阈值没有任何依据可以标定。
+   → **已由批次 20261101gevid 的触发表模块消解**（见 `volume_breakout_evidence_table`）。
+2. **本机分钟库路径未成契约**。远端 SSH 历史上有分钟数据，但本机既没挂载也没落盘；
+   有远端源 ≠ 本机可跑（软提醒 2）。
+   → **已由批次 20261101gevid3 的本机分钟库探针模块消解**（见 `local_minute_lib`）；
+   运行时数据在 `data/kline_minute`，gitignore，**不入仓**。
 3. **HTTP 分钟列目录 401，凭证未交**。这一条不是"忘了配"，是"还没拿到"；
    本文件不写、也不该写任何密码 / 密钥 / token。
 
@@ -59,10 +62,13 @@ PHASE3 §3 里的示意名 `post_open_15m` **还没有**进入这个封闭集。
 **不扩集** —— 扩集等于悄悄修改一个封闭取值域，而封闭域的意义正是"不让人随手
 往里加"。噪声档在本拍只作空桩（`False` / `None`）。
 
-## 四条证据缺口
+## 证据缺口
 
 见 `VOLUME_BREAKOUT_EVIDENCE_PENDING` 与 `VOLUME_BREAKOUT_EVIDENCE`。
-四条全部 `data_pending`，一条都没清。
+原四条，已清两条（触发表 / 本机分钟库探针），**仍有两**条 `data_pending`。
+
+**清零 ≠ 可翻闸。** 清掉一条标签只是"这件具体的事有据可查了"，
+不是"闸开了"、不是"阈值锁了"、更不是"可以放量了"。
 """
 from __future__ import annotations
 
@@ -135,32 +141,35 @@ VOLUME_BREAKOUT_TRIGGERING_ENABLED: Final = False
 真开放量需要另拍（阈值标定 + 触发表 + 负号解释），不是一个开关的事。
 """
 
-# ------------------------------------------------------- 三条证据缺口
+# ------------------------------------------------------- 两条证据缺口
 
 VOLUME_BREAKOUT_EVIDENCE_PENDING: Final = frozenset(
     {
-        "local_minute_lib_data_pending",        # 本机无分钟库
         "http_minute_listing_auth_pending",     # HTTP 列目录 401，凭证未交
         "threshold_lock_data_pending",          # 阈值未锁定
     }
 )
-"""三条证据缺口的**机器可读标签**。全部 `data_pending`，仍无一条可宣称已齐。
+"""**两条**证据缺口的机器可读标签。全部 `data_pending`，仍无一条可宣称已齐。
+
+原始是四条，已清两条（都是**删标签**，不是改后缀留存）：
+
+- `trigger_evidence_table_data_pending`（批次 20261101gevid）——
+  已由 `volume_breakout_evidence_table` 模块把既有负证据形式化为四行触发表
+  （`volume_breakout_evidence_table_v1`）而消解。**清零 ≠ 可翻闸**；
+  **表 PRESENT ≠ 可开 TRIGGERING**；**strongly_negative ≠ 阈值已锁**。
+- `local_minute_lib_data_pending`（批次 20261101gevid3）——
+  已由 `local_minute_lib` 模块把 `settings.data_dir / "kline_minute"` 的
+  Hive `date=*/part.parquet` 布局钉成 `local_minute_lib_v1` 路径契约 +
+  只读探针而消解（运行时数据 gitignore，**未**入仓）。**清零 ≠ 可翻闸**；
+  **落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；
+  **路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**。
 
 标签都以 `pending` 结尾不是巧合：它们是**缺口**，不是完成项。将来清掉某一条时，
 那个标签应当被删掉而不是被改成 `_done` —— 一个已清的条目留在 pending 集合里，
 会让"还有几条没清"这个判断失真。
-
-**已清（批次 20261101gevid）**：`trigger_evidence_table_data_pending` ——
-已由 `volume_breakout_evidence_table` 模块把既有负证据形式化为四行触发表
-（`volume_breakout_evidence_table_v1`）而消解，故**从本集合删除**（不是改后缀留存）。**清零 ≠ 可翻闸**；
-**表 PRESENT ≠ 可开 TRIGGERING**；**strongly_negative ≠ 阈值已锁**。
 """
 
 VOLUME_BREAKOUT_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
-    "local_minute_lib_data_pending": (
-        "本机分钟库",
-        "本机既没挂载也没落盘分钟数据; 远端 SSH 历史有源 != 本机可跑, 不假装触达",
-    ),
     "http_minute_listing_auth_pending": (
         "HTTP 列目录凭证",
         "取分钟数据的 HTTP 入口 401, 凭证未交; 本仓不写、也不该写任何密码或 token",
@@ -175,9 +184,9 @@ VOLUME_BREAKOUT_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
 两处分开写是刻意的：机器读标签，人读说明。键集合必须相等，有测例对比 ——
 只改一处会让另一处悄悄过期。
 
-已清的 `trigger_evidence_table_data_pending` **不再留在本表**：留着它，人读表会
-继续告诉读者"没有触发表"，而触发表已经有了。人读表比机器集更该诚实 ——
-机器集有断言咬住，人读表没有，所以它更容易悄悄变成一句过期的话。
+已清的两条**都不再留在本表**：留着它们，人读表会继续告诉读者"本机既没挂载也没落盘"，
+而探针契约与触发表都已经有了。人读表比机器集更该诚实 —— 机器集有断言咬住，
+人读表没有，所以它更容易悄悄变成一句过期的话。
 """
 
 VOLUME_BREAKOUT_NEGATIVE_EVIDENCE: Final[Mapping[str, Any]] = {

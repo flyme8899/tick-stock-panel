@@ -88,31 +88,33 @@
 | 影子观测口 | 契约在场且**默认关**取向一致 | `shadow_obs_v1` 在场、默认关；**默认关 ≠ 放量** |
 | 三 env | `PERSIST` / `PUSH` / `DINGTALK` | 本拍**零触碰**；不得以翻闸为由改 |
 | P3a 闸 | `NON_LIVE_MODE` 仍拦、无 `allow_shadow` | **仍绿**；本拍不放宽 |
-| **证据缺口** | 两族待补证据是否清零 | **已清 1 / 剩 7**（见 §4.1）—— VOLUME 剩 3、AUCTION 仍 4；已清项＝VOLUME `trigger_evidence_table_data_pending`（触发表契约 + 既有负证据形式化）。**清零一刀 ≠ 可翻闸** |
+| **证据缺口** | 两族待补证据是否清零 | **已清 2 / 剩 6**（见 §4.1）—— VOLUME 剩 2、AUCTION 仍 4；已清项＝VOLUME `trigger_evidence_table_data_pending`（#265 触发表契约）+ `local_minute_lib_data_pending`（#-A-#9 本机分钟库探针契约 + 运行时路径）。**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING** |
 
-### 4.1 证据缺口现 7 条（已诚实清 1），不是一句「待补」
+### 4.1 证据缺口现 6 条（已诚实清 2），不是一句「待补」
 
 两族各有一个 `frozenset` 常量，是**代码里就能读到的**缺口清单，不是文档里的口述：
 
 | 族 | 常量 | 条数 | `*_STATUS` |
 |---|---|---|---|
-| 量能突破 | `VOLUME_BREAKOUT_EVIDENCE_PENDING` | **3** | `data_pending` |
+| 量能突破 | `VOLUME_BREAKOUT_EVIDENCE_PENDING` | **2** | `data_pending` |
 | 竞价异动 | `AUCTION_ABNORMAL_EVIDENCE_PENDING` | **4** | `data_pending` |
 
-本拍（20261101gevid）清了 VOLUME 标签 `trigger_evidence_table_data_pending`：
-交付触发表薄模块 `volume_breakout_evidence_table`（version
-`volume_breakout_evidence_table_v1`），把 tip 已有
-`VOLUME_BREAKOUT_NEGATIVE_EVIDENCE` / `quant_evidence.yaml` · `volume_breakout`
-负证据形式化为可验表行（**未伪造任何收益/样本**）。
+本拍（20261101gevid3）清了 VOLUME 标签 `local_minute_lib_data_pending`：
+交付本机分钟库路径契约 + 探针薄模块 `local_minute_lib`（version
+`local_minute_lib_v1`），约定 `settings.data_dir / "kline_minute"`
+（Hive `date=*/part.parquet`），只读 `probe_*`；测例用 `tmp_path` 造最小分区夹具，
+**未**把 5.1G 分钟数据塞进仓（运行时 `data/kline_minute` 由 gitignore `data/**` 挡住）。
 
 **已清（VOLUME）**
 - `trigger_evidence_table_data_pending` —— 已由触发表契约 + 既有负证据形式化消解；
   **清零 ≠ 可翻闸**；**表 PRESENT ≠ 可开 TRIGGERING**；**strongly_negative ≠ 阈值已锁**
+- `local_minute_lib_data_pending` —— 已由本机分钟库探针契约 + 运行时路径（gitignore）消解；
+  **清零 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；
+  **路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**
 
-缺口明细（只读引自 tip，**本拍只清上面那一条，其余不动**）：
+缺口明细（只读引自 tip，**本拍只清上面 `local_minute_lib_data_pending` 一条，其余不动**）：
 
-**`VOLUME_BREAKOUT_EVIDENCE_PENDING`（仍 3 条）**
-- `local_minute_lib_data_pending` —— 本机无分钟库
+**`VOLUME_BREAKOUT_EVIDENCE_PENDING`（仍 2 条）**
 - `http_minute_listing_auth_pending` —— 分钟列表鉴权未通
 - `threshold_lock_data_pending` —— 量比 / 突破幅度 / 窗口分钟数均未锁定
 
@@ -126,19 +128,27 @@
 > `-23.86 / -32.44 / -13.80 / -19.81`（**全负**）。触发表存在只说明
 > 「我们知道自己过去亏在哪」，不说明「现在可以放量」。
 > 负号没解释，表再完整也只是把问题钉在墙上。
+>
+> **分钟库落盘也不改变闸的状态。** `data/kline_minute` 里有 362 个分区、
+> 5.1G、`2025-05-07`…`2026-10-30`，那只说明「本机有这份数据」，
+> 不说明「阈值标定了」「负号解释清楚了」「可以放量了」。
+> **落盘 ≠ calib ≠ 可放量 ≠ TRIGGERING。**
 
 ### 4.2 为什么把缺口条数写进文档
 
-因为「证据缺口仍在」这句话太软，读者会当成客套。**现 7 条、已清 1 条**是一个可数的数字：
+因为「证据缺口仍在」这句话太软，读者会当成客套。**现 6 条、已清 2 条**是一个可数的数字：
 
-- 它说明**不是差一点**，是还差 7 件具体的事，每件都有名字
+- 它说明**不是差一点**，是还差 6 件具体的事，每件都有名字
 - 它可被断言（本锁面只读引用这两个集合，断言 `*_STATUS == "data_pending"` 且两集合非空）
 - 缺口被整族清空时，`assert` 会提醒「契约描述过时了」，而不是让文档慢慢腐烂
 
-**但断言抓不住"只清了一两条"。** 清掉 VOLUME 那一条之后，VOLUME 仍非空 3 条、
+**但断言抓不住"只清了一两条"。** 清掉 VOLUME 那两条之后，VOLUME 仍非空 2 条、
 STATUS 仍 `data_pending`、COUNT 仍是派生值 —— `assert_evidence_pending_still_open`
-**照过**。所以「8 变 7」这件事必须靠人同步文档、锁面 NOTE 与测例期望。
+**照过**。所以「8 变 7 变 6」这件事必须靠人同步文档、锁面 NOTE 与测例期望。
 把它当成自动兜底，就会在真清空之前一直读到过期的"0/8"。
+
+**清零进度看板"绿" ≠ 可翻闸。** 缺口条数是一个**披露**指标，不是**授权**指标：
+它变小的唯一含义是"文档与代码更诚实了"。**落盘 ≠ 可开 TRIGGERING**。
 
 **文档里的缺口清单必须由常量派生，不能手抄。** 手抄的话，stub 补了一条、表里还是旧的，表就成了「已经补完了」的假象——这比没有表更坏。
 
@@ -239,7 +249,7 @@ STATUS 仍 `data_pending`、COUNT 仍是派生值 —— `assert_evidence_pendin
 
 ### 11.1 缺口清单**派生**而非复制
 
-锁面里 `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 由两个 `*_EVIDENCE_PENDING` **只读求和**，不写 `8` / `7` 这个字面量。理由同 §4.2：手抄的数字会在缺口被补掉后继续骗人 —— 批次 20261101gevid 清了 VOLUME 一条，这个常量**没改一行代码**就自己从 8 变成 7。
+锁面里 `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 由两个 `*_EVIDENCE_PENDING` **只读求和**，不写 `8` / `7` / `6` 这个字面量。理由同 §4.2：手抄的数字会在缺口被补掉后继续骗人 —— 批次 20261101gevid 清了 VOLUME 一条（8 → 7）、批次 20261101gevid3 又清了一条（7 → 6），这个常量**两次都没改一行代码**。
 
 ---
 

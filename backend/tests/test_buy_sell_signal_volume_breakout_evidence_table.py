@@ -262,14 +262,19 @@ def test_t1_table_present_fires_when_row_count_wrong(monkeypatch):
 # ---------------------------------------------------------------- T2 删标签（干净、不空删）
 
 
-def test_t2_pending_exactly_three_without_cleared_tag():
-    """G-T3: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 恰 **3** 条且**不含**已清标签。"""
+def test_t2_pending_exactly_two_without_cleared_tag():
+    """G-T3: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 恰 **2** 条且**不含**已清标签。
+
+    批次 20261101gevid3 又清了 `local_minute_lib_data_pending`（触发表那条由
+    批次 20261101gevid 清），所以这里的期望从 3 变 2 —— 本组测只测触发表那一刀，
+    但仍须如实反映当前集合。
+    """
     from app.buy_sell_signals import volume_breakout_stub as vb
 
-    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 3
+    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
     assert _CLEARED_TAG not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
+    assert "local_minute_lib_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
     assert set(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == {
-        "local_minute_lib_data_pending",
         "http_minute_listing_auth_pending",
         "threshold_lock_data_pending",
     }
@@ -329,12 +334,17 @@ def test_t2_auction_family_untouched():
 
 
 def test_t2_threshold_lock_gap_still_open():
-    """G-T3: **阈值锁那条必须还在** —— 本拍清的是"无触发表"，不是"阈值已标定"。"""
+    """G-T3: **阈值锁那条必须还在** —— 清触发表不等于"阈值已标定"；
+    清本机分钟库（批次 20261101gevid3）也不等于阈值已标定。
+
+    所以这里咬的是"剩下那两条一条没动"，而不是"被清的那条还在"。
+    """
     from app.buy_sell_signals import volume_breakout_stub as vb
 
     assert "threshold_lock_data_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
-    assert "local_minute_lib_data_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
     assert "http_minute_listing_auth_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
+    # 本机分钟库那条已被 20261101gevid3 清掉（探针契约顶上），不再留在 pending
+    assert "local_minute_lib_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
 
 
 def test_t2_clear_is_not_empty_delete():
@@ -358,8 +368,8 @@ def test_t2_clear_is_not_empty_delete():
 # ---------------------------------------------------------------- T3 COUNT 派生 = 7
 
 
-def test_t3_count_is_seven_and_derived():
-    """G-T4: COUNT == 7，且**等于两族之和**（不是手抄的 7）。"""
+def test_t3_count_is_six_and_derived():
+    """G-T4: COUNT == 6，且**等于两族之和**（不是手抄的 6）。"""
     from app.buy_sell_signals import trigger_gate_lock as g
     from app.buy_sell_signals.auction_abnormal_stub import (
         AUCTION_ABNORMAL_EVIDENCE_PENDING,
@@ -368,9 +378,9 @@ def test_t3_count_is_seven_and_derived():
         VOLUME_BREAKOUT_EVIDENCE_PENDING,
     )
 
-    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 3
+    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
     assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 4
-    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 7
+    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 6
     assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -438,15 +448,18 @@ def test_t3_evidence_assert_still_fires_when_status_drifted(monkeypatch):
 # ---------------------------------------------------------------- T4 文档 / 锁面披露
 
 
-def test_t4_gate_doc_discloses_seven_left_one_cleared():
-    """G-T4 / G-T10: 门禁文档披露「已清 1 / 剩 7」，且**没有**旧口径残留。"""
+def test_t4_gate_doc_discloses_six_left_two_cleared():
+    """G-T4 / G-T10: 门禁文档披露「已清 2 / 剩 6」，且**没有**旧口径残留。"""
     text = _DOC_PATH.read_text(encoding="utf-8")
-    assert "已清 1 / 剩 7" in text
-    assert "仍 3 条" in text
+    assert "已清 2 / 剩 6" in text
+    assert "已清 1 / 剩 7" not in text, "文档仍留旧的「已清 1 / 剩 7」"
+    assert "仍 2 条" in text
     assert "仍 4 条" in text
     # 旧口径不得残留
     assert "0 / 8 清零" not in text, "文档仍有旧的「0 / 8 清零」"
     assert "证据缺口是 8 条" not in text
+    assert "证据缺口是 7 条" not in text
+    assert "仍 3 条" not in text
     # 已清标签只在「已清」语境里出现
     assert _CLEARED_TAG in text, "文档应记录已清项名称"
     assert "清零 ≠ 可翻闸" in text
@@ -470,21 +483,24 @@ def test_t4_gate_doc_keeps_big_letters_and_footnote():
     assert lines[-1] == _FOOTNOTE, f"末行不是脚注: {lines[-1]!r}"
 
 
-def test_t4_lock_note_discloses_cleared_one():
-    """G-T4: 锁面 NOTE 披露已清 1 / 剩 7，且带「清零一刀 != 可翻闸」。"""
+def test_t4_lock_note_discloses_two_cleared():
+    """G-T4: 锁面 NOTE 披露已清2/剩6，且带「清零一刀 != 可翻闸」「落盘!=可开TRIGGERING」。"""
     from app.buy_sell_signals import trigger_gate_lock as g
 
     note = g.TRIGGER_GATE_LOCK_NOTE
     assert "证据缺口8条0清零" not in note, "NOTE 仍是旧的 8 条 0 清零"
-    assert "已清1/剩7" in note
+    assert "已清2/剩6" in note
+    assert "已清1/剩7" not in note, "NOTE 仍留旧的「已清1/剩7」"
     assert "清零一刀!=可翻闸" in note
+    assert "落盘!=可开TRIGGERING" in note
 
 
 def test_t4_skeleton_discloses_current_state():
     """G-T4: skeleton 相关披露已同步（不再说「四条」/「8 条 / 0 清零」）。"""
     text = _SKELETON_PATH.read_text(encoding="utf-8")
-    assert "### 三条证据缺口" in text
-    assert "已清 1 / 剩 7" in text
+    assert "### 两条证据缺口" in text
+    assert "已清 2 / 剩 6" in text
+    assert "已清 1 / 剩 7" not in text
     assert "证据缺口 **8 条 / 0 清零**" not in text
 
     lines = [ln for ln in text.splitlines() if ln.strip()]
