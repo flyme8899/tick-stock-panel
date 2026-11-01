@@ -1227,24 +1227,34 @@ data/auction_scan/{YYYY-MM-DD}.json     ← 经 get_scan(data_dir, target) 读
 | `scanned_at` | `metadata["scanned_at"]` | 这个结论基于哪一刻的快照 |
 | `item.symbol` | `symbol` | 缺则整条跳过，不拿空串当标的 |
 | `item.ticker` / `item.name` | `ticker` / `display_name` | 展示用 |
-| `item.gap` | `metadata["gap"]` | 由 scan 内价算出；价本身没落盘 |
+| `item.gap` | `metadata["gap"]` | 由 scan 内价算出 |
 | `item.vol_ratio` | `metadata["vol_ratio"]` | **UI 阈值来源，不当已锁门禁** |
 | `item.auction_volume` | `auction_volume` | 有则填，缺则 `None`（**不填 0**） |
 | `item.auction_amount` | `metadata["auction_amount"]` | |
-| （无）`auction_price` / `prev_close` | `auction_price = None` | 见 `auction_price_not_persisted` |
+| `item.auction_price`（批次 `20261101gauction` 起） | `auction_price` | 有则填，缺/非法则 `None`；**禁 `gap` 倒推** |
+| `item.prev_close`（同上，可选） | `metadata["prev_close"]` | 有则填 |
 
-**为什么 `auction_price` 恒 `None` 而不是用 `gap` 倒推**：`gap` 是相对昨收的比例，
-反推价格还需要 `prev_close` —— 而 `prev_close` 同样没落盘。两个未落盘量的比值
-看起来像个价，实际不可复核。
+**为什么不用 `gap` 倒推 `auction_price`**：`gap = auction_price / prev_close - 1`。
+就算 `prev_close` 现在也落盘了、倒推出来的还是同一个数，但那不是「观测到的价」，
+是「从两个数的比值反算出来的价」—— 看起来像数、实际不可复核。清标签的理由必须是
+**「记下来了」**，不是「能算出来」。
 
-### 四条证据缺口（全部 pending）
+### 三条证据缺口（全部 pending）
+
+原始四条。批次 `20261101gauction` 删掉了 `auction_price_not_persisted`
+（`auction_scan.build_lists` 落盘 `auction_price` / `prev_close`，stub 有则映射），
+是**删标签**而不是改 `_done` 后缀。**清零 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**。
 
 | 标签 | 含义 | 清掉的条件（另拍） |
 |---|---|---|
-| `auction_price_not_persisted` | 落盘 item 只有 `gap` / `vol_ratio` / `auction_volume` / `auction_amount`，**没有** `auction_price` / `prev_close` | 另拍补 scan 落盘 schema（零行为破坏）或接入等价可信价源 |
-| `threshold_lock_data_pending` | UI 列表的 `min_gap` / `min_vol_ratio` 是**页面筛选参数**，不是 PHASE3 回测门禁 | 回测标定后锁 `auction_rule_id` + version |
+| ~~`auction_price_not_persisted`~~ | **已清（`20261101gauction`）**：落盘 item 现在写 `auction_price` / `prev_close`（两值本来就算，只补持久化） | 已由 20261101gauction 补落盘 schema 消解 |
+| `threshold_lock_data_pending` | UI 列表的 `min_gap` / `min_vol_ratio` 是**页面筛选参数**，不是 PHASE3 回测门禁 | 回测标定后锁 `auction_rule_id` + version；**负锁语义见门禁文档 §4.1.1，本拍勿删** |
 | `backtest_evidence_data_pending` | 没有竞价异动的回测表 / 触发表 / 显著性证据 | 另拍证据表 + 门禁样本 |
 | `minute_0925_still_absent` | 分钟库最早仍 09:30 | **保留**；**不**阻塞读 scan 存档；**永不**用 09:30 清掉 |
+
+**旧档案兼容**：历史 JSON 没有 `auction_price` / `prev_close` 键 → 映射出来仍是 `None`。
+这是**诚实**（那天就是没记下来），不是缺陷。标签清除的语义是 **writer 契约 PRESENT**，
+不是「每一个历史文件都已回填」；**禁止**为清标签写回填脚本把历史改成假价。
 
 **`min_vol_ratio` 不是门禁。** 它是页面上「你看列表时想筛多严」的参数，
 随时可能被调。把它写进代码当阈值，等于把一个 UI 偏好升级成统计口径。
@@ -2488,7 +2498,7 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 
 触发/放量**门禁**契约（**不是**触发引擎、**不是**放量开闸、**不是**授权翻闸；两
 `*_TRIGGERING_ENABLED` **Final=False 非 env**；翻闸另口令；前置条件表**表≠已可翻**；
-与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 2 / 剩 6**（VOLUME 2 + AUCTION 4；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；**负锁语义 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；**负锁 ≠ 删标签**；**钉数 ＝ fabricate**；**本拍 ≠ 清零刀**）；禁六词与价量仓单；
+与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 3 / 剩 5**（VOLUME 2 + AUCTION 3；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；**负锁语义 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；**负锁 ≠ 删标签**；**钉数 ＝ fabricate**；**本拍 ≠ 清零刀**）；禁六词与价量仓单；
 门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**；**K8 PASS ≠ 可放量 ≠ 可开 TRIGGERING**；
 **门禁契约 ≠ 授权翻闸**）见：
 [buy-sell-signal-trigger-gate.md](./buy-sell-signal-trigger-gate.md)。

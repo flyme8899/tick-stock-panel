@@ -304,15 +304,17 @@ def test_cross_lock_fires_when_shadow_obs_default_enabled(monkeypatch):
         g.assert_shadow_t1_t2_cross_lock()
 
 
-# ---------------------------------------------------------------- ⑤ 证据缺口（已清 2 / 剩 6）
+# ---------------------------------------------------------------- ⑤ 证据缺口（已清 3 / 剩 5）
 
 
-def test_evidence_pending_is_six_across_two_families():
-    """VOLUME 剩 2 + AUCTION 4 = **6** —— 且总数是**派生的**，不是写死 6。
+def test_evidence_pending_is_five_across_two_families():
+    """VOLUME 剩 2 + AUCTION 3 = **5** —— 且总数是**派生的**，不是写死 5。
 
     批次 20261101gevid 清了 VOLUME 的 `trigger_evidence_table_data_pending`；
-    批次 20261101gevid3 清了 VOLUME 的 `local_minute_lib_data_pending`。
-    这条同时咬住「只清了这两条」：VOLUME 不能是 1 或 3，AUCTION 不能变。
+    批次 20261101gevid3 清了 VOLUME 的 `local_minute_lib_data_pending`；
+    批次 20261101gauction 清了 AUCTION 的 `auction_price_not_persisted`
+    （auction_scan 落盘价 + stub 映射，三条齐）。
+    这条同时咬住「只清了这三条」：VOLUME 不能是 1 或 3，AUCTION 不能是 2 或 4。
     """
     from app.buy_sell_signals import trigger_gate_lock as g
     from app.buy_sell_signals.auction_abnormal_stub import (
@@ -323,9 +325,9 @@ def test_evidence_pending_is_six_across_two_families():
     )
 
     assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
-    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 4
-    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 6
-    # 派生关系：总数 == 两族之和（不是手抄的 6）
+    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 3
+    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 5
+    # 派生关系：总数 == 两族之和（不是手抄的 5）
     assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -439,10 +441,10 @@ def test_trigger_gate_doc_exists_and_covers_contract_points():
         # 4 前置条件表 + 表≠已可翻
         "表 ≠ 已可翻",
         "前置条件表",
-        # 4.1 证据缺口（已清 2 / 剩 6）
+        # 4.1 证据缺口（已清 3 / 剩 5）
         "VOLUME_BREAKOUT_EVIDENCE_PENDING",
         "AUCTION_ABNORMAL_EVIDENCE_PENDING",
-        "已清 2 / 剩 6",
+        "已清 3 / 剩 5",
         "清零 ≠ 可翻闸",
         "落盘 ≠ 可开 TRIGGERING",
         "data_pending",

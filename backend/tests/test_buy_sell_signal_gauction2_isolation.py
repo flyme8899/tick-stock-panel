@@ -28,6 +28,7 @@ import hashlib
 import json
 import re
 from datetime import date
+from datetime import time as dt_time
 from pathlib import Path
 
 import pytest
@@ -397,12 +398,99 @@ def test_candidate_carries_the_mapped_fields(scan_root: Path) -> None:
     assert cand.metadata["scanned_at"].startswith(f"{D1.isoformat()}T09:25")
 
 
-def test_candidate_auction_price_is_always_none(scan_root: Path) -> None:
-    """落盘没有竞价价 —— 诚实 `None`，不填 0、不用 gap 倒推。"""
+def test_legacy_archive_without_price_maps_to_none(scan_root: Path) -> None:
+    """**旧档**（无 `auction_price` 键）→ 仍 `None`：诚实，不填 0、不用 gap 倒推。
+
+    批次 20261101gauction 之前落盘的 JSON 都没有这个键。它们映射出来仍是 `None` ——
+    这是**正确**的（那天确实没记下来），不是缺陷。标签清除的语义是
+    **writer 契约 PRESENT**，不是「每一个历史文件都已回填」。
+    """
     ev = A.evaluate_auction_abnormal(scan_root, D1)
 
     assert ev.candidates
     assert all(c.auction_price is None for c in ev.candidates)
+    # 旧档里的 gap 有值（0.051 / -0.031），但**没有任何一条**被拿来倒推价格
+    assert any(c.metadata["gap"] is not None for c in ev.candidates)
+    assert all("prev_close" not in c.metadata for c in ev.candidates)
+
+
+def test_rich_archive_price_is_mapped(tmp_path: Path) -> None:
+    """**新档**（有 `auction_price` / `prev_close`）→ 映射出来，且等于落盘值。
+
+    这一条是 `test_legacy_archive_without_price_maps_to_none` 的对照：
+    只测「旧档是 None」不够 —— 一个永远返回 `None` 的实现也能过那种测。
+    """
+    root = tmp_path / "data"
+    (root / "auction_scan").mkdir(parents=True)
+    payload = {
+        "trade_date": D1.isoformat(),
+        "scanned_at": f"{D1.isoformat()}T09:25:12+08:00",
+        "server_ts": 0,
+        "scanned_count": 1,
+        "volume_basis": "snapshot_auction_volume",
+        "min_gap": 0.02,
+        "min_vol_ratio": 2.0,
+        "items": [
+            {
+                "symbol": "TEST09.SH",
+                "ticker": "TEST09",
+                "name": "合成九号",
+                "gap": 0.011236,
+                "vol_ratio": 1.5,
+                "auction_volume": 3.0,
+                "auction_amount": 500.0,
+                "auction_price": 18.0,
+                "prev_close": 17.8,
+            }
+        ],
+    }
+    (root / "auction_scan" / f"{D1.isoformat()}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    ev = A.evaluate_auction_abnormal(root, D1)
+    cand = next(c for c in ev.candidates if c.symbol == "TEST09.SH")
+
+    assert cand.auction_price == 18.0
+    assert cand.metadata["prev_close"] == 17.8
+    # 与 gap 自洽（不是倒推出来的，是本来就自洽）
+    # gap 在落盘时已 round 到 6 位，这里按 6 位容差核对自洽性
+    assert abs(cand.auction_price / cand.metadata["prev_close"] - 1 - 0.011236) < 1e-6
+
+
+def test_price_is_never_reversed_from_gap(tmp_path: Path) -> None:
+    """**禁 gap 倒推**：`gap` 与 `prev_close` 都在、但 `auction_price` 缺 → 仍 `None`。
+
+    这是本拍最核心的一条红线。倒推出来的数会「看起来完全正确」
+    （`prev_close * (1 + gap)` 正好等于真价），所以它不会被任何数值断言抓到 ——
+    只能靠「有没有填」来抓：没观测到，就必须是 `None`。
+    """
+    root = tmp_path / "data"
+    (root / "auction_scan").mkdir(parents=True)
+    payload = {
+        "trade_date": D1.isoformat(),
+        "scanned_at": f"{D1.isoformat()}T09:25:12+08:00",
+        "scanned_count": 1,
+        "items": [
+            {
+                "symbol": "TEST10.SH",
+                "gap": 0.05,
+                "vol_ratio": 2.0,
+                # prev_close 有值，auction_price 故意缺
+                "prev_close": 100.0,
+            }
+        ],
+    }
+    (root / "auction_scan" / f"{D1.isoformat()}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    ev = A.evaluate_auction_abnormal(root, D1)
+    cand = next(c for c in ev.candidates if c.symbol == "TEST10.SH")
+
+    # 100.0 * (1 + 0.05) == 105.0 —— 一个「看起来完全正确」的假价
+    assert cand.auction_price is None
+    assert cand.metadata["prev_close"] == 100.0
 
 
 def test_candidate_missing_numbers_stay_none_not_zero(scan_root: Path) -> None:
@@ -481,22 +569,40 @@ def test_payload_trade_date_wins_over_target(tmp_path: Path) -> None:
     assert ev.trade_date == D2
 
 
-# ==================================================== ⑥ 四标签 + 恒不触发
+# ============================================ ⑥ 三标签（原四条，清一条）+ 恒不触发
+#
+# 批次 20261101gauction：`auction_scan.build_lists` 补落盘 `auction_price` /
+# `prev_close`，本模块改为有则映射 → 缺口标签 `auction_price_not_persisted`
+# 被消解并**删除**（删标签，不是改 `_done`）。原四条变三条。
+# **清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**禁 gap 倒推**。
 
 
-def test_evidence_pending_has_exactly_four_tags() -> None:
-    assert len(A.AUCTION_ABNORMAL_EVIDENCE_PENDING) == 4
+def test_evidence_pending_has_exactly_three_tags() -> None:
+    assert len(A.AUCTION_ABNORMAL_EVIDENCE_PENDING) == 3
 
 
-def test_evidence_pending_contains_the_four_required_tags() -> None:
+def test_evidence_pending_contains_the_three_required_tags() -> None:
     assert frozenset(
         {
-            "auction_price_not_persisted",
             "threshold_lock_data_pending",
             "backtest_evidence_data_pending",
             "minute_0925_still_absent",
         }
     ) == A.AUCTION_ABNORMAL_EVIDENCE_PENDING
+
+
+def test_cleared_auction_price_tag_is_gone_not_done() -> None:
+    """清掉的那条是**删标签**，不是改 `_done` 后缀留存。"""
+    assert "auction_price_not_persisted" not in A.AUCTION_ABNORMAL_EVIDENCE_PENDING
+    assert "auction_price_not_persisted" not in A.AUCTION_ABNORMAL_EVIDENCE
+    assert not any(
+        tag.startswith("auction_price") for tag in A.AUCTION_ABNORMAL_EVIDENCE_PENDING
+    )
+
+
+def test_threshold_lock_tag_survives_in_auction_family() -> None:
+    """本拍**勿删** `threshold_lock_data_pending`（两侧都要在）。"""
+    assert "threshold_lock_data_pending" in A.AUCTION_ABNORMAL_EVIDENCE_PENDING
 
 
 def test_evidence_human_table_keys_match() -> None:
@@ -744,18 +850,111 @@ def test_stub_does_not_touch_env_at_all() -> None:
     assert "getenv" not in code
 
 
-def test_auction_scan_service_is_unchanged() -> None:
-    """**默认零改** scan 落盘 / SCAN_WINDOW。"""
-    import subprocess
+def test_auction_scan_service_keeps_its_invariants() -> None:
+    """`auction_scan.py` 的**行为不变式**逐项钉死。
 
-    result = subprocess.run(
-        ["git", "diff", "--quiet", "HEAD", "--", "backend/app/services/auction_scan.py"],
-        cwd=BACKEND.parent,
-        capture_output=True,
+    原本这里判的是「文件相对 HEAD 逐字节未改」。批次 20261101gauction 起，
+    `build_lists` 的 item 多了 `auction_price` / `prev_close` 两个键 ——
+    那个判据会**常红**，而一条长期红的测和一条不存在的测一样没用（误报和漏报
+    一样坏）。所以改成**逐值钉**：真正要保的不是"这个文件没人碰过"，
+    是"SCAN 窗、helpers 算法、筛选阈值、gap 语义一个都没变"。
+
+    只要有人改了其中任何一项，下面总有一条会红。
+    """
+    from app.services import auction_scan as S
+
+    # ① SCAN 窗：09:25:30 – 09:28:00，不改；窗外（含盘后）不补跑
+    assert dt_time(9, 25, 30) == S.SCAN_START
+    assert dt_time(9, 28, 0) == S.SCAN_END
+    assert S.MISFIRE_GRACE_S == 60
+
+    # ② 常量口径
+    assert S.SESSION_MINUTES == 240
+    assert S.SHARES_PER_HAND == 100
+    assert S.WIDE_MIN_GAP == 0.03
+    assert S.LOOKBACK_DAYS == 5
+
+    # ③ helpers 算法：open_price 优先，否则 last_price；昨收同理；**只认正数**
+    assert S._auction_price({"open_price": 18.0, "last_price": 17.5}) == 18.0
+    assert S._auction_price({"last_price": 17.5}) == 17.5
+    assert S._auction_price({"open_price": 0, "last_price": 17.5}) == 17.5
+    assert S._auction_price({}) is None
+    assert S._auction_price({"open_price": -1.0, "last_price": -2.0}) is None
+    assert S._prev_close({"prev_price": 17.8, "prev_close_price": 17.0}) == 17.8
+    assert S._prev_close({"prev_close_price": 17.0}) == 17.0
+    assert S._prev_close({}) is None
+
+    # ④ gap 语义不变：price / prev - 1，保留 6 位
+    row = {
+        "thscode": "600519.SH",
+        "open_price": 18.0,
+        "prev_price": 17.8,
+        "vol_ratio": 2.0,   # 显式给量比 → basis=snapshot_volume_ratio，不依赖 avg_hands
+        "volume": 1000.0,
+    }
+    hits, _wide, _basis = S.build_lists([row], avg_hands={}, gap_min=0.0, ratio_min=0.0)
+    assert hits[0]["gap"] == round(18.0 / 17.8 - 1.0, 6)
+
+    # ⑤ 筛选阈值语义不变：gap 低于 floor 不进 hits
+    _h, wide, _b = S.build_lists([row], avg_hands={}, gap_min=0.5, ratio_min=0.0)
+    assert wide == [] and _h == []
+
+    # ⑥ 没有盘后补扫、没有 09:30 回填。
+    # 注意：本拍在源码里**主动写了「禁止用 09:30 回填」这类说明性注释**，
+    # 所以不能再用「源码里出现 09:30 就红」这种粗糙扫描（会把禁令本身当违规）。
+    # 沿用本文件既有的教训（`_code_without_strings`）：**只扫代码骨架，不扫文本**。
+    #   6a 不存在盘后补扫入口：代码骨架里不出现 backfill / 补扫 这些**标识符**；
+    #   6b 所有 `time(h, m)` 字面量都不得晚于 SCAN_END（09:28），不许为「补到 09:30」加窗；
+    #   6c run_once 在窗外**直接 return**，不进入抓取/落盘分支。
+    assert "SCAN_POST_CLOSE" not in dir(S)
+
+    service = BACKEND / "app" / "services" / "auction_scan.py"
+    skeleton = _code_without_strings(service)
+    assert '"backfill"' not in skeleton.lower()
+    assert "backfill" not in skeleton.lower()
+    assert "补扫" not in skeleton
+    assert "SCAN_POST_CLOSE" not in skeleton
+
+    src = service.read_text(encoding="utf-8")
+    tree = _tree(service)
+
+    # 6b：所有时间字面量都不得晚于 SCAN_END（09:28）。
+    # 源码里是 `SCAN_START = dt_time(9, 25, 30)` —— 名字是 **id** 不是 attr，
+    # 且末段不是 `time`，所以按「调用者名字里含 time」认（`dt_time` / `time` / `datetime.time`）。
+    seen_times: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            callee = node.func.attr
+        else:
+            callee = getattr(node.func, "id", "")
+        if "time" not in callee.lower() or callee.endswith("timestamp"):
+            continue
+        if len(node.args) < 2:
+            continue
+        hour, minute = node.args[0], node.args[1]
+        if isinstance(hour, ast.Constant) and isinstance(minute, ast.Constant):
+            assert isinstance(hour.value, int) and isinstance(minute.value, int)
+            seen_times.append((hour.value, minute.value))
+    assert len(seen_times) >= 2, f"至少应有 SCAN_START / SCAN_END 两个时间字面量，实际 {seen_times}"
+    for hour, minute in seen_times:
+        assert dt_time(hour, minute) <= S.SCAN_END
+
+    # 6c：run_scan 窗外**直接 return**（`outside_window`），不进入抓取/落盘分支
+    run_scan = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "run_scan"
     )
-    if result.returncode not in (0, 1):
-        pytest.skip("当前环境没有 git，跳过字节比对")
-    assert result.returncode == 0, "auction_scan.py 被改动了"
+    run_src = ast.get_source_segment(src, run_scan) or ""
+    assert "in_scan_window" in run_src
+    assert '"outside_window"' in run_src
+    # _fetch_and_store（真正取数 + 落盘）只能在 run_scan 的窗口判断之后被调用
+    lines = src.splitlines()
+    gate_line = next(i for i, ln in enumerate(lines) if '"outside_window"' in ln)
+    fetch_call = next(
+        i for i, ln in enumerate(lines) if "_fetch_and_store(" in ln and "def " not in ln
+    )
+    assert fetch_call > gate_line, "取数/落盘必须在窗口判断之后"
 
 
 # ========================================================== ⑧ 文案红线

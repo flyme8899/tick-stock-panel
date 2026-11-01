@@ -9,9 +9,11 @@
 - `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE` **仍 False**（不翻）
 - **无 `allow_shadow`**
 - 只读交叉 `shadow_obs_v1` / T1 `tier_cut_v1` / T2 `tier_display_v1`
-- 两族证据缺口**仍开着**：已清 2 / 剩 6（批次 20261101gevid 清了 VOLUME 的
+- 两族证据缺口**仍开着**：已清 3 / 剩 5（批次 20261101gevid 清了 VOLUME 的
   `trigger_evidence_table_data_pending`；批次 20261101gevid3 清了 VOLUME 的
-  `local_minute_lib_data_pending`；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**）
+  `local_minute_lib_data_pending`；批次 20261101gauction 清了 AUCTION 的
+  `auction_price_not_persisted`（落盘 schema 补价）；**清零一刀 ≠ 可翻闸**；
+  **落盘 ≠ 可开 TRIGGERING**；**禁 gap 倒推**；**09:25 撮合终态 ≠ 09:30**）
 - **阈值负锁语义 PRESENT**（批次 20261101gthresh · `threshold_neg_lock_v1`）：
   `threshold_lock_data_pending` **仍开**（VOLUME + AUCTION 各一条，本拍都不删）；
   **负锁 ≠ 删标签**；**钉可交易数 ＝ fabricate**；**本拍 ≠ 清零刀**
@@ -102,12 +104,13 @@ TRIGGER_GATE_LOCK_VERSION: Final = "trigger_gate_v1"
 
 改前置表口径 / 缺口披露方式 / 交叉边界 / 禁项**必须** bump。
 
-**本拍（20261101gevid3）显式不 bump，仍 `trigger_gate_v1`。** 理由写在这里，
-免得下一个人以为是漏了：bump 会迫使 `schema_push_lock` /
-`schema_push_live_lock` 的 `EXPECTED_TRIGGER_GATE_LOCK_VERSION` 同步改字面量，
-而那两个文件在本拍任务书里是**零碰**面。为了不把一次"缺口披露更新"扩成
-跨三个锁面的交叉改动，本拍只改 NOTE 与文档披露，version 留待另拍与其交叉同步。
-**未 bump ≠ 未披露**：NOTE / 文档 §4.1 / skeleton 都已同步成「已清 2 / 剩 6」。
+**批次 20261101gevid3 / 20261101gthresh / 20261101gauction 均显式不 bump，
+仍 `trigger_gate_v1`。** 理由写在这里，免得下一个人以为是漏了：bump 会迫使
+`schema_push_lock` / `schema_push_live_lock` 的
+`EXPECTED_TRIGGER_GATE_LOCK_VERSION` 同步改字面量，而那三个文件在历次任务书里
+都是**零碰**面。为了不把一次"缺口披露更新"扩成跨三个锁面的交叉改动，
+这几拍只改 NOTE 与文档披露，version 留待另拍与其交叉同步。
+**未 bump ≠ 未披露**：NOTE / 文档 §4.1 / skeleton 都已同步成「已清 3 / 剩 5」。
 """
 
 # ---------------------------------------------------------------- 交叉期望值
@@ -163,10 +166,11 @@ TRIGGER_GATE_LOCK_NOTE: Final = (
     "触发/放量门禁锁: version=trigger_gate_v1 / "
     "两TRIGGERING Final=False非env / COMPLETE仍False / 无allow_shadow / "
     "只读交叉 shadow_obs_v1 + T1 tier_cut_v1 + T2 tier_display_v1 / "
-    "证据缺口已清2/剩6(触发表契约+本机分钟库探针; 清零一刀!=可翻闸; "
+    "证据缺口已清3/剩5(触发表契约+本机分钟库探针+竞价落盘补价; 清零一刀!=可翻闸; "
     "表PRESENT!=可开TRIGGERING; 落盘!=可开TRIGGERING; 探针PRESENT!=可开TRIGGERING; "
+    "竞价补价PRESENT!=可开TRIGGERING; 禁gap倒推; 09:25撮合终态!=09:30; "
     "strongly_negative!=阈值已锁) / "
-    "threshold负锁语义PRESENT(threshold_neg_lock_v1, 标签仍开, 已清2/剩6, "
+    "threshold负锁语义PRESENT(threshold_neg_lock_v1, 标签仍开(两侧), 已清3/剩5, "
     "负锁!=删标签, 钉可交易数=fabricate, 本拍!=清零刀, FreqLockStamp!=可清标签) / "
     "门禁边Bonferroni不占m=6非永久豁免。"
     "**路径已通!=calib!=可放量!=TRIGGERING**; "
@@ -219,10 +223,11 @@ def assert_evidence_pending_still_open() -> None:
 
     **但它抓不住"只清了一两条"。** 判定只有三件事：某族 pending 为空、STATUS 漂移、
     COUNT 与派生不一致。批次 20261101gevid 清掉 VOLUME 的触发表标签、批次
-    20261101gevid3 清掉 VOLUME 的本机分钟库标签之后，VOLUME 仍有 2 条、
-    STATUS 仍 `data_pending`、COUNT 仍是派生值 —— 这条断言**照过**。
+    20261101gevid3 清掉 VOLUME 的本机分钟库标签、批次 20261101gauction 清掉
+    AUCTION 的落盘补价标签之后，两族仍各有 2 / 3 条、STATUS 仍 `data_pending`、
+    COUNT 仍是派生值 —— 这条断言**照过**。
 
-    所以「清了 2 条、8 变 6」这件事，是靠**人**同步文档/锁面 NOTE/测例期望的，
+    所以「清了 3 条、8 变 5」这件事，是靠**人**同步文档/锁面 NOTE/测例期望的，
     不是靠这条断言提醒。把它当成自动兜底，就会在真清空之前一直读到过期的"0/8"。
     """
     for family, pending, status in (
