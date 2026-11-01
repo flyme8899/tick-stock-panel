@@ -6,7 +6,7 @@
 
 **是**：把「竞价异动这条信号在注册表里长什么样」钉成可被测例扫描的常量，并把
 `auction_scan` 的**既有落盘存档**只读地映射成候选结构 —— 身份、字段映射、
-四条证据缺口，三件事各自钉死。
+三条证据缺口，三件事各自钉死。
 
 **不是**触发引擎。这里没有量比阈值判定、没有 gap 门槛计算、没有回测、没有扫描调度。
 `evaluate_auction_abnormal()` **永远不会**返回"今天竞价异动了"这种结论：
@@ -41,6 +41,13 @@
 
 所以本模块**只读**，且**默认不改** `auction_scan` 的落盘 schema。
 
+> 批次 `20261101gauction` 是一次**例外**，也是唯一一次：`auction_scan.build_lists`
+> 本来就已经算出撮合价与昨收（算 `gap` 必须算），只是没写进 item。本拍把那两个
+> **已算出的中间值**落进 schema，属于补持久化，不是新增取数、不是新行情源，
+> 也没有改动 `SCAN_START` / `SCAN_END` / 筛选阈值 / `gap` / 量比算法。
+> 副作用是缺口标签 `auction_price_not_persisted` 被消解并删除 —— 但那只是
+> "存档里有价了"，**不等于**这条信号被验证过（见下方三条缺口）。
+
 ## 永久硬禁：09:30 冒充 09:25
 
 `auction_ts` 由 `trade_date` + **固定 09:25:00 Asia/Shanghai** 推出，**不读任何分钟
@@ -51,22 +58,34 @@ bar**。用 09:30 或任意开盘后 bar 冒充 09:25 是永久禁止的：两�
 `minute_0925_still_absent` 诚实记着 —— 它**不妨碍**读 scan 存档，但**永不**能用
 09:30 把它清掉。
 
-## 四条证据缺口
+## 三条证据缺口
 
 竞价解阻是**部分**的：prod 有 `data/auction_scan/` 多日 JSON（B1「无 auction 包」
-部分解阻），但 B2 分钟 09:25 仍缺。四条缺口一条都没清：
+部分解阻），但 B2 分钟 09:25 仍缺。批次 `20261101gauction` 清掉一条，**剩三条**：
 
-1. `auction_price_not_persisted` —— 落盘 item 只有 `gap` / `vol_ratio` /
-   `auction_volume` / `auction_amount`，**没有** `auction_price` / `prev_close`。
-   所以本模块 `auction_price` 恒 `None`，并带这个标签；不反推、不用 gap 倒算。
-2. `threshold_lock_data_pending` —— UI 列表用的 `min_gap` / `min_vol_ratio` 是
+1. ~~`auction_price_not_persisted`~~ —— **已清（批次 `20261101gauction`）**。
+   落盘 item 现在除了 `gap` / `vol_ratio` / `auction_volume` / `auction_amount`，
+   还写 `auction_price` / `prev_close`（`build_lists` 里本来就算好了，只补持久化）。
+   本模块 `_candidate_from_item` 有字段就映射、缺字段仍 `None`。
+   **清零 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**禁 gap 倒推**；
+   **09:25 撮合终态**（≠ 09:30）。
+现役三条：
+
+1. `threshold_lock_data_pending` —— UI 列表用的 `min_gap` / `min_vol_ratio` 是
    **页面筛选参数**，不是 PHASE3 回测门禁。本拍**不钉任何数值**，也不把它们
-   当"已锁定阈值"。
-3. `backtest_evidence_data_pending` —— 没有竞价异动的回测表 / 触发表 / 显著性证据。
-4. `minute_0925_still_absent` —— 分钟库仍无 09:25 bar。
+   当"已锁定阈值"。**本拍勿删**（#267 已把这条的负锁语义契约化，见
+   `threshold_neg_lock`）。
+2. `backtest_evidence_data_pending` —— 没有竞价异动的回测表 / 触发表 / 显著性证据。
+3. `minute_0925_still_absent` —— 分钟库仍无 09:25 bar。
 
-**部分解阻 ≠ 整拍可推。** 有存档能映射出候选，只说明字段能对上，不说明这条信号
-经过验证。任何"回测已通过 / 可交易 / 可推送"的说法在本拍都不成立。
+**存档有价 ≠ 有回测 ≠ 可推。** 上一拍是"字段对不上"，这一拍是"字段对上了但没有
+证据说明这个缺口被补完之后信号表现如何"。任何"回测已通过 / 可交易 / 可推送"
+的说法在本拍都不成立。
+
+**旧档案兼容**：历史 JSON 没有 `auction_price` / `prev_close` 键，映射出来仍是
+`None` —— 这是**诚实**的（那天就是没记下来），不是缺陷。标签清除的语义是
+**writer 契约 PRESENT**（同 `local_minute_lib` 的「探针契约」层），不是
+"每一个历史文件都已回填"。**禁止**为清标签去写回填脚本把历史改写成假价。
 """
 from __future__ import annotations
 
@@ -159,17 +178,20 @@ AUCTION_ABNORMAL_TRIGGERING_ENABLED: Final = False
 回测证据 / 分钟 09:25，四件事一件都不能少。
 """
 
-# ------------------------------------------------------- 四条证据缺口
+# ------------------------------------------------------- 三条证据缺口
 
 AUCTION_ABNORMAL_EVIDENCE_PENDING: Final = frozenset(
     {
-        "auction_price_not_persisted",     # 落盘无 auction_price / prev_close
-        "threshold_lock_data_pending",     # UI 阈值 ≠ 已锁回测门禁
+        "threshold_lock_data_pending",     # UI 阈值 ≠ 已锁回测门禁（本拍勿删）
         "backtest_evidence_data_pending",  # 无竞价异动回测 / 触发表
         "minute_0925_still_absent",        # 分钟库仍无 09:25；禁用 09:30 清掉
     }
 )
-"""四条证据缺口的**机器可读标签**。全部 pending，一条都没清。
+"""三条证据缺口的**机器可读标签**。全部 pending，一条都没清。
+
+原始是四条。批次 `20261101gauction` 删掉了 `auction_price_not_persisted`
+（`auction_scan.build_lists` 补落盘 `auction_price` / `prev_close`，本模块有则映射），
+是**删标签**，不是改 `_done` 后缀留存。
 
 标签都以 `pending` 结尾不是巧合：它们是**缺口**，不是完成项。将来清掉某一条时，
 那个标签应当被删掉而不是改成 `_done` —— 已清的条目留在 pending 集合里，
@@ -177,14 +199,12 @@ AUCTION_ABNORMAL_EVIDENCE_PENDING: Final = frozenset(
 
 注意 `minute_0925_still_absent` 是唯一一个**不以 pending 结尾**的，因为它的语义是
 "某样东西**仍然不存在**"，而不是"某件事还没做"。它**不阻塞**读 scan 存档。
+
+**清掉一条不改变闸的状态。** 剩三条里 `threshold_lock_data_pending` 是**负锁**
+（不是待办：缺的是一个解释，不是一个凭证），本拍**零碰**。
 """
 
 AUCTION_ABNORMAL_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
-    "auction_price_not_persisted": (
-        "竞价价未落盘",
-        "落盘 item 只有 gap / vol_ratio / auction_volume / auction_amount;"
-        " 无 auction_price / prev_close, 故 auction_price 恒 None, 不用 gap 倒推",
-    ),
     "threshold_lock_data_pending": (
         "阈值锁定",
         "UI 列表的 min_gap / min_vol_ratio 是页面筛选参数, 不是 PHASE3 回测门禁;"
@@ -306,11 +326,16 @@ class AuctionCandidate:
     """竞价成交量（手）。存档里有就填，没有就 `None` —— 不填 0。"""
 
     auction_price: float | None = None
-    """竞价价格。**恒 `None`** —— 存档没有这个字段。
+    """竞价价格。**存档有就填，缺就 `None`**（批次 `20261101gauction` 起）。
 
-    随 `auction_price_not_persisted` 标签一起返回。**不**用 `gap` 反推价格：
-    `gap` 是相对昨收的比例，反推需要 `prev_close`，而 `prev_close` 同样没落盘。
-    反推出来的"价格"是两个未落盘量的比值，看起来像数、实际不可复核。
+    来源是 `auction_scan.build_lists` 落盘的 `item.auction_price`，也就是
+    09:25 集合竞价撮合终态的代理价（`open_price` 优先，否则 `last_price`）。
+    历史存档没有这个键 → 仍是 `None`（诚实：那天确实没记下来）。
+
+    **永远不用 `gap` 反推价格。** `gap = auction_price / prev_close - 1`，
+    倒推需要 `prev_close`；就算把它也落盘了，倒推出来的也是同一个数，
+    但那不是"观测到的价"，是"从两个数的比值反算出来的价"——看起来像数、
+    实际不可复核，而清标签的理由应当是"记下来了"，不是"能算出来"。
     """
 
     metadata: Mapping[str, Any] = field(default_factory=dict)
@@ -479,7 +504,16 @@ def _candidate_from_item(
     | `item.vol_ratio` | `metadata["vol_ratio"]`（**不**当已锁门禁） |
     | `item.auction_volume` | `auction_volume` |
     | `item.auction_amount` | `metadata["auction_amount"]` |
-    | （无）`auction_price` | `auction_price=None` |
+    | `item.auction_price`（批次 `20261101gauction` 起） | `auction_price`（缺 / 非法 → `None`） |
+    | `item.prev_close`（同上，可选） | `metadata["prev_close"]` |
+
+    **两条硬规矩**：
+
+    1. **禁 `gap` 倒推**。`auction_price` 只能来自 `item["auction_price"]`。
+       哪怕 `gap` 与 `prev_close` 都在，也不许乘除反算 —— 反算出来的是
+       "值"，不是"观测到的价"。
+    2. **旧档不倒推、不补 0**。历史 JSON 没有这个键时 `auction_price` 仍是
+       `None`。这是诚实态，不是缺陷；**禁止**为清标签去写回填脚本。
     """
     symbol = item.get("symbol")
     if not isinstance(symbol, str) or not symbol.strip():
@@ -495,6 +529,13 @@ def _candidate_from_item(
     if scanned_at is not None:
         metadata["scanned_at"] = scanned_at
 
+    # 撮合价：只读存档字段。缺 / 非有限数 / 布尔 → None。
+    # **绝不**用 gap 与 prev_close 反算。
+    mapped_price = _to_float(item.get("auction_price"))
+    prev_close = _to_float(item.get("prev_close"))
+    if prev_close is not None:
+        metadata["prev_close"] = prev_close
+
     return AuctionCandidate(
         symbol=symbol.strip(),
         trade_date=trade_date,
@@ -502,7 +543,7 @@ def _candidate_from_item(
         display_name=str(name).strip() if isinstance(name, str) and name.strip() else None,
         ticker=str(ticker).strip() if isinstance(ticker, str) and ticker.strip() else None,
         auction_volume=_to_float(item.get("auction_volume")),
-        auction_price=None,
+        auction_price=mapped_price,
         metadata=metadata,
     )
 
@@ -519,12 +560,15 @@ def evaluate_auction_abnormal(
     |---|---|---|
     | 没有 `data_dir` / 存档缺失（`state=no_data`） | `no_data` | 空 |
     | 读到存档但没有可映射条目 | `no_candidates` | 空 |
-    | 读到存档且有条目 | `evidence_pending` | 若干候选，全部带四条 pending 标签 |
+    | 读到存档且有条目 | `evidence_pending` | 若干候选，全部带三条 pending 标签 |
 
     第三条路径**最容易误读**：明明映射出了候选、`gap` 和 `vol_ratio` 都有值，
     看起来像"能算了"。但那些值是存档里现成的筛选结果，不是这条信号的触发结论 ——
     阈值没锁定、没有回测、没有 09:25 分钟证据，三条缺口一条没清。所以
     `triggered` 仍然是 `None`。
+
+    批次 `20261101gauction` 之后 `auction_price` 也常有值了。这**不会**让上面这段
+    变成"能算了"：价是观测到的，结论仍然没有证据支撑。
 
     这个函数**不**跑扫描、**不**重抓快照、**不**碰 `SCAN_WINDOW`。
     """

@@ -319,14 +319,18 @@ def test_t2_status_and_triggering_unchanged():
 
 
 def test_t2_auction_family_untouched():
-    """G-T3: AUCTION 族**一条都没动**（本拍不抢）。"""
+    """G-T3 / Z8: AUCTION 族本拍**一条都不动**。
+
+    批次 `20261101gauction` 另拍从 AUCTION 清了 `auction_price_not_persisted`（4 → 3），
+    VOLUME 这一拍自身的钉子改为咬「AUCTION 现在恰是 3 条、且 `threshold_lock_data_pending`
+    仍在」—— 既不再把 4 写死（会跟着别的拍红），也不放松到「随便几条都行」。
+    """
     from app.buy_sell_signals.auction_abnormal_stub import (
         AUCTION_ABNORMAL_EVIDENCE_PENDING,
     )
 
-    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 4
+    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 3
     assert set(AUCTION_ABNORMAL_EVIDENCE_PENDING) == {
-        "auction_price_not_persisted",
         "threshold_lock_data_pending",
         "backtest_evidence_data_pending",
         "minute_0925_still_absent",
@@ -365,11 +369,14 @@ def test_t2_clear_is_not_empty_delete():
     assert [r["return"] for r in rows] == original["returns"]
 
 
-# ---------------------------------------------------------------- T3 COUNT 派生 = 7
+# ---------------------------------------------------------------- T3 COUNT 派生 = 5
 
 
-def test_t3_count_is_six_and_derived():
-    """G-T4: COUNT == 6，且**等于两族之和**（不是手抄的 6）。"""
+def test_t3_count_is_five_and_derived():
+    """G-T4: COUNT == 5，且**等于两族之和**（不是手抄的 5）。
+
+    批次 `20261101gauction`：AUCTION 4 → 3，总数 6 → 5。COUNT 仍派生。
+    """
     from app.buy_sell_signals import trigger_gate_lock as g
     from app.buy_sell_signals.auction_abnormal_stub import (
         AUCTION_ABNORMAL_EVIDENCE_PENDING,
@@ -379,8 +386,8 @@ def test_t3_count_is_six_and_derived():
     )
 
     assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
-    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 4
-    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 6
+    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 3
+    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 5
     assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -388,7 +395,7 @@ def test_t3_count_is_six_and_derived():
 
 
 def test_t3_count_source_is_a_sum_not_a_literal():
-    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量 7。
+    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量 5。
 
     查 AST 不看文本：`len(...) + len(...)` 与 `7` 在 AST 里形状完全不同。
     """
@@ -448,18 +455,20 @@ def test_t3_evidence_assert_still_fires_when_status_drifted(monkeypatch):
 # ---------------------------------------------------------------- T4 文档 / 锁面披露
 
 
-def test_t4_gate_doc_discloses_six_left_two_cleared():
-    """G-T4 / G-T10: 门禁文档披露「已清 2 / 剩 6」，且**没有**旧口径残留。"""
+def test_t4_gate_doc_discloses_five_left_three_cleared():
+    """G-T4 / G-T10: 门禁文档披露「已清 3 / 剩 5」，且**没有**旧口径残留。"""
     text = _DOC_PATH.read_text(encoding="utf-8")
-    assert "已清 2 / 剩 6" in text
+    assert "已清 3 / 剩 5" in text
+    assert "已清 2 / 剩 6" not in text, "文档仍留旧的「已清 2 / 剩 6」"
     assert "已清 1 / 剩 7" not in text, "文档仍留旧的「已清 1 / 剩 7」"
     assert "仍 2 条" in text
-    assert "仍 4 条" in text
+    assert "仍 3 条" in text
     # 旧口径不得残留
     assert "0 / 8 清零" not in text, "文档仍有旧的「0 / 8 清零」"
     assert "证据缺口是 8 条" not in text
     assert "证据缺口是 7 条" not in text
-    assert "仍 3 条" not in text
+    assert "证据缺口现 6 条" not in text
+    assert "仍 4 条" not in text
     # 已清标签只在「已清」语境里出现
     assert _CLEARED_TAG in text, "文档应记录已清项名称"
     assert "清零 ≠ 可翻闸" in text
@@ -483,23 +492,30 @@ def test_t4_gate_doc_keeps_big_letters_and_footnote():
     assert lines[-1] == _FOOTNOTE, f"末行不是脚注: {lines[-1]!r}"
 
 
-def test_t4_lock_note_discloses_two_cleared():
-    """G-T4: 锁面 NOTE 披露已清2/剩6，且带「清零一刀 != 可翻闸」「落盘!=可开TRIGGERING」。"""
+def test_t4_lock_note_discloses_three_cleared():
+    """G-T4: 锁面 NOTE 披露「已清3/剩5」，且带「清零一刀 != 可翻闸」「落盘!=可开TRIGGERING」。"""
     from app.buy_sell_signals import trigger_gate_lock as g
 
     note = g.TRIGGER_GATE_LOCK_NOTE
     assert "证据缺口8条0清零" not in note, "NOTE 仍是旧的 8 条 0 清零"
-    assert "已清2/剩6" in note
+    assert "已清3/剩5" in note
+    assert "已清2/剩6" not in note, "NOTE 仍留旧的「已清2/剩6」"
     assert "已清1/剩7" not in note, "NOTE 仍留旧的「已清1/剩7」"
     assert "清零一刀!=可翻闸" in note
     assert "落盘!=可开TRIGGERING" in note
 
 
 def test_t4_skeleton_discloses_current_state():
-    """G-T4: skeleton 相关披露已同步（不再说「四条」/「8 条 / 0 清零」）。"""
+    """G-T4: skeleton 相关披露已同步。
+
+    VOLUME 自己的节标题就是「### 两条证据缺口」（2 条，本拍不动）；
+    AUCTION 那节是「### 三条证据缺口（全部 pending）」。所以只钉总口径与本拍旧值。
+    """
     text = _SKELETON_PATH.read_text(encoding="utf-8")
-    assert "### 两条证据缺口" in text
-    assert "已清 2 / 剩 6" in text
+    assert "### 两条证据缺口" in text          # VOLUME 自身，仍在
+    assert "### 三条证据缺口（全部 pending）" in text  # AUCTION 3 条
+    assert "已清 3 / 剩 5" in text
+    assert "已清 2 / 剩 6" not in text
     assert "已清 1 / 剩 7" not in text
     assert "证据缺口 **8 条 / 0 清零**" not in text
 

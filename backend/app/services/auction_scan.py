@@ -13,6 +13,34 @@ volume（股）/ turnover，没有竞价量，也没有量比。集合竞价另�
 若某次快照行上出现量比或竞价量字段，则优先用快照字段，不再用这套推算。
 落盘沿用 auction_benchmark 的按日 JSON + ``.part`` 原子替换。
 当天文件已在就跳过；窗口外（含盘后）不补跑。
+
+**批次 `20261101gauction`：item 持久化已算的撮合价 / 昨收。**
+
+`symbol` / `ticker` / `name` / `gap` / `vol_ratio` / `auction_volume` /
+`auction_amount` 之外，item 现在**多两个键**：
+
+- ``auction_price`` —— 竞价窗快照下的**撮合价代理**（``open_price`` 优先，否则
+  ``last_price``）。它就是算 ``gap`` 用的那个 ``price``，本拍只把它**落下来**。
+- ``prev_close`` —— 昨收（``prev_price`` 优先，否则 ``prev_close_price``）。
+
+两个值**本来就已经算出来**了（算 gap 必须算），只是之前没写进 item，
+下游信号侧只能拿 ``auction_price=None`` 并挂一条
+``auction_price_not_persisted`` 的缺口标签。本拍补的是**持久化**，
+不是新的取数逻辑，也不是新的行情源。
+
+**语义＝交易日 09:25 撮合终态**：值是 09:25:30–09:28:00 窗口内某一次快照的
+``open_price``/``last_price``。这个窗口里的 ``volume`` 还没进入连续竞价，
+所以价与量都对应集合竞价那一次离散撮合。禁止用 09:30 及之后的连续竞价价回填，
+禁止为本拍加盘后补扫 —— 那两类数据是**另一个信息集**，混用不会报错，只会让
+竞价类统计整体失真。
+
+**零行为破坏**：筛选 / 排序 / ``gap`` / 量比 / ``WIDE_MIN_GAP`` / ``gap_floor`` /
+``ratio_floor`` 逻辑一个字节没改，只多两个键。
+
+**落盘 ≠ calib ≠ 可放量 ≠ TRIGGERING；清零一刀 ≠ 可翻闸。**
+写下一个价，只说明"这一刻的撮合价被记住了"，不说明"这条信号被验证过"。
+
+仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。
 """
 
 from __future__ import annotations
@@ -246,6 +274,22 @@ def build_lists(
     """返回 (命中列表, 高开≥3% 宽候选, volume_basis)。
 
     宽候选包含命中列表，方便以后只调阈值、不再抓快照。
+
+    每个 item 的键（批次 `20261101gauction` 起）：
+
+    | 键 | 含义 |
+    |---|---|
+    | `symbol` / `ticker` / `name` | 标识 |
+    | `gap` | `auction_price / prev_close - 1`，保留 6 位 |
+    | `vol_ratio` | 量比（口径由 `volume_basis` 说明） |
+    | `auction_volume` | 竞价量（手） |
+    | `auction_amount` | 竞价额 |
+    | `auction_price` | **本拍新增**：09:25 撮合价代理（`open_price` 优先，否则 `last_price`） |
+    | `prev_close` | **本拍新增**：昨收（`prev_price` 优先，否则 `prev_close_price`） |
+
+    后两个键写的是**已经算出来的中间值**，本拍只补持久化：改之前下游只能拿
+    `None` 并挂 `auction_price_not_persisted`；改之后有字段就填、没字段仍 `None`。
+    **禁止**用 `gap` 倒推价格 —— 倒推出来的是同一个数，但那不是"观测到的价"。
     """
     names = name_map or {}
     gap_floor = min_gap() if gap_min is None else gap_min
@@ -291,6 +335,12 @@ def build_lists(
             "vol_ratio": ratio,
             "auction_volume": None if shares is None else round(shares / SHARES_PER_HAND, 4),
             "auction_amount": _amount(row),
+            # 批次 20261101gauction：持久化**已经算出来**的撮合价 / 昨收。
+            # 这两个值就是上面算 gap 用的 price / prev —— 只落盘，不改算法。
+            # 语义＝交易日 09:25 集合竞价撮合终态（SCAN 窗 09:25:30–09:28）；
+            # 不用 09:30 或任意连续竞价价回填，也不为本拍加盘后补扫。
+            "auction_price": price,
+            "prev_close": prev,
         }
         if gap + 1e-9 >= WIDE_MIN_GAP:
             wide.append(item)

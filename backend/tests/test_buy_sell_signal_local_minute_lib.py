@@ -350,11 +350,15 @@ def test_t2_stub_does_not_keep_stale_three_tag_docstring():
     assert _CLEARED_TAG in text
 
 
-# ---------------------------------------------------------------- T3 COUNT 派生 = 6
+# ---------------------------------------------------------------- T3 COUNT 派生 = 5
 
 
-def test_t3_count_is_six_and_derived():
-    """G-T4: COUNT == 6，且**等于两族之和**（不是手抄的 6）。"""
+def test_t3_count_is_five_and_derived():
+    """G-T4: COUNT == 5，且**等于两族之和**（不是手抄的 5）。
+
+    批次 20261101gauction 把 AUCTION 的 `auction_price_not_persisted` 清掉，
+    AUCTION 4 → 3，总数 6 → 5。COUNT 依旧派生，没改成字面量。
+    """
     from app.buy_sell_signals import trigger_gate_lock as g
     from app.buy_sell_signals.auction_abnormal_stub import (
         AUCTION_ABNORMAL_EVIDENCE_PENDING,
@@ -364,8 +368,8 @@ def test_t3_count_is_six_and_derived():
     )
 
     assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
-    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 4
-    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 6
+    assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 3
+    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 5
     assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -373,7 +377,7 @@ def test_t3_count_is_six_and_derived():
 
 
 def test_t3_count_source_is_a_sum_not_a_literal():
-    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量 6。"""
+    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量 5。"""
     from app.buy_sell_signals import trigger_gate_lock as g
 
     tree = ast.parse(Path(g.__file__).read_text(encoding="utf-8"))
@@ -415,17 +419,19 @@ def test_t3_evidence_assert_still_fires_when_family_emptied(monkeypatch):
 # ---------------------------------------------------------------- T4 披露同步
 
 
-def test_t4_gate_doc_discloses_six_left_two_cleared():
-    """G-T4 / G-T10: 门禁文档披露「已清 2 / 剩 6」，且旧口径不残留。"""
+def test_t4_gate_doc_discloses_five_left_three_cleared():
+    """G-T4 / G-T10: 门禁文档披露「已清 3 / 剩 5」，且旧口径不残留。"""
     text = _DOC_PATH.read_text(encoding="utf-8")
-    assert "已清 2 / 剩 6" in text
-    assert "证据缺口现 6 条（已诚实清 2）" in text
+    assert "已清 3 / 剩 5" in text
+    assert "证据缺口现 5 条（已诚实清 3）" in text
     assert "仍 2 条" in text
-    assert "仍 4 条" in text
+    assert "仍 3 条" in text
     # 旧口径不得残留
+    assert "已清 2 / 剩 6" not in text
     assert "已清 1 / 剩 7" not in text
+    assert "证据缺口现 6 条" not in text
     assert "证据缺口现 7 条" not in text
-    assert "仍 3 条" not in text
+    assert "仍 4 条" not in text
     # 已清标签只在「已清」语境里出现，且带大字
     assert _CLEARED_TAG in text
     assert "落盘 ≠ 可开 TRIGGERING" in text
@@ -451,12 +457,13 @@ def test_t4_gate_doc_keeps_big_letters_and_footnote():
     assert lines[-1] == _FOOTNOTE, f"末行不是脚注: {lines[-1]!r}"
 
 
-def test_t4_lock_note_discloses_six_left():
-    """G-T4: 锁面 NOTE 披露「已清2/剩6」，带大字，且不再出现「已清1/剩7」。"""
+def test_t4_lock_note_discloses_five_left():
+    """G-T4: 锁面 NOTE 披露「已清3/剩5」，带大字，且不再出现旧口径。"""
     from app.buy_sell_signals import trigger_gate_lock as g
 
     note = g.TRIGGER_GATE_LOCK_NOTE
-    assert "已清2/剩6" in note
+    assert "已清3/剩5" in note
+    assert "已清2/剩6" not in note
     assert "已清1/剩7" not in note
     assert "清零一刀!=可翻闸" in note
     assert "落盘!=可开TRIGGERING" in note
@@ -466,12 +473,48 @@ def test_t4_lock_note_discloses_six_left():
 
 
 def test_t4_skeleton_discloses_current_state():
-    """G-T4: skeleton 相关披露已同步（不再说「三条」/「已清 1 / 剩 7」）。"""
+    """G-T4: skeleton 相关披露已同步。
+
+    **骨架文档是两族共用的**：VOLUME 那一节标题就是「两条证据缺口」（2 条，本拍不动），
+    AUCTION 那一节才是「三条证据缺口」（4 → 3）。所以不能一句
+    `"### 两条证据缺口" not in text` 把 VOLUME 自己的标题也判成残留 ——
+    那会把合法的同族披露当成旧口径。改为**按族定位**再钉标题下的条数。
+    """
     text = _SKELETON_PATH.read_text(encoding="utf-8")
-    assert "### 两条证据缺口" in text
-    assert "已清 2 / 剩 6" in text
+
+    # 总口径：已清 3 / 剩 5
+    assert "已清 3 / 剩 5" in text
+    assert "已清 2 / 剩 6" not in text
     assert "已清 1 / 剩 7" not in text
-    assert "### 三条证据缺口" not in text
+
+    # AUCTION 节：标题「三条证据缺口」，且标题后第一条表格行数不再是 4
+    assert "### 三条证据缺口（全部 pending）" in text
+    auction_head = text.split("### 三条证据缺口（全部 pending）", 1)[1]
+    auction_block = auction_head.split("\n### ", 1)[0]
+    # 表格行：`| \`tag\`` 开头，含划线已清行（`| ~~\`tag\`~~`）也算一行
+    table_rows = [
+        ln for ln in auction_block.splitlines()
+        if ln.startswith("| `") or ln.startswith("| ~~`")
+    ]
+    assert len(table_rows) == 4, f"AUCTION 缺口表应 4 行（3 现役 + 1 划线已清），实际 {len(table_rows)}"
+    # 已清项必须以**划线**形式保留（人读留痕），不能整行消失、也不能当现役
+    struck = [ln for ln in table_rows if ln.startswith("| ~~`auction_price_not_persisted`~~")]
+    assert len(struck) == 1, "已清标签应保留 1 行划线留痕"
+    live_rows = [ln for ln in table_rows if not ln.startswith("| ~~`")]
+    assert len(live_rows) == 3, f"AUCTION 现役缺口应 3 行，实际 {len(live_rows)}"
+    live_block = "\n".join(live_rows)
+    assert "auction_price_not_persisted" not in live_block, "已清标签不得再当现役缺口列出"
+    assert "threshold_lock_data_pending" in live_block
+
+    # VOLUME 节：标题「两条证据缺口」仍在（属 VOLUME 自己，不是残留）
+    assert "### 两条证据缺口：全 `data_pending`" in text
+    volume_head = text.split("### 两条证据缺口：全 `data_pending`", 1)[1]
+    volume_block = volume_head.split("\n### ", 1)[0]
+    volume_rows = [ln for ln in volume_block.splitlines() if ln.startswith("| `")]
+    assert len(volume_rows) == 2, f"VOLUME 缺口表应 2 行，实际 {len(volume_rows)}"
+
+    # 「四条证据缺口」作为**标题**不得残留（旧口径）
+    assert "### 四条证据缺口" not in text
     # 历史快照行必须标注，不能让读者以为标签仍 pending
     assert "历史快照" in text
     assert "local_minute_lib.py" in text
@@ -485,7 +528,14 @@ def test_t4_no_stale_disclosure_across_docs_and_lock():
 
     注意排除本文件自己：测例里本来就要写旧字符串去断言"它不存在"。
     """
-    needles = ("已清 1 / 剩 7", "仍 3 条", "证据缺口现 7 条", "三条证据缺口")
+    needles = (
+        "已清 1 / 剩 7",
+        "已清 2 / 剩 6",
+        "仍 4 条",
+        "证据缺口现 6 条",
+        "证据缺口现 7 条",
+        "四条证据缺口",
+    )
     candidates = [
         *(_REPO_ROOT / "docs").glob("*.md"),
         Path(__import__("app").__file__).parent / "buy_sell_signals" / "trigger_gate_lock.py",
@@ -550,8 +600,12 @@ def test_t5_direction_bonferroni_schema_untouched():
     assert HITS_SCHEMA_VERSION == "1"
 
 
-def test_t5_auction_family_untouched():
-    """G-T3 / Z8: AUCTION 四条一条不动、TRIGGERING 仍 False。"""
+def test_t5_auction_family_keeps_threshold_and_three_others():
+    """G-T3 / Z8: AUCTION 剩 3 条（只清了 `auction_price_not_persisted`）、TRIGGERING 仍 False。
+
+    批次 20261101gauction：清掉 `auction_price_not_persisted`（auction_scan 已落盘价 + stub 已映射），
+    另三条**一条不动**，尤其 `threshold_lock_data_pending` 必须还在（本拍禁删）。
+    """
     from app.buy_sell_signals.auction_abnormal_stub import (
         AUCTION_ABNORMAL_EVIDENCE_PENDING,
         AUCTION_ABNORMAL_TRIGGERING_ENABLED,
@@ -559,7 +613,6 @@ def test_t5_auction_family_untouched():
 
     assert AUCTION_ABNORMAL_EVIDENCE_PENDING == frozenset(
         {
-            "auction_price_not_persisted",
             "threshold_lock_data_pending",
             "backtest_evidence_data_pending",
             "minute_0925_still_absent",
