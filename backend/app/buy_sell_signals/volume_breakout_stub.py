@@ -135,31 +135,31 @@ VOLUME_BREAKOUT_TRIGGERING_ENABLED: Final = False
 真开放量需要另拍（阈值标定 + 触发表 + 负号解释），不是一个开关的事。
 """
 
-# ------------------------------------------------------- 四条证据缺口
+# ------------------------------------------------------- 三条证据缺口
 
 VOLUME_BREAKOUT_EVIDENCE_PENDING: Final = frozenset(
     {
         "local_minute_lib_data_pending",        # 本机无分钟库
-        "trigger_evidence_table_data_pending",  # 无触发表 / 回测表
         "http_minute_listing_auth_pending",     # HTTP 列目录 401，凭证未交
         "threshold_lock_data_pending",          # 阈值未锁定
     }
 )
-"""四条证据缺口的**机器可读标签**。全部 `data_pending`，一条都没清。
+"""三条证据缺口的**机器可读标签**。全部 `data_pending`，仍无一条可宣称已齐。
 
 标签都以 `pending` 结尾不是巧合：它们是**缺口**，不是完成项。将来清掉某一条时，
 那个标签应当被删掉而不是被改成 `_done` —— 一个已清的条目留在 pending 集合里，
 会让"还有几条没清"这个判断失真。
+
+**已清（批次 20261101gevid）**：`trigger_evidence_table_data_pending` ——
+已由 `volume_breakout_evidence_table` 模块把既有负证据形式化为四行触发表
+（`volume_breakout_evidence_table_v1`）而消解，故**从本集合删除**（不是改后缀留存）。**清零 ≠ 可翻闸**；
+**表 PRESENT ≠ 可开 TRIGGERING**；**strongly_negative ≠ 阈值已锁**。
 """
 
 VOLUME_BREAKOUT_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
     "local_minute_lib_data_pending": (
         "本机分钟库",
         "本机既没挂载也没落盘分钟数据; 远端 SSH 历史有源 != 本机可跑, 不假装触达",
-    ),
-    "trigger_evidence_table_data_pending": (
-        "触发证据表",
-        "没有放量突破的回测表 / 触发表; 缺它, 任何量比与突破幅度阈值都没有标定依据",
     ),
     "http_minute_listing_auth_pending": (
         "HTTP 列目录凭证",
@@ -174,6 +174,10 @@ VOLUME_BREAKOUT_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
 
 两处分开写是刻意的：机器读标签，人读说明。键集合必须相等，有测例对比 ——
 只改一处会让另一处悄悄过期。
+
+已清的 `trigger_evidence_table_data_pending` **不再留在本表**：留着它，人读表会
+继续告诉读者"没有触发表"，而触发表已经有了。人读表比机器集更该诚实 ——
+机器集有断言咬住，人读表没有，所以它更容易悄悄变成一句过期的话。
 """
 
 VOLUME_BREAKOUT_NEGATIVE_EVIDENCE: Final[Mapping[str, Any]] = {

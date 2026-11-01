@@ -88,38 +88,57 @@
 | 影子观测口 | 契约在场且**默认关**取向一致 | `shadow_obs_v1` 在场、默认关；**默认关 ≠ 放量** |
 | 三 env | `PERSIST` / `PUSH` / `DINGTALK` | 本拍**零触碰**；不得以翻闸为由改 |
 | P3a 闸 | `NON_LIVE_MODE` 仍拦、无 `allow_shadow` | **仍绿**；本拍不放宽 |
-| **证据缺口** | 两族待补证据是否清零 | **0 / 8 清零**（见 §4.1）—— 两族各自 4 条，一条都没清 |
+| **证据缺口** | 两族待补证据是否清零 | **已清 1 / 剩 7**（见 §4.1）—— VOLUME 剩 3、AUCTION 仍 4；已清项＝VOLUME `trigger_evidence_table_data_pending`（触发表契约 + 既有负证据形式化）。**清零一刀 ≠ 可翻闸** |
 
-### 4.1 证据缺口是 8 条，不是一句「待补」
+### 4.1 证据缺口现 7 条（已诚实清 1），不是一句「待补」
 
 两族各有一个 `frozenset` 常量，是**代码里就能读到的**缺口清单，不是文档里的口述：
 
 | 族 | 常量 | 条数 | `*_STATUS` |
 |---|---|---|---|
-| 量能突破 | `VOLUME_BREAKOUT_EVIDENCE_PENDING` | **4** | `data_pending` |
+| 量能突破 | `VOLUME_BREAKOUT_EVIDENCE_PENDING` | **3** | `data_pending` |
 | 竞价异动 | `AUCTION_ABNORMAL_EVIDENCE_PENDING` | **4** | `data_pending` |
 
-缺口明细（只读引自 tip，**本拍不动**）：
+本拍（20261101gevid）清了 VOLUME 标签 `trigger_evidence_table_data_pending`：
+交付触发表薄模块 `volume_breakout_evidence_table`（version
+`volume_breakout_evidence_table_v1`），把 tip 已有
+`VOLUME_BREAKOUT_NEGATIVE_EVIDENCE` / `quant_evidence.yaml` · `volume_breakout`
+负证据形式化为可验表行（**未伪造任何收益/样本**）。
 
-**`VOLUME_BREAKOUT_EVIDENCE_PENDING`**
+**已清（VOLUME）**
+- `trigger_evidence_table_data_pending` —— 已由触发表契约 + 既有负证据形式化消解；
+  **清零 ≠ 可翻闸**；**表 PRESENT ≠ 可开 TRIGGERING**；**strongly_negative ≠ 阈值已锁**
+
+缺口明细（只读引自 tip，**本拍只清上面那一条，其余不动**）：
+
+**`VOLUME_BREAKOUT_EVIDENCE_PENDING`（仍 3 条）**
 - `local_minute_lib_data_pending` —— 本机无分钟库
-- `trigger_evidence_table_data_pending` —— 无触发表 / 回测表
-- `threshold_lock_data_pending` —— UI 阈值 ≠ 已锁回测门禁
 - `http_minute_listing_auth_pending` —— 分钟列表鉴权未通
+- `threshold_lock_data_pending` —— 量比 / 突破幅度 / 窗口分钟数均未锁定
 
-**`AUCTION_ABNORMAL_EVIDENCE_PENDING`**
+**`AUCTION_ABNORMAL_EVIDENCE_PENDING`（本拍不抢，仍 4 条）**
 - `auction_price_not_persisted` —— 落盘无 `auction_price` / `prev_close`
 - `threshold_lock_data_pending` —— UI 阈值 ≠ 已锁回测门禁
 - `backtest_evidence_data_pending` —— 无竞价异动回测 / 触发表
 - `minute_0925_still_absent` —— 09:25 分钟数据仍缺
 
-### 4.2 为什么把「8 条」写进文档
+> **清掉一条不改变闸的状态。** 四个突破口径的回测收益仍然是
+> `-23.86 / -32.44 / -13.80 / -19.81`（**全负**）。触发表存在只说明
+> 「我们知道自己过去亏在哪」，不说明「现在可以放量」。
+> 负号没解释，表再完整也只是把问题钉在墙上。
 
-因为「证据缺口仍在」这句话太软，读者会当成客套。**8 条、清零 0 条**是一个可数的数字：
+### 4.2 为什么把缺口条数写进文档
 
-- 它说明**不是差一点**，是差 8 件具体的事，每件都有名字
+因为「证据缺口仍在」这句话太软，读者会当成客套。**现 7 条、已清 1 条**是一个可数的数字：
+
+- 它说明**不是差一点**，是还差 7 件具体的事，每件都有名字
 - 它可被断言（本锁面只读引用这两个集合，断言 `*_STATUS == "data_pending"` 且两集合非空）
-- 缺口哪天被补掉，`assert` 会**在补掉的那一刻**提醒「契约描述过时了」，而不是让文档慢慢腐烂
+- 缺口被整族清空时，`assert` 会提醒「契约描述过时了」，而不是让文档慢慢腐烂
+
+**但断言抓不住"只清了一两条"。** 清掉 VOLUME 那一条之后，VOLUME 仍非空 3 条、
+STATUS 仍 `data_pending`、COUNT 仍是派生值 —— `assert_evidence_pending_still_open`
+**照过**。所以「8 变 7」这件事必须靠人同步文档、锁面 NOTE 与测例期望。
+把它当成自动兜底，就会在真清空之前一直读到过期的"0/8"。
 
 **文档里的缺口清单必须由常量派生，不能手抄。** 手抄的话，stub 补了一条、表里还是旧的，表就成了「已经补完了」的假象——这比没有表更坏。
 
@@ -200,7 +219,7 @@
 
 | 只读交叉对象 | 交叉内容 | 本拍 |
 |---|---|---|
-| `volume_breakout_stub` | `VOLUME_BREAKOUT_TRIGGERING_ENABLED is False` + `EVIDENCE_PENDING`（4 条）+ `STATUS=="data_pending"` | 只读，**不改取值** |
+| `volume_breakout_stub` | `VOLUME_BREAKOUT_TRIGGERING_ENABLED is False` + `EVIDENCE_PENDING`（**3** 条）+ `STATUS=="data_pending"` | 只读，**不改取值** |
 | `auction_abnormal_stub` | `AUCTION_ABNORMAL_TRIGGERING_ENABLED is False` + `EVIDENCE_PENDING`（4 条）+ `STATUS=="data_pending"` | 只读，**不改取值** |
 | `first_seen_audit` | `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE is False` | 只读，**不翻** |
 | `shadow_obs_lock` | `SHADOW_OBS_LOCK_VERSION == "shadow_obs_v1"`；默认关 | 只读交叉，**不重写规则** |
@@ -220,7 +239,7 @@
 
 ### 11.1 缺口清单**派生**而非复制
 
-锁面里 `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 由两个 `*_EVIDENCE_PENDING` **只读求和**，不写 `8` 这个字面量。理由同 §4.2：手抄的数字会在缺口被补掉后继续骗人。
+锁面里 `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 由两个 `*_EVIDENCE_PENDING` **只读求和**，不写 `8` / `7` 这个字面量。理由同 §4.2：手抄的数字会在缺口被补掉后继续骗人 —— 批次 20261101gevid 清了 VOLUME 一条，这个常量**没改一行代码**就自己从 8 变成 7。
 
 ---
 

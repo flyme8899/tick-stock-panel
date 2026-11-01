@@ -279,14 +279,20 @@ def test_stub_api_takes_no_dataframe() -> None:
 # -------------------------------------------- ④ pending 四条可见
 
 
-def test_evidence_pending_has_exactly_four_tags() -> None:
+def test_evidence_pending_has_exactly_three_tags() -> None:
+    """批次 20261101gevid 清掉 `trigger_evidence_table_data_pending` 后**恰好三条**。
+
+    这条同时是「不许顺手多清」的守卫：其余三条（分钟库 / HTTP 鉴权 / 阈值锁）
+    本拍一条都没动，少一条都会在这里红。
+    """
     expected = {
         "local_minute_lib_data_pending",
-        "trigger_evidence_table_data_pending",
         "http_minute_listing_auth_pending",
         "threshold_lock_data_pending",
     }
     assert set(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == expected
+    # 已清的那条必须**真的不在集合里**（不是改成 _done 留在里面）
+    assert "trigger_evidence_table_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
 
 
 def test_evidence_tags_all_end_with_pending() -> None:
@@ -307,11 +313,28 @@ def test_evidence_human_table_explains_each_gate() -> None:
         assert len(what_is_missing.strip()) >= 8, f"{tag} 的说明太短, 等于没说"
 
 
-def test_evidence_covers_minute_lib_evidence_table_auth_and_threshold() -> None:
-    """四条缺口各自的**关键词**都要出现，防止写成"数据没到"这种糊过去的说明。"""
+def test_evidence_covers_minute_lib_auth_and_threshold() -> None:
+    """在册三条缺口各自的**关键词**都要出现，防止写成"数据没到"这种糊过去的说明。"""
     text = " ".join(f"{a} {b}" for a, b in vb.VOLUME_BREAKOUT_EVIDENCE.values())
-    for keyword in ("分钟", "触发", "401", "阈值"):
+    for keyword in ("分钟", "401", "阈值"):
         assert keyword in text, keyword
+
+
+def test_cleared_evidence_table_gap_has_a_real_deliverable() -> None:
+    """「触发表」这条缺口被清，靠的是**真有模块**，不是把标签抹掉。
+
+    人读表里已经没有「触发」描述了 —— 因为缺口没了。但缺口没了必须有对应交付物：
+    `volume_breakout_evidence_table` 四行在册。没有这个模块却删标签，就是空删。
+    """
+    from app.buy_sell_signals import volume_breakout_evidence_table as table
+
+    assert table.VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION == (
+        "volume_breakout_evidence_table_v1"
+    )
+    assert len(list(table.iter_rows())) == 4
+    # 人读表里不该再有「触发表缺失」这类说法
+    text = " ".join(f"{a} {b}" for a, b in vb.VOLUME_BREAKOUT_EVIDENCE.values())
+    assert "没有放量突破的回测表" not in text
 
 
 def test_stub_exposes_pending_tags_to_callers() -> None:
