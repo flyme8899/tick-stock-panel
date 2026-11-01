@@ -167,6 +167,14 @@ VOLUME_BREAKOUT_EVIDENCE_PENDING: Final = frozenset(
 标签都以 `pending` 结尾不是巧合：它们是**缺口**，不是完成项。将来清掉某一条时，
 那个标签应当被删掉而不是被改成 `_done` —— 一个已清的条目留在 pending 集合里，
 会让"还有几条没清"这个判断失真。
+
+**`threshold_lock_data_pending` 是"负锁"，不是"待办"。** 它和
+`http_minute_listing_auth_pending` 并排放在这里，但两者性质不同：前者缺的是
+一个**外部凭证**（拿到就能通），后者缺的是**一个解释** —— 四个突破口径的回测
+收益全负（`-23.86 / -32.44 / -13.80 / -19.81`），负号没解释清楚之前，
+阈值补什么都不能清。语义已由 `threshold_neg_lock`（`threshold_neg_lock_v1`）
+契约化：`assert_threshold_lock_still_pending` 咬住"标签必须还在"，
+`assert_no_tradeable_threshold_nail` 咬住"禁钉可交易数"。**负锁 ≠ 删标签。**
 """
 
 VOLUME_BREAKOUT_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
@@ -176,7 +184,9 @@ VOLUME_BREAKOUT_EVIDENCE: Final[Mapping[str, tuple[str, str]]] = {
     ),
     "threshold_lock_data_pending": (
         "阈值锁定",
-        "量比 / 突破幅度 / 窗口分钟数均未锁定; 本拍不钉任何数值, 也不写 '已锁定'",
+        "量比 / 突破幅度 / 窗口分钟数均未锁定; 本拍不钉任何数值, 也不写 '已锁定'; "
+        "负锁语义已契约化见 threshold_neg_lock（threshold_neg_lock_v1）, "
+        "可钉证据路径清单见门禁文档 §4.1; 仍开 ≠ 已锁; 本拍≠清零刀",
     ),
 }
 """同一批缺口的**人读表**，键与 `VOLUME_BREAKOUT_EVIDENCE_PENDING` 一一对应。

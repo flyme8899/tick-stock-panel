@@ -6,6 +6,9 @@
 > **tip = prod = `c1b19fc8dc684f118db897b5d38902207d0d0777`**（#261 gshadow + #260 T2 + #259 T1 + #254–#258 **已合且已部署 live**）
 > rollback `pre261_20261031_172351` · 本拍新 PR **不部署**
 >
+> **后续批次增补（只增不删，原语义不变）**：#265 `20261101gevid`（触发表契约）、
+> #266 `20261101gevid3`（本机分钟库探针契约）、**`20261101gthresh`（阈值负锁语义 · §4.1.1 / §11.2，`threshold_neg_lock_v1`，标签仍开、COUNT 仍 6）**。
+>
 > **仅供研究，不构成投资建议；执行须人工确认。** 红涨绿跌。成本来回 **18.2bp**。
 
 ---
@@ -117,10 +120,11 @@
 **`VOLUME_BREAKOUT_EVIDENCE_PENDING`（仍 2 条）**
 - `http_minute_listing_auth_pending` —— 分钟列表鉴权未通
 - `threshold_lock_data_pending` —— 量比 / 突破幅度 / 窗口分钟数均未锁定
+  （**负锁语义已契约化，见 §4.1.1 / `threshold_neg_lock`**；可钉证据路径清单见 §4.1.1；**仍开 ≠ 已锁**）
 
 **`AUCTION_ABNORMAL_EVIDENCE_PENDING`（本拍不抢，仍 4 条）**
 - `auction_price_not_persisted` —— 落盘无 `auction_price` / `prev_close`
-- `threshold_lock_data_pending` —— UI 阈值 ≠ 已锁回测门禁
+- `threshold_lock_data_pending` —— UI 阈值 ≠ 已锁回测门禁（**本拍零碰**；负锁语义在 VOLUME 侧，见 §4.1.1）
 - `backtest_evidence_data_pending` —— 无竞价异动回测 / 触发表
 - `minute_0925_still_absent` —— 09:25 分钟数据仍缺
 
@@ -133,6 +137,71 @@
 > 5.1G、`2025-05-07`…`2026-10-30`，那只说明「本机有这份数据」，
 > 不说明「阈值标定了」「负号解释清楚了」「可以放量了」。
 > **落盘 ≠ calib ≠ 可放量 ≠ TRIGGERING。**
+
+### 4.1.1 `threshold_lock_data_pending` 是**负锁**，不是「待办」（批次 20261101gthresh）
+
+> **本小节只交付语义契约，不执行清标签。** 标签 `threshold_lock_data_pending`
+> **仍开**（VOLUME 与 AUCTION 各一条，两条都不删）；COUNT **仍 6**（已清 2 / 剩 6 不变）；
+> **本拍 ≠ 清零刀。**
+
+**披露句（锁面状态）**
+
+| 项 | 状态 |
+|---|---|
+| 阈值负锁语义锁面 | **PRESENT** —— `threshold_neg_lock`（`threshold_neg_lock_v1`） |
+| `threshold_lock_data_pending`（VOLUME） | **仍开**，仍在 `VOLUME_BREAKOUT_EVIDENCE_PENDING` 里 |
+| `threshold_lock_data_pending`（AUCTION） | **仍开**，本拍零碰 |
+| COUNT（`TRIGGER_GATE_EVIDENCE_PENDING_COUNT`） | **仍 6**（派生，VOLUME 2 + AUCTION 4） |
+| 两族 `*_STATUS` | **仍 `data_pending`** |
+| 两 `*_TRIGGERING_ENABLED` / `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE` | **仍 `False`** |
+
+**为什么「负锁」要跟「待办」分开说**
+
+这条标签和 `http_minute_listing_auth_pending` 并排放在同一个 `frozenset` 里，
+但两者缺的东西不一样：
+
+| 标签 | 缺的是什么 | 补齐后能不能清 |
+|---|---|---|
+| `http_minute_listing_auth_pending` | 一个**外部凭证** | 拿到凭证、跑通，就可以考虑清 |
+| `threshold_lock_data_pending` | **一个解释** | 负号解释清楚之前，**补什么都不能清** |
+
+前者是「还没到」，后者是「到了也不能用」。四个突破口径的回测收益
+`-23.86 / -32.44 / -13.80 / -19.81` 全负 —— 在这条负号被解释掉之前，
+量比 / 突破幅度 / 窗口分钟数标定出来的只会是**更精确的亏损**。
+所以越确定 `strongly_negative`，阈值这一格**越该锁着**。
+
+**可钉证据路径清单（研究档 · 本拍不执行清标签）**
+
+下面是「将来另一个口令才**可能考虑**清这条标签」的前置地图。
+**逐条满足 ≠ 自动可清 ≠ 可翻闸** —— 每一条都只是「有资格被讨论」，不是「已成立」。
+
+| # | 前置 | 现状 | 说明 |
+|---|---|---|---|
+| 1 | 负号可解释 | **未成立** | 需要一个能说明「四个口径为什么全负、负在哪」的研究口径（不是「市场不好」这类空话）；解释不清 → 阈值无论怎么钉都是伪的 |
+| 2 | 研究档阈值标定（若采用）须另口令明示 | **未发生** | 即便只做研究档标定，也必须另口令写明「这不是可交易锁」；**不得**静默冒充可交易阈值 |
+| 3 | 真可交易标定的前置已另拍闭合 | **未闭合** | 分钟列表鉴权（`http_minute_listing_auth_pending`）等硬前置仍在；本机分钟库已落盘 ≠ 鉴权已通 |
+| 4 | 人读「均未锁定」被诚实改写的事实基础 | **未具备** | 现在这句「均未锁定」是准确的；要改写它，得先有 1–3 的事实，否则就是改文案冒充进度 |
+| 5 | 测与 COUNT 派生同步 | **长期要求** | 清一条就同步文档 / 锁面 NOTE / 测期望；COUNT 永远派生、绝不手抄；清完仍非空时断言照过，靠人同步 |
+
+**这张清单不能被当成授权。** 它是「清标签这件事有多难」的地图，
+不是「照着做完就能清」的施工图。**在另口令之前，任何一条「已满足」的口头结论
+都不构成清标签的理由。**
+
+**大字**
+
+- **负锁 ≠ 删标签**
+- **钉数 ＝ fabricate**（量比 / 突破% / 窗口分钟数一旦钉值，钉出来的不是标定）
+- **本拍 ≠ 清零刀**
+- **清零一刀 ≠ 可翻闸**
+- **语义锁面 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**
+- **strongly_negative ≠ 阈值已锁**
+- **FreqLockStamp ≠ 可清标签理由**（写下数值 ≠ 证据支持）
+- **门禁契约 ≠ 授权翻闸**；**合入 ≠ 部署**
+
+模块侧对应：`threshold_neg_lock.assert_threshold_lock_still_pending` 咬住「标签必须还在」，
+`assert_no_tradeable_threshold_nail` 咬住「禁钉可交易数」，
+`assert_strongly_negative_does_not_lock_threshold` / `assert_freq_lock_stamp_is_not_clear_reason`
+把两条交叉写成**能被测例调用**的边 —— 写在 docstring 里的话改代码时没人看见，写在断言里的话会红。
 
 ### 4.2 为什么把缺口条数写进文档
 
@@ -229,13 +298,14 @@ STATUS 仍 `data_pending`、COUNT 仍是派生值 —— `assert_evidence_pendin
 
 | 只读交叉对象 | 交叉内容 | 本拍 |
 |---|---|---|
-| `volume_breakout_stub` | `VOLUME_BREAKOUT_TRIGGERING_ENABLED is False` + `EVIDENCE_PENDING`（**3** 条）+ `STATUS=="data_pending"` | 只读，**不改取值** |
+| `volume_breakout_stub` | `VOLUME_BREAKOUT_TRIGGERING_ENABLED is False` + `EVIDENCE_PENDING`（**2** 条）+ `STATUS=="data_pending"` | 只读，**不改取值**；本拍**只在人读说明增补负锁一句**，**不删 pending 键** |
 | `auction_abnormal_stub` | `AUCTION_ABNORMAL_TRIGGERING_ENABLED is False` + `EVIDENCE_PENDING`（4 条）+ `STATUS=="data_pending"` | 只读，**不改取值** |
 | `first_seen_audit` | `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE is False` | 只读，**不翻** |
 | `shadow_obs_lock` | `SHADOW_OBS_LOCK_VERSION == "shadow_obs_v1"`；默认关 | 只读交叉，**不重写规则** |
 | `tier_cut_lock` | `TIER_CUT_RULE_VERSION == "tier_cut_v1"` | 只读交叉 |
 | `tier_display_lock` | `TIER_DISPLAY_LOCK_VERSION == "tier_display_v1"` | 只读交叉 |
 | `constants` | `DIRECTION_LABELS` 三值；`BONFERRONI_M == 6` | **零碰** |
+| `threshold_neg_lock` | `THRESHOLD_NEG_LOCK_VERSION == "threshold_neg_lock_v1"`；标签仍须在 pending；禁钉可交易数 | 本拍**新建**；只读引用 stub / 触发表 / freq_lock，不 import 后两者 |
 
 **不算行情、不改 stub 取值、不调度、不真推、不重写 T1/T2/shadow_obs。**
 
@@ -250,6 +320,36 @@ STATUS 仍 `data_pending`、COUNT 仍是派生值 —— `assert_evidence_pendin
 ### 11.1 缺口清单**派生**而非复制
 
 锁面里 `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 由两个 `*_EVIDENCE_PENDING` **只读求和**，不写 `8` / `7` / `6` 这个字面量。理由同 §4.2：手抄的数字会在缺口被补掉后继续骗人 —— 批次 20261101gevid 清了 VOLUME 一条（8 → 7）、批次 20261101gevid3 又清了一条（7 → 6），这个常量**两次都没改一行代码**。
+
+### 11.2 阈值负锁语义锁面（批次 20261101gthresh）
+
+见 [`backend/app/buy_sell_signals/threshold_neg_lock.py`](../backend/app/buy_sell_signals/threshold_neg_lock.py)（`threshold_neg_lock_v1`）。
+
+**这一层不是缺口清单，是"某条缺口为什么必须继续待着"的契约。** §11 的锁面回答「还剩几条」，
+这里回答「其中 `threshold_lock_data_pending` 那一条，不许被顺手清掉」。
+
+| 常量 / 断言 | 咬住什么 |
+|---|---|
+| `THRESHOLD_LOCK_TAG_MUST_REMAIN = "threshold_lock_data_pending"` | 这条标签的名字，被写成一个**可被引用的名字**，而不是散在文档里的字符串 |
+| `assert_threshold_lock_still_pending(pending)` | 标签**必须还在** pending 里；不在 → raise（`ThresholdTagRemovedError`，继承 `AssertionError`） |
+| `assert_no_tradeable_threshold_nail(...)` | 量比 / 突破% / 窗口分钟数**禁止**被钉成「已锁定」；任一非空 → raise（`TradeableThresholdNailError`） |
+| `assert_strongly_negative_does_not_lock_threshold(verdict)` | 触发表 `strongly_negative` **不**构成阈值已锁 |
+| `assert_freq_lock_stamp_is_not_clear_reason(has_freq_lock_stamp=...)` | 有 `FreqLockStamp` **不是**清标签的理由（写下数值 ≠ 证据支持） |
+
+**本模块刻意不 import `freq_lock` / 不从 `volume_breakout_evidence_table` import verdict。**
+交叉是语义层面的，不是符号层面的 —— 为了一条断言去 import 一整个模块，会让"零碰"
+变成"零碰但依赖"；而跟着那边改名，等于"表变了规矩也自动变"，那这条规矩就没人守了。
+两边取值相等由测例咬住，而不是由 import 咬住。
+
+**version 未 bump 的说明**：`TRIGGER_GATE_LOCK_VERSION` 本拍**显式不 bump**，
+仍为 `trigger_gate_v1`（同 #265 / #266）。理由：bump 会迫使
+`schema_push_lock` / `schema_push_live_lock` 的 `EXPECTED_TRIGGER_GATE_LOCK_VERSION`
+同步改字面量，而那两个文件本拍标零碰 —— 为一个披露变更去动 schema 门禁常量，
+风险大于收益。**未 bump ≠ 未披露**：`TRIGGER_GATE_LOCK_NOTE` 已加旁注，
+本文件 §4.1.1 已写全，测例 T3 钉住负锁 version 非空。交叉 bump 留另拍同步。
+
+**语义锁面 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING。** 这个模块在场，
+恰恰说明这一格**还没清**。
 
 ---
 

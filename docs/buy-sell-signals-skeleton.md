@@ -1031,6 +1031,17 @@ PHASE3 §3 的示意名 `post_open_15m` **尚未入集**，本拍**不扩集**�
 | `http_minute_listing_auth_pending` | 取分钟数据的 HTTP 入口 **401**，凭证未交；本仓不写、也不该写任何密码或 token |
 | `threshold_lock_data_pending` | 量比 / 突破幅度 / 窗口分钟数均未锁定，**一个数值都没钉** |
 
+> **`threshold_lock_data_pending` 是"负锁"，不是"待办"**（批次 `20261101gthresh`）。
+> 它和上面那条并排放在同一个集合里，但两者缺的东西不一样：`http_minute` 缺一个
+> **外部凭证**（拿到就能通），这条缺一个**解释** —— 四个口径回测全负，
+> 负号解释清楚之前，补什么都不能清。语义已由
+> [`threshold_neg_lock`](../backend/app/buy_sell_signals/threshold_neg_lock.py)
+> （`threshold_neg_lock_v1`）契约化：`assert_threshold_lock_still_pending` 咬住
+> "标签必须还在"，`assert_no_tradeable_threshold_nail` 咬住"禁钉可交易数"。
+> **负锁 ≠ 删标签**；**钉数 ＝ fabricate**；**本拍 ≠ 清零刀**；
+> **语义锁面 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；标签**仍开**、COUNT **仍 6**；
+> 可钉证据路径清单见[门禁文档 §4.1.1](./buy-sell-signal-trigger-gate.md)。
+
 > **已清（批次 20261101gevid）**：`trigger_evidence_table_data_pending` —— 已由
 > [`volume_breakout_evidence_table`](../backend/app/buy_sell_signals/volume_breakout_evidence_table.py)
 > 把既有负证据形式化为四行触发表而消解，**已从 pending 集合删除**（非改后缀留存）。
@@ -2477,7 +2488,7 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 
 触发/放量**门禁**契约（**不是**触发引擎、**不是**放量开闸、**不是**授权翻闸；两
 `*_TRIGGERING_ENABLED` **Final=False 非 env**；翻闸另口令；前置条件表**表≠已可翻**；
-与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 2 / 剩 6**（VOLUME 2 + AUCTION 4；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**）；禁六词与价量仓单；
+与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 2 / 剩 6**（VOLUME 2 + AUCTION 4；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；**负锁语义 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；**负锁 ≠ 删标签**；**钉数 ＝ fabricate**；**本拍 ≠ 清零刀**）；禁六词与价量仓单；
 门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**；**K8 PASS ≠ 可放量 ≠ 可开 TRIGGERING**；
 **门禁契约 ≠ 授权翻闸**）见：
 [buy-sell-signal-trigger-gate.md](./buy-sell-signal-trigger-gate.md)。
@@ -2485,6 +2496,10 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 常量锁面：[`backend/app/buy_sell_signals/trigger_gate_lock.py`](../backend/app/buy_sell_signals/trigger_gate_lock.py)
 （纯常量 + 断言，无 I/O 写路径；只读交叉 stub 两 TRIGGERING + COMPLETE +
 shadow_obs/T1/T2；**不改 stub 取值、不算行情、不调度、不真推**）。
+
+阈值负锁语义锁面：[`backend/app/buy_sell_signals/threshold_neg_lock.py`](../backend/app/buy_sell_signals/threshold_neg_lock.py)
+（`threshold_neg_lock_v1`；纯常量 + 断言，**无 I/O**；咬住「`threshold_lock_data_pending` 必须仍在」+
+「禁钉可交易量比/突破%/窗口分钟数」+ 两条只读交叉；**不清标签、不降 COUNT、不翻闸**）。
 
 本拍＝**触发/放量门禁契约文档 + 薄锁面**；**不是**真翻 TRIGGERING；**不是**宣称可放量；
 **不是**完整触发引擎；**不是** schema 进 hits；**不是**改三 env。锁面版本 `trigger_gate_v1`；

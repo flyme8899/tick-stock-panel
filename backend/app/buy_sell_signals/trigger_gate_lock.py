@@ -12,6 +12,9 @@
 - 两族证据缺口**仍开着**：已清 2 / 剩 6（批次 20261101gevid 清了 VOLUME 的
   `trigger_evidence_table_data_pending`；批次 20261101gevid3 清了 VOLUME 的
   `local_minute_lib_data_pending`；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**）
+- **阈值负锁语义 PRESENT**（批次 20261101gthresh · `threshold_neg_lock_v1`）：
+  `threshold_lock_data_pending` **仍开**（VOLUME + AUCTION 各一条，本拍都不删）；
+  **负锁 ≠ 删标签**；**钉可交易数 ＝ fabricate**；**本拍 ≠ 清零刀**
 
 规则全文见 `docs/buy-sell-signal-trigger-gate.md`。文档给人读，模块给测例验。
 
@@ -162,7 +165,10 @@ TRIGGER_GATE_LOCK_NOTE: Final = (
     "只读交叉 shadow_obs_v1 + T1 tier_cut_v1 + T2 tier_display_v1 / "
     "证据缺口已清2/剩6(触发表契约+本机分钟库探针; 清零一刀!=可翻闸; "
     "表PRESENT!=可开TRIGGERING; 落盘!=可开TRIGGERING; 探针PRESENT!=可开TRIGGERING; "
-    "strongly_negative!=阈值已锁) / 门禁边Bonferroni不占m=6非永久豁免。"
+    "strongly_negative!=阈值已锁) / "
+    "threshold负锁语义PRESENT(threshold_neg_lock_v1, 标签仍开, 已清2/剩6, "
+    "负锁!=删标签, 钉可交易数=fabricate, 本拍!=清零刀, FreqLockStamp!=可清标签) / "
+    "门禁边Bonferroni不占m=6非永久豁免。"
     "**路径已通!=calib!=可放量!=TRIGGERING**; "
     "**K8 PASS!=可放量!=可开TRIGGERING**; **讨论!=派单**; "
     "**影子写入!=观测口!=放量**; **门禁契约!=授权翻闸**; "
