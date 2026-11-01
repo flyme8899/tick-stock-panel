@@ -386,7 +386,8 @@ def test_m10b_threshold_lock_pending_is_still_pending():
     from app.buy_sell_signals import volume_breakout_stub as vb
 
     assert "threshold_lock_data_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
-    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 4
+    # 批次 20261101gevid 清了触发表那条，剩 3（阈值锁**不在**被清之列）
+    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 3
 
 
 # ======================================================= M11 · calibrated 字段

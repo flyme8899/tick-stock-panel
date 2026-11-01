@@ -9,7 +9,8 @@
 - `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE` **仍 False**（不翻）
 - **无 `allow_shadow`**
 - 只读交叉 `shadow_obs_v1` / T1 `tier_cut_v1` / T2 `tier_display_v1`
-- 两族证据缺口**仍开着**（0/8 清零）
+- 两族证据缺口**仍开着**：已清 1 / 剩 7（批次 20261101gevid 清了 VOLUME 的
+  `trigger_evidence_table_data_pending`，**清零一刀 ≠ 可翻闸**）
 
 规则全文见 `docs/buy-sell-signal-trigger-gate.md`。文档给人读，模块给测例验。
 
@@ -119,10 +120,16 @@ TRIGGER_GATE_EVIDENCE_STATUS_EXPECTED: Final = "data_pending"
 TRIGGER_GATE_EVIDENCE_PENDING_COUNT: Final = len(
     _vol.VOLUME_BREAKOUT_EVIDENCE_PENDING
 ) + len(_auc.AUCTION_ABNORMAL_EVIDENCE_PENDING)
-"""两族待补证据**总条数**（只读求和，不写死 8）。
+"""两族待补证据**总条数**（只读求和，不写死 8 / 7）。
 
-缺口哪天被补掉，这个数字会跟着变小 —— 那时 `assert_evidence_pending_still_open`
-会炸，提醒「文档 §4.1 该更新了」。
+清掉一条缺口，这个数字**自己就会变小**（批次 20261101gevid 清了 VOLUME 的
+触发表标签，8 → 7，没改这一行代码）。这正是它派生的意义：手抄的数字会在缺口
+被补掉后继续骗人。
+
+**但它不会替你把文档改好。** `assert_evidence_pending_still_open` 只在
+「某一族被清空」或「`*_STATUS` 漂移」时才炸；清个一条两条，两族都还非空、
+STATUS 还是 `data_pending`，断言照过。所以"清了一条"这件事**必须靠人同步
+文档 §4.1 / 锁面 NOTE / 测例期望**，断言兜不住 —— 别把它当成自动提醒。
 """
 
 TRIGGER_GATE_REFUSED_ACTION_PHRASES: Final = (
@@ -145,10 +152,12 @@ TRIGGER_GATE_LOCK_NOTE: Final = (
     "触发/放量门禁锁: version=trigger_gate_v1 / "
     "两TRIGGERING Final=False非env / COMPLETE仍False / 无allow_shadow / "
     "只读交叉 shadow_obs_v1 + T1 tier_cut_v1 + T2 tier_display_v1 / "
-    "证据缺口8条0清零 / 门禁边Bonferroni不占m=6非永久豁免。"
+    "证据缺口已清1/剩7(触发表契约; 清零一刀!=可翻闸; 表PRESENT!=可开TRIGGERING; "
+    "strongly_negative!=阈值已锁) / 门禁边Bonferroni不占m=6非永久豁免。"
     "**路径已通!=calib!=可放量!=TRIGGERING**; "
     "**K8 PASS!=可放量!=可开TRIGGERING**; **讨论!=派单**; "
     "**影子写入!=观测口!=放量**; **门禁契约!=授权翻闸**; "
+    "**清零一刀!=可翻闸**; "
     "**COMPLETE仍False!=可翻COMPLETE**; **合入!=部署**; tip=prod。"
     "本拍不翻闸、不算行情、不调度、不写hits、不真推、不改stub取值。"
 )
@@ -191,10 +200,14 @@ def assert_evidence_pending_still_open() -> None:
     """两族证据缺口**仍开着**，且评估状态仍 `data_pending`。
 
     **这条断了不代表改坏了** —— 缺口被补掉是好事。它断的含义是：
-    **文档 §4.1 的缺口清单与「0/8 清零」描述已经过时**，必须同步更新。
+    **文档 §4.1 的缺口清单与缺口条数描述已经过时**，必须同步更新。
 
-    契约里的数字与清单由常量派生（``TRIGGER_GATE_EVIDENCE_PENDING_COUNT``），
-    就是为了让这一刻**必然可见**，而不是让文档慢慢腐烂成一句客套。
+    **但它抓不住"只清了一两条"。** 判定只有三件事：某族 pending 为空、STATUS 漂移、
+    COUNT 与派生不一致。批次 20261101gevid 清掉 VOLUME 的触发表标签后，VOLUME 仍有
+    3 条、STATUS 仍 `data_pending`、COUNT 仍是派生值 —— 这条断言**照过**。
+
+    所以「清了 1 条、8 变 7」这件事，是靠**人**同步文档/锁面 NOTE/测例期望的，
+    不是靠这条断言提醒。把它当成自动兜底，就会在真清空之前一直读到过期的"0/8"。
     """
     for family, pending, status in (
         ("volume_breakout", _vol.VOLUME_BREAKOUT_EVIDENCE_PENDING, _vol.VOLUME_BREAKOUT_STATUS),

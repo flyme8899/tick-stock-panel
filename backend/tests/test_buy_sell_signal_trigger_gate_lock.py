@@ -304,11 +304,15 @@ def test_cross_lock_fires_when_shadow_obs_default_enabled(monkeypatch):
         g.assert_shadow_t1_t2_cross_lock()
 
 
-# ---------------------------------------------------------------- ⑤ 证据缺口（8 条 / 0 清零）
+# ---------------------------------------------------------------- ⑤ 证据缺口（已清 1 / 剩 7）
 
 
-def test_evidence_pending_is_eight_across_two_families():
-    """两族各 4 条缺口，合计 8 条 —— 且总数是**派生的**，不是写死 8。"""
+def test_evidence_pending_is_seven_across_two_families():
+    """VOLUME 剩 3 + AUCTION 4 = **7** —— 且总数是**派生的**，不是写死 7。
+
+    批次 20261101gevid 清了 VOLUME 的 `trigger_evidence_table_data_pending`。
+    这条同时咬住「只清了一条」：VOLUME 不能是 2 或 4，AUCTION 不能变。
+    """
     from app.buy_sell_signals import trigger_gate_lock as g
     from app.buy_sell_signals.auction_abnormal_stub import (
         AUCTION_ABNORMAL_EVIDENCE_PENDING,
@@ -317,10 +321,10 @@ def test_evidence_pending_is_eight_across_two_families():
         VOLUME_BREAKOUT_EVIDENCE_PENDING,
     )
 
-    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 4
+    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 3
     assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 4
-    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 8
-    # 派生关系：总数 == 两族之和
+    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 7
+    # 派生关系：总数 == 两族之和（不是手抄的 7）
     assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -434,10 +438,11 @@ def test_trigger_gate_doc_exists_and_covers_contract_points():
         # 4 前置条件表 + 表≠已可翻
         "表 ≠ 已可翻",
         "前置条件表",
-        # 4.1 8 条缺口
+        # 4.1 证据缺口（已清 1 / 剩 7）
         "VOLUME_BREAKOUT_EVIDENCE_PENDING",
         "AUCTION_ABNORMAL_EVIDENCE_PENDING",
-        "0 / 8 清零",
+        "已清 1 / 剩 7",
+        "清零 ≠ 可翻闸",
         "data_pending",
         # 5 与 COMPLETE/calib/K8/影子
         "EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE",
