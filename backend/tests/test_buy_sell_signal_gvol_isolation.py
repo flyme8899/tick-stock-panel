@@ -279,20 +279,20 @@ def test_stub_api_takes_no_dataframe() -> None:
 # -------------------------------------------- ④ pending 四条可见
 
 
-def test_evidence_pending_has_exactly_three_tags() -> None:
-    """批次 20261101gevid 清掉 `trigger_evidence_table_data_pending` 后**恰好三条**。
+def test_evidence_pending_has_exactly_two_tags() -> None:
+    """批次 20261101gevid 清触发表、批次 20261101gevid3 清本机分钟库后**恰好两条**。
 
-    这条同时是「不许顺手多清」的守卫：其余三条（分钟库 / HTTP 鉴权 / 阈值锁）
+    这条同时是「不许顺手多清」的守卫：其余两条（HTTP 鉴权 / 阈值锁）
     本拍一条都没动，少一条都会在这里红。
     """
     expected = {
-        "local_minute_lib_data_pending",
         "http_minute_listing_auth_pending",
         "threshold_lock_data_pending",
     }
     assert set(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == expected
-    # 已清的那条必须**真的不在集合里**（不是改成 _done 留在里面）
+    # 两条已清的都必须**真的不在集合里**（不是改成 _done 留在里面）
     assert "trigger_evidence_table_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
+    assert "local_minute_lib_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
 
 
 def test_evidence_tags_all_end_with_pending() -> None:

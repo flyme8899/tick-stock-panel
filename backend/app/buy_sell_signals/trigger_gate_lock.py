@@ -9,8 +9,9 @@
 - `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE` **仍 False**（不翻）
 - **无 `allow_shadow`**
 - 只读交叉 `shadow_obs_v1` / T1 `tier_cut_v1` / T2 `tier_display_v1`
-- 两族证据缺口**仍开着**：已清 1 / 剩 7（批次 20261101gevid 清了 VOLUME 的
-  `trigger_evidence_table_data_pending`，**清零一刀 ≠ 可翻闸**）
+- 两族证据缺口**仍开着**：已清 2 / 剩 6（批次 20261101gevid 清了 VOLUME 的
+  `trigger_evidence_table_data_pending`；批次 20261101gevid3 清了 VOLUME 的
+  `local_minute_lib_data_pending`；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**）
 
 规则全文见 `docs/buy-sell-signal-trigger-gate.md`。文档给人读，模块给测例验。
 
@@ -37,10 +38,10 @@
 模块别名是**活引用**：每次读都回到源模块。这样「有人翻了开关」能在断言里当场炸。
 同一理由适用于 version 交叉与 `DIRECTION_LABELS` / `BONFERRONI_M`。
 
-## 证据缺口是 8 条，不是一句「待补」
+## 证据缺口是 6 条，不是一句「待补」
 
 `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 由两族 `*_EVIDENCE_PENDING` **只读求和**，
-不写 `8` 这个字面量。手抄的数字会在缺口被补掉后继续骗人。
+不写 `6` 这个字面量。手抄的数字会在缺口被补掉后继续骗人。
 
 `assert_evidence_pending_still_open()` 断了**不代表改坏了**，代表**文档 §4.1 该更新了** ——
 缺口补掉是好事，但契约描述必须跟着动，否则表就成了「已经补完了」的假象。
@@ -97,6 +98,13 @@ TRIGGER_GATE_LOCK_VERSION: Final = "trigger_gate_v1"
 """可审计门禁契约版本。
 
 改前置表口径 / 缺口披露方式 / 交叉边界 / 禁项**必须** bump。
+
+**本拍（20261101gevid3）显式不 bump，仍 `trigger_gate_v1`。** 理由写在这里，
+免得下一个人以为是漏了：bump 会迫使 `schema_push_lock` /
+`schema_push_live_lock` 的 `EXPECTED_TRIGGER_GATE_LOCK_VERSION` 同步改字面量，
+而那两个文件在本拍任务书里是**零碰**面。为了不把一次"缺口披露更新"扩成
+跨三个锁面的交叉改动，本拍只改 NOTE 与文档披露，version 留待另拍与其交叉同步。
+**未 bump ≠ 未披露**：NOTE / 文档 §4.1 / skeleton 都已同步成「已清 2 / 剩 6」。
 """
 
 # ---------------------------------------------------------------- 交叉期望值
@@ -120,11 +128,11 @@ TRIGGER_GATE_EVIDENCE_STATUS_EXPECTED: Final = "data_pending"
 TRIGGER_GATE_EVIDENCE_PENDING_COUNT: Final = len(
     _vol.VOLUME_BREAKOUT_EVIDENCE_PENDING
 ) + len(_auc.AUCTION_ABNORMAL_EVIDENCE_PENDING)
-"""两族待补证据**总条数**（只读求和，不写死 8 / 7）。
+"""两族待补证据**总条数**（只读求和，不写死 8 / 7 / 6）。
 
 清掉一条缺口，这个数字**自己就会变小**（批次 20261101gevid 清了 VOLUME 的
-触发表标签，8 → 7，没改这一行代码）。这正是它派生的意义：手抄的数字会在缺口
-被补掉后继续骗人。
+触发表标签 8 → 7；批次 20261101gevid3 清了 VOLUME 的本机分钟库标签 7 → 6，
+两次都没改这一行代码）。这正是它派生的意义：手抄的数字会在缺口被补掉后继续骗人。
 
 **但它不会替你把文档改好。** `assert_evidence_pending_still_open` 只在
 「某一族被清空」或「`*_STATUS` 漂移」时才炸；清个一条两条，两族都还非空、
@@ -152,7 +160,8 @@ TRIGGER_GATE_LOCK_NOTE: Final = (
     "触发/放量门禁锁: version=trigger_gate_v1 / "
     "两TRIGGERING Final=False非env / COMPLETE仍False / 无allow_shadow / "
     "只读交叉 shadow_obs_v1 + T1 tier_cut_v1 + T2 tier_display_v1 / "
-    "证据缺口已清1/剩7(触发表契约; 清零一刀!=可翻闸; 表PRESENT!=可开TRIGGERING; "
+    "证据缺口已清2/剩6(触发表契约+本机分钟库探针; 清零一刀!=可翻闸; "
+    "表PRESENT!=可开TRIGGERING; 落盘!=可开TRIGGERING; 探针PRESENT!=可开TRIGGERING; "
     "strongly_negative!=阈值已锁) / 门禁边Bonferroni不占m=6非永久豁免。"
     "**路径已通!=calib!=可放量!=TRIGGERING**; "
     "**K8 PASS!=可放量!=可开TRIGGERING**; **讨论!=派单**; "
@@ -203,10 +212,11 @@ def assert_evidence_pending_still_open() -> None:
     **文档 §4.1 的缺口清单与缺口条数描述已经过时**，必须同步更新。
 
     **但它抓不住"只清了一两条"。** 判定只有三件事：某族 pending 为空、STATUS 漂移、
-    COUNT 与派生不一致。批次 20261101gevid 清掉 VOLUME 的触发表标签后，VOLUME 仍有
-    3 条、STATUS 仍 `data_pending`、COUNT 仍是派生值 —— 这条断言**照过**。
+    COUNT 与派生不一致。批次 20261101gevid 清掉 VOLUME 的触发表标签、批次
+    20261101gevid3 清掉 VOLUME 的本机分钟库标签之后，VOLUME 仍有 2 条、
+    STATUS 仍 `data_pending`、COUNT 仍是派生值 —— 这条断言**照过**。
 
-    所以「清了 1 条、8 变 7」这件事，是靠**人**同步文档/锁面 NOTE/测例期望的，
+    所以「清了 2 条、8 变 6」这件事，是靠**人**同步文档/锁面 NOTE/测例期望的，
     不是靠这条断言提醒。把它当成自动兜底，就会在真清空之前一直读到过期的"0/8"。
     """
     for family, pending, status in (

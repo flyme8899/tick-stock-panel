@@ -1024,11 +1024,10 @@ PHASE3 §3 的示意名 `post_open_15m` **尚未入集**，本拍**不扩集**�
 一个封闭取值域，而封闭域的意义正是"不让人随手往里加"。噪声档本拍只作空桩
 （`False` / `None`）。
 
-### 三条证据缺口：全 `data_pending`
+### 两条证据缺口：全 `data_pending`
 
 | 缺口 | 现状 |
 |---|---|
-| `local_minute_lib_data_pending` | 本机既没挂载也没落盘分钟数据；远端 SSH 历史有源 **≠** 本机可跑 |
 | `http_minute_listing_auth_pending` | 取分钟数据的 HTTP 入口 **401**，凭证未交；本仓不写、也不该写任何密码或 token |
 | `threshold_lock_data_pending` | 量比 / 突破幅度 / 窗口分钟数均未锁定，**一个数值都没钉** |
 
@@ -1036,6 +1035,13 @@ PHASE3 §3 的示意名 `post_open_15m` **尚未入集**，本拍**不扩集**�
 > [`volume_breakout_evidence_table`](../backend/app/buy_sell_signals/volume_breakout_evidence_table.py)
 > 把既有负证据形式化为四行触发表而消解，**已从 pending 集合删除**（非改后缀留存）。
 > **清零 ≠ 可翻闸**；**表 PRESENT ≠ 可开 TRIGGERING**；**strongly_negative ≠ 阈值已锁**。
+>
+> **已清（批次 20261101gevid3）**：`local_minute_lib_data_pending` —— 已由
+> [`local_minute_lib`](../backend/app/buy_sell_signals/local_minute_lib.py)
+> 把 `settings.data_dir / "kline_minute"`（Hive `date=*/part.parquet`）钉成
+> `local_minute_lib_v1` 路径契约 + 只读探针而消解，**已从 pending 集合删除**。
+> 运行时数据在 `data/kline_minute`（5.1G · 362 分区），gitignore `data/**`，**不入仓**；
+> 测例用 `tmp_path` 夹具。**清零 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**。
 
 ### 仓内已有的反证（本拍最该被看见的一条）
 
@@ -1127,6 +1133,10 @@ cd backend && python -m pytest \
 - [x] `auction_stat_bucket` 对放量路径为 `None`；混桶测例**构造即抛错**
 - [x] 身份常量可见：`volume_breakout` / `intraday_volume` / bucket `None`
 - [x] pending 四条（本机分钟库 / 触发表 / HTTP 凭证 / 阈值锁定）单测可见
+  - **历史快照**：验收时为四条。现状已清两条（触发表 #265 / 本机分钟库 #-A-#9），
+    剩两条（HTTP 凭证 / 阈值锁定）—— 现行账见门禁文档
+    [§4.1](./buy-sell-signal-trigger-gate.md) 与
+    [`local_minute_lib`](../backend/app/buy_sell_signals/local_minute_lib.py)。
 - [x] 未回退 #208 估值 / 健康 pending；未回退 #209 `LOCKED=None` / `0.60` / `p40`
 - [x] 未改 PERSIST / PUSH / DINGTALK；未碰 `t_rounds` / 飞书 / DSA / 17–19
 - [x] 质量 / 估值 / 健康 / 白名单行为本拍零碰（#208 / #209 字节未改）
@@ -2467,7 +2477,7 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 
 触发/放量**门禁**契约（**不是**触发引擎、**不是**放量开闸、**不是**授权翻闸；两
 `*_TRIGGERING_ENABLED` **Final=False 非 env**；翻闸另口令；前置条件表**表≠已可翻**；
-与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 1 / 剩 7**（VOLUME 3 + AUCTION 4；**清零一刀 ≠ 可翻闸**）；禁六词与价量仓单；
+与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 2 / 剩 6**（VOLUME 2 + AUCTION 4；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**）；禁六词与价量仓单；
 门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**；**K8 PASS ≠ 可放量 ≠ 可开 TRIGGERING**；
 **门禁契约 ≠ 授权翻闸**）见：
 [buy-sell-signal-trigger-gate.md](./buy-sell-signal-trigger-gate.md)。
