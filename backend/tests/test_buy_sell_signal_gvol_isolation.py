@@ -276,23 +276,24 @@ def test_stub_api_takes_no_dataframe() -> None:
     assert params == ["symbol", "asof"], params
 
 
-# -------------------------------------------- ④ pending 四条可见
+# -------------------------------------------- ④ pending 一条可见
 
 
-def test_evidence_pending_has_exactly_two_tags() -> None:
-    """批次 20261101gevid 清触发表、批次 20261101gevid3 清本机分钟库后**恰好两条**。
+def test_evidence_pending_has_exactly_one_tag() -> None:
+    """批次 20261101gevid 清触发表、gevid3 清本机分钟库、gevid6 清 HTTP 鉴权后**恰好一条**。
 
-    这条同时是「不许顺手多清」的守卫：其余两条（HTTP 鉴权 / 阈值锁）
-    本拍一条都没动，少一条都会在这里红。
+    这条同时是「不许顺手多清」的守卫：剩下的阈值锁本拍没动，
+    少一条（含整族清空）都会在这里红。
     """
     expected = {
-        "http_minute_listing_auth_pending",
+        # 批次 20261102gevid6 之后 VOLUME 唯一剩下的缺口：负锁，不是待办
         "threshold_lock_data_pending",
     }
     assert set(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == expected
-    # 两条已清的都必须**真的不在集合里**（不是改成 _done 留在里面）
+    # 三条已清的都必须**真的不在集合里**（不是改成 _done 留在里面）
     assert "trigger_evidence_table_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
     assert "local_minute_lib_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
+    assert "http_minute_listing_auth_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
 
 
 def test_evidence_tags_all_end_with_pending() -> None:
@@ -313,11 +314,17 @@ def test_evidence_human_table_explains_each_gate() -> None:
         assert len(what_is_missing.strip()) >= 8, f"{tag} 的说明太短, 等于没说"
 
 
-def test_evidence_covers_minute_lib_auth_and_threshold() -> None:
-    """在册三条缺口各自的**关键词**都要出现，防止写成"数据没到"这种糊过去的说明。"""
+def test_evidence_covers_threshold_keywords() -> None:
+    """在册缺口各自的关键词都要出现，防止写成"数据没到"这种糊过去的说明。
+
+    批次 20261102gevid6 之后 `401` 这个词**不该再在**人读表里 ——
+    HTTP 分钟列目录鉴权那条已清，人读表同步删键。反过来，若 `401` 还在，
+    说明有人只删了机器集、忘了人读表（`set(EVIDENCE) == set(PENDING)` 也咬这个）。
+    """
     text = " ".join(f"{a} {b}" for a, b in vb.VOLUME_BREAKOUT_EVIDENCE.values())
-    for keyword in ("分钟", "401", "阈值"):
+    for keyword in ("阈值", "负锁"):
         assert keyword in text, keyword
+    assert "401" not in text, "已清的 HTTP 鉴权条目不得残留于人读表"
 
 
 def test_cleared_evidence_table_gap_has_a_real_deliverable() -> None:

@@ -11,8 +11,9 @@
    让它消失。这是最坏的一种：进度看着前进了，实际没有。
 2. **假删** —— 标签改成 `local_minute_lib_data_done` 仍留在集合里。集合非空、
    断言照过，但"还有几条没清"从此失真。
-3. **借机多删** —— 顺手把 `threshold_lock_data_pending` 或 `http_minute_listing_auth_pending`
-   也清掉。缺口数更好看，但阈值一个都没钉、鉴权一次都没通。
+3. **借机多删** —— 顺手把 `threshold_lock_data_pending` 也清掉。缺口数更好看，
+   但阈值一个都没钉。（同族的 `http_minute_listing_auth_pending` 已由批次
+   20261102gevid6 单独清掉，本文件对它的期望随之同步 —— 见 `_REMAINING_VOLUME_TAGS`。）
 
 所以主线是：**探针真的在且可验**（T1）、**只删了那一条且删得干净**（T2）、
 **总数随之派生而变、两断言仍过**（T3）。
@@ -55,7 +56,7 @@ _CLEARED_TAG = "local_minute_lib_data_pending"
 _FOOTNOTE = "*仅供研究，不构成投资建议；执行须人工确认。红涨绿跌。成本来回 18.2bp。*"
 
 _REMAINING_VOLUME_TAGS = {
-    "http_minute_listing_auth_pending",
+    # 批次 20261102gevid6 之后，VOLUME 只剩这条负锁；它不是「待办」，是「待解释」。
     "threshold_lock_data_pending",
 }
 
@@ -290,11 +291,16 @@ def test_t1_probe_does_not_stat_or_open_partition_files(tmp_path: Path, monkeypa
 # ---------------------------------------------------------------- T2 删标签（干净、不空删）
 
 
-def test_t2_pending_exactly_two_without_cleared_tag():
-    """G-T3: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 恰 **2** 条且**不含**已清标签。"""
+def test_t2_pending_exactly_one_without_cleared_tag():
+    """G-T3: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 恰 **1** 条且**不含**已清标签。
+
+    批次 20261102gevid6 把 `http_minute_listing_auth_pending` 也清了，
+    VOLUME 从 2 条降到 1 条。本断言随之收紧 —— 但仍要求 `== 1` 而非 `>= 1`，
+    因为"恰好一条"才是当下的真值；写成 `>= 1` 会让将来多塞一条标签不被察觉。
+    """
     from app.buy_sell_signals import volume_breakout_stub as vb
 
-    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
+    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 1
     assert _CLEARED_TAG not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
     assert set(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == _REMAINING_VOLUME_TAGS
 
@@ -350,14 +356,16 @@ def test_t2_stub_does_not_keep_stale_three_tag_docstring():
     assert _CLEARED_TAG in text
 
 
-# ---------------------------------------------------------------- T3 COUNT 派生 = 5
+# ---------------------------------------------------------------- T3 COUNT 派生 = 4
 
 
-def test_t3_count_is_five_and_derived():
-    """G-T4: COUNT == 5，且**等于两族之和**（不是手抄的 5）。
+def test_t3_count_is_four_and_derived():
+    """G-T4: COUNT == 4，且**等于两族之和**（不是手抄的 4）。
 
     批次 20261101gauction 把 AUCTION 的 `auction_price_not_persisted` 清掉，
-    AUCTION 4 → 3，总数 6 → 5。COUNT 依旧派生，没改成字面量。
+    AUCTION 4 → 3；批次 20261102gevid6 把 VOLUME 的
+    `http_minute_listing_auth_pending` 清掉，VOLUME 2 → 1，总数 5 → 4。
+    COUNT 依旧派生，没改成字面量。
     """
     from app.buy_sell_signals import trigger_gate_lock as g
     from app.buy_sell_signals.auction_abnormal_stub import (
@@ -367,9 +375,9 @@ def test_t3_count_is_five_and_derived():
         VOLUME_BREAKOUT_EVIDENCE_PENDING,
     )
 
-    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
+    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 1
     assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 3
-    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 5
+    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 4
     assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -377,7 +385,7 @@ def test_t3_count_is_five_and_derived():
 
 
 def test_t3_count_source_is_a_sum_not_a_literal():
-    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量 5。"""
+    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量。"""
     from app.buy_sell_signals import trigger_gate_lock as g
 
     tree = ast.parse(Path(g.__file__).read_text(encoding="utf-8"))
@@ -419,16 +427,18 @@ def test_t3_evidence_assert_still_fires_when_family_emptied(monkeypatch):
 # ---------------------------------------------------------------- T4 披露同步
 
 
-def test_t4_gate_doc_discloses_five_left_three_cleared():
-    """G-T4 / G-T10: 门禁文档披露「已清 3 / 剩 5」，且旧口径不残留。"""
+def test_t4_gate_doc_discloses_four_left_four_cleared():
+    """G-T4 / G-T10: 门禁文档披露「已清 4 / 剩 4」，且旧口径不残留。"""
     text = _DOC_PATH.read_text(encoding="utf-8")
-    assert "已清 3 / 剩 5" in text
-    assert "证据缺口现 5 条（已诚实清 3）" in text
-    assert "仍 2 条" in text
+    assert "已清 4 / 剩 4" in text
+    assert "证据缺口现 4 条（已诚实清 4）" in text
+    assert "仍 1 条" in text
     assert "仍 3 条" in text
     # 旧口径不得残留
+    assert "已清 3 / 剩 5" not in text
     assert "已清 2 / 剩 6" not in text
     assert "已清 1 / 剩 7" not in text
+    assert "证据缺口现 5 条" not in text
     assert "证据缺口现 6 条" not in text
     assert "证据缺口现 7 条" not in text
     assert "仍 4 条" not in text
@@ -457,12 +467,13 @@ def test_t4_gate_doc_keeps_big_letters_and_footnote():
     assert lines[-1] == _FOOTNOTE, f"末行不是脚注: {lines[-1]!r}"
 
 
-def test_t4_lock_note_discloses_five_left():
-    """G-T4: 锁面 NOTE 披露「已清3/剩5」，带大字，且不再出现旧口径。"""
+def test_t4_lock_note_discloses_four_left():
+    """G-T4: 锁面 NOTE 披露「已清4/剩4」，带大字，且不再出现旧口径。"""
     from app.buy_sell_signals import trigger_gate_lock as g
 
     note = g.TRIGGER_GATE_LOCK_NOTE
-    assert "已清3/剩5" in note
+    assert "已清4/剩4" in note
+    assert "已清3/剩5" not in note
     assert "已清2/剩6" not in note
     assert "已清1/剩7" not in note
     assert "清零一刀!=可翻闸" in note
@@ -475,15 +486,16 @@ def test_t4_lock_note_discloses_five_left():
 def test_t4_skeleton_discloses_current_state():
     """G-T4: skeleton 相关披露已同步。
 
-    **骨架文档是两族共用的**：VOLUME 那一节标题就是「两条证据缺口」（2 条，本拍不动），
-    AUCTION 那一节才是「三条证据缺口」（4 → 3）。所以不能一句
-    `"### 两条证据缺口" not in text` 把 VOLUME 自己的标题也判成残留 ——
-    那会把合法的同族披露当成旧口径。改为**按族定位**再钉标题下的条数。
+    **骨架文档是两族共用的**：VOLUME 那一节标题就是「一条证据缺口」（1 条，
+    批次 20261102gevid6 之后），AUCTION 那一节才是「三条证据缺口」（4 → 3）。
+    所以不能一句 `"### 一条证据缺口" not in text` 把 VOLUME 自己的标题也判成
+    残留 —— 那会把合法的同族披露当成旧口径。改为**按族定位**再钉标题下的条数。
     """
     text = _SKELETON_PATH.read_text(encoding="utf-8")
 
-    # 总口径：已清 3 / 剩 5
-    assert "已清 3 / 剩 5" in text
+    # 总口径：已清 4 / 剩 4
+    assert "已清 4 / 剩 4" in text
+    assert "已清 3 / 剩 5" not in text
     assert "已清 2 / 剩 6" not in text
     assert "已清 1 / 剩 7" not in text
 
@@ -506,15 +518,19 @@ def test_t4_skeleton_discloses_current_state():
     assert "auction_price_not_persisted" not in live_block, "已清标签不得再当现役缺口列出"
     assert "threshold_lock_data_pending" in live_block
 
-    # VOLUME 节：标题「两条证据缺口」仍在（属 VOLUME 自己，不是残留）
-    assert "### 两条证据缺口：全 `data_pending`" in text
-    volume_head = text.split("### 两条证据缺口：全 `data_pending`", 1)[1]
+    # VOLUME 节：标题「一条证据缺口」仍在（属 VOLUME 自己，不是残留）
+    assert "### 一条证据缺口：仍 `data_pending`" in text
+    volume_head = text.split("### 一条证据缺口：仍 `data_pending`", 1)[1]
     volume_block = volume_head.split("\n### ", 1)[0]
     volume_rows = [ln for ln in volume_block.splitlines() if ln.startswith("| `")]
-    assert len(volume_rows) == 2, f"VOLUME 缺口表应 2 行，实际 {len(volume_rows)}"
+    assert len(volume_rows) == 1, f"VOLUME 缺口表应 1 行，实际 {len(volume_rows)}"
+    assert "threshold_lock_data_pending" in volume_block
+    # 已清的 http_minute 不得再当现役缺口列出
+    assert "http_minute_listing_auth_pending" not in "\n".join(volume_rows)
 
     # 「四条证据缺口」作为**标题**不得残留（旧口径）
     assert "### 四条证据缺口" not in text
+    assert "### 两条证据缺口" not in text
     # 历史快照行必须标注，不能让读者以为标签仍 pending
     assert "历史快照" in text
     assert "local_minute_lib.py" in text
@@ -524,14 +540,17 @@ def test_t4_skeleton_discloses_current_state():
 
 
 def test_t4_no_stale_disclosure_across_docs_and_lock():
-    """G-T4: docs / 锁面 / stub 不得残留旧的「已清 1 / 剩 7」「仍 3 条」口径。
+    """G-T4: docs / 锁面 / stub 不得残留旧的「已清 3 / 剩 5」「仍 2 条」口径。
 
     注意排除本文件自己：测例里本来就要写旧字符串去断言"它不存在"。
     """
     needles = (
-        "已清 1 / 剩 7",
+        "已清 3 / 剩 5",
         "已清 2 / 剩 6",
+        "已清 1 / 剩 7",
+        "仍 5 条",
         "仍 4 条",
+        "证据缺口现 5 条",
         "证据缺口现 6 条",
         "证据缺口现 7 条",
         "四条证据缺口",

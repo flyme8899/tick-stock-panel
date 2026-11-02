@@ -296,11 +296,15 @@ def test_t3_threshold_tag_survives_on_both_sides() -> None:
     assert THRESHOLD_TAG in volume_breakout_stub.VOLUME_BREAKOUT_EVIDENCE_PENDING
 
 
-def test_t3_count_is_five_and_still_derived() -> None:
-    """COUNT == 5 且**源码是求和**（不是手抄 5）。"""
+def test_t3_count_is_four_and_still_derived() -> None:
+    """COUNT == 4 且**源码是求和**（不是手抄 4）。
+
+    批次 20261102gevid6 清了 VOLUME 的 `http_minute_listing_auth_pending`，
+    VOLUME 2 → 1，总数 5 → 4；COUNT 仍派生。
+    """
     from app.buy_sell_signals import auction_abnormal_stub, trigger_gate_lock, volume_breakout_stub
 
-    assert trigger_gate_lock.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 5
+    assert trigger_gate_lock.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 4
     assert (
         len(volume_breakout_stub.VOLUME_BREAKOUT_EVIDENCE_PENDING) + len(auction_abnormal_stub.AUCTION_ABNORMAL_EVIDENCE_PENDING)
     ) == trigger_gate_lock.TRIGGER_GATE_EVIDENCE_PENDING_COUNT
@@ -356,17 +360,19 @@ def test_t3_assert_fires_when_family_emptied(monkeypatch) -> None:
 # ==================================================== T4 · 披露同步
 
 
-def test_t4_gate_doc_discloses_three_cleared_five_left() -> None:
+def test_t4_gate_doc_discloses_four_cleared_four_left() -> None:
     text = DOC_PATH.read_text(encoding="utf-8")
-    assert "已清 3 / 剩 5" in text
+    assert "已清 4 / 剩 4" in text
+    assert "已清 3 / 剩 5" not in text
     assert "已清 2 / 剩 6" not in text
     assert CLEARED_TAG in text, "文档要留已清项名字（人读留痕）"
 
 
-def test_t4_lock_note_discloses_three_cleared() -> None:
+def test_t4_lock_note_discloses_four_cleared() -> None:
     from app.buy_sell_signals import trigger_gate_lock
 
-    assert "已清3/剩5" in trigger_gate_lock.TRIGGER_GATE_LOCK_NOTE
+    assert "已清4/剩4" in trigger_gate_lock.TRIGGER_GATE_LOCK_NOTE
+    assert "已清3/剩5" not in trigger_gate_lock.TRIGGER_GATE_LOCK_NOTE
     assert "已清2/剩6" not in trigger_gate_lock.TRIGGER_GATE_LOCK_NOTE
     # 大字仍在
     assert "清零一刀!=可翻闸" in trigger_gate_lock.TRIGGER_GATE_LOCK_NOTE
@@ -374,10 +380,14 @@ def test_t4_lock_note_discloses_three_cleared() -> None:
 
 
 def test_t4_skeleton_discloses_three_gaps_section() -> None:
+    """AUCTION 那节标题仍是「三条证据缺口」（本拍零碰）；VOLUME 那节已缩到 1 条。"""
     text = SKELETON_PATH.read_text(encoding="utf-8")
     assert "### 三条证据缺口（全部 pending）" in text
+    assert "### 一条证据缺口：仍 `data_pending`" in text
     assert "### 四条证据缺口" not in text
-    assert "已清 3 / 剩 5" in text
+    assert "### 两条证据缺口" not in text
+    assert "已清 4 / 剩 4" in text
+    assert "已清 3 / 剩 5" not in text
 
 
 def test_t4_footnote_is_last_line_everywhere() -> None:
