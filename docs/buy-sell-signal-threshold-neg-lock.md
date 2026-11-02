@@ -2,7 +2,9 @@
 
 > 批次 `20261101gthresh` · P-bss-evidence · 对象＝VOLUME `threshold_lock_data_pending` 的**语义**
 > 锁面：`backend/app/buy_sell_signals/threshold_neg_lock.py` · version `threshold_neg_lock_v1`
-> **标签仍开** · COUNT **仍 6** · 两 TRIGGERING / COMPLETE **仍 `False`** · **本拍 ≠ 清零刀**
+> **标签仍开（两侧）** · COUNT 现为 **4**（派生；`20261102gevid6` 清了 VOLUME
+> `http_minute_listing_auth_pending` 后由 5 变 4） · 两 TRIGGERING / COMPLETE
+> **仍 `False`** · **本拍 ≠ 清零刀**
 >
 > **仅供研究，不构成投资建议；执行须人工确认。** 红涨绿跌。成本来回 **18.2bp**。
 
@@ -18,14 +20,17 @@
 
 ## 1. 为什么"待补"和"必须继续待着"要分开
 
-`VOLUME_BREAKOUT_EVIDENCE_PENDING` 里剩两条，并排放着：
+`VOLUME_BREAKOUT_EVIDENCE_PENDING` 现在只剩一条 —— `threshold_lock_data_pending`。
+它曾经和 `http_minute_listing_auth_pending` 并排放着，后者已由批次
+`20261102gevid6` 清掉（凭证已交、认证后列目录/MANIFEST 已通、**密码不入仓**）：
 
-| 标签 | 缺的是什么 | 补齐后能不能清 |
-|---|---|---|
-| `http_minute_listing_auth_pending` | 一个**外部凭证** | 拿到凭证、跑通 → 可以考虑清 |
-| `threshold_lock_data_pending` | **一个解释** | 负号解释清楚之前，**补什么都不能清** |
+| 标签 | 缺的是什么 | 补齐后能不能清 | 当前状态 |
+|---|---|---|---|
+| `http_minute_listing_auth_pending` | 一个**外部凭证** | 拿到凭证、跑通 → 可以考虑清 | **已清**（`20261102gevid6`） |
+| `threshold_lock_data_pending` | **一个解释** | 负号解释清楚之前，**补什么都不能清** | **仍开**（两侧） |
 
 前者是「还没到」，后者是「到了也不能用」。
+**清掉前者 ≠ 后者变轻** —— 现在数字上已经没有任何别的缺口能替它分担注意力。
 
 四个突破口径的回测收益是 `-23.86 / -32.44 / -13.80 / -19.81` —— **全负**。
 在这个负号有解释之前，把量比 / 突破幅度 / 窗口分钟数标定出来，

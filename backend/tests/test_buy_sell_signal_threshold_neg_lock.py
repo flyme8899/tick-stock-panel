@@ -11,8 +11,8 @@
    钉数＝fabricate。T3 逐个字段验 `raise`，并且**验 `0` 也炸**（否则漏出来的默认值
    会拿到通行证）。
 3. **COUNT 被手抄** —— `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 必须仍是两族集合的
-   求和，不得写成字面量 5。T2 用 `len(_vol) + len(_auc) == 常量` 咬，而不是只咬 `== 5`
-   —— 只咬 6 的话，常量退化成手抄的 6 也照样绿。
+   求和，不得写成字面量。T2 用 `len(_vol) + len(_auc) == 常量` 咬，而不是只咬
+   数字本身 —— 只咬数字的话，常量退化成手抄的字面量也照样绿。
 4. **闸被顺手翻** —— 两 TRIGGERING / COMPLETE 被赋 True。T4 对写死的 False 断言。
 
 ## 为什么 T3 要既测 raise 又测"干净态不 raise"
@@ -145,10 +145,12 @@ def test_t1_threshold_tag_still_pending_in_volume_family() -> None:
     """
     assert THRESHOLD_LOCK_TAG_MUST_REMAIN == "threshold_lock_data_pending"
     assert THRESHOLD_LOCK_TAG_MUST_REMAIN in VOLUME_BREAKOUT_EVIDENCE_PENDING
-    # 本拍没有删掉任何一条：VOLUME 仍 2 条
-    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
-    # 同族另一条（http 鉴权）也一条没动
-    assert "http_minute_listing_auth_pending" in VOLUME_BREAKOUT_EVIDENCE_PENDING
+    # 批次 20261102gevid6 清了同族的 http 鉴权那条，VOLUME 2 → 1；
+    # 剩下这条**只有 threshold**，正是「清掉一条 ≠ 剩下这条变轻了」的现场。
+    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 1
+    assert frozenset({THRESHOLD_LOCK_TAG_MUST_REMAIN}) == VOLUME_BREAKOUT_EVIDENCE_PENDING
+    # 但 threshold 本身一条没动：既没删、也没改成 _done 后缀变体
+    assert not any("_done" in tag for tag in VOLUME_BREAKOUT_EVIDENCE_PENDING)
 
     # 断言函数在真实集合上必须安静通过
     assert_threshold_lock_still_pending(VOLUME_BREAKOUT_EVIDENCE_PENDING)
@@ -202,18 +204,19 @@ def test_t1_auction_family_untouched() -> None:
 # ================================================================ T2 · COUNT 与状态
 
 
-def test_t2_count_still_five_and_derived_not_copied() -> None:
-    """COUNT == 5，且**必须是派生值**，不是手抄的字面量。
+def test_t2_count_still_four_and_derived_not_copied() -> None:
+    """COUNT == 4，且**必须是派生值**，不是手抄的字面量。
 
-    批次 `20261101gauction`：AUCTION 4 → 3，总数 6 → 5。
+    批次 `20261101gauction`：AUCTION 4 → 3，总数 6 → 5；
+    批次 `20261102gevid6`：VOLUME 2 → 1，总数 5 → 4。
 
-    只咬 `== 6` 不够，只咬 `== len(vol) + len(auc)` 也不够 ——
-    把常量写成 `Final = 5` 时，这两个等式**同时成立**（此刻 VOL+AUС 恰好就是 5），
+    只咬 `== 4` 不够，只咬 `== len(vol) + len(auc)` 也不够 ——
+    把常量写成 `Final = 4` 时，这两个等式**同时成立**（此刻 VOL+AUС 恰好就是 4），
     测全绿而常量已经是手抄的（负控 N04 验过）。所以还要看**源码**：
     `TRIGGER_GATE_EVIDENCE_PENDING_COUNT` 的右侧必须出现 `len(`，
     且不许是纯数字字面量。
     """
-    assert TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 5
+    assert TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 4
     assert TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -263,7 +266,8 @@ def test_t2_lock_version_explicitly_not_bumped() -> None:
     """
     assert TRIGGER_GATE_LOCK_VERSION == "trigger_gate_v1"
     assert "trigger_gate_v1" in TRIGGER_GATE_LOCK_NOTE
-    assert "已清3/剩5" in TRIGGER_GATE_LOCK_NOTE
+    assert "已清4/剩4" in TRIGGER_GATE_LOCK_NOTE
+    assert "已清3/剩5" not in TRIGGER_GATE_LOCK_NOTE
     assert "已清2/剩6" not in TRIGGER_GATE_LOCK_NOTE
     # 旁注必须在
     assert "threshold" in TRIGGER_GATE_LOCK_NOTE
@@ -501,8 +505,11 @@ def test_t5_gate_doc_has_neg_lock_section_and_path_list() -> None:
     assert "本拍 ≠ 清零刀" in doc
     assert "清零一刀 ≠ 可翻闸" in doc
     assert "语义锁面 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING" in doc
-    # 计数与本拍一致：已清 3 / 剩 5（20261101gauction 清了 AUCTION 的 auction_price_not_persisted）
-    assert "已清 3 / 剩 5" in doc
+    # 计数与本拍一致：已清 4 / 剩 4
+    # （20261101gauction 清 AUCTION 的 auction_price_not_persisted；
+    #   20261102gevid6 清 VOLUME 的 http_minute_listing_auth_pending）
+    assert "已清 4 / 剩 4" in doc
+    assert "已清 3 / 剩 5" not in doc
     assert "已清 2 / 剩 6" not in doc
     # 既有 threshold 缺口行仍在（本拍只增补，不删）
     assert "量比 / 突破幅度 / 窗口分钟数均未锁定" in doc

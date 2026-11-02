@@ -1024,22 +1024,24 @@ PHASE3 §3 的示意名 `post_open_15m` **尚未入集**，本拍**不扩集**�
 一个封闭取值域，而封闭域的意义正是"不让人随手往里加"。噪声档本拍只作空桩
 （`False` / `None`）。
 
-### 两条证据缺口：全 `data_pending`
+### 一条证据缺口：仍 `data_pending`
 
 | 缺口 | 现状 |
 |---|---|
-| `http_minute_listing_auth_pending` | 取分钟数据的 HTTP 入口 **401**，凭证未交；本仓不写、也不该写任何密码或 token |
 | `threshold_lock_data_pending` | 量比 / 突破幅度 / 窗口分钟数均未锁定，**一个数值都没钉** |
 
 > **`threshold_lock_data_pending` 是"负锁"，不是"待办"**（批次 `20261101gthresh`）。
-> 它和上面那条并排放在同一个集合里，但两者缺的东西不一样：`http_minute` 缺一个
-> **外部凭证**（拿到就能通），这条缺一个**解释** —— 四个口径回测全负，
-> 负号解释清楚之前，补什么都不能清。语义已由
+> 批次 `20261102gevid6` 把同族另一条 `http_minute_listing_auth_pending` 清掉
+> 之后，它是本族**唯一**剩下的缺口。两者缺的东西本来就不一样：`http_minute`
+> 缺一个**外部凭证**（拿到就能通，现已通），这条缺一个**解释** —— 四个口径回测
+> 全负，负号解释清楚之前，补什么都不能清。**清掉一条 ≠ 剩下的这条变轻了。**
+> 语义已由
 > [`threshold_neg_lock`](../backend/app/buy_sell_signals/threshold_neg_lock.py)
 > （`threshold_neg_lock_v1`）契约化：`assert_threshold_lock_still_pending` 咬住
 > "标签必须还在"，`assert_no_tradeable_threshold_nail` 咬住"禁钉可交易数"。
 > **负锁 ≠ 删标签**；**钉数 ＝ fabricate**；**本拍 ≠ 清零刀**；
-> **语义锁面 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；标签**仍开**、COUNT **仍 6**；
+> **语义锁面 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；标签**仍开（两侧）**、
+> COUNT 现为 **4**（派生，VOLUME 1 + AUCTION 3）；
 > 可钉证据路径清单见[门禁文档 §4.1.1](./buy-sell-signal-trigger-gate.md)。
 
 > **已清（批次 20261101gevid）**：`trigger_evidence_table_data_pending` —— 已由
@@ -2498,7 +2500,7 @@ save / append（G-T8c 扫描 `hits_store.py` 源码守着）。影子写入路�
 
 触发/放量**门禁**契约（**不是**触发引擎、**不是**放量开闸、**不是**授权翻闸；两
 `*_TRIGGERING_ENABLED` **Final=False 非 env**；翻闸另口令；前置条件表**表≠已可翻**；
-与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 3 / 剩 5**（VOLUME 2 + AUCTION 3；**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；**负锁语义 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；**负锁 ≠ 删标签**；**钉数 ＝ fabricate**；**本拍 ≠ 清零刀**）；禁六词与价量仓单；
+与 COMPLETE/calib/K8/影子观测口关系；证据缺口 **已清 4 / 剩 4**（VOLUME 1 + AUCTION 3；**清零一刀 ≠ 可翻闸**；**凭证已通 ≠ 可开 TRIGGERING**；**密码不入仓**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；**负锁语义 PRESENT ≠ 阈值已锁 ≠ 可开 TRIGGERING**；**负锁 ≠ 删标签**；**钉数 ＝ fabricate**；**本拍 ≠ 清零刀**）；禁六词与价量仓单；
 门禁**路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**；**K8 PASS ≠ 可放量 ≠ 可开 TRIGGERING**；
 **门禁契约 ≠ 授权翻闸**）见：
 [buy-sell-signal-trigger-gate.md](./buy-sell-signal-trigger-gate.md)。

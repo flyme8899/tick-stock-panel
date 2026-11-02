@@ -262,20 +262,21 @@ def test_t1_table_present_fires_when_row_count_wrong(monkeypatch):
 # ---------------------------------------------------------------- T2 删标签（干净、不空删）
 
 
-def test_t2_pending_exactly_two_without_cleared_tag():
-    """G-T3: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 恰 **2** 条且**不含**已清标签。
+def test_t2_pending_exactly_one_without_cleared_tag():
+    """G-T3: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 恰 **1** 条且**不含**已清标签。
 
     批次 20261101gevid3 又清了 `local_minute_lib_data_pending`（触发表那条由
-    批次 20261101gevid 清），所以这里的期望从 3 变 2 —— 本组测只测触发表那一刀，
-    但仍须如实反映当前集合。
+    批次 20261101gevid 清），批次 20261102gevid6 又清了
+    `http_minute_listing_auth_pending`，所以这里的期望从 3 变成 1 ——
+    本组测只测触发表那一刀，但仍须如实反映当前集合。
     """
     from app.buy_sell_signals import volume_breakout_stub as vb
 
-    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
+    assert len(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == 1
     assert _CLEARED_TAG not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
     assert "local_minute_lib_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
+    assert "http_minute_listing_auth_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
     assert set(vb.VOLUME_BREAKOUT_EVIDENCE_PENDING) == {
-        "http_minute_listing_auth_pending",
         "threshold_lock_data_pending",
     }
 
@@ -339,16 +340,20 @@ def test_t2_auction_family_untouched():
 
 def test_t2_threshold_lock_gap_still_open():
     """G-T3: **阈值锁那条必须还在** —— 清触发表不等于"阈值已标定"；
-    清本机分钟库（批次 20261101gevid3）也不等于阈值已标定。
+    清本机分钟库（20261101gevid3）、清 HTTP 分钟列目录鉴权（20261102gevid6）
+    也都不等于阈值已标定。
 
-    所以这里咬的是"剩下那两条一条没动"，而不是"被清的那条还在"。
+    所以这里咬的是"剩下那条一条没动"，而不是"被清的那条还在"。
+    **清掉一条 ≠ 剩下的这条变轻了** —— 它现在是 VOLUME 族唯一剩下的缺口。
     """
     from app.buy_sell_signals import volume_breakout_stub as vb
 
     assert "threshold_lock_data_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
-    assert "http_minute_listing_auth_pending" in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
     # 本机分钟库那条已被 20261101gevid3 清掉（探针契约顶上），不再留在 pending
     assert "local_minute_lib_data_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
+    # HTTP 分钟列目录鉴权那条已被 20261102gevid6 清掉（凭证在运维侧），
+    # **未认证入口仍应 401**：清标签 ≠ 开放入口。
+    assert "http_minute_listing_auth_pending" not in vb.VOLUME_BREAKOUT_EVIDENCE_PENDING
 
 
 def test_t2_clear_is_not_empty_delete():
@@ -369,13 +374,14 @@ def test_t2_clear_is_not_empty_delete():
     assert [r["return"] for r in rows] == original["returns"]
 
 
-# ---------------------------------------------------------------- T3 COUNT 派生 = 5
+# ---------------------------------------------------------------- T3 COUNT 派生 = 4
 
 
-def test_t3_count_is_five_and_derived():
-    """G-T4: COUNT == 5，且**等于两族之和**（不是手抄的 5）。
+def test_t3_count_is_four_and_derived():
+    """G-T4: COUNT == 4，且**等于两族之和**（不是手抄的 4）。
 
-    批次 `20261101gauction`：AUCTION 4 → 3，总数 6 → 5。COUNT 仍派生。
+    批次 `20261101gauction`：AUCTION 4 → 3，总数 6 → 5；
+    批次 `20261102gevid6`：VOLUME 2 → 1，总数 5 → 4。COUNT 仍派生。
     """
     from app.buy_sell_signals import trigger_gate_lock as g
     from app.buy_sell_signals.auction_abnormal_stub import (
@@ -385,9 +391,9 @@ def test_t3_count_is_five_and_derived():
         VOLUME_BREAKOUT_EVIDENCE_PENDING,
     )
 
-    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 2
+    assert len(VOLUME_BREAKOUT_EVIDENCE_PENDING) == 1
     assert len(AUCTION_ABNORMAL_EVIDENCE_PENDING) == 3
-    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 5
+    assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == 4
     assert g.TRIGGER_GATE_EVIDENCE_PENDING_COUNT == (
         len(VOLUME_BREAKOUT_EVIDENCE_PENDING)
         + len(AUCTION_ABNORMAL_EVIDENCE_PENDING)
@@ -395,7 +401,7 @@ def test_t3_count_is_five_and_derived():
 
 
 def test_t3_count_source_is_a_sum_not_a_literal():
-    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量 5。
+    """G-T4: COUNT 的**源码**必须是求和，不许写成字面量。
 
     查 AST 不看文本：`len(...) + len(...)` 与 `7` 在 AST 里形状完全不同。
     """
@@ -455,23 +461,28 @@ def test_t3_evidence_assert_still_fires_when_status_drifted(monkeypatch):
 # ---------------------------------------------------------------- T4 文档 / 锁面披露
 
 
-def test_t4_gate_doc_discloses_five_left_three_cleared():
-    """G-T4 / G-T10: 门禁文档披露「已清 3 / 剩 5」，且**没有**旧口径残留。"""
+def test_t4_gate_doc_discloses_four_left_four_cleared():
+    """G-T4 / G-T10: 门禁文档披露「已清 4 / 剩 4」，且**没有**旧口径残留。"""
     text = _DOC_PATH.read_text(encoding="utf-8")
-    assert "已清 3 / 剩 5" in text
+    assert "已清 4 / 剩 4" in text
+    assert "已清 3 / 剩 5" not in text, "文档仍留旧的「已清 3 / 剩 5」"
     assert "已清 2 / 剩 6" not in text, "文档仍留旧的「已清 2 / 剩 6」"
     assert "已清 1 / 剩 7" not in text, "文档仍留旧的「已清 1 / 剩 7」"
-    assert "仍 2 条" in text
+    assert "仍 1 条" in text
     assert "仍 3 条" in text
     # 旧口径不得残留
     assert "0 / 8 清零" not in text, "文档仍有旧的「0 / 8 清零」"
     assert "证据缺口是 8 条" not in text
     assert "证据缺口是 7 条" not in text
+    assert "证据缺口现 5 条" not in text
     assert "证据缺口现 6 条" not in text
     assert "仍 4 条" not in text
     # 已清标签只在「已清」语境里出现
     assert _CLEARED_TAG in text, "文档应记录已清项名称"
+    assert "http_minute_listing_auth_pending" in text, "文档应记录本拍已清项名称"
     assert "清零 ≠ 可翻闸" in text
+    assert "凭证已通 ≠ 可开 TRIGGERING" in text
+    assert "密码不入仓" in text
 
 
 def test_t4_gate_doc_keeps_big_letters_and_footnote():
@@ -492,32 +503,38 @@ def test_t4_gate_doc_keeps_big_letters_and_footnote():
     assert lines[-1] == _FOOTNOTE, f"末行不是脚注: {lines[-1]!r}"
 
 
-def test_t4_lock_note_discloses_three_cleared():
-    """G-T4: 锁面 NOTE 披露「已清3/剩5」，且带「清零一刀 != 可翻闸」「落盘!=可开TRIGGERING」。"""
+def test_t4_lock_note_discloses_four_cleared():
+    """G-T4: 锁面 NOTE 披露「已清4/剩4」，且带「清零一刀 != 可翻闸」「落盘!=可开TRIGGERING」。"""
     from app.buy_sell_signals import trigger_gate_lock as g
 
     note = g.TRIGGER_GATE_LOCK_NOTE
     assert "证据缺口8条0清零" not in note, "NOTE 仍是旧的 8 条 0 清零"
-    assert "已清3/剩5" in note
+    assert "已清4/剩4" in note
+    assert "已清3/剩5" not in note, "NOTE 仍留旧的「已清3/剩5」"
     assert "已清2/剩6" not in note, "NOTE 仍留旧的「已清2/剩6」"
     assert "已清1/剩7" not in note, "NOTE 仍留旧的「已清1/剩7」"
     assert "清零一刀!=可翻闸" in note
     assert "落盘!=可开TRIGGERING" in note
+    assert "凭证已通!=可开TRIGGERING" in note
+    assert "密码不入仓" in note
 
 
 def test_t4_skeleton_discloses_current_state():
     """G-T4: skeleton 相关披露已同步。
 
-    VOLUME 自己的节标题就是「### 两条证据缺口」（2 条，本拍不动）；
-    AUCTION 那节是「### 三条证据缺口（全部 pending）」。所以只钉总口径与本拍旧值。
+    VOLUME 自己的节标题现在是「### 一条证据缺口：仍 `data_pending`」（1 条，
+    批次 20261102gevid6 之后）；AUCTION 那节是「### 三条证据缺口（全部 pending）」。
+    所以只钉总口径与本拍旧值。
     """
     text = _SKELETON_PATH.read_text(encoding="utf-8")
-    assert "### 两条证据缺口" in text          # VOLUME 自身，仍在
+    assert "### 一条证据缺口：仍 `data_pending`" in text   # VOLUME 自身，仍在
     assert "### 三条证据缺口（全部 pending）" in text  # AUCTION 3 条
-    assert "已清 3 / 剩 5" in text
+    assert "已清 4 / 剩 4" in text
+    assert "已清 3 / 剩 5" not in text
     assert "已清 2 / 剩 6" not in text
     assert "已清 1 / 剩 7" not in text
     assert "证据缺口 **8 条 / 0 清零**" not in text
+    assert "### 两条证据缺口" not in text
 
     lines = [ln for ln in text.splitlines() if ln.strip()]
     assert lines[-1] == _FOOTNOTE, "skeleton 脚注应仍在末行"

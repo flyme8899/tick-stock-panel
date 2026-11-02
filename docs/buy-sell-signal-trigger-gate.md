@@ -7,7 +7,7 @@
 > rollback `pre261_20261031_172351` · 本拍新 PR **不部署**
 >
 > **后续批次增补（只增不删，原语义不变）**：#265 `20261101gevid`（触发表契约）、
-> #266 `20261101gevid3`（本机分钟库探针契约）、`20261101gthresh`（阈值负锁语义 · §4.1.1 / §11.2，`threshold_neg_lock_v1`，标签仍开）、**`20261101gauction`（AUCTION 落盘 schema 补价 · §4.1，已清 3 / 剩 5，保留两侧 threshold）**。
+> #266 `20261101gevid3`（本机分钟库探针契约）、`20261101gthresh`（阈值负锁语义 · §4.1.1 / §11.2，`threshold_neg_lock_v1`，标签仍开）、`20261101gauction`（AUCTION 落盘 schema 补价 · §4.1，保留两侧 threshold）、**`20261102gevid6`（VOLUME HTTP 分钟列目录鉴权清零 · §4.1，已清 4 / 剩 4，密码不入仓）**。
 >
 > **仅供研究，不构成投资建议；执行须人工确认。** 红涨绿跌。成本来回 **18.2bp**。
 
@@ -91,25 +91,30 @@
 | 影子观测口 | 契约在场且**默认关**取向一致 | `shadow_obs_v1` 在场、默认关；**默认关 ≠ 放量** |
 | 三 env | `PERSIST` / `PUSH` / `DINGTALK` | 本拍**零触碰**；不得以翻闸为由改 |
 | P3a 闸 | `NON_LIVE_MODE` 仍拦、无 `allow_shadow` | **仍绿**；本拍不放宽 |
-| **证据缺口** | 两族待补证据是否清零 | **已清 3 / 剩 5**（见 §4.1）—— VOLUME 剩 2、AUCTION 剩 3；已清项＝VOLUME `trigger_evidence_table_data_pending`（#265 触发表契约）+ `local_minute_lib_data_pending`（#-A-#9 本机分钟库探针契约 + 运行时路径）+ AUCTION `auction_price_not_persisted`（`20261101gauction` 落盘 schema 补价）。**清零一刀 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING** |
+| **证据缺口** | 两族待补证据是否清零 | **已清 4 / 剩 4**（见 §4.1）—— VOLUME 剩 1、AUCTION 剩 3；已清项＝VOLUME `trigger_evidence_table_data_pending`（#265 触发表契约）+ `local_minute_lib_data_pending`（#-A-#9 本机分钟库探针契约 + 运行时路径）+ `http_minute_listing_auth_pending`（`20261102gevid6` 保险库 PRESENT + 认证后列目录/MANIFEST 200，**密码不入仓**）+ AUCTION `auction_price_not_persisted`（`20261101gauction` 落盘 schema 补价）。**清零一刀 ≠ 可翻闸**；**凭证已通 ≠ 可开 TRIGGERING**；**落盘 ≠ 可开 TRIGGERING** |
 
-### 4.1 证据缺口现 5 条（已诚实清 3），不是一句「待补」
+### 4.1 证据缺口现 4 条（已诚实清 4），不是一句「待补」
 
 两族各有一个 `frozenset` 常量，是**代码里就能读到的**缺口清单，不是文档里的口述：
 
 | 族 | 常量 | 条数 | `*_STATUS` |
 |---|---|---|---|
-| 量能突破 | `VOLUME_BREAKOUT_EVIDENCE_PENDING` | **2** | `data_pending` |
+| 量能突破 | `VOLUME_BREAKOUT_EVIDENCE_PENDING` | **1** | `data_pending` |
 | 竞价异动 | `AUCTION_ABNORMAL_EVIDENCE_PENDING` | **3** | `data_pending` |
 
-本拍（20261101gauction）清了 AUCTION 标签 `auction_price_not_persisted`：
-`auction_scan.build_lists` 的 item 本来就算出了撮合价与昨收（算 `gap` 必须算），
-只是没写进存档；本拍把那两个**已算出的中间值**落进 schema
-（`auction_price` / `prev_close`），stub 改成有则映射、缺则 `None`。
+本拍（20261102gevid6）清了 VOLUME 标签 `http_minute_listing_auth_pending`：
+运维侧保险库 `minute.tsp.local` / 环境已持有凭证，且**认证后列目录与 MANIFEST
+已通**（ALIGN 旁证只记 HTTP 状态码）。
 
-**这不是新行情源，不是新取数逻辑**：`SCAN_START` / `SCAN_END` / 筛选阈值 /
-`gap` / 量比 / `WIDE_MIN_GAP` / 排序**一个字节没改**，只多两个键。
-**零行为破坏**是有测例的（`gap` 回归 + 宽候选回归）。
+**三条边界必须一起读：**
+
+1. **密码不入仓。** 本仓不写、也不该写任何密码 / 密钥 / token；清零依据是
+   "运维侧确实持有凭证且认证后能列目录"，不是"把密码抄进代码"。
+2. **未认证入口仍应 401。** 「凭证已交」不改变"未带凭证时该被拒"这件事；
+   把"未认证也通"写成现状就是撒谎。
+3. **不新建 HTTP 探针模块。** 与 #266（`local_minute_lib` 新建只读探针）不同，
+   本拍**不**交付新探针；人读写清"凭证已通"即可。CI **不要求**持有真实 Basic
+   密码，也不跑真实认证请求。
 
 **已清（VOLUME）**
 - `trigger_evidence_table_data_pending` —— 已由触发表契约 + 既有负证据形式化消解；
@@ -117,6 +122,10 @@
 - `local_minute_lib_data_pending` —— 已由本机分钟库探针契约 + 运行时路径（gitignore）消解；
   **清零 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**探针 PRESENT ≠ 可开 TRIGGERING**；
   **路径已通 ≠ calib ≠ 可放量 ≠ TRIGGERING**
+- `http_minute_listing_auth_pending`（批次 `20261102gevid6`）—— 运维侧保险库
+  `minute.tsp.local` / 环境已持有凭证，且认证后列目录与 MANIFEST 已通；
+  **清零 ≠ 可翻闸**；**凭证已通 ≠ 可开 TRIGGERING**；**密码不入仓**；
+  **未认证入口仍应 401**（运维面）；**不新建** HTTP 探针模块冒充本拍必须交付
 
 **已清（AUCTION · 批次 `20261101gauction`）**
 - `auction_price_not_persisted` —— 已由 `auction_scan` 落盘 schema 补
@@ -124,14 +133,18 @@
   **清零 ≠ 可翻闸**；**落盘 ≠ 可开 TRIGGERING**；**竞价补价 PRESENT ≠ 可开 TRIGGERING**；
   **禁 gap 倒推**；**09:25 撮合终态 ≠ 09:30**
 
-缺口明细（只读引自 tip，**本拍只清上面 `auction_price_not_persisted` 一条，其余不动**）：
+缺口明细（只读引自 tip，**本拍只清上面 `http_minute_listing_auth_pending` 一条，其余不动**）：
 
-**`VOLUME_BREAKOUT_EVIDENCE_PENDING`（仍 2 条，本拍零碰）**
-- `http_minute_listing_auth_pending` —— 分钟列表鉴权未通
+**`VOLUME_BREAKOUT_EVIDENCE_PENDING`（仍 1 条）**
 - `threshold_lock_data_pending` —— 量比 / 突破幅度 / 窗口分钟数均未锁定
   （**负锁语义已契约化，见 §4.1.1 / `threshold_neg_lock`**；可钉证据路径清单见 §4.1.1；**仍开 ≠ 已锁**）
 
-**`AUCTION_ABNORMAL_EVIDENCE_PENDING`（本拍只剩这三条，仍 3 条）**
+> **清掉 http_minute 之后，VOLUME 只剩这一条，而且它不会因为"少了一条"变轻。**
+> 前三条缺的都是**外部物**（表、路径、凭证）—— 拿到就能通；
+> 这一条缺的是**一个解释**：四个突破口径回测收益 `-23.86 / -32.44 / -13.80 / -19.81`
+> **全负**，负号没解释清楚之前，阈值补什么都不能清。**负锁 ≠ 删标签。**
+
+**`AUCTION_ABNORMAL_EVIDENCE_PENDING`（仍 3 条，本拍零碰）**
 - `threshold_lock_data_pending` —— UI 阈值 ≠ 已锁回测门禁（**本拍零碰**；负锁语义在 VOLUME 侧，见 §4.1.1）
 - `backtest_evidence_data_pending` —— 无竞价异动回测 / 触发表
 - `minute_0925_still_absent` —— 09:25 分钟数据仍缺
@@ -161,21 +174,24 @@
 | 阈值负锁语义锁面 | **PRESENT** —— `threshold_neg_lock`（`threshold_neg_lock_v1`） |
 | `threshold_lock_data_pending`（VOLUME） | **仍开**，仍在 `VOLUME_BREAKOUT_EVIDENCE_PENDING` 里 |
 | `threshold_lock_data_pending`（AUCTION） | **仍开**，本拍零碰 |
-| COUNT（`TRIGGER_GATE_EVIDENCE_PENDING_COUNT`） | **现 5**（派生，VOLUME 2 + AUCTION 3） |
+| COUNT（`TRIGGER_GATE_EVIDENCE_PENDING_COUNT`） | **现 4**（派生，VOLUME 1 + AUCTION 3） |
 | 两族 `*_STATUS` | **仍 `data_pending`** |
 | 两 `*_TRIGGERING_ENABLED` / `EVENT_TRACK_FIRST_SEEN_AUDIT_COMPLETE` | **仍 `False`** |
 
 **为什么「负锁」要跟「待办」分开说**
 
-这条标签和 `http_minute_listing_auth_pending` 并排放在同一个 `frozenset` 里，
-但两者缺的东西不一样：
+这条标签曾经和 `http_minute_listing_auth_pending` 并排放在同一个 `frozenset` 里。
+批次 `20261102gevid6` 把后者清掉之后，它成了 VOLUME 族**唯一**剩下的缺口 ——
+而两者缺的东西本来就不一样：
 
-| 标签 | 缺的是什么 | 补齐后能不能清 |
-|---|---|---|
-| `http_minute_listing_auth_pending` | 一个**外部凭证** | 拿到凭证、跑通，就可以考虑清 |
-| `threshold_lock_data_pending` | **一个解释** | 负号解释清楚之前，**补什么都不能清** |
+| 标签 | 缺的是什么 | 补齐后能不能清 | 当前状态 |
+|---|---|---|---|
+| `http_minute_listing_auth_pending` | 一个**外部凭证** | 拿到凭证、跑通，就可以考虑清 | **已清**（`20261102gevid6`；密码不入仓） |
+| `threshold_lock_data_pending` | **一个解释** | 负号解释清楚之前，**补什么都不能清** | **仍开**（两侧） |
 
-前者是「还没到」，后者是「到了也不能用」。四个突破口径的回测收益
+前者是「还没到」，后者是「到了也不能用」。
+**清掉前者 ≠ 后者变轻**：恰恰相反，现在 VOLUME 族只剩这一条，
+「还剩几条」这个数字已经不能再替它分担注意力了。四个突破口径的回测收益
 `-23.86 / -32.44 / -13.80 / -19.81` 全负 —— 在这条负号被解释掉之前，
 量比 / 突破幅度 / 窗口分钟数标定出来的只会是**更精确的亏损**。
 所以越确定 `strongly_negative`，阈值这一格**越该锁着**。
@@ -189,7 +205,7 @@
 |---|---|---|---|
 | 1 | 负号可解释 | **未成立** | 需要一个能说明「四个口径为什么全负、负在哪」的研究口径（不是「市场不好」这类空话）；解释不清 → 阈值无论怎么钉都是伪的 |
 | 2 | 研究档阈值标定（若采用）须另口令明示 | **未发生** | 即便只做研究档标定，也必须另口令写明「这不是可交易锁」；**不得**静默冒充可交易阈值 |
-| 3 | 真可交易标定的前置已另拍闭合 | **未闭合** | 分钟列表鉴权（`http_minute_listing_auth_pending`）等硬前置仍在；本机分钟库已落盘 ≠ 鉴权已通 |
+| 3 | 真可交易标定的前置已另拍闭合 | **部分闭合** | 分钟列表鉴权（`http_minute_listing_auth_pending`）**已由 `20261102gevid6` 消解**（凭证已通、密码不入仓）；本机分钟库已落盘 ≠ 阈值已标定；真可交易标定**仍未闭合** |
 | 4 | 人读「均未锁定」被诚实改写的事实基础 | **未具备** | 现在这句「均未锁定」是准确的；要改写它，得先有 1–3 的事实，否则就是改文案冒充进度 |
 | 5 | 测与 COUNT 派生同步 | **长期要求** | 清一条就同步文档 / 锁面 NOTE / 测期望；COUNT 永远派生、绝不手抄；清完仍非空时断言照过，靠人同步 |
 
@@ -215,15 +231,15 @@
 
 ### 4.2 为什么把缺口条数写进文档
 
-因为「证据缺口仍在」这句话太软，读者会当成客套。**现 5 条、已清 3 条**是一个可数的数字：
+因为「证据缺口仍在」这句话太软，读者会当成客套。**现 4 条、已清 4 条**是一个可数的数字：
 
-- 它说明**不是差一点**，是还差 5 件具体的事，每件都有名字
+- 它说明**不是差一点**，是还差 4 件具体的事，每件都有名字
 - 它可被断言（本锁面只读引用这两个集合，断言 `*_STATUS == "data_pending"` 且两集合非空）
 - 缺口被整族清空时，`assert` 会提醒「契约描述过时了」，而不是让文档慢慢腐烂
 
-**但断言抓不住"只清了一两条"。** 清掉 VOLUME 那两条、AUCTION 那一条之后，两族仍
-非空（2 / 3）、STATUS 仍 `data_pending`、COUNT 仍是派生值 ——
-`assert_evidence_pending_still_open` **照过**。所以「8 变 7 变 6 变 5」这件事必须靠
+**但断言抓不住"只清了一两条"。** 清掉 VOLUME 那三条、AUCTION 那一条之后，两族仍
+非空（1 / 3）、STATUS 仍 `data_pending`、COUNT 仍是派生值 ——
+`assert_evidence_pending_still_open` **照过**。所以「8 变 7 变 6 变 5 变 4」这件事必须靠
 人同步文档、锁面 NOTE 与测例期望。把它当成自动兜底，就会在真清空之前一直读到过期的"0/8"。
 
 **清零进度看板"绿" ≠ 可翻闸。** 缺口条数是一个**披露**指标，不是**授权**指标：
