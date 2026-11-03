@@ -28,12 +28,11 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
-    """出厂证据的样本量全部门槛以下 → 全部不注入。
+    """出厂证据中仅 shrink_pullback 过样本闸，其余五族仍不注入。
 
-    这不是回归，是 P-qe 样本门槛的**预期后果**：yaml 里 6 条证据的
-    sample_sizes 最小值分别是 59/94/77/77/55/71，无一达到 100。
-    曾经能注入，是因为当时没有门槛。门槛加上之后，结论就该是「证据不够硬，
-    不往技能提示里塞」。
+    20261104 tip/prod 面板复跑接受 shrink 新权威样本 [210,229,166]，
+    最小值 166 ≥ 100；ma_golden_cross=59 等其余五族仍低于门槛。
+    曾经全部能注入，是因为当时没有门槛；现在只注入过闸的那一条。
     """
     golden = render_skill_appendix("ma_golden_cross", _SHIPPED)
     wave = render_skill_appendix("wave_theory", _SHIPPED)
@@ -44,8 +43,11 @@ def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
     summary = evidence_summary(_SHIPPED)
     names = {item["name"] for item in summary["skills"]}
     assert "ma_golden_cross" in names
-    assert all(not item["injectable"] for item in summary["skills"])
-    golden_row = next(item for item in summary["skills"] if item["name"] == "ma_golden_cross")
+    by_name = {item["name"]: item for item in summary["skills"]}
+    assert by_name["shrink_pullback"]["injectable"] is True
+    assert by_name["shrink_pullback"]["min_sample"] == 166
+    assert all(not item["injectable"] for item in summary["skills"] if item["name"] != "shrink_pullback")
+    golden_row = by_name["ma_golden_cross"]
     assert golden_row["min_sample"] == 59
     assert golden_row["returns"][0] == -14.70
 
@@ -151,7 +153,7 @@ def test_hook_appends_only_matching_skills(monkeypatch: pytest.MonkeyPatch, tmp_
     before_golden = base.load_skill_from_yaml(golden_path).instructions
     before_wave = base.load_skill_from_yaml(wave_path).instructions
 
-    # 出厂证据样本全部 < 100 → 钩子装上也不追加，且技能原文一字不动。
+    # 出厂证据中的 ma_golden_cross / wave_theory 均 < 100 → 钩子装上也不追加，且技能原文一字不动。
     monkeypatch.setenv("TSP_QUANT_EVIDENCE_FILE", str(_SHIPPED))
     install()
     assert base.load_skill_from_yaml(golden_path).instructions == before_golden
