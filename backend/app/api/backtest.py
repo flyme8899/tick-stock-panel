@@ -123,6 +123,9 @@ class BacktestRequest(BaseModel):
     exits: list[str] = []
     stop_loss_pct: float | None = None
     max_hold_days: int | None = None
+    # 无 stamp 旧端 / 已知缺口: 本口只有 fees_pct (双边佣金, 无印花税字段),
+    # 20261103gfee 方案 A 不改此处语义 (fees_pct 仍是万2, 不等于已含印花);
+    # 与拆分三元组 (commission/stamp/slippage) 对齐属方案 B, 另议。
     fees_pct: float = 0.0002
     slippage_bps: float = 5
     matching: Literal["close_t", "open_t+1"] = "close_t"
@@ -468,8 +471,11 @@ class StrategyBacktestRequest(BaseModel):
     entry_fill: Literal["close_t", "open_t+1"] | None = None
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     fees_pct: float = 0.0002
-    commission_pct: float | None = None
-    stamp_tax_pct: float | None = None
+    # 20261103gfee 方案 A 默认三元组: 万2.5 + 印花万5(仅卖出) + 滑5
+    # → 买7.5/卖12.5/来回20bp。注意: 默认撮合 20bp ≠ 研究闸锚 18.2bp。
+    # 请求体仍可覆盖 (显式传值优先)。
+    commission_pct: float | None = 0.00025
+    stamp_tax_pct: float | None = 0.0005
     slippage_bps: float = 5.0
     max_positions: int = 10
     max_exposure_pct: float = 1.0
@@ -761,8 +767,11 @@ async def strategy_stream(
     entry_fill: str | None = None,
     exit_fill: str | None = None,
     fees_pct: float = 0.0002,
-    commission_pct: float | None = None,
-    stamp_tax_pct: float | None = None,
+    # 20261103gfee 方案 A 默认三元组, 与 StrategyBacktestRequest / MatcherConfig 一致:
+    # 万2.5 + 印花万5(仅卖出) + 滑5 → 买7.5/卖12.5/来回20bp。默认撮合 20bp ≠ 闸锚 18.2bp。
+    # 注意: cancel 侧 job_key 兜底须同值 (见 strategy_cancel), 否则任务 key 不对称。
+    commission_pct: float | None = 0.00025,
+    stamp_tax_pct: float | None = 0.0005,
     slippage_bps: float = 5.0,
     max_positions: int = 10,
     max_exposure_pct: float = 1.0,
@@ -988,6 +997,14 @@ async def strategy_cancel(request: Request):
         # 可选成本参数: 缺省或空串 → None (与 stream 侧 float | None 口径一致, 保证 job_key 对齐)。
         v = _get(key)
         return float(v) if v else None
+    def _get_cost_float(key: str, default: float) -> float | None:
+        # 成本参数兜底: query 未带该键时取 /strategy/stream 的同名默认值。
+        # 20261103gfee 起 commission_pct/stamp_tax_pct 默认不再是 None,
+        # 若这里仍回落 None, cancel 算出的 job_key 会与 stream 不一致 → 取消失效。
+        if key not in p:
+            return default
+        v = p.get(key, [default])[0]
+        return float(v) if v else None
     job_key = _make_job_key(
         _get("strategy_id"),
         _get("symbols") or None,
@@ -1006,8 +1023,8 @@ async def strategy_cancel(request: Request):
         _get("overrides") or None,
         _get("mode", "position"),
         int(_get("holding_days", "5")),
-        commission_pct=_get_opt_float("commission_pct"),
-        stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
+        commission_pct=_get_cost_float("commission_pct", 0.00025),
+        stamp_tax_pct=_get_cost_float("stamp_tax_pct", 0.0005),
         asset_type=_get("asset_type", "stock"),
         minute_fill=_get("minute_fill").lower() in {"1", "true", "yes", "on"},
         regime_filter=_get("regime_filter") or None,
@@ -1093,8 +1110,10 @@ async def optimize_stream(
     end: str | None = None,
     matching: str = "open_t+1",
     fees_pct: float = 0.0002,
-    commission_pct: float | None = None,
-    stamp_tax_pct: float | None = None,
+    # 20261103gfee 方案 A 默认三元组, 与 StrategyBacktestRequest / MatcherConfig 一致:
+    # 万2.5 + 印花万5(仅卖出) + 滑5 → 买7.5/卖12.5/来回20bp。默认撮合 20bp ≠ 闸锚 18.2bp。
+    commission_pct: float | None = 0.00025,
+    stamp_tax_pct: float | None = 0.0005,
     slippage_bps: float = 5.0,
     max_positions: int = 10,
     max_exposure_pct: float = 1.0,
@@ -1318,8 +1337,10 @@ async def walkforward_stream(
     end: str | None = None,
     matching: str = "open_t+1",
     fees_pct: float = 0.0002,
-    commission_pct: float | None = None,
-    stamp_tax_pct: float | None = None,
+    # 20261103gfee 方案 A 默认三元组, 与 StrategyBacktestRequest / MatcherConfig 一致:
+    # 万2.5 + 印花万5(仅卖出) + 滑5 → 买7.5/卖12.5/来回20bp。默认撮合 20bp ≠ 闸锚 18.2bp。
+    commission_pct: float | None = 0.00025,
+    stamp_tax_pct: float | None = 0.0005,
     slippage_bps: float = 5.0,
     max_positions: int = 10,
     max_exposure_pct: float = 1.0,

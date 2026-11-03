@@ -1,6 +1,12 @@
 """回测引擎 — 共享数据加载 + 撮合 + 统计计算。
 
 纯 Polars/NumPy 实现，不依赖 pandas/vectorbt。
+
+成本口径 (20261103gfee): 默认撮合 = 万2.5 佣金 + 万5 印花(仅卖出) + 5bps 滑点
+→ 买 7.5bp / 卖 12.5bp / 来回 20bp。默认撮合 20bp **不等于**研究闸锚 18.2bp
+(GTJA191_COST_BP_ROUNDTRIP / CALIB_COST_BP_ROUNDTRIP)，两者口径分离，互不追溯。
+
+仅供研究，不构成投资建议；执行须人工确认。
 """
 from __future__ import annotations
 
@@ -238,10 +244,14 @@ class MatcherConfig:
     entry_fill: Literal["close_t", "open_t+1"] | None = None
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     # 成本模型: 优先使用拆分口径 (佣金双边 + 印花税仅卖出 + 滑点双边)。
-    # 未设 commission_pct 时回退到 fees_pct 作为双边佣金 (向后兼容, 无印花税)。
+    # 默认 = 市面常见零售 (20261103gfee 方案 A): 万2.5 + 印花万5 + 滑5
+    # → 买 7.5bp / 卖 12.5bp / 来回 20bp。用户 (请求/构造参数) 可覆盖。
+    # 注意: 默认撮合 20bp ≠ 研究闸锚 18.2bp (GTJA191/CALIB), 两者口径分离。
+    # fees_pct 仅作「未设 commission_pct」时的回退兼容值 (旧语义无印花);
+    # 推荐路径请显式传 commission_pct + stamp_tax_pct。
     fees_pct: float = 0.0002
-    commission_pct: float | None = None
-    stamp_tax_pct: float | None = None
+    commission_pct: float | None = 0.00025
+    stamp_tax_pct: float | None = 0.0005
     slippage_bps: float = 5.0
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None

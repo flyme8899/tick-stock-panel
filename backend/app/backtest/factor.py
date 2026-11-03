@@ -55,8 +55,10 @@ class FactorConfig:
     fees_pct: float = 0.0002
     slippage_bps: float = 5.0
     asset_type: str = "stock"
-    commission_pct: float | None = None
-    stamp_tax_pct: float | None = None
+    # 20261103gfee 方案 A: 显式默认三元组 (与 MatcherConfig 一致), 买7.5/卖12.5/来回20bp。
+    # 注意: 默认撮合 20bp ≠ 研究闸锚 18.2bp; fees_pct 仅作回退兼容。
+    commission_pct: float | None = 0.00025
+    stamp_tax_pct: float | None = 0.0005
 
 
 @dataclass
@@ -113,8 +115,10 @@ class FactorBatchConfig:
     fees_pct: float = 0.0002
     slippage_bps: float = 5.0
     asset_type: str = "stock"
-    commission_pct: float | None = None
-    stamp_tax_pct: float | None = None
+    # 20261103gfee 方案 A: 显式默认三元组 (与 MatcherConfig 一致), 买7.5/卖12.5/来回20bp。
+    # 注意: 默认撮合 20bp ≠ 研究闸锚 18.2bp; fees_pct 仅作回退兼容。
+    commission_pct: float | None = 0.00025
+    stamp_tax_pct: float | None = 0.0005
 
 
 @dataclass

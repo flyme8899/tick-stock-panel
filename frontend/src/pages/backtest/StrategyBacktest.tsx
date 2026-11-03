@@ -1052,8 +1052,10 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1' | 'signal_next_minute'>(
     saved ? (saved.exitFill ?? saved.matching ?? 'close_t') : 'open_t+1',
   )
-  const [fees, setFees] = useState(saved?.fees ?? '2')
-  const [stampTax, setStampTax] = useState(saved?.stampTax ?? '1')
+  // 费率默认 20261103gfee 方案 A: 万2.5 + 印花万5 + 滑5 → 买7.5/卖12.5/来回20bp。
+  // 默认撮合 20bp ≠ 研究闸锚 18.2bp。用户改动后存入 saved, 仍可覆盖。
+  const [fees, setFees] = useState(saved?.fees ?? '2.5')
+  const [stampTax, setStampTax] = useState(saved?.stampTax ?? '0.5')
   const [slippage, setSlippage] = useState(saved?.slippage ?? '5')
   const [volumeLimitPct, setVolumeLimitPct] = useState(saved?.volumeLimitPct ?? '')
   const [benchmarkSymbol, setBenchmarkSymbol] = useState(saved?.benchmarkSymbol ?? '000001.SH')

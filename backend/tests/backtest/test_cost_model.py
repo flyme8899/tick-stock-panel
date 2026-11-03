@@ -54,11 +54,43 @@ def _mask(panel: pl.DataFrame, marks: set[tuple[str, int]]) -> pl.Series:
 # 1. 单元测试: buy_cost_pct / sell_cost_pct
 # ---------------------------------------------------------------
 
+def test_default_matcher_retail_triplet_7_5_12_5_20():
+    """20261103gfee 方案 A: 默认 = 万2.5 佣金 + 万5 印花(仅卖出) + 5bps 滑点。
+
+    买 7.5bp / 卖 12.5bp / 来回 20.0bp。
+    注意: 默认撮合 20bp ≠ 研究闸锚 18.2bp (GTJA191/CALIB), 两者口径分离, 不互相追溯。
+    """
+    cfg = MatcherConfig()  # 方案 A 默认
+    assert cfg.commission_pct == 0.00025
+    assert cfg.stamp_tax_pct == 0.0005
+    assert cfg.slippage_bps == 5.0
+    assert cfg.buy_cost_pct() * 10000 == 7.5
+    assert cfg.sell_cost_pct() * 10000 == 12.5
+    assert (cfg.buy_cost_pct() + cfg.sell_cost_pct()) * 10000 == 20.0
+
+
 def test_legacy_fees_pct_keeps_symmetric_cost_without_stamp():
-    """仅传 fees_pct: 买卖成本相等, 均为 fees + slippage, 不含印花税 (旧行为)。"""
-    cfg = MatcherConfig(fees_pct=0.0002, slippage_bps=5.0)
+    """仅传 fees_pct (显式 None 关掉拆分口径): 买卖成本相等, 不含印花税 (旧行为)。
+
+    默认已非 None, 兼容路径必须显式传 None 才触发 fees_pct 回退; 语义仍是 7/7 对称。
+    """
+    cfg = MatcherConfig(fees_pct=0.0002, commission_pct=None, stamp_tax_pct=None, slippage_bps=5.0)
     assert cfg.buy_cost_pct() == 0.0002 + 0.0005
     assert cfg.sell_cost_pct() == 0.0002 + 0.0005  # 无印花税, 与买入对称
+    assert cfg.buy_cost_pct() * 10000 == 7.0
+    assert cfg.sell_cost_pct() * 10000 == 7.0
+
+
+def test_default_triplet_does_not_touch_research_anchor():
+    """默认撮合 20bp 与研究闸锚 18.2bp 口径分离: 本 PR 不读、不写、不改锚。
+
+    仅断言「默认撮合不等于锚」, 防止后续有人把 20bp 当成 18.2 的替代品。
+    锚本身 (GTJA191_COST_BP_ROUNDTRIP / CALIB_COST_BP_ROUNDTRIP) 由各自 lock 测守护。
+    """
+    cfg = MatcherConfig()
+    roundtrip_bp = (cfg.buy_cost_pct() + cfg.sell_cost_pct()) * 10000
+    assert roundtrip_bp == 20.0
+    assert roundtrip_bp != 18.2
 
 
 def test_decomposed_cost_applies_stamp_only_on_sell():
@@ -70,14 +102,18 @@ def test_decomposed_cost_applies_stamp_only_on_sell():
 
 def test_commission_pct_overrides_fees_pct():
     """同时给 fees_pct 与 commission_pct 时, 以 commission_pct 为准。"""
-    cfg = MatcherConfig(fees_pct=0.0002, commission_pct=0.0009, slippage_bps=0)
+    cfg = MatcherConfig(
+        fees_pct=0.0002, commission_pct=0.0009, stamp_tax_pct=None, slippage_bps=0,
+    )
     assert cfg.buy_cost_pct() == 0.0009
-    assert cfg.sell_cost_pct() == 0.0009  # stamp 未设 → 0
+    assert cfg.sell_cost_pct() == 0.0009  # stamp 显式未设 → 0
 
 
 def test_commission_pct_zero_is_not_treated_as_unset():
     """commission_pct=0.0 是有效值, 不应因 falsy 而回退到 fees_pct。"""
-    cfg = MatcherConfig(fees_pct=0.0002, commission_pct=0.0, slippage_bps=0)
+    cfg = MatcherConfig(
+        fees_pct=0.0002, commission_pct=0.0, stamp_tax_pct=None, slippage_bps=0,
+    )
     assert cfg.buy_cost_pct() == 0.0
     assert cfg.sell_cost_pct() == 0.0
 

@@ -88,7 +88,10 @@ class BacktestConfig:
     # 其他参数
     stop_loss_pct: float | None = None       # 例 -0.05 = -5%
     max_hold_days: int | None = None
-    fees_pct: float = 0.0002                 # 万二佣金
+    # 无 stamp 旧端 (vectorbt) / 已知缺口: fees_pct 为双边佣金, 无印花税字段。
+    # 20261103gfee 方案 A 只改 Matcher/Strategy/Factor/paper/mining 的拆分三元组,
+    # 此处不改语义 (万2 不等于已含印花); 拆分为 commission/stamp 属方案 B, 另议。
+    fees_pct: float = 0.0002                 # 万二佣金 (仅本旧端; 非拆分口径)
     slippage_bps: float = 5                  # 5 bps
     # 撮合
     matching: Literal["close_t", "open_t+1"] = "close_t"

@@ -106,7 +106,8 @@ const DEFAULT_DRAFT: MiningDraft = {
   profile: 'exploratory',
   factorNames: [],
   strategyIds: [],
-  commissionBps: '2',
+  // 费率默认 20261103gfee 方案 A: 佣金万2.5 / 印花万5 / 滑5bp (bp 单位)。
+  commissionBps: '2.5',
   stampTaxBps: '5',
   slippageBps: '5',
   correlationThreshold: '0.75',
