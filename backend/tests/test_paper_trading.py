@@ -50,12 +50,23 @@ def _write_factor(tmp_path, day: date, factor: float, asset_type: str = "stock")
 
 
 # ── 纯函数口径 ──────────────────────────────────────────
+def test_default_fee_constants_match_retail_triplet():
+    """20261103gfee 方案 A: paper 默认须与回测引擎一致 (万2.5 / 万5 / 5bps)。
+
+    印花税自 2023-08-28 减半为万5 (财政部 税务总局公告2023年第39号), 旧千一是法定错值。
+    默认撮合来回 20bp ≠ 研究闸锚 18.2bp, 两者口径分离。
+    """
+    assert paper.DEFAULT_COMMISSION_PCT == 0.00025
+    assert paper.DEFAULT_STAMP_TAX_PCT == 0.0005
+    assert paper.DEFAULT_SLIPPAGE_BPS == 5.0
+
+
 def test_fees_min_commission_and_stamp_tax_sell_only():
     # 佣金最低 5 元: 100 股 x 10 元 x 万2.5 = 0.25 → 取 5
     assert paper.buy_fee(100, 10.0, 0.00025) == 5.0
     # 大额按比例: 10000 股 x 10 元 = 10万 x 万2.5 = 25
     assert paper.buy_fee(10000, 10.0, 0.00025) == 25.0
-    # 印花税仅卖出: 25 + 10万 x 千1 = 125
+    # 印花税仅卖出: 25 + 10万 x 千1 = 125 (显式传参, 验算法本身, 非默认口径)
     assert paper.sell_fee(10000, 10.0, 0.00025, 0.001) == 25.0 + 100.0
     assert paper.buy_fee(10000, 10.0, 0.001) == 100.0
 
@@ -612,7 +623,12 @@ def test_account_id_validation_blocks_traversal(tmp_path):
 
 
 def test_legacy_single_account_layout_migrates(tmp_path, monkeypatch):
-    """旧版 data/paper/* 单账户布局首次访问自动迁移到 accounts/default/。"""
+    """旧版 data/paper/* 单账户布局首次访问自动迁移到 accounts/default/。
+
+    夹具里的 "stamp_tax_pct": 0.001 是**旧账户落盘字面量** (模拟历史数据),
+    故意保持千1, 用来验证迁移只搬运不改写; 不等于默认仍是千1。
+    新建账户路径走 paper.DEFAULT_STAMP_TAX_PCT = 0.0005。
+    """
     monkeypatch.setattr(paper, "_MIGRATION_DONE", False)
     legacy = tmp_path / "paper"
     legacy.mkdir()

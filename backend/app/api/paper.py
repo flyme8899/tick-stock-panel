@@ -54,7 +54,7 @@ class OrderModel(BaseModel):
 class SettingsModel(BaseModel):
     queue_limit_orders: bool | None = None
     commission_pct: float | None = None   # 佣金率 (0.00025 = 万2.5)
-    stamp_tax_pct: float | None = None    # 印花税 (0.001 = 千1, 仅卖出)
+    stamp_tax_pct: float | None = None    # 印花税 (0.0005 = 万5, 仅卖出; 法定现行)
     slippage_bps: float | None = None     # 滑点 (5 = 5bps)
 
 

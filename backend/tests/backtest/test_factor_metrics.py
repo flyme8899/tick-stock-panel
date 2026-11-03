@@ -47,6 +47,10 @@ def _config(
         "n_groups": 2,
         "rebalance": "daily",
         "fees_pct": 0.0,
+        # 20261103gfee: 默认 commission/stamp 已非 None; 本文件多数断言基于零成本,
+        # 显式关掉拆分口径。需要成本的用例自行覆盖这三个键。
+        "commission_pct": None,
+        "stamp_tax_pct": None,
         "slippage_bps": 0.0,
     }
     values.update(overrides)
@@ -62,6 +66,10 @@ def _batch_config(**overrides) -> FactorBatchConfig:
         "n_groups": 2,
         "rebalance": "daily",
         "fees_pct": 0.0,
+        # 20261103gfee: 默认 commission/stamp 已非 None; 本文件多数断言基于零成本,
+        # 显式关掉拆分口径。需要成本的用例自行覆盖这三个键。
+        "commission_pct": None,
+        "stamp_tax_pct": None,
         "slippage_bps": 0.0,
     }
     values.update(overrides)

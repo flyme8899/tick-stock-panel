@@ -611,8 +611,11 @@ class StrategyBacktestConfig:
     entry_fill: Literal["close_t", "open_t+1"] | None = None
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     fees_pct: float = 0.0002
-    commission_pct: float | None = None
-    stamp_tax_pct: float | None = None
+    # 20261103gfee 方案 A 默认三元组 (与 MatcherConfig 一致):
+    # 万2.5 佣金 + 万5 印花(仅卖出) + 5bps 滑点 → 买 7.5 / 卖 12.5 / 来回 20bp。
+    # 注意: 默认撮合 20bp ≠ 研究闸锚 18.2bp; 构造参数可覆盖。
+    commission_pct: float | None = 0.00025
+    stamp_tax_pct: float | None = 0.0005
     slippage_bps: float = 5.0
     max_positions: int = 10
     max_exposure_pct: float = 1.0

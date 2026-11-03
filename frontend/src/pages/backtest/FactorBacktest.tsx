@@ -106,7 +106,8 @@ export function FactorBacktest({
   const [nGroups, setNGroups] = useState(5)
   const [weight, setWeight] = useState<'equal' | 'factor_weight'>('equal')
   const [rebalance, setRebalance] = useState<'daily' | 'weekly' | 'monthly'>('daily')
-  const [fees, setFees] = useState('2')
+  // 费率默认 20261103gfee 方案 A: 佣金万2.5 (单位 ‱)。默认撮合 20bp ≠ 闸锚 18.2bp。
+  const [fees, setFees] = useState('2.5')
   const [slippage, setSlippage] = useState('5')
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)

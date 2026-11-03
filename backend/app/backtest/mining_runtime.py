@@ -893,8 +893,9 @@ def _decode_runtime_request(
         1.0,
         exclusive_min=True,
     )
+    # 20261103gfee: 佣金回退 0.0002 → 0.00025 (万2.5), 与 MatcherConfig 默认一致; stamp 仍万5。
     commission_pct = _bounded_float(
-        request.get("commission_pct", 0.0002), "commission_pct", 0.0, 0.05
+        request.get("commission_pct", 0.00025), "commission_pct", 0.0, 0.05
     )
     stamp_tax_pct = _bounded_float(
         request.get("stamp_tax_pct", 0.0005), "stamp_tax_pct", 0.0, 0.05

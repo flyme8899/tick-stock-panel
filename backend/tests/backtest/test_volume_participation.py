@@ -55,6 +55,10 @@ def _run(panel: pl.DataFrame, entries, exits, **kwargs):
     config = MatcherConfig(
         matching=kwargs.pop("matching", "open_t+1"),
         fees_pct=0,
+        # 显式关掉拆分口径 (20261103gfee 起默认非 None), 否则 sizing 会按 7.5bp 算,
+        # 100_000 / (10 * 1.00075) 取整百股 = 9900 而非 10_000, 与本文件「零成本」前提冲突。
+        commission_pct=None,
+        stamp_tax_pct=None,
         slippage_bps=0,
         max_positions=kwargs.pop("max_positions", 1),
         initial_capital=100_000,
@@ -160,7 +164,10 @@ def test_independent_one_lot_skips_then_force_closes() -> None:
         panel,
         entries,
         exits,
-        MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0, volume_limit=0.1, max_hold_days=1),
+        MatcherConfig(
+            matching="close_t", fees_pct=0, commission_pct=None, stamp_tax_pct=None,
+            slippage_bps=0, volume_limit=0.1, max_hold_days=1,
+        ),
     )
     assert blocked.trades == []
     assert blocked.stats["execution"]["buy_volume_limit"] == 1
@@ -174,7 +181,10 @@ def test_independent_one_lot_skips_then_force_closes() -> None:
         panel,
         entries,
         exits,
-        MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0, volume_limit=0.1, max_hold_days=1),
+        MatcherConfig(
+            matching="close_t", fees_pct=0, commission_pct=None, stamp_tax_pct=None,
+            slippage_bps=0, volume_limit=0.1, max_hold_days=1,
+        ),
     )
     assert len(closed.trades) == 1
     assert closed.trades[0].shares == 100

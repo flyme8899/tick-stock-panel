@@ -358,6 +358,10 @@ def test_full_mode_executes_every_candidate_with_strategy_rules():
         mode="full",
         matching="open_t+1",
         fees_pct=0,
+        # 20261103gfee: 默认 commission/stamp 已非 None; 本文件断言多为毛收益口径,
+        # 显式关掉拆分口径 (否则 avg_return 会被 7.5/12.5bp 拉低)。
+        commission_pct=None,
+        stamp_tax_pct=None,
         slippage_bps=0,
         holding_days=1,
     ))
@@ -609,6 +613,10 @@ def test_matrix_cache_preserves_trades_daily_equity_and_core_stats():
         end=start + timedelta(days=5),
         matching="close_t",
         fees_pct=0,
+        # 20261103gfee: 默认 commission/stamp 已非 None; 本文件断言多为毛收益口径,
+        # 显式关掉拆分口径 (否则 avg_return 会被 7.5/12.5bp 拉低)。
+        commission_pct=None,
+        stamp_tax_pct=None,
         slippage_bps=0,
         max_positions=1,
     )
@@ -679,6 +687,10 @@ def test_full_mode_reports_factor_attribution():
         mode="full",
         matching="open_t+1",
         fees_pct=0,
+        # 20261103gfee: 默认 commission/stamp 已非 None; 本文件断言多为毛收益口径,
+        # 显式关掉拆分口径 (否则 avg_return 会被 7.5/12.5bp 拉低)。
+        commission_pct=None,
+        stamp_tax_pct=None,
         slippage_bps=0,
         holding_days=1,
     ))

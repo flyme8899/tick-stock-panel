@@ -7,7 +7,10 @@
 
 价格口径: 全程不复权 raw 价 (与真实交易一致)。费用参数与回测引擎
 (app/backtest/engine.py) 同名同默认值: commission_pct 双边佣金 / stamp_tax_pct
-卖出印花税 / slippage_bps 滑点。
+卖出印花税 / slippage_bps 滑点。20261103gfee 起两侧统一为 万2.5 + 万5 + 5bps
+(买 7.5bp / 卖 12.5bp / 来回 20bp); 默认撮合 20bp ≠ 研究闸锚 18.2bp。
+
+仅供研究，不构成投资建议；执行须人工确认。
 
 多账户 (V2): 数据目录 data/paper/accounts/{account_id}/, 账户间完全隔离
 (订单/台账/持仓/净值/自动规则均按账户存放)。所有域函数带 account_id 参数
@@ -47,11 +50,12 @@ logger = logging.getLogger(__name__)
 # 单进程内全部写操作互斥 (API 下单 / 行情钩子撮合 / 盘后结算共用一把锁)
 PAPER_LOCK = threading.RLock()
 
-# 费用默认值 — 与回测 engine.py 一致
+# 费用默认值 — 与回测 engine.py 一致 (20261103gfee 方案 A)
 DEFAULT_COMMISSION_PCT = 0.00025   # 双边佣金 万2.5
 MIN_COMMISSION = 5.0               # 佣金最低 5 元
-DEFAULT_STAMP_TAX_PCT = 0.001      # 印花税, 仅卖出
+DEFAULT_STAMP_TAX_PCT = 0.0005     # 印花税万5, 仅卖出 (法定现行; 2023-08-28 减半后)
 DEFAULT_SLIPPAGE_BPS = 5.0         # 滑点 (bps, 万分之5)
+# 默认撮合来回 20bp (买 7.5 / 卖 12.5) ≠ 研究闸锚 18.2bp, 两者口径分离。
 
 MAX_POSTPONE_DAYS = 3             # 顺延上限: 连续 N 个交易日无法成交自动过期
 # 结算价格的打印时刻 (北京墙钟): 开盘价 09:30 / 收盘价 15:00。下单晚于该时刻的单

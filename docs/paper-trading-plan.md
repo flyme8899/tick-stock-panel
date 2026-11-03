@@ -47,7 +47,7 @@ data/paper/
 
 - **价格一律不复权 raw 价**(与真实交易一致); 持仓市值用 `raw_close`。
 - **除权处理**: 日终结算时检测持仓 symbol 当日有除权因子(`adj_factor_etf`/`adj_factor`), 按因子调整数量与成本(送转 → 数量乘因子、成本除因子; 现金分红 → cash 入账), 并记一条 `corporate_action` 冲正成交, 保证净值曲线连续。
-- **费用**: `commission_pct`(双边, 默认万 2.5, 最低 5 元)、`stamp_tax_pct`(卖出印花税, 默认千 1)、`slippage_bps`(默认 5)——与回测引擎 `app/backtest/engine.py` 的参数名和默认值完全一致, 用户心智一份口径。
+- **费用**: `commission_pct`(双边, 默认万 2.5, 最低 5 元)、`stamp_tax_pct`(卖出印花税, 默认万 5)、`slippage_bps`(默认 5)——与回测引擎 `app/backtest/engine.py` 的参数名和默认值完全一致, 用户心智一份口径。默认撮合来回约 20bp(买 7.5 / 卖 12.5), 与研究闸锚 **18.2bp** 分离, 两者不可互相冒充。
 
 ## 4. 撮合规则(金融口径, 必须逐条测试)
 

@@ -55,6 +55,9 @@ def test_max_exposure_sets_target_position_and_caps_count():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=3,
             max_exposure_pct=0.6,
@@ -83,7 +86,7 @@ def test_one_price_limit_up_blocks_buy():
         panel,
         entries,
         exits,
-        MatcherConfig(matching="open_t+1", fees_pct=0, slippage_bps=0, max_positions=1, initial_capital=100_000),
+        MatcherConfig(matching="open_t+1", fees_pct=0, commission_pct=None, stamp_tax_pct=None, slippage_bps=0, max_positions=1, initial_capital=100_000),
     )
 
     assert result.trades == []
@@ -111,6 +114,9 @@ def test_failed_open_exit_keeps_slot_and_blocks_replacement_buy():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=3,
             max_exposure_pct=0.6,
@@ -146,6 +152,9 @@ def test_trailing_stop_uses_high_water_mark():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             initial_capital=100_000,
@@ -178,6 +187,9 @@ def test_trailing_take_profit_requires_activation():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             initial_capital=100_000,
@@ -208,6 +220,9 @@ def test_trailing_take_profit_exits_after_activation():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             initial_capital=100_000,
@@ -246,6 +261,9 @@ def test_score_filter_uses_signal_day_score_range():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=3,
             initial_capital=100_000,
@@ -278,7 +296,7 @@ def test_independent_candidates_allow_overlapping_same_symbol_trades():
         panel,
         entries,
         exits,
-        MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0, max_hold_days=2),
+        MatcherConfig(matching="close_t", fees_pct=0, commission_pct=None, stamp_tax_pct=None, slippage_bps=0, max_hold_days=2),
     )
 
     assert result.stats["full_kind"] == "candidate_execution"
@@ -305,7 +323,7 @@ def test_independent_candidates_apply_stop_loss():
         panel,
         entries,
         exits,
-        MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0, stop_loss_pct=0.1),
+        MatcherConfig(matching="close_t", fees_pct=0, commission_pct=None, stamp_tax_pct=None, slippage_bps=0, stop_loss_pct=0.1),
     )
 
     assert len(result.trades) == 1
@@ -337,6 +355,9 @@ def test_signal_exit_takes_priority_over_max_hold():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             max_hold_days=2,
@@ -371,6 +392,9 @@ def test_stop_loss_triggers_even_when_expired_in_open_mode():
         MatcherConfig(
             matching="open_t+1",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             max_hold_days=2,
@@ -409,6 +433,9 @@ def test_default_fill_is_buy_open_sell_close():
             entry_fill="open_t+1",
             exit_fill="close_t",
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             max_hold_days=1,
@@ -472,6 +499,9 @@ def test_minute_signal_exit_fills_at_next_minute_open():
             exit_fill="signal_next_minute",
             minute_fill=True,
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             initial_capital=100_000,
@@ -507,6 +537,9 @@ def test_minute_signal_exit_without_next_bar_falls_back_to_next_open():
             exit_fill="signal_next_minute",
             minute_fill=True,
             fees_pct=0,
+            # 20261103gfee: 默认 commission/stamp 已非 None, 零成本前提须显式关闭拆分口径。
+            commission_pct=None,
+            stamp_tax_pct=None,
             slippage_bps=0,
             max_positions=1,
             initial_capital=100_000,
