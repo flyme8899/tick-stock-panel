@@ -417,20 +417,30 @@ def test_min_sample_threshold_is_100() -> None:
 
 
 def test_shipped_evidence_all_below_threshold() -> None:
-    """出厂 yaml 的 6 条证据全部不足样本 → 全部不注入（预期结果，非回归）。"""
+    """历史测名保留：出厂 yaml 仅 shrink_pullback 过样本闸，其余五族仍不足。
+
+    166 是 20261104 tip/prod 面板复跑的新权威读数（旧 94 不再作为出厂口径）。
+    """
     summary = quant_evidence.evidence_summary(_SHIPPED)
     mins = {item["name"]: item["min_sample"] for item in summary["skills"]}
 
     assert mins == {
         "ma_golden_cross": 59,
-        "shrink_pullback": 94,
+        "shrink_pullback": 166,
         "volume_breakout": 77,
         "bull_trend": 77,
         "dragon_head": 55,
         "bottom_volume": 71,
     }
-    assert all(not item["injectable"] for item in summary["skills"])
+    by_name = {item["name"]: item for item in summary["skills"]}
+    assert by_name["shrink_pullback"]["injectable"] is True
+    assert by_name["shrink_pullback"]["returns"] == [-38.11, -36.47, -29.89]
+    assert all(not item["injectable"] for item in summary["skills"] if item["name"] != "shrink_pullback")
+    assert summary["sample_below_threshold"] is False
     assert summary["expired"] is False, "时效没问题，是样本不够——两件事不能混"
+    appendix = quant_evidence.render_skill_appendix("shrink_pullback", _SHIPPED)
+    assert appendix, "过样本闸后应可注入"
+    assert "166 笔" in appendix
 
 
 def test_env_label_missing_is_flagged(tmp_path: Path) -> None:
