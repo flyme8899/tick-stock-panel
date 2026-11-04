@@ -417,12 +417,12 @@ def test_min_sample_threshold_is_100() -> None:
 
 
 def test_shipped_evidence_all_below_threshold() -> None:
-    """历史测名保留：出厂 yaml 中 shrink_pullback、bull_trend 与 volume_breakout
-    已过样本闸（可注入）；其余三族仍不足。
+    """历史测名保留：出厂 yaml 中 shrink_pullback、bull_trend、volume_breakout
+    与 bottom_volume 已过样本闸（可注入）；其余两族仍不足。
 
-    20261104gyaml4 方案 A：接受 VB prod 面板 [152,116,102,150]（min=102）。
+    20261104gyaml5 方案 A：接受 bottom prod 面板 [144,102,194,281]（min=102）。
     写 yaml ≠ path#1 ≠ 清标签。D1 已成立（shrink）≠ 本拍清标签。
-    tip≠prod：权威＝prod 面板。3/6 ≠ 清标签 ≠ 可放量。
+    tip≠prod：权威＝prod 面板。4/6 ≠ 清标签 ≠ 可放量。
     """
     summary = quant_evidence.evidence_summary(_SHIPPED)
     mins = {item["name"]: item["min_sample"] for item in summary["skills"]}
@@ -433,7 +433,7 @@ def test_shipped_evidence_all_below_threshold() -> None:
         "volume_breakout": 102,
         "bull_trend": 110,
         "dragon_head": 55,
-        "bottom_volume": 71,
+        "bottom_volume": 102,
     }
     by_name = {item["name"]: item for item in summary["skills"]}
     assert by_name["shrink_pullback"]["injectable"] is True
@@ -442,12 +442,14 @@ def test_shipped_evidence_all_below_threshold() -> None:
     assert by_name["bull_trend"]["returns"] == [-55.13, -44.84]
     assert by_name["volume_breakout"]["injectable"] is True
     assert by_name["volume_breakout"]["returns"] == [-46.88, -41.38, -22.82, -37.29]
+    assert by_name["bottom_volume"]["injectable"] is True
+    assert by_name["bottom_volume"]["returns"] == [-16.82, -4.87, -38.05, -35.06]
     assert all(
         not by_name[n]["injectable"]
-        for n in ("ma_golden_cross", "dragon_head", "bottom_volume")
+        for n in ("ma_golden_cross", "dragon_head")
     )
     assert summary["sample_below_threshold"] is False
-    assert summary["expired"] is False, "时效没问题，其余三族是样本不够——两件事不能混"
+    assert summary["expired"] is False, "时效没问题，其余两族是样本不够——两件事不能混"
     appendix_shrink = quant_evidence.render_skill_appendix("shrink_pullback", _SHIPPED)
     assert appendix_shrink, "shrink 过样本闸后应可注入"
     assert "166 笔" in appendix_shrink
@@ -457,6 +459,9 @@ def test_shipped_evidence_all_below_threshold() -> None:
     appendix_vb = quant_evidence.render_skill_appendix("volume_breakout", _SHIPPED)
     assert appendix_vb, "VB 过样本闸后应可注入"
     assert "102 笔" in appendix_vb
+    appendix_bottom = quant_evidence.render_skill_appendix("bottom_volume", _SHIPPED)
+    assert appendix_bottom, "bottom 过样本闸后应可注入"
+    assert "102 笔" in appendix_bottom
 
 
 def test_env_label_missing_is_flagged(tmp_path: Path) -> None:
