@@ -417,9 +417,10 @@ def test_min_sample_threshold_is_100() -> None:
 
 
 def test_shipped_evidence_all_below_threshold() -> None:
-    """历史测名保留：出厂 yaml 仅 shrink_pullback 过样本闸，其余五族仍不足。
+    """历史测名保留：出厂 yaml 中 shrink_pullback 与 bull_trend 已过样本闸（可注入）；其余四族仍不足。
 
-    166 是 20261104 tip/prod 面板复跑的新权威读数（旧 94 不再作为出厂口径）。
+    20261104gyaml3 方案 A：接受 bull 面板 [172,110]（min=110）。
+    写 yaml ≠ path#1 ≠ 清标签。D1 已成立（shrink）≠ 本拍清标签。
     """
     summary = quant_evidence.evidence_summary(_SHIPPED)
     mins = {item["name"]: item["min_sample"] for item in summary["skills"]}
@@ -428,19 +429,27 @@ def test_shipped_evidence_all_below_threshold() -> None:
         "ma_golden_cross": 59,
         "shrink_pullback": 166,
         "volume_breakout": 77,
-        "bull_trend": 77,
+        "bull_trend": 110,
         "dragon_head": 55,
         "bottom_volume": 71,
     }
     by_name = {item["name"]: item for item in summary["skills"]}
     assert by_name["shrink_pullback"]["injectable"] is True
     assert by_name["shrink_pullback"]["returns"] == [-38.11, -36.47, -29.89]
-    assert all(not item["injectable"] for item in summary["skills"] if item["name"] != "shrink_pullback")
+    assert by_name["bull_trend"]["injectable"] is True
+    assert by_name["bull_trend"]["returns"] == [-55.13, -44.84]
+    assert all(
+        not by_name[n]["injectable"]
+        for n in ("ma_golden_cross", "volume_breakout", "dragon_head", "bottom_volume")
+    )
     assert summary["sample_below_threshold"] is False
-    assert summary["expired"] is False, "时效没问题，是样本不够——两件事不能混"
-    appendix = quant_evidence.render_skill_appendix("shrink_pullback", _SHIPPED)
-    assert appendix, "过样本闸后应可注入"
-    assert "166 笔" in appendix
+    assert summary["expired"] is False, "时效没问题，其余四族是样本不够——两件事不能混"
+    appendix_shrink = quant_evidence.render_skill_appendix("shrink_pullback", _SHIPPED)
+    assert appendix_shrink, "shrink 过样本闸后应可注入"
+    assert "166 笔" in appendix_shrink
+    appendix_bull = quant_evidence.render_skill_appendix("bull_trend", _SHIPPED)
+    assert appendix_bull, "bull 过样本闸后应可注入"
+    assert "110 笔" in appendix_bull
 
 
 def test_env_label_missing_is_flagged(tmp_path: Path) -> None:
