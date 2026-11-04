@@ -795,15 +795,15 @@ def test_volume_stub_keeps_all_pinned_values() -> None:
     assert vb.VOLUME_BREAKOUT_RECORD_STATUS == "candidate"
     # 闸开关：本文件永远 Final=False
     assert vb.VOLUME_BREAKOUT_TRIGGERING_ENABLED is False
-    # 负证据四个口径原样（不是本拍造的数，也不许本拍改）
+    # 负证据四口径仍全负。20261104gyaml4＝有 C 凭证的权威替换，非 fabricate；负号未解释。
     assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["source"] == "app/custom/dsa/quant_evidence.yaml"
     assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["key"] == "volume_breakout"
     assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["verdict"] == "strongly_negative"
     assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["returns"] == (
-        -23.86,
-        -32.44,
-        -13.80,
-        -19.81,
+        -46.88,
+        -41.38,
+        -22.82,
+        -37.29,
     )
     assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["matched"] == (
         "放量创60日新高",
