@@ -341,8 +341,8 @@ def test_t2_status_and_triggering_untouched():
     assert vb.VOLUME_BREAKOUT_STATUS == "data_pending"
     assert vb.VOLUME_BREAKOUT_TRIGGERING_ENABLED is False
     assert vb.VOLUME_BREAKOUT_RECORD_STATUS == "candidate"
-    # 负证据数字本拍零碰
-    assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["returns"] == (-23.86, -32.44, -13.80, -19.81)
+    # 负号仍在；20261104gyaml4 权威替换，未解释掉负号
+    assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["returns"] == (-46.88, -41.38, -22.82, -37.29)
 
 
 def test_t2_stub_does_not_keep_stale_three_tag_docstring():

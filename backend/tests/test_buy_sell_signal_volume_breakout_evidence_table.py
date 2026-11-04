@@ -125,12 +125,12 @@ def _code_only(path: Path) -> str:
 
 
 def test_t1_table_version_present():
-    """G-T2: 表模块 PRESENT，version 非空且等于 `volume_breakout_evidence_table_v1`。"""
+    """G-T2: 表模块 PRESENT，version 非空且等于 `volume_breakout_evidence_table_v2`。"""
     from app.buy_sell_signals import volume_breakout_evidence_table as t
 
     assert t.VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION
     assert t.VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION == (
-        "volume_breakout_evidence_table_v1"
+        "volume_breakout_evidence_table_v2"
     )
     assert isinstance(t.VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION, str)
 
@@ -208,7 +208,7 @@ def test_t1_iter_rows_yields_copies():
     first = next(iter(t.iter_rows()))
     first["return"] = 0.0
     second = next(iter(t.iter_rows()))
-    assert second["return"] == -23.86, "返回值被改后污染了契约数据"
+    assert second["return"] == -46.88, "返回值被改后污染了契约数据"
 
 
 def test_t1_cross_assertion_fires_when_row_tampered(monkeypatch):
@@ -246,7 +246,7 @@ def test_t1_table_present_fires_when_version_drifted(monkeypatch):
     from app.buy_sell_signals import volume_breakout_evidence_table as t
 
     monkeypatch.setattr(t, "VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION", "v2")
-    with pytest.raises(AssertionError, match="must be 'volume_breakout_evidence_table_v1'"):
+    with pytest.raises(AssertionError, match="must be 'volume_breakout_evidence_table_v2'"):
         t.assert_table_present()
 
 
@@ -706,12 +706,15 @@ def test_t5_table_all_exports_real_and_sorted():
 
 
 def test_t5_stub_keeps_negative_evidence_numbers():
-    """G-T2: stub 的负证据数字**未被本拍改动**（禁改数字冒充"更新证据"）。"""
+    """G-T2: stub 负证据为 gyaml4 prod 面板权威替换（有 C 凭证，非 fabricate）。
+
+    测名保留。负号仍在，本拍未解释掉负号。
+    """
     from app.buy_sell_signals.volume_breakout_stub import (
         VOLUME_BREAKOUT_NEGATIVE_EVIDENCE as neg,  # noqa: N811
     )
 
-    assert neg["returns"] == (-23.86, -32.44, -13.80, -19.81)
+    assert neg["returns"] == (-46.88, -41.38, -22.82, -37.29)
     assert neg["matched"] == ("放量创60日新高", "趋势突破", "平台整理突破", "布林突破")
     assert neg["verdict"] == "strongly_negative"
     assert neg["source"] == "app/custom/dsa/quant_evidence.yaml"

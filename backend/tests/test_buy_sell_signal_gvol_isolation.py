@@ -257,7 +257,7 @@ def test_no_volume_ratio_or_breakout_threshold_is_pinned() -> None:
         if isinstance(node, ast.Constant) and isinstance(node.value, float)
     ]
     # 唯一允许出现的浮点是负证据里抄来的四个回测收益率(它们是引用的既有数据,
-    # 不是阈值)。注意 `-23.86` 在 AST 里是 `UnaryOp(USub, Constant(23.86))`,
+    # 不是阈值)。注意 `-46.88` 在 AST 里是 `UnaryOp(USub, Constant(46.88))`,
     # 所以 `Constant` 取到的是正值 —— 白名单要取绝对值。
     allowed = {abs(v) for v in vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["returns"]}
     unexpected = [f for f in floats if abs(f) not in allowed]
@@ -336,7 +336,7 @@ def test_cleared_evidence_table_gap_has_a_real_deliverable() -> None:
     from app.buy_sell_signals import volume_breakout_evidence_table as table
 
     assert table.VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION == (
-        "volume_breakout_evidence_table_v1"
+        "volume_breakout_evidence_table_v2"
     )
     assert len(list(table.iter_rows())) == 4
     # 人读表里不该再有「触发表缺失」这类说法

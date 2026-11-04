@@ -43,7 +43,7 @@ version = `threshold_neg_lock_v1`。
 ## 与触发表的交叉：strongly_negative ≠ 阈值已锁
 
 `volume_breakout_evidence_table` 的四行 `return` 是
-`-23.86 / -32.44 / -13.80 / -19.81`，`verdict = strongly_negative`。
+`-46.88 / -41.38 / -22.82 / -37.29`，`verdict = strongly_negative`。
 
 这个 verdict 回答的是「**过去这四个口径赚钱吗**」，答案是不赚。
 它**没有**回答「量比多少才算放量」「突破几个点算突破」「窗口几分钟」。

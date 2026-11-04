@@ -189,14 +189,17 @@ def test_t2_auction_threshold_still_pending() -> None:
 
 
 def test_t2_negative_evidence_numbers_untouched() -> None:
-    """负证据四个数字本拍零碰 —— 清凭证不等于负号被解释了。"""
+    """测名保留：负号仍在，本拍未「解释掉负号」。
+
+    20261104gyaml4 把四负换成 prod 面板权威读数；清凭证 / 写 yaml 都不等于负号被解释。
+    """
     from app.buy_sell_signals import volume_breakout_stub as vb
 
     assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["returns"] == (
-        -23.86,
-        -32.44,
-        -13.80,
-        -19.81,
+        -46.88,
+        -41.38,
+        -22.82,
+        -37.29,
     )
     assert vb.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE["verdict"] == "strongly_negative"
 

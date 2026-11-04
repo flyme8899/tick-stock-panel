@@ -7,7 +7,7 @@
 - `volume_breakout_stub.VOLUME_BREAKOUT_NEGATIVE_EVIDENCE`（代码里的 Mapping）
 - `app/custom/dsa/quant_evidence.yaml` · `volume_breakout`（回测原始结论）
 
-version = `volume_breakout_evidence_table_v1`。四行，对应四个突破口径。
+version = `volume_breakout_evidence_table_v2`。四行，对应四个突破口径。
 
 **这是形式化，不是新证据。** 四个 `return` 全部来自 yaml 原文，四个 `sample_size`
 同样。本模块不产生任何新数字 —— 它只是把「我们已经有的负证据」从两个散落的
@@ -23,7 +23,7 @@ Mapping/文件，收成一组能被 `iter_rows()` 逐行读、能被测例逐项
 
 ## 为什么这张表反而挡在闸前
 
-四行 `return` 是 `-23.86 / -32.44 / -13.80 / -19.81` —— 四个口径**全负**，无一例外。
+四行 `return` 是 `-46.88 / -41.38 / -22.82 / -37.29` —— 四个口径**全负**，无一例外。
 摆在这里不是为了让谁"看到数据就开跑"，而是让"补上数据就开跑"的冲动先撞上它。
 
 **表 PRESENT ≠ 可翻闸。** 一张全负的表存在，只说明"我们知道它过去是亏的"，
@@ -90,7 +90,7 @@ __all__ = [
 
 # ---------------------------------------------------------------- 版本与出处
 
-VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION: Final = "volume_breakout_evidence_table_v1"
+VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION: Final = "volume_breakout_evidence_table_v2"
 """触发表契约版本。
 
 改行数 / 改口径 / 改出处**必须** bump。把数字改了却不 bump，
@@ -108,8 +108,8 @@ VOLUME_BREAKOUT_EVIDENCE_TABLE_POLARITY: Final = "negative"
 VOLUME_BREAKOUT_EVIDENCE_TABLE_ROWS: Final[tuple[Mapping[str, Any], ...]] = (
     {
         "matched": "放量创60日新高",
-        "return": -23.86,
-        "sample_size": 78,
+        "return": -46.88,
+        "sample_size": 152,
         "source": VOLUME_BREAKOUT_EVIDENCE_TABLE_SOURCE,
         "key": VOLUME_BREAKOUT_EVIDENCE_TABLE_KEY,
         "verdict": VOLUME_BREAKOUT_EVIDENCE_TABLE_VERDICT,
@@ -117,8 +117,8 @@ VOLUME_BREAKOUT_EVIDENCE_TABLE_ROWS: Final[tuple[Mapping[str, Any], ...]] = (
     },
     {
         "matched": "趋势突破",
-        "return": -32.44,
-        "sample_size": 77,
+        "return": -41.38,
+        "sample_size": 116,
         "source": VOLUME_BREAKOUT_EVIDENCE_TABLE_SOURCE,
         "key": VOLUME_BREAKOUT_EVIDENCE_TABLE_KEY,
         "verdict": VOLUME_BREAKOUT_EVIDENCE_TABLE_VERDICT,
@@ -126,8 +126,8 @@ VOLUME_BREAKOUT_EVIDENCE_TABLE_ROWS: Final[tuple[Mapping[str, Any], ...]] = (
     },
     {
         "matched": "平台整理突破",
-        "return": -13.80,
-        "sample_size": 79,
+        "return": -22.82,
+        "sample_size": 102,
         "source": VOLUME_BREAKOUT_EVIDENCE_TABLE_SOURCE,
         "key": VOLUME_BREAKOUT_EVIDENCE_TABLE_KEY,
         "verdict": VOLUME_BREAKOUT_EVIDENCE_TABLE_VERDICT,
@@ -135,8 +135,8 @@ VOLUME_BREAKOUT_EVIDENCE_TABLE_ROWS: Final[tuple[Mapping[str, Any], ...]] = (
     },
     {
         "matched": "布林突破",
-        "return": -19.81,
-        "sample_size": 110,
+        "return": -37.29,
+        "sample_size": 150,
         "source": VOLUME_BREAKOUT_EVIDENCE_TABLE_SOURCE,
         "key": VOLUME_BREAKOUT_EVIDENCE_TABLE_KEY,
         "verdict": VOLUME_BREAKOUT_EVIDENCE_TABLE_VERDICT,
@@ -146,8 +146,9 @@ VOLUME_BREAKOUT_EVIDENCE_TABLE_ROWS: Final[tuple[Mapping[str, Any], ...]] = (
 """四行触发表数据 —— 逐字来自 `quant_evidence.yaml` · `volume_breakout`。
 
 **禁止改数字。** 改了就变成一份本仓自己造的回测结论，而我们从没跑过这个回测。
-四个 `return` 全负（-23.86 / -32.44 / -13.80 / -19.81），四个 `sample_size`
-（78 / 77 / 79 / 110）与 yaml 同序。
+本拍＝有 C 凭证的权威替换（gyaml4），非 fabricate。
+四个 `return` 全负（-46.88 / -41.38 / -22.82 / -37.29），四个 `sample_size`
+（152 / 116 / 102 / 150）与 yaml 同序。
 
 `matched` 是**口径名**，不是股票名、不是信号名，更不是可执行标的。
 """
@@ -171,10 +172,10 @@ def assert_table_present() -> None:
     """表必须在场、四行、极性全负、字段齐全（由测例调用；import 不硬 raise）。"""
     if not VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION:
         raise AssertionError("VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION must be non-empty")
-    if VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION != "volume_breakout_evidence_table_v1":
+    if VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION != "volume_breakout_evidence_table_v2":
         raise AssertionError(
             "VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION must be "
-            "'volume_breakout_evidence_table_v1', "
+            "'volume_breakout_evidence_table_v2', "
             f"got {VOLUME_BREAKOUT_EVIDENCE_TABLE_VERSION!r}"
         )
     rows = list(iter_rows())

@@ -86,7 +86,7 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 - **四条缺口**: `VOLUME_BREAKOUT_EVIDENCE_PENDING` 覆盖本机分钟库 / 触发证据表 /
   HTTP 凭证 / 阈值锁定, 全部 `data_pending`。
 - **既有反证**: 仓内 `app/custom/dsa/quant_evidence.yaml` 的 `volume_breakout` 四个口径
-  回测全为负(-23.86% / -32.44% / -13.80% / -19.81%, `strongly_negative`)。
+  回测全为负(-46.88% / -41.38% / -22.82% / -37.29%, `strongly_negative`)。
   开闸前要先解释这个负号 —— 见 `VOLUME_BREAKOUT_NEGATIVE_EVIDENCE`。
 - **竞价不做**: 无 09:25 真实包; **永久禁止**用 09:30 或任意开盘后 bar 冒充 09:25。
   本拍不新建任何竞价引擎 / 回测 / 09:25 路径。
@@ -155,8 +155,8 @@ SSE 路由。触发 = 状态变化 且 `publishable` 且 `push_gate=armed` 且 `
 - **新模块** `threshold_neg_lock.py`(`threshold_neg_lock_v1`): 把 tip 上散在三处的
   同一句话 —— `threshold_lock_data_pending` 仍开 / `strongly_negative` ≠ 阈值已锁 /
   `FreqLockStamp` ≠ 可清标签 —— 收成**纯常量 + 纯断言**, **无 I/O**。
-- **语义**: 这条标签缺的是一个**解释**(四个突破口径回测全负 `-23.86 / -32.44 /
-  -13.80 / -19.81`), 不是一个外部凭证。**负锁 ≠ 删标签**; 负号解释清楚之前,
+- **语义**: 这条标签缺的是一个**解释**(四个突破口径回测全负 `-46.88 / -41.38 /
+  -22.82 / -37.29`), 不是一个外部凭证。**负锁 ≠ 删标签**; 负号解释清楚之前,
   量比 / 突破幅度 / 窗口分钟数钉什么都是**更精确的亏损**。
 - **断言**: `assert_threshold_lock_still_pending`(标签必须还在) /
   `assert_no_tradeable_threshold_nail`(禁钉可交易数, 钉＝fabricate) /

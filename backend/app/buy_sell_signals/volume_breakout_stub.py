@@ -30,8 +30,8 @@
 
 外加一条**已经被写下来的反证**：`app/custom/dsa/quant_evidence.yaml` 里的
 `volume_breakout` 条目记录了四个近似口径的回测结论 ——
-放量创60日新高 **-23.86%**、趋势突破 **-32.44%**、平台整理突破 **-13.80%**、
-布林突破 **-19.81%**，四个口径**全为负**，`verdict: strongly_negative`。
+放量创60日新高 **-46.88%**、趋势突破 **-41.38%**、平台整理突破 **-22.82%**、
+布林突破 **-37.29%**，四个口径**全为负**，`verdict: strongly_negative`。
 
 所以这一拍更准确的说法不是「数据还没到，等到了就能跑」，而是
 **「已有证据指向负期望，开闸前必须先解释这个负号」**。阈值可以标定，
@@ -160,7 +160,7 @@ VOLUME_BREAKOUT_EVIDENCE_PENDING: Final = frozenset(
 
 - `trigger_evidence_table_data_pending`（批次 20261101gevid）——
   已由 `volume_breakout_evidence_table` 模块把既有负证据形式化为四行触发表
-  （`volume_breakout_evidence_table_v1`）而消解。**清零 ≠ 可翻闸**；
+  （`volume_breakout_evidence_table_v2`）而消解。**清零 ≠ 可翻闸**；
   **表 PRESENT ≠ 可开 TRIGGERING**；**strongly_negative ≠ 阈值已锁**。
 - `local_minute_lib_data_pending`（批次 20261101gevid3）——
   已由 `local_minute_lib` 模块把 `settings.data_dir / "kline_minute"` 的
@@ -183,7 +183,7 @@ VOLUME_BREAKOUT_EVIDENCE_PENDING: Final = frozenset(
 `20261102gevid6` 清掉 `http_minute_listing_auth_pending` 之后，它是本族**唯一**
 剩下的缺口，但它与刚清掉的那条性质不同：`http_minute` 缺的是一个**外部凭证**
 （拿到就能通，已经拿到了），这条缺的是**一个解释** —— 四个突破口径的回测
-收益全负（`-23.86 / -32.44 / -13.80 / -19.81`），负号没解释清楚之前，
+收益全负（`-46.88 / -41.38 / -22.82 / -37.29`），负号没解释清楚之前，
 阈值补什么都不能清。**清掉一条 ≠ 剩下的这条变轻了。**语义已由 `threshold_neg_lock`（`threshold_neg_lock_v1`）
 契约化：`assert_threshold_lock_still_pending` 咬住"标签必须还在"，
 `assert_no_tradeable_threshold_nail` 咬住"禁钉可交易数"。**负锁 ≠ 删标签。**
@@ -215,7 +215,7 @@ VOLUME_BREAKOUT_NEGATIVE_EVIDENCE: Final[Mapping[str, Any]] = {
     "source": "app/custom/dsa/quant_evidence.yaml",
     "key": "volume_breakout",
     "verdict": "strongly_negative",
-    "returns": (-23.86, -32.44, -13.80, -19.81),
+    "returns": (-46.88, -41.38, -22.82, -37.29),
     "matched": ("放量创60日新高", "趋势突破", "平台整理突破", "布林突破"),
 }
 """仓内**已有**的放量突破负证据（四个口径全为负）。
