@@ -28,12 +28,13 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
-    """出厂证据中 shrink_pullback、bull_trend 与 volume_breakout 过样本闸，其余三族仍不注入。
+    """出厂证据中 shrink_pullback、bull_trend、volume_breakout 与 bottom_volume
+    过样本闸，其余两族仍不注入。
 
-    20261104gyaml4 方案 A：接受 VB prod 面板 [152,116,102,150]（min=102）；
-    shrink 仍 [210,229,166]（min=166）；bull 仍 [172,110]（min=110）。
-    ma_golden_cross=59 等其余三族仍低于门槛。
-    写 yaml ≠ path#1 ≠ 清标签。tip≠prod；3/6 ≠ 清标签。
+    20261104gyaml5 方案 A：接受 bottom prod 面板 [144,102,194,281]（min=102）；
+    shrink 仍 [210,229,166]（min=166）；bull 仍 [172,110]（min=110）；
+    VB 仍 [152,116,102,150]（min=102）。ma_golden_cross=59 等其余两族仍低于门槛。
+    写 yaml ≠ path#1 ≠ 清标签。tip≠prod；4/6 ≠ 清标签。
     """
     golden = render_skill_appendix("ma_golden_cross", _SHIPPED)
     wave = render_skill_appendix("wave_theory", _SHIPPED)
@@ -51,10 +52,13 @@ def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
     assert by_name["bull_trend"]["min_sample"] == 110
     assert by_name["volume_breakout"]["injectable"] is True
     assert by_name["volume_breakout"]["min_sample"] == 102
+    assert by_name["bottom_volume"]["injectable"] is True
+    assert by_name["bottom_volume"]["min_sample"] == 102
     assert all(
         not item["injectable"]
         for item in summary["skills"]
-        if item["name"] not in ("shrink_pullback", "bull_trend", "volume_breakout")
+        if item["name"]
+        not in ("shrink_pullback", "bull_trend", "volume_breakout", "bottom_volume")
     )
     golden_row = by_name["ma_golden_cross"]
     assert golden_row["min_sample"] == 59
@@ -63,6 +67,8 @@ def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
     assert bull_appendix, "bull 过样本闸后应可注入"
     vb_appendix = render_skill_appendix("volume_breakout", _SHIPPED)
     assert vb_appendix, "VB 过样本闸后应可注入"
+    bottom_appendix = render_skill_appendix("bottom_volume", _SHIPPED)
+    assert bottom_appendix, "bottom 过样本闸后应可注入"
 
 
 def test_malformed_returns_do_not_raise(tmp_path: Path) -> None:

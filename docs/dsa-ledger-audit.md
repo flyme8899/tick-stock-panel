@@ -135,7 +135,7 @@ tip 锚定值（本拍不改上游默认，改须显式）：
 
 ### 3.1 出厂证据当前的状态（重要）
 
-按 100 笔门槛，`quant_evidence.yaml` 的 6 条证据中，**`shrink_pullback`、`bull_trend` 与 `volume_breakout` 已过样本闸**；其余三族仍不过闸（59/55/71）：
+按 100 笔门槛，`quant_evidence.yaml` 的 6 条证据中，**`shrink_pullback`、`bull_trend`、`volume_breakout` 与 `bottom_volume` 已过样本闸**；其余两族仍不过闸（59/55）。
 
 | 策略 | 最小匹配样本 |
 |---|---|
@@ -144,7 +144,7 @@ tip 锚定值（本拍不改上游默认，改须显式）：
 | `volume_breakout` | 102 |
 | `bull_trend` | 110 |
 | `dragon_head` | 55 |
-| `bottom_volume` | 71 |
+| `bottom_volume` | 102 |
 
 `shrink_pullback` 的 166 来自 20261104 tip/prod 面板复跑（symbols=null，#270
 费率；源 zip d1a98a21… / REVIEW b26f02c0…），接受为新权威读数；166≠旧 94，
@@ -160,11 +160,18 @@ tip 锚定值（本拍不改上游默认，改须显式）：
 读数；102≠旧 77（且 152≠78 / 116≠77 / 150≠110）；原窗 API [127,110,91,113]
 ≠旧 yaml [78,77,79,110]，旧值属历史「24 策略全量回测报告」粘贴，不据此改参凑数。
 
-结果是：**技能提示里 `shrink_pullback`、`bull_trend` 与 `volume_breakout` 会追加量化回测参考，其余三族不追加。**
-这不是 bug，是门槛生效后的应有结果——曾经全部能注入，是因为当时没有门槛。
-shrink+bull+VB 从（shrink+bull / 2/6）变为 **3/6** 可注入，是 20261104gyaml4 prod 面板复跑的预期产品变化，不等于清标签、翻闸或可放量。D1 已因 shrink 成立，本拍 VB 入账 ≠ 清标签。tip≠prod 写死（合入 tip ≠ 部署 prod）。
+`bottom_volume` 的 102 来自 20261104 **prod 面板**复跑（tip≠prod：panel=prod
+71751935…，tip c99b31d0… 未部署；symbols=null，#271 费率；扩窗
+2026-04-29~2026-10-08；源 zip db2f71392683… / REVIEW 2a6782a1…），接受为新权威
+读数；102≠旧 71（且 144≠77 / 194≠100 / 281≠163）；原窗 API [67,45,105,163]
+≠旧 yaml [77,71,100,163]（67≠77 / 45≠71 / 105≠100 / 163=163），旧值属历史
+「24 策略全量回测报告」粘贴，不据此改参凑数。
 
-其余**三族**补样本量或补回测是**另一拍**的事。在那之前，宁可让技能提示少一段，
+结果是：**技能提示里 `shrink_pullback`、`bull_trend`、`volume_breakout` 与 `bottom_volume` 会追加量化回测参考，其余两族不追加。**
+这不是 bug，是门槛生效后的应有结果——曾经全部能注入，是因为当时没有门槛。
+shrink+bull+VB+bottom 从（shrink+bull+VB / 3/6）变为 **4/6** 可注入，是 20261104gyaml5 prod 面板复跑的预期产品变化，不等于清标签、翻闸或可放量。D1 已因 shrink 成立，本拍 bottom 入账 ≠ 清标签。tip≠prod 写死（合入 tip ≠ 部署 prod）。
+
+其余**两族**补样本量或补回测是**另一拍**的事。在那之前，宁可让技能提示少一段，
 也不要把 59 笔得出的结论当「这类形态负期望」这种量级判断的依据。
 
 `dsa_bootstrap` 的钩子装上后，未注入的会打 `量化证据未追加到 <skill>：过期或
