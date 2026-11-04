@@ -135,11 +135,11 @@ tip 锚定值（本拍不改上游默认，改须显式）：
 
 ### 3.1 出厂证据当前的状态（重要）
 
-按 100 笔门槛，`quant_evidence.yaml` 的 6 条证据中，**`shrink_pullback`、`bull_trend`、`volume_breakout` 与 `bottom_volume` 已过样本闸**；其余两族仍不过闸（59/55）。
+按 100 笔门槛，`quant_evidence.yaml` 的 6 条证据中，**`shrink_pullback`、`bull_trend`、`volume_breakout`、`bottom_volume` 与 `ma_golden_cross` 已过样本闸**；仅 `dragon_head` 仍不过闸（55）。
 
 | 策略 | 最小匹配样本 |
 |---|---|
-| `ma_golden_cross` | 59 |
+| `ma_golden_cross` | 131 |
 | `shrink_pullback` | 166 |
 | `volume_breakout` | 102 |
 | `bull_trend` | 110 |
@@ -167,12 +167,22 @@ tip 锚定值（本拍不改上游默认，改须显式）：
 ≠旧 yaml [77,71,100,163]（67≠77 / 45≠71 / 105≠100 / 163=163），旧值属历史
 「24 策略全量回测报告」粘贴，不据此改参凑数。
 
-结果是：**技能提示里 `shrink_pullback`、`bull_trend`、`volume_breakout` 与 `bottom_volume` 会追加量化回测参考，其余两族不追加。**
-这不是 bug，是门槛生效后的应有结果——曾经全部能注入，是因为当时没有门槛。
-shrink+bull+VB+bottom 从（shrink+bull+VB / 3/6）变为 **4/6** 可注入，是 20261104gyaml5 prod 面板复跑的预期产品变化，不等于清标签、翻闸或可放量。D1 已因 shrink 成立，本拍 bottom 入账 ≠ 清标签。tip≠prod 写死（合入 tip ≠ 部署 prod）。
+`ma_golden_cross` 的 131 来自 20261104 **prod 面板**复跑（tip≠prod：panel=prod
+71751935…，tip 615a0534… 未部署；symbols=null，#271 费率；扩窗
+2026-06-24~2026-10-08；源 zip 5b3e0c9f… / REVIEW 7f14ab2d…），接受为新权威
+读数；131≠旧 59（且 139≠113 / 132≠76）；原窗 API [98,116,103]≠旧 yaml
+[59,113,76]（98≠59 / 116≠113 / 103≠76＝接受面板为新权威），旧值属历史
+「24 策略全量回测报告」粘贴，不据此改参凑数。三条 matched 腿一条没丢，
+returns 由 [-14.70, -16.37, 1.16] 变为 [-45.24, -25.79, -46.57]——原「MACD
+金叉放量」+1.16% 的唯一例外随扩窗消失，verdict 由 `negative` 升为
+`strongly_negative`。
 
-其余**两族**补样本量或补回测是**另一拍**的事。在那之前，宁可让技能提示少一段，
-也不要把 59 笔得出的结论当「这类形态负期望」这种量级判断的依据。
+结果是：**技能提示里 `shrink_pullback`、`bull_trend`、`volume_breakout`、`bottom_volume` 与 `ma_golden_cross` 会追加量化回测参考，`dragon_head` 不追加。**
+这不是 bug，是门槛生效后的应有结果——曾经全部能注入，是因为当时没有门槛。
+shrink+bull+VB+bottom+ma 从（shrink+bull+VB+bottom / 4/6）变为 **5/6** 可注入，是 20261104gyaml6 prod 面板复跑的预期产品变化，不等于清标签、翻闸或可放量。D1 已因 shrink 成立，本拍 ma 入账 ≠ 清标签。tip≠prod 写死（合入 tip ≠ 部署 prod）。
+
+仅剩 **`dragon_head` 一族**补样本量或补回测是**另一拍**的事。在那之前，宁可让技能提示少一段，
+也不要把 55 笔得出的结论当「这类形态负期望」这种量级判断的依据。
 
 `dsa_bootstrap` 的钩子装上后，未注入的会打 `量化证据未追加到 <skill>：过期或
 样本不足` 日志，避免「没注入」和「本来就没这条证据」在日志里长得一样。
