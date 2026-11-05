@@ -28,15 +28,17 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
-    """出厂证据中 shrink_pullback、bull_trend、volume_breakout、bottom_volume
-    与 ma_golden_cross 过样本闸，仅 dragon_head 仍不注入。
+    """出厂证据中六族（shrink_pullback、bull_trend、volume_breakout、bottom_volume、
+    ma_golden_cross、dragon_head）均过样本闸；未知技能仍不注入。
 
     20261104gyaml5 方案 A：接受 bottom prod 面板 [144,102,194,281]（min=102）；
-    20261104gyaml6 方案 A：接受 ma prod 面板 [131,139,132]（min=131），
-    三腿 matched 未丢、returns 全负、verdict 升 strongly_negative。
+    20261104gyaml6 方案 A：接受 ma prod 面板 [131,139,132]（min=131）；
+    20261104gyaml7 方案 A：接受 dragon prod 面板 [307,321,118,104]（min=104），
+    四腿 matched 未丢、returns 全负且更深、verdict 维持 strongly_negative。
     shrink 仍 [210,229,166]（min=166）；bull 仍 [172,110]（min=110）；
-    VB 仍 [152,116,102,150]（min=102）。dragon_head=55 仍低于门槛。
-    写 yaml ≠ path#1 ≠ 清标签。tip≠prod；5/6 ≠ 清标签。
+    VB 仍 [152,116,102,150]（min=102）；bottom 仍 [144,102,194,281]（min=102）；
+    ma 仍 [131,139,132]（min=131）。
+    写 yaml ≠ path#1 ≠ 清标签。tip≠prod；6/6 ≠ 清标签。
     """
     golden = render_skill_appendix("ma_golden_cross", _SHIPPED)
     wave = render_skill_appendix("wave_theory", _SHIPPED)
@@ -48,6 +50,7 @@ def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
     summary = evidence_summary(_SHIPPED)
     names = {item["name"] for item in summary["skills"]}
     assert "ma_golden_cross" in names
+    assert "dragon_head" in names
     by_name = {item["name"]: item for item in summary["skills"]}
     assert by_name["shrink_pullback"]["injectable"] is True
     assert by_name["shrink_pullback"]["min_sample"] == 166
@@ -59,6 +62,22 @@ def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
     assert by_name["bottom_volume"]["min_sample"] == 102
     assert by_name["ma_golden_cross"]["injectable"] is True
     assert by_name["ma_golden_cross"]["min_sample"] == 131
+    assert by_name["dragon_head"]["injectable"] is True
+    assert by_name["dragon_head"]["min_sample"] == 104
+    assert all(
+        item["injectable"]
+        for item in summary["skills"]
+        if item["name"]
+        in (
+            "shrink_pullback",
+            "bull_trend",
+            "volume_breakout",
+            "bottom_volume",
+            "ma_golden_cross",
+            "dragon_head",
+        )
+    )
+    # 未知技能仍不注入（wave_theory 等不在 shipped 六族）
     assert all(
         not item["injectable"]
         for item in summary["skills"]
@@ -69,17 +88,27 @@ def test_shipped_evidence_renders_known_skill_and_skips_others() -> None:
             "volume_breakout",
             "bottom_volume",
             "ma_golden_cross",
+            "dragon_head",
         )
     )
     golden_row = by_name["ma_golden_cross"]
     assert golden_row["min_sample"] == 131
     assert golden_row["returns"] == [-45.24, -25.79, -46.57]
+    dragon_row = by_name["dragon_head"]
+    assert dragon_row["min_sample"] == 104
+    assert dragon_row["returns"] == [-49.97, -46.42, -35.98, -20.42]
+    assert len(dragon_row["returns"]) == 4
     bull_appendix = render_skill_appendix("bull_trend", _SHIPPED)
     assert bull_appendix, "bull 过样本闸后应可注入"
     vb_appendix = render_skill_appendix("volume_breakout", _SHIPPED)
     assert vb_appendix, "VB 过样本闸后应可注入"
     bottom_appendix = render_skill_appendix("bottom_volume", _SHIPPED)
     assert bottom_appendix, "bottom 过样本闸后应可注入"
+    ma_appendix = render_skill_appendix("ma_golden_cross", _SHIPPED)
+    assert ma_appendix, "ma 过样本闸后应可注入"
+    dragon_appendix = render_skill_appendix("dragon_head", _SHIPPED)
+    assert dragon_appendix, "dragon 过样本闸后应可注入"
+    assert "104 笔" in dragon_appendix
 
 
 def test_malformed_returns_do_not_raise(tmp_path: Path) -> None:
