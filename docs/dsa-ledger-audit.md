@@ -135,7 +135,7 @@ tip 锚定值（本拍不改上游默认，改须显式）：
 
 ### 3.1 出厂证据当前的状态（重要）
 
-按 100 笔门槛，`quant_evidence.yaml` 的 6 条证据中，**`shrink_pullback`、`bull_trend`、`volume_breakout`、`bottom_volume` 与 `ma_golden_cross` 已过样本闸**；仅 `dragon_head` 仍不过闸（55）。
+按 100 笔门槛，**六族（`shrink_pullback`、`bull_trend`、`volume_breakout`、`bottom_volume`、`ma_golden_cross`、`dragon_head`）均已过样本闸**。
 
 | 策略 | 最小匹配样本 |
 |---|---|
@@ -143,7 +143,7 @@ tip 锚定值（本拍不改上游默认，改须显式）：
 | `shrink_pullback` | 166 |
 | `volume_breakout` | 102 |
 | `bull_trend` | 110 |
-| `dragon_head` | 55 |
+| `dragon_head` | 104 |
 | `bottom_volume` | 102 |
 
 `shrink_pullback` 的 166 来自 20261104 tip/prod 面板复跑（symbols=null，#270
@@ -177,12 +177,19 @@ returns 由 [-14.70, -16.37, 1.16] 变为 [-45.24, -25.79, -46.57]——原「MA
 金叉放量」+1.16% 的唯一例外随扩窗消失，verdict 由 `negative` 升为
 `strongly_negative`。
 
-结果是：**技能提示里 `shrink_pullback`、`bull_trend`、`volume_breakout`、`bottom_volume` 与 `ma_golden_cross` 会追加量化回测参考，`dragon_head` 不追加。**
-这不是 bug，是门槛生效后的应有结果——曾经全部能注入，是因为当时没有门槛。
-shrink+bull+VB+bottom+ma 从（shrink+bull+VB+bottom / 4/6）变为 **5/6** 可注入，是 20261104gyaml6 prod 面板复跑的预期产品变化，不等于清标签、翻闸或可放量。D1 已因 shrink 成立，本拍 ma 入账 ≠ 清标签。tip≠prod 写死（合入 tip ≠ 部署 prod）。
+`dragon_head` 的 104 来自 20261104 **prod 面板**复跑（tip≠prod：panel=prod
+71751935…，tip 045b98a9… 未部署；symbols=null，#271 费率；扩窗
+2026-06-10~2026-10-08；源 zip 4e2f144506bf… / REVIEW 511e891c…），接受为新权威
+读数；104≠旧 55（且 307≠233 / 321≠234 / 118≠55）；原窗 API [231,245,100,75]
+≠旧 yaml [233,234,55,73]（231≠233 / 245≠234 / 100≠55 / 75≠73），旧值属历史
+「24 策略全量回测报告」粘贴，不据此改参凑数。策略代码 tip↔prod 本族 diff 空。
+四腿 matched 一条没丢，returns 由 [-40.92, -25.18, -9.08, -8.49] 变为
+[-49.97, -46.42, -35.98, -20.42]——四腿全显著为负且更深，verdict 维持
+`strongly_negative`。
 
-仅剩 **`dragon_head` 一族**补样本量或补回测是**另一拍**的事。在那之前，宁可让技能提示少一段，
-也不要把 55 笔得出的结论当「这类形态负期望」这种量级判断的依据。
+结果是：**技能提示里六族均会追加量化回测参考。**
+这不是 bug，是门槛生效后的应有结果——曾经全部能注入，是因为当时没有门槛。
+shrink+bull+VB+bottom+ma+dragon 从（shrink+bull+VB+bottom+ma / 5/6）变为 **6/6** 可注入，是 20261104gyaml7 prod 面板复跑的预期产品变化，不等于清标签、翻闸或可放量。D1 已因 shrink 成立，本拍 dragon 入账 ≠ 清标签。tip≠prod 写死（合入 tip ≠ 部署 prod）。**6/6 ≠ 清标签 ≠ 可放量 ≠ path#1**。
 
 `dsa_bootstrap` 的钩子装上后，未注入的会打 `量化证据未追加到 <skill>：过期或
 样本不足` 日志，避免「没注入」和「本来就没这条证据」在日志里长得一样。
