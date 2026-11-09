@@ -71,18 +71,23 @@ fuyao 竞价扫描只在交易日 09:25:30–09:28:00 抓快照，盘后不补�
 
 ## 运行时配置
 
-都不要写进仓库，也不要改 `.env`、DSA、三套买卖信号环境变量或阈值锁。
+不要把这些写进 Git，也不要改 `.env`、DSA 使用的环境变量、三套买卖信号环境变量或阈值锁。开关和凭据每次请求现读，写完 `secrets.json` 不用为了生效再重建容器。
 
-| 变量 | 默认 | 作用 |
-| --- | --- | --- |
-| `XTICK_SUPPLEMENT_ENABLED` | 关 | `1` / `true` / `yes` / `on` 才允许出网 |
-| `XTICK_API_TOKEN` | 空 | token。也可放 `data/user_data/secrets.json` 的 `xtick_api_token`，优先级高于环境变量 |
-| `XTICK_BIDHISTORY_ALLOW_ALL` | 关 | 才允许 `code=all` |
-| `XTICK_HTTP_TIMEOUT_S` | 15 | 限制在 1–60 秒 |
-| `XTICK_MIN_INTERVAL_S` | 1 | 两次真正出网的最小间隔，最大认到 30 秒 |
-| `XTICK_API_BASE` | `http://api.xtick.top` | 只在需要改主机时设置。不要在值里放 token |
+环境变量未设置时，下面的 secrets.json 键可以单独打开功能。环境变量若写成 `0`、`false`、`off` 或 `no`，强制关闭，盖过 secrets.json。
 
-官方示例是 `http://api.xtick.top`。日志会去掉 `token=` 和 token 原文。响应体若含 token，整包丢弃不落盘。
+| 位置 | 键 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `data/user_data/secrets.json` | `xtick_supplement_enabled` | 无 | `1` / `true` / `yes` / `on` 才允许出网 |
+| 同上 | `xtick_api_token` | 无 | 凭据。有这个键就不必设 `XTICK_API_TOKEN` |
+| 同上 | `xtick_bidhistory_allow_all` | 无 | `1` 才允许 `code=all` |
+| 环境变量 | `XTICK_SUPPLEMENT_ENABLED` | 未设置 | 显式 `1` 开启；显式 `0` 强制关闭 |
+| 环境变量 | `XTICK_API_TOKEN` | 未设置 | 仅当 secrets.json 没有凭据时使用 |
+| 环境变量 | `XTICK_BIDHISTORY_ALLOW_ALL` | 未设置 | 显式 `0` 时即使 secrets.json 允许 all 也不放行 |
+| 环境变量 | `XTICK_HTTP_TIMEOUT_S` | 15 | 限制在 1–60 秒 |
+| 环境变量 | `XTICK_MIN_INTERVAL_S` | 1 | 两次真正出网的最小间隔，最大认到 30 秒 |
+| 环境变量 | `XTICK_API_BASE` | `http://api.xtick.top` | 不要在值里放凭据 |
+
+状态接口只返回「有没有凭据」，不返回凭据本身。非法代码、日期、seq 不会按原样写进响应。日志会去掉 `token=` 和凭据原文。响应体若含凭据，整包丢弃不落盘。上游连接异常不挂到返回给页面的错误上，避免异常文本带出完整 URL。
 
 读取 ZIP 时只认成员名 `data.json`，拒绝路径穿越、过大的解压体积、过高的压缩比和超过 8000 行的包。生产观察的全市场是 5580 行，超过上限整包拒绝，避免半截结果被当成完整全市场。`data.json` 可以是 JSON 数组，或一行一个对象。
 
@@ -90,17 +95,36 @@ fuyao 竞价扫描只在交易日 09:25:30–09:28:00 抓快照，盘后不补�
 
 ## 最小上线
 
-1. 先部署这份代码，三个开关保持默认。页面上能看到「补充源未开启」，确认 fuyao 风向标和竞价扫描与现在一致。
-2. 在运行环境放入 token，不要写进 Git。只设 `XTICK_SUPPLEMENT_ENABLED=1`。
-3. 打开异动页竞价 tab，对一只股票、一个已经结束的交易日点一次查询。核对来源是 XTick、日期是所选交易日、`live` 语义在文案里是历史或当日终态。
-4. 故意把开关关掉或停掉网络，确认这张卡报自己的错误，扫描列表还在。
-5. 不要为了验收去轮询 `all`，也不要在 09:26 前把今天的结果当成可交易竞价。
+代码在镜像里，`data/` 只是卷。旧容器没有这条路由，所以**第一次装上本 PR 必须重建 app 容器**。重建时不要改 `.env`，也不要带上 dsa profile。
+
+在已经构建出含本 PR 的镜像、并且当前目录的 `.env` 没有被改过的前提下，只重建 app：
+
+```bash
+docker compose up -d --no-deps --force-recreate app
+```
+
+这一步会让 app 重新读取现有 `.env`，但命令本身不编辑它。三套信号变量、DSA 和阈值锁都还在原来的文件里。不要执行 `docker compose up --build` 时顺手改 `.env`，也不要 `--profile dsa`。
+
+容器起来之后，**只改 secrets.json 就能启用，不必再重建，也不必写 `.env`**。编辑 `data/user_data/secrets.json`，保留已有键，只增加：
+
+```json
+"xtick_api_token": "<凭据>",
+"xtick_supplement_enabled": "1"
+```
+
+文件权限保持 `0600`，属主仍是容器用户。保存后刷新竞价页即可，进程每次请求都会重读这个文件。不要把凭据写进 shell history，也不要为了这一步去改 `.env`。
+
+然后对一只股票、一个已经结束的交易日点一次查询。核对来源是 XTick、日期是所选日期、文案是历史或当日终态。不要为了验收去开 `all`，也不要在北京时间 09:26 前把今天的结果当成可交易竞价。
+
+如果 secrets.json 里开关是 `1`，但环境变量 `XTICK_SUPPLEMENT_ENABLED=0`，仍然不出网。这个 `0` 是硬关闭。
 
 ## 回退
 
-1. 去掉 `XTICK_SUPPLEMENT_ENABLED`，或设成 `0`。进程不再请求 XTick。
-2. 已落盘的 `data/xtick_supplement/` 可以留着，接口关闭后不会再读它来改主行情。要清掉就只删这个目录。
-3. 代码回退只需要撤掉本 PR。没有迁移，没有改评分、风控、触发和三套信号环境变量。
+启用之后的回退**不用重建容器**：把 `xtick_supplement_enabled` 改成 `0` 或删掉该键。下一次查询就不再出网。凭据键可以留着，关闭时不会被状态接口返回。
+
+`data/xtick_supplement/` 可以留着。关闭后它不会回写主行情。要清掉就只删这个目录。
+
+若要连代码一起撤掉，把 app 镜像换回合并本 PR 之前的版本，再执行同一条只重建 app 的命令。不要因此改 `.env`，也不要重建 dsa。没有迁移，没有改评分、风控、触发和三套信号环境变量。
 
 ## 还没有做的事
 

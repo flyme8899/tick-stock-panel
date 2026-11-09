@@ -57,12 +57,12 @@ export function XtickBidHistoryCard({ onOpenStock }: {
       )}
       {status.data && !enabled && (
         <p className="mt-3 text-xs leading-relaxed text-secondary">
-          补充源未开启。运行时设置 XTICK_SUPPLEMENT_ENABLED=1 后才会向 XTick 发请求，默认不影响现有竞价扫描。
+          补充源未开启。含本功能的容器跑起来之后，只在 secrets.json 增加 xtick_supplement_enabled=1 即可，不必改 .env。环境变量写成 0 会强制关闭。
         </p>
       )}
       {status.data && enabled && !credential && (
         <p className="mt-3 text-xs leading-relaxed text-secondary">
-          已开启但未配置凭据。请在运行时设置 XTICK_API_TOKEN，或写入 secrets.json 的 xtick_api_token。页面不保存、不显示 token。
+          已开启但未配置凭据。把凭据写入 secrets.json 的 xtick_api_token。页面不保存、不显示凭据。
         </p>
       )}
 
@@ -119,8 +119,7 @@ export function XtickBidHistoryCard({ onOpenStock }: {
       )}
 
       <p className="mt-2 text-[11px] leading-relaxed text-muted">
-        官方文档对 seq 有两套互相矛盾的说法（0/1 谁是开盘、谁是集合竞价最后一条），这里只显示原值，不采信任一说法。
-        全市场 all 默认关闭。
+        seq 只按原数字请求和展示，官方没有一套可以采信的中文含义。全市场 all 默认关闭。
       </p>
 
       {history.isFetching && <p className="mt-3 text-xs text-muted">正在向 XTick 读取该日终态…</p>}
@@ -156,9 +155,11 @@ function HistoryBody({ payload, onOpenStock }: {
       )}
       {payload.unit_note && <p className="text-[11px] leading-relaxed text-muted">{payload.unit_note}</p>}
       {payload.seq_doc?.conflict && (
-        <p className="text-[11px] leading-relaxed text-muted">
-          seq 未判定。range：{payload.seq_doc.range_text}。另一处说明：{payload.seq_doc.description_head}。
-        </p>
+        <div className="text-[11px] leading-relaxed text-muted">
+          <p>seq 未判定。这一列只显示原数字，下面两句官方原文互相矛盾，不能用来解释这一列。</p>
+          <p>原文甲：{payload.seq_doc.range_text}</p>
+          <p>原文乙：{payload.seq_doc.description_head}</p>
+        </div>
       )}
       {rows.length > 0 && (
         <div className="overflow-x-auto">
@@ -166,7 +167,7 @@ function HistoryBody({ payload, onOpenStock }: {
             <thead className="text-[11px] text-muted">
               <tr>
                 <th className="py-1 pr-3 font-medium">代码</th>
-                <th className="py-1 pr-3 font-medium">seq</th>
+                <th className="py-1 pr-3 font-medium">seq 原值</th>
                 <th className="py-1 pr-3 font-medium">上游时间</th>
                 <th className="py-1 pr-3 font-medium">价格</th>
                 <th className="py-1 pr-3 font-medium">前收</th>

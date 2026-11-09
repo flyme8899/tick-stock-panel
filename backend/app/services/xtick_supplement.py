@@ -51,7 +51,13 @@ _MS_MIN = 10**12
 _MS_MAX = 10**14
 _AUCTION_READY = dt_time(9, 26)
 _CODE_RE = re.compile(r"^\d{6}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TOKEN_QUERY_RE = re.compile(r"(?i)(token=)[^&\s]+")
+_OFF = {"0", "false", "no", "off"}
+# A 股价格没有这个量级。非正数、非有限数和更大的数不展示，避免坏值被画成价格。
+_MAX_PRICE = 100_000.0
+# 公开样例的竞价涨幅是百分数。绝对值超过 1000 不再展示。
+_MAX_JJZF_ABS = 1000.0
 _RECORD_KEYS = {
     "type", "code", "time", "seq", "price", "close", "jjzf", "jjl", "jje", "nol", "noe", "trend",
 }
@@ -85,11 +91,27 @@ def reset_rate_limit_for_tests() -> None:
 
 
 def enabled() -> bool:
-    return os.environ.get("XTICK_SUPPLEMENT_ENABLED", "").strip().lower() in _ON
+    """环境变量显式关闭优先。未设置时才看 secrets.json，这样不必改 .env。"""
+    return _switch("XTICK_SUPPLEMENT_ENABLED", "xtick_supplement_enabled")
 
 
 def allow_all() -> bool:
-    return os.environ.get("XTICK_BIDHISTORY_ALLOW_ALL", "").strip().lower() in _ON
+    return _switch("XTICK_BIDHISTORY_ALLOW_ALL", "xtick_bidhistory_allow_all")
+
+
+def _switch(env_name: str, secrets_field: str) -> bool:
+    raw = os.environ.get(env_name)
+    if raw is not None and raw.strip():
+        value = raw.strip().lower()
+        if value in _OFF:
+            return False
+        return value in _ON
+    from app.secrets_store import load
+
+    stored = load().get(secrets_field)
+    if stored is None:
+        return False
+    return str(stored).strip().lower() in _ON
 
 
 def resolve_token() -> str:
@@ -141,6 +163,10 @@ def status_payload() -> dict[str, Any]:
         "primary_source_unchanged": True,
         "auth_note": "公开目录该接口 apiAuth 仅为 [4]。页面档位顺序是青铜/白银/黄金/至尊/量化，编号不能当成配额。",
         "quota_note": "公开目录没有写至尊版无限配额。默认只允许单票、单日、手动查询，不自动轮询。",
+        "switch_note": (
+            "环境变量未设置时，secrets.json 的 xtick_supplement_enabled 写成 1 即开启，不必改 .env。"
+            "环境变量写成 0、false、off 或 no 时强制关闭，盖过 secrets.json。"
+        ),
     }
 
 
@@ -230,10 +256,11 @@ def default_transport(url: str, timeout: float) -> tuple[int, bytes]:
             return resp.status_code, b"".join(chunks)
     except SupplementError:
         raise
-    except httpx.TimeoutException as exc:
-        raise SupplementError("timeout", "上游超时，未采用响应。") from exc
-    except httpx.HTTPError as exc:
-        raise SupplementError("transport", "上游连接失败，未采用响应。") from exc
+    except httpx.TimeoutException:
+        # from None：httpx 异常文本里通常带完整 URL，不能挂到返回页面的错误上。
+        raise SupplementError("timeout", "上游超时，未采用响应。") from None
+    except httpx.HTTPError:
+        raise SupplementError("transport", "上游连接失败，未采用响应。") from None
 
 
 def parse_upstream_body(body: bytes) -> list[dict[str, Any]]:
@@ -260,7 +287,10 @@ def _query(
     payload = _envelope(code, trade_date, seq, clock)
     if not enabled():
         payload["state"] = "disabled"
-        payload["message"] = "XTICK_SUPPLEMENT_ENABLED 未开启。主行情、竞价扫描和信号都未请求 XTick。"
+        payload["message"] = (
+            "补充源未开启。可在 secrets.json 写 xtick_supplement_enabled=1，"
+            "或设置 XTICK_SUPPLEMENT_ENABLED=1。环境变量为 0 时强制关闭。主行情未请求 XTick。"
+        )
         return payload
     normalized_code, normalized_seq, day = _validate(code, trade_date, seq)
     payload["code"] = normalized_code
@@ -319,9 +349,13 @@ def _query(
             payload["warnings"] = ["vendor_time_date_mismatch"]
     # 空结果不落盘。上游限流也可能表现为空，缓存住会把缺失固化成历史事实。
     if rows:
-        if token and token in json.dumps(payload, ensure_ascii=False):
+        encoded = json.dumps(payload, ensure_ascii=False)
+        if token and token in encoded:
             raise SupplementError("redaction", "上游记录含凭据，已丢弃且未落盘。")
-        _write_cache(data_dir, day, normalized_code, normalized_seq, payload)
+        if _cache_payload_ok(payload, day, normalized_code, normalized_seq):
+            _write_cache(data_dir, day, normalized_code, normalized_seq, payload)
+        else:
+            logger.warning("xtick bidhistory skipped cache write code=%s date=%s", normalized_code, day.isoformat())
     return payload
 
 
@@ -336,9 +370,9 @@ def _envelope(code: str, trade_date: str, seq: str | None, clock: datetime) -> d
         "affects_triggers": False,
         "primary_source_unchanged": True,
         "state": "error",
-        "code": code.strip(),
-        "trade_date": trade_date.strip(),
-        "seq_requested": seq,
+        "code": _public_code(code),
+        "trade_date": _public_date(trade_date),
+        "seq_requested": _public_seq(seq),
         "seq_doc": SEQ_DOC,
         "freshness": "unknown",
         "as_of": _iso(clock),
@@ -359,22 +393,27 @@ def _envelope(code: str, trade_date: str, seq: str | None, clock: datetime) -> d
 def _validate(code: str, trade_date: str, seq: str | None) -> tuple[str, str | None, date_cls]:
     text = code.strip()
     lowered = text.lower()
+    if len(text) > 16:
+        raise SupplementError("invalid_request", "代码只接受 6 位数字。")
     if lowered == "all":
         if not allow_all():
             raise SupplementError(
                 "invalid_request",
-                "全市场 all 默认关闭。需要时才设置 XTICK_BIDHISTORY_ALLOW_ALL，避免一次拉出数千行。",
+                "全市场 all 默认关闭。需要时才设置开关，避免一次拉出数千行。",
             )
         normalized = "all"
     elif _CODE_RE.fullmatch(text):
         normalized = text
     else:
         raise SupplementError("invalid_request", "代码只接受 6 位数字。批量代码不在本轮范围。")
+    raw_date = trade_date.strip()
+    if not _DATE_RE.fullmatch(raw_date):
+        raise SupplementError("invalid_request", "交易日格式应为 YYYY-MM-DD。")
     try:
-        day = date_cls.fromisoformat(trade_date.strip())
+        day = date_cls.fromisoformat(raw_date)
     except ValueError as exc:
         raise SupplementError("invalid_request", "交易日格式应为 YYYY-MM-DD。") from exc
-    if day.isoformat() != trade_date.strip():
+    if day.isoformat() != raw_date or not 1990 <= day.year <= 2100:
         raise SupplementError("invalid_request", "交易日格式应为 YYYY-MM-DD。")
     if seq is None or str(seq).strip() == "":
         normalized_seq = None
@@ -417,14 +456,13 @@ def _freshness_message(freshness: str) -> str:
 
 
 def _normalize_row(item: dict[str, Any], day: date_cls) -> dict[str, Any]:
-    code = item.get("code")
-    code_text = str(code).strip() if code is not None else ""
-    price = _as_float(item.get("price"))
-    prev_close = _as_float(item.get("close"))
-    jjl = _as_number(item.get("jjl"))
-    jje = _as_number(item.get("jje"))
-    nol = _as_number(item.get("nol"))
-    noe = _as_number(item.get("noe"))
+    code_text = _row_code(item.get("code"))
+    price = _price(item.get("price"))
+    prev_close = _price(item.get("close"))
+    jjl = _non_negative(item.get("jjl"))
+    jje = _non_negative(item.get("jje"))
+    nol = _non_negative(item.get("nol"))
+    noe = _non_negative(item.get("noe"))
     time_ms = _as_int(item.get("time"))
     time_bj = None
     time_date = None
@@ -435,11 +473,12 @@ def _normalize_row(item: dict[str, Any], day: date_cls) -> dict[str, Any]:
         time_date = stamp.date().isoformat()
         midnight = stamp.hour == 0 and stamp.minute == 0 and stamp.second == 0
     trend = _as_int(item.get("trend"))
+    raw_seq = _as_int(item.get("seq"))
     return {
         "type": _as_int(item.get("type")),
         "code": code_text or None,
         "symbol": _display_symbol(code_text),
-        "seq": _as_int(item.get("seq")),
+        "seq": raw_seq if raw_seq in (0, 1) else None,
         "time_ms": time_ms,
         "time_bj": time_bj,
         "time_calendar_date": time_date,
@@ -447,7 +486,7 @@ def _normalize_row(item: dict[str, Any], day: date_cls) -> dict[str, Any]:
         "time_is_midnight": midnight,
         "price": price,
         "prev_close": prev_close,
-        "jjzf_percent": _as_float(item.get("jjzf")),
+        "jjzf_percent": _jjzf(item.get("jjzf")),
         "jjl": jjl,
         "jje": jje,
         "nol": nol,
@@ -495,6 +534,69 @@ def _display_symbol(code: str) -> str | None:
     if text.startswith(("00", "30")):
         return f"{text}.SZ"
     return None
+
+
+def _public_code(code: str) -> str:
+    text = (code or "").strip()
+    if len(text) > 16:
+        return ""
+    if text.lower() == "all":
+        return "all"
+    if _CODE_RE.fullmatch(text):
+        return text
+    return ""
+
+
+def _row_code(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    text = str(value).strip()
+    if _CODE_RE.fullmatch(text):
+        return text
+    return ""
+
+
+def _public_date(value: str) -> str:
+    text = (value or "").strip()
+    if not _DATE_RE.fullmatch(text):
+        return ""
+    try:
+        day = date_cls.fromisoformat(text)
+    except ValueError:
+        return ""
+    if day.isoformat() != text or not 1990 <= day.year <= 2100:
+        return ""
+    return text
+
+
+def _public_seq(seq: str | None) -> str | None:
+    if seq is None:
+        return None
+    text = str(seq).strip()
+    if text in {"0", "1"}:
+        return text
+    return None
+
+
+def _non_negative(value: Any) -> int | float | None:
+    number = _as_number(value)
+    if number is None or number < 0:
+        return None
+    return number
+
+
+def _price(value: Any) -> float | None:
+    number = _as_float(value)
+    if number is None or number <= 0 or number > _MAX_PRICE:
+        return None
+    return number
+
+
+def _jjzf(value: Any) -> float | None:
+    number = _as_float(value)
+    if number is None or abs(number) > _MAX_JJZF_ABS:
+        return None
+    return number
 
 
 def _as_int(value: Any) -> int | None:
@@ -628,9 +730,39 @@ def _read_cache(data_dir: Path, day: date_cls, code: str, seq: str | None) -> di
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or data.get("dataset") != DATASET:
+    if not _cache_payload_ok(data, day, code, seq):
         return None
     return data
+
+
+def _cache_payload_ok(data: Any, day: date_cls, code: str, seq: str | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("dataset") != DATASET or data.get("state") != "ok" or data.get("error"):
+        return False
+    if data.get("live") is not False:
+        return False
+    if data.get("code") != code or data.get("trade_date") != day.isoformat():
+        return False
+    if data.get("seq_requested") != seq:
+        return False
+    rows = data.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return False
+    for row in rows:
+        if not isinstance(row, dict) or "close" in row:
+            return False
+        row_code = row.get("code")
+        if row_code is not None and not _CODE_RE.fullmatch(str(row_code)):
+            return False
+        for key in ("price", "prev_close"):
+            value = row.get(key)
+            if value is not None and _price(value) is None:
+                return False
+        jjzf = row.get("jjzf_percent")
+        if jjzf is not None and _jjzf(jjzf) is None:
+            return False
+    return True
 
 
 def _write_cache(

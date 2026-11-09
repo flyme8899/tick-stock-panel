@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import io
 import json
+import threading
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -227,7 +229,10 @@ def test_timeout_and_exception_do_not_leak_token(monkeypatch, tmp_path, caplog):
     result, _calls = _query(tmp_path, boom)
     assert result["state"] == "error"
     assert result["error"]["kind"] == "internal"
-    assert TOKEN not in json.dumps(result)
+    body = json.dumps(result)
+    assert TOKEN not in body
+    assert "api.xtick.top" not in body
+    assert "token=" not in body
     assert TOKEN not in caplog.text
     assert "token=***" in caplog.text
 
@@ -417,3 +422,156 @@ def test_status_reports_missing_credential(tmp_path):
     assert payload["enabled"] is False
     assert payload["credential_configured"] is False
     assert payload["live"] is False
+    assert TOKEN not in json.dumps(payload)
+
+
+def test_secrets_json_enables_without_env_and_explicit_off_wins(monkeypatch, tmp_path):
+    (tmp_path / "user_data").mkdir()
+    (tmp_path / "user_data" / "secrets.json").write_text(
+        json.dumps({
+            "xtick_api_token": "file-token-bbb",
+            "xtick_supplement_enabled": "1",
+            "tickflow_api_key": "leave-this-key",
+        }),
+        encoding="utf-8",
+    )
+    result, calls = _query(tmp_path, lambda url, timeout: (200, _ndjson_zip(SAMPLE)))
+    assert result["state"] == "ok"
+    assert calls["n"] == 1
+    assert "file-token-bbb" in calls["urls"][0]
+    blob = json.dumps(result)
+    assert "file-token-bbb" not in blob
+    assert "leave-this-key" not in blob
+    status = xs.status_payload()
+    assert status["enabled"] is True
+    assert status["credential_configured"] is True
+    assert "file-token-bbb" not in json.dumps(status)
+    monkeypatch.setenv("XTICK_SUPPLEMENT_ENABLED", "0")
+    stopped, stopped_calls = _query(tmp_path, lambda url, timeout: (200, _ndjson_zip(SAMPLE)))
+    assert stopped["state"] == "disabled"
+    assert stopped_calls["n"] == 0
+
+
+def test_invalid_inputs_are_not_echoed_and_bad_numbers_are_dropped(monkeypatch, tmp_path):
+    monkeypatch.setenv("XTICK_SUPPLEMENT_ENABLED", "1")
+    monkeypatch.setenv("XTICK_API_TOKEN", TOKEN)
+    rejected, calls = _query(
+        tmp_path,
+        lambda url, timeout: (200, _ndjson_zip(SAMPLE)),
+        code=TOKEN,
+        trade_date="2026-11-06T00:00:00",
+        seq=TOKEN,
+    )
+    assert calls["n"] == 0
+    assert rejected["state"] == "invalid_request"
+    assert rejected["code"] == ""
+    assert rejected["trade_date"] == ""
+    assert rejected["seq_requested"] is None
+    assert TOKEN not in json.dumps(rejected)
+    bad = dict(SAMPLE)
+    bad.update(price=-1, close=True, jjzf=10_000, jjl=-3, code="../000001", seq=9)
+    cleaned, _calls = _query(tmp_path, lambda url, timeout: (200, _ndjson_zip(bad)))
+    row = cleaned["rows"][0]
+    assert cleaned["state"] == "ok"
+    assert row["price"] is None
+    assert row["prev_close"] is None
+    assert row["jjzf_percent"] is None
+    assert row["jjl"] is None
+    assert row["code"] is None
+    assert row["seq"] is None
+    assert "close" not in row
+
+
+def test_error_and_truncated_cache_do_not_pollute_the_next_read(monkeypatch, tmp_path):
+    monkeypatch.setenv("XTICK_SUPPLEMENT_ENABLED", "1")
+    monkeypatch.setenv("XTICK_API_TOKEN", TOKEN)
+    cache = (
+        tmp_path / "xtick_supplement" / "bidhistory" / "date=2026-11-06" / "000001__seq-1.json"
+    )
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps({
+        "dataset": "bidhistory",
+        "state": "error",
+        "error": {"message": TOKEN},
+        "live": False,
+        "code": "000001",
+        "trade_date": "2026-11-06",
+        "seq_requested": "1",
+        "rows": [{"code": "000001", "price": -5, "close": 11}],
+    }), encoding="utf-8")
+    result, calls = _query(tmp_path, lambda url, timeout: (200, _ndjson_zip(SAMPLE)))
+    assert calls["n"] == 1
+    assert result["state"] == "ok"
+    assert result["cache"] == "miss"
+    assert TOKEN not in json.dumps(result)
+    assert result["rows"][0]["price"] == 11.08
+    cache.write_text("{", encoding="utf-8")
+    again, again_calls = _query(tmp_path, lambda url, timeout: (200, _ndjson_zip(SAMPLE)))
+    assert again_calls["n"] == 1
+    assert again["state"] == "ok"
+    saved = json.loads(cache.read_text(encoding="utf-8"))
+    assert saved["state"] == "ok"
+    assert TOKEN not in cache.read_text(encoding="utf-8")
+
+
+def test_parallel_cache_writes_leave_one_complete_json(monkeypatch, tmp_path):
+    monkeypatch.setenv("XTICK_SUPPLEMENT_ENABLED", "1")
+    monkeypatch.setenv("XTICK_API_TOKEN", TOKEN)
+    monkeypatch.setenv("XTICK_MIN_INTERVAL_S", "0")
+    xs.reset_rate_limit_for_tests()
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            xs.query_bidhistory(
+                tmp_path,
+                code="000001",
+                trade_date="2026-11-06",
+                seq="1",
+                now=CLOCK,
+                transport=lambda url, timeout: (200, _ndjson_zip(SAMPLE)),
+                mono=1000,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    cache = next((tmp_path / "xtick_supplement").rglob("*.json"))
+    saved = json.loads(cache.read_text(encoding="utf-8"))
+    assert saved["state"] == "ok"
+    assert saved["rows"][0]["nol"] == 1469
+    assert TOKEN not in cache.read_text(encoding="utf-8")
+
+
+def test_routes_stay_on_the_existing_auth_middleware():
+    source = (BACKEND / "app/main.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    exact = prefix = None
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if target.id == "_AUTH_WHITELIST_EXACT":
+                exact = ast.literal_eval(node.value)
+            if target.id == "_AUTH_WHITELIST_PREFIX":
+                prefix = ast.literal_eval(node.value)
+    assert exact == ("/health", "/api/events")
+    assert prefix == ("/api/auth/",)
+    for path in ("/api/xtick-supplement/status", "/api/xtick-supplement/bidhistory"):
+        assert path not in exact
+        assert not any(path.startswith(item) for item in prefix)
+    assert 'if not path.startswith("/api/")' in source
+    assert "未登录或会话已过期" in source
+    from app.api.xtick_supplement import router as xtick_router
+
+    assert {route.path for route in xtick_router.routes} == {
+        "/api/xtick-supplement/status",
+        "/api/xtick-supplement/bidhistory",
+    }
