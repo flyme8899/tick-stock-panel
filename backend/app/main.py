@@ -50,6 +50,7 @@ from app.api import (
     strategy,
     trade_signals,
     watchlist,
+    xtick_supplement,
 )
 from app.api import auth as auth_api
 from app.api import settings as settings_api
@@ -827,6 +828,7 @@ app.include_router(picker.router)
 app.include_router(abnormal.router)
 app.include_router(buy_sell_signals_hits.router)
 app.include_router(auction_scan.router)
+app.include_router(xtick_supplement.router)
 app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
