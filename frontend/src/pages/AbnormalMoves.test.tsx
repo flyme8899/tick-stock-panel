@@ -29,7 +29,7 @@ const api = vi.hoisted(() => ({
       signals: ['limit_up'],
     }],
   })),
-  auctionBenchmark: vi.fn(async () => ({
+  auctionBenchmark: vi.fn(async (): Promise<Record<string, unknown>> => ({
     state: 'ok',
     trade_date: '2026-10-12',
     count: 2,
@@ -62,6 +62,22 @@ const api = vi.hoisted(() => ({
     dates: [],
     items: [],
   })),
+  xtickSupplementStatus: vi.fn(async () => ({
+    source: 'xtick' as const,
+    dataset: 'bidhistory' as const,
+    role: 'supplement' as const,
+    live: false as const,
+    enabled: false,
+    credential_configured: false,
+    allow_all: false,
+    affects_scoring: false as const,
+    affects_risk: false as const,
+    affects_triggers: false as const,
+    primary_source_unchanged: true as const,
+  })),
+  xtickBidHistory: vi.fn(async (): Promise<Record<string, unknown>> => {
+    throw new Error('不应在未查询时请求')
+  }),
   abnormalOverview: vi.fn(async () => { throw new Error('偏移计算不应在未开启时请求') }),
   watchlistList: vi.fn(async () => ({ symbols: [] })),
 }))
@@ -80,6 +96,22 @@ beforeEach(() => {
     dates: [],
     items: [],
   })
+  api.xtickSupplementStatus.mockReset()
+  api.xtickSupplementStatus.mockResolvedValue({
+    source: 'xtick',
+    dataset: 'bidhistory',
+    role: 'supplement',
+    live: false,
+    enabled: false,
+    credential_configured: false,
+    allow_all: false,
+    affects_scoring: false,
+    affects_risk: false,
+    affects_triggers: false,
+    primary_source_unchanged: true,
+  })
+  api.xtickBidHistory.mockReset()
+  api.xtickBidHistory.mockRejectedValue(new Error('不应在未查询时请求'))
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   host = document.createElement('div')
   document.body.append(host)
@@ -94,9 +126,16 @@ afterEach(async () => {
 })
 
 async function settle() {
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 12; i++) {
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
   }
+}
+
+function setControlValue(el: HTMLInputElement | HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set
+  setter?.call(el, value)
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+  el.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
 async function renderPage() {
@@ -215,4 +254,109 @@ it('auction scan says the day has no rows when a scan file exists but nothing hi
   await act(async () => tab!.click())
   await settle()
   expect(host.textContent).toContain('当日无数据')
+})
+
+it('keeps the XTick card closed until the runtime switch is on', async () => {
+  await renderPage()
+  const tab = [...host.querySelectorAll('button')].find(el => el.textContent?.includes('竞价异动'))
+  await act(async () => tab!.click())
+  await settle()
+  expect(host.textContent).toContain('补充源未开启')
+  expect(host.textContent).toContain('不是实时行情')
+  expect(api.xtickBidHistory).not.toHaveBeenCalled()
+})
+
+it('shows a historical XTick auction row without treating it as a live quote', async () => {
+  api.xtickSupplementStatus.mockResolvedValue({
+    source: 'xtick',
+    dataset: 'bidhistory',
+    role: 'supplement',
+    live: false,
+    enabled: true,
+    credential_configured: true,
+    allow_all: false,
+    affects_scoring: false,
+    affects_risk: false,
+    affects_triggers: false,
+    primary_source_unchanged: true,
+  })
+  api.xtickBidHistory.mockResolvedValue({
+    source: 'xtick',
+    dataset: 'bidhistory',
+    role: 'supplement',
+    live: false,
+    affects_scoring: false,
+    affects_risk: false,
+    affects_triggers: false,
+    primary_source_unchanged: true,
+    state: 'ok',
+    trade_date: '2026-11-06',
+    freshness: 'historical',
+    cache: 'miss',
+    message: '查询日早于北京时间今天。这是历史补充，不是实时行情。',
+    warnings: ['vendor_time_date_mismatch'],
+    unit_note: '官方字段说明没写竞价量、竞价额的单位。',
+    seq_doc: {
+      conflict: true,
+      adopted_label: null,
+      range_text: '0-开盘数据，1-集合竞价最后一条数据',
+      description_head: 'seq为0表示集合竞价最后一条（9:25），seq为1表示倒数第二条',
+    },
+    rows: [{
+      code: '000001',
+      symbol: '000001.SZ',
+      seq: 1,
+      time_bj: '2026-02-06 00:00:00',
+      time_matches_trade_date: false,
+      time_is_midnight: true,
+      price: 11.08,
+      prev_close: 11.09,
+      jjzf_percent: -0.09,
+      jjl: 8018,
+      jje: 8883944,
+      nol: 1469,
+      noe: 1627652,
+      trend: -1,
+      trend_label: '主动性卖',
+    }],
+  })
+  await renderPage()
+  const tab = [...host.querySelectorAll('button')].find(el => el.textContent?.includes('竞价异动'))
+  await act(async () => tab!.click())
+  await settle()
+  const code = host.querySelector('input[aria-label="XTick 股票代码"]') as HTMLInputElement
+  const date = host.querySelector('input[aria-label="XTick 交易日"]') as HTMLInputElement
+  const seq = host.querySelector('select[aria-label="XTick seq"]') as HTMLSelectElement
+  await act(async () => {
+    setControlValue(code, '000001')
+    setControlValue(date, '2026-11-06')
+    setControlValue(seq, '1')
+  })
+  const submit = [...host.querySelectorAll('button')].find(el => el.textContent === '查询历史竞价')
+  await act(async () => submit!.click())
+  await settle()
+  expect(api.xtickBidHistory).toHaveBeenCalledWith({ code: '000001', tradeDate: '2026-11-06', seq: '1' })
+  expect(host.textContent).toContain('历史记录')
+  expect(host.textContent).toContain('2026-11-06')
+  expect(host.textContent).toContain('不是实时行情')
+  expect(host.textContent).toContain('-0.09%')
+  expect(host.textContent).toContain('1,469')
+  expect(host.textContent).toContain('主动性卖')
+  expect(host.textContent).toContain('时间是 00:00，不解释成 09:25')
+  expect(host.textContent).toContain('seq 未判定')
+  expect(host.textContent).toContain('与查询日不一致')
+})
+
+it('still shows the XTick card when fuyao is missing', async () => {
+  api.auctionBenchmark.mockResolvedValueOnce({
+    state: 'source_unavailable',
+    message: '未配置',
+  })
+  await renderPage()
+  const tab = [...host.querySelectorAll('button')].find(el => el.textContent?.includes('竞价异动'))
+  await act(async () => tab!.click())
+  await settle()
+  expect(host.textContent).toContain('竞价数据源未配置')
+  expect(host.textContent).toContain('补充源未开启')
+  expect(api.xtickBidHistory).not.toHaveBeenCalled()
 })

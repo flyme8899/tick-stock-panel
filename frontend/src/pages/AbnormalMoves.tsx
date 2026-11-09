@@ -19,6 +19,7 @@ import { cn } from '@/lib/cn'
 import { boardTag } from '@/components/stock-table/primitives'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { XtickBidHistoryCard } from '@/components/XtickBidHistoryCard'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
 
 /**
@@ -244,20 +245,23 @@ function AuctionView({ onOpenStock }: {
   // 不再展示零散的降级卡/占位卡 — 与偏移 tab「监控未开启」空态同款式
   if (fuyaoMissing) {
     return (
-      <PanelEmpty
-        icon={Compass}
-        title="竞价数据源未配置"
-        hint="竞价异动（同花顺盘前风向标与全市场竞价扫描）依赖 fuyao 数据源，复盘页的龙虎榜同样来自该数据源。在「设置 → 数据源」配置 fuyao API Key 后即可使用。"
-        action={
-          <Link
-            to="/settings?tab=data-sources"
-            className="inline-flex h-9 items-center gap-2 rounded-btn bg-accent px-4 text-xs font-medium text-white transition-colors hover:bg-accent/90"
-          >
-            前往配置数据源
-            <ChevronRight className="h-3.5 w-3.5" />
-          </Link>
-        }
-      />
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 overflow-y-auto">
+        <PanelEmpty
+          icon={Compass}
+          title="竞价数据源未配置"
+          hint="竞价异动（同花顺盘前风向标与全市场竞价扫描）依赖 fuyao 数据源，复盘页的龙虎榜同样来自该数据源。在「设置 → 数据源」配置 fuyao API Key 后即可使用。下方 XTick 卡片是独立补充，未开启时不会替代这里的主数据。"
+          action={
+            <Link
+              to="/settings?tab=data-sources"
+              className="inline-flex h-9 items-center gap-2 rounded-btn bg-accent px-4 text-xs font-medium text-white transition-colors hover:bg-accent/90"
+            >
+              前往配置数据源
+              <ChevronRight className="h-3.5 w-3.5" />
+            </Link>
+          }
+        />
+        <XtickBidHistoryCard onOpenStock={(symbol) => onOpenStock(symbol)} />
+      </div>
     )
   }
 
@@ -265,11 +269,13 @@ function AuctionView({ onOpenStock }: {
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 overflow-y-auto">
       <BenchmarkCard q={q} onOpenStock={onOpenStock} />
       <AuctionScanCard q={scan} onOpenStock={onOpenStock} />
+      <XtickBidHistoryCard onOpenStock={(symbol) => onOpenStock(symbol)} />
 
       <p className="px-1 text-xs leading-relaxed text-muted">
         风向标为同花顺盘前竞价筛选名单 (每日约 5~6 只)。60 日回测: 名单当日开盘买入均值 +0.54%
         (超额 +0.44%), 但高开 ≥5% 子集当日 -1.97% — 追高是陷阱, 次日无显著优势, 仅作当日观察。
         全市场扫描在交易日 9:25 竞价终态后落盘，历史从启用当天开始积累。
+        XTick 卡片是另一路历史补充，默认关闭，不替代上面两块，也不进入评分或触发。
       </p>
     </div>
   )

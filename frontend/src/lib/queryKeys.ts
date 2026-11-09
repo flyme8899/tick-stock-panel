@@ -32,6 +32,10 @@ export const QK = {
   abnormalIntraday:     (limit: number) => ['abnormal-intraday', limit] as const,
   // 全市场竞价扫描 (异动监控「竞价」tab; date 缺省为当天)
   auctionScan:          (date?: string) => ['auction-scan', date ?? 'latest'] as const,
+  // XTick 历史竞价补充。不进 SSE 失效列表，避免行情推送把补充查询打到上游。
+  xtickSupplementStatus: ['xtick-supplement-status'] as const,
+  xtickBidHistory:      (code: string, tradeDate: string, seq: string) =>
+                          ['xtick-bidhistory', code, tradeDate, seq] as const,
   // 不用 watchlist- 前缀: 日K历史盘中几乎不变, 若被 SSE quotes_updated 高频失效
   // (expert 1s) 会导致全自选日K每秒重拉, staleTime 形同虚设。
   // 刷新点: staleTime 过期 + Watchlist 增删自选/改蜡烛天数时的手动失效;

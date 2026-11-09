@@ -891,6 +891,77 @@ export interface AuctionScanPayload {
   message?: string
 }
 
+// ===== XTick 历史竞价补充（不进入主行情） =====
+export interface XtickSupplementStatus {
+  source: 'xtick'
+  dataset: 'bidhistory'
+  role: 'supplement'
+  live: false
+  enabled: boolean
+  credential_configured: boolean
+  allow_all: boolean
+  affects_scoring: false
+  affects_risk: false
+  affects_triggers: false
+  primary_source_unchanged: true
+  auth_note?: string
+  quota_note?: string
+}
+
+export interface XtickBidHistoryRow {
+  type?: number | null
+  code?: string | null
+  symbol?: string | null
+  seq?: number | null
+  time_ms?: number | null
+  time_bj?: string | null
+  time_calendar_date?: string | null
+  time_matches_trade_date?: boolean
+  time_is_midnight?: boolean
+  price?: number | null
+  prev_close?: number | null
+  jjzf_percent?: number | null
+  jjl?: number | null
+  jje?: number | null
+  nol?: number | null
+  noe?: number | null
+  trend?: number | null
+  trend_label?: string | null
+  amount_identity?: { jj?: string; unmatched?: string }
+}
+
+export interface XtickBidHistoryPayload {
+  source: 'xtick'
+  dataset: 'bidhistory'
+  role: 'supplement'
+  live: false
+  affects_scoring: false
+  affects_risk: false
+  affects_triggers: false
+  primary_source_unchanged: true
+  state: 'ok' | 'missing' | 'disabled' | 'missing_credential' | 'not_ready' | 'invalid_request' | 'rate_limited' | 'error'
+  code?: string
+  trade_date?: string
+  seq_requested?: string | null
+  seq_doc?: {
+    conflict?: boolean
+    adopted_label?: string | null
+    range_text?: string
+    description_head?: string
+    description_tail?: string
+  }
+  freshness?: string
+  as_of?: string
+  fetched_at?: string | null
+  cache?: string
+  rows?: XtickBidHistoryRow[]
+  row_count?: number
+  message?: string
+  warnings?: string[]
+  unit_note?: string
+  error?: { kind?: string; message?: string; http_status?: number } | null
+}
+
 // ===== Strategy Engine =====
 export interface StrategyParamDef {
   id: string
@@ -4515,6 +4586,20 @@ export const api = {
     request<AuctionScanPayload>(
       `/api/auction-scan${date ? `?date=${encodeURIComponent(date)}` : ''}`,
     ),
+
+  /** XTick 补充源开关。不访问上游。 */
+  xtickSupplementStatus: () =>
+    request<XtickSupplementStatus>('/api/xtick-supplement/status', { quiet: true }),
+
+  /** 手动查询一个交易日的 XTick 历史竞价终态。失败不弹全局 toast。 */
+  xtickBidHistory: (q: { code: string; tradeDate: string; seq?: string }) => {
+    const params = new URLSearchParams({ code: q.code, trade_date: q.tradeDate })
+    if (q.seq === '0' || q.seq === '1') params.set('seq', q.seq)
+    return request<XtickBidHistoryPayload>(
+      `/api/xtick-supplement/bidhistory?${params.toString()}`,
+      { quiet: true },
+    )
+  },
 
   reviewReportSave: (r: {
     as_of: string; focus?: string; content: string
