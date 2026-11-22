@@ -78,7 +78,7 @@ docker compose --profile dsa up --build
 
 ### 5. 跑钩子验收矩阵（H1–H5）
 
-sidecar 由 `backend/app/custom/dsa/dsa_bootstrap.py` 启动，在 `main.py` 之前装五个钩子。每个钩子只有两种合法结果：**装载成功**，或**显式跳过并打日志**。任何「没装上、日志里也看不出来」都算失败，不得写成升级成功。
+sidecar 由 `backend/app/custom/dsa/dsa_bootstrap.py` 启动，在 `main.py` 之前装六个钩子。每个钩子只有两种合法结果：**装载成功**，或**显式跳过并打日志**。任何「没装上、日志里也看不出来」都算失败，不得写成升级成功。
 
 | ID | 钩子 | 装载点 | 成功信号 | 显式跳过信号 |
 |---|---|---|---|---|
@@ -87,10 +87,11 @@ sidecar 由 `backend/app/custom/dsa/dsa_bootstrap.py` 启动，在 `main.py` 之
 | H3 | `etf_job` | `_install_etf_job()` | `etf_job.py` 在 → `install_import_hook()` | 日志「未找到 etf_job.py，DSA 不提供 ETF 轮动入口」 |
 | H4 | `fund_flow_bridge` | `_install_fund_flow_bridge()` | `fund_flow_bridge.py` 在 → `install()` | 日志「未找到 fund_flow_bridge.py，DSA 不读取资金进出」 |
 | H5 | `analysis_bridge` | `_install_analysis_bridge()` | `analysis_bridge.py` 在 → `install()` | 日志「未找到 analysis_bridge.py，DSA 不注入个股上下文」 |
+| H6 | `json_finite` | `_install_json_finite()` | `json_finite.py` 在且 DSA 模块可导入 → `install()` | 日志「未找到 json_finite.py，DSA 不清洗工具消息里的非有限数值」；DSA 模块不在时只记「当前不是 DSA 进程」，不算装上 |
 
 钩子抛异常时 `main()` 会 `logger.exception(...)` 后继续启动 DSA——这是「不挡住面板」，**不等于**钩子成功。看日志确认每个钩子落在「已安装」还是「未找到」，两者都要能在日志里找到，不能只凭容器起来了就判定通过。
 
-**Docker 挂载**：compose 的 dsa 服务把 `dsa_bootstrap.py`、`etf_job.py`、`news_bridge.py`、`analysis_bridge.py`、`fund_flow_bridge.py`、`quant_evidence.py`、`quant_evidence.yaml` 逐个只读挂进 `/opt/tsp/`。新增钩子文件时必须同步补一行挂载，否则容器内走「未找到」分支——那是显式跳过，不是装载成功。
+**Docker 挂载**：compose 的 dsa 服务把 `dsa_bootstrap.py`、`etf_job.py`、`news_bridge.py`、`analysis_bridge.py`、`fund_flow_bridge.py`、`json_finite.py`、`quant_evidence.py`、`quant_evidence.yaml` 逐个只读挂进 `/opt/tsp/`。新增钩子文件时必须同步补一行挂载，否则容器内走「未找到」分支——那是显式跳过，不是装载成功。
 
 ### 6. 跑推送 / health 验收
 
@@ -119,7 +120,7 @@ sidecar 由 `backend/app/custom/dsa/dsa_bootstrap.py` 启动，在 `main.py` 之
 python3 scripts/dsa_upgrade_check.py --check
 ```
 
-它会输出四处钉是否一致、钉格式是否为 40 位十六进制、五个钩子文件是否齐全，以及 compose 是否把五个钩子都只读挂到了 `/opt/tsp/`。退出码 `0` 表示一致，`1` 表示有不一致项——不一致就不要开 PR。加 `--json` 可拿到机器可读结果。
+它会输出四处钉是否一致、钉格式是否为 40 位十六进制、钩子文件是否齐全，以及 compose 是否把这些钩子都只读挂到了 `/opt/tsp/`。退出码 `0` 表示一致，`1` 表示有不一致项——不一致就不要开 PR。加 `--json` 可拿到机器可读结果。
 
 自动化测（CI 也会跑）：
 
@@ -139,6 +140,7 @@ cd backend && python -m pytest tests/test_dsa_upgrade_pin.py tests/test_dsa_upgr
 ## 变更记录
 
 - 2026-10-26：建立本 SOP（P5）。钉保持 `ce364e457aab288863a5707e7b3df79786ad07f2`，未换上游版；补 dsa 服务 `fund_flow_bridge.py` 挂载，H4 在 Docker 下可装载。
+- 2026-11-22：增加 H6 `json_finite`（不改 vendor、不换钉 `ce364e457aab288863a5707e7b3df79786ad07f2`）。工具结果和工具参数里的非有限数值在序列化前变成 `null`；普通字符串保持原样。
 
 ---
 

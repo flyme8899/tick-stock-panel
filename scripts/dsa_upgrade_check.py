@@ -5,8 +5,8 @@
 不写盘、不调 git、不起容器，重复执行结果一致，适合在开 PR 前跑一次。
 
 检查项：四处钉同值且都是 40 位小写十六进制；钉不是 ``latest`` / ``main`` /
-``HEAD`` 之类浮动引用；五个钩子文件齐全；compose 已把 ``fund_flow_bridge.py``
-等钩子只读挂进 ``/opt/tsp/``。
+``HEAD`` 之类浮动引用；钩子文件齐全；compose 已把 ``fund_flow_bridge.py``、
+``json_finite.py`` 等钩子只读挂进 ``/opt/tsp/``。
 
 退出码：``0`` 全部一致，``1`` 有不一致（逐条打印原因）。
 """
@@ -44,6 +44,7 @@ _HOOKS = {
     "etf_job.py": "/opt/tsp/etf_job.py",
     "fund_flow_bridge.py": "/opt/tsp/fund_flow_bridge.py",
     "analysis_bridge.py": "/opt/tsp/analysis_bridge.py",
+    "json_finite.py": "/opt/tsp/json_finite.py",
 }
 _HOOK_DIR = "backend/app/custom/dsa"
 _COMPOSE = "docker-compose.yml"
@@ -126,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     elif report.ok:
         pins = {value for value in report.pins.values() if value}
-        print(f"OK 四处钉一致 {pins.pop()}；五个钩子齐全且已挂载")
+        print(f"OK 四处钉一致 {pins.pop()}；{len(_HOOKS)} 个钩子齐全且已挂载")
     else:
         print("FAIL DSA 钉 / 钩子自检未通过：")
         for message in report.errors:
