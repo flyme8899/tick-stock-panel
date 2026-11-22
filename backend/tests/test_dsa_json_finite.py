@@ -129,6 +129,17 @@ def test_serialize_path_sanitizes_nested_and_numpy_without_mutating() -> None:
     assert math.isnan(payload["history"][1])
 
 
+def test_top_level_numpy_scalar_stays_a_json_literal() -> None:
+    """裸标量不能走进原函数的 None 分支，否则会变成 {"result": null}。"""
+    wrapped = json_finite._wrap_serialize(_vendor_serialize)
+
+    assert wrapped(np.float64("nan")) == "null"
+    assert wrapped(np.float64("inf")) == "null"
+    assert wrapped(np.float64(1.25)) == "1.25"
+    assert wrapped(np.int64(7)) == "7"
+    assert wrapped(None) == '{"result": null}'
+
+
 def test_serialize_path_keeps_plain_text_and_existing_strings() -> None:
     wrapped = json_finite._wrap_serialize(_vendor_serialize)
     prose = "请看说明里的 NaN / Infinity，这不是 JSON"
@@ -245,6 +256,98 @@ def test_install_patches_both_paths_and_is_idempotent(monkeypatch, caplog) -> No
     parsed = _strict_loads(execution.serialize_tool_result({"price": np.float64("nan"), "ok": 1.5}))
     assert parsed == {"price": None, "ok": 1.5}
     assert any("已安装 DSA 非有限值 JSON 钩子" in record.getMessage() for record in caplog.records)
+
+
+def test_adapter_import_failure_still_patches_vendor_shaped_serialize(monkeypatch, caplog) -> None:
+    _adapter, execution, _runner = _plant_dsa_modules(monkeypatch)
+    monkeypatch.setitem(sys.modules, "src.agent.llm_adapter", None)
+
+    with caplog.at_level(logging.INFO, logger="tsp.dsa.json_finite"):
+        json_finite.install()
+
+    raw = execution.serialize_tool_result({"price": float("nan"), "label": "NaN"})
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert _strict_loads(raw) == {"price": None, "label": "NaN"}
+    assert "DSA 适配器未导入，跳过 _convert_messages 清洗" in messages
+    assert "已安装 DSA 非有限值 JSON 钩子" not in messages
+    assert "当前不是 DSA 进程，跳过非有限值 JSON 钩子" not in messages
+
+
+def test_pinned_vendor_serialize_tool_result_is_compatible(monkeypatch) -> None:
+    """直接调用钉上的 serialize_tool_result，不经过手写仿品。"""
+    vendor = str(_ROOT / "vendor/daily_stock_analysis")
+    monkeypatch.syspath_prepend(vendor)
+    stale = [name for name in sys.modules if name == "src" or name.startswith("src.")]
+    for name in stale:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "src.agent.llm_adapter", None)
+
+    import src.agent.tools.execution as execution
+
+    payload = {
+        "price": float("nan"),
+        "volume": float("inf"),
+        "label": "NaN",
+        "ok": np.float64(1.25),
+        "nested": [float("-inf"), {"deep": np.float64("nan")}],
+    }
+    nested = payload["nested"]
+    before = execution.serialize_tool_result(payload)
+    with pytest.raises(ValueError):
+        _strict_loads(before)
+    prose = "请看说明里的 NaN，不是 JSON"
+    assert execution.serialize_tool_result(prose) == prose
+
+    json_finite.install()
+    raw = execution.serialize_tool_result(payload)
+
+    assert getattr(execution.serialize_tool_result, "_tsp_json_finite", False)
+    assert _strict_loads(raw) == {
+        "price": None,
+        "volume": None,
+        "label": "NaN",
+        "ok": 1.25,
+        "nested": [None, {"deep": None}],
+    }
+    assert execution.serialize_tool_result(prose) == prose
+    assert execution.serialize_tool_result('{"price": NaN}') == '{"price": NaN}'
+    assert execution.serialize_tool_result(np.float64("nan")) == "null"
+    assert execution.serialize_tool_result(np.float64(1.25)) == "1.25"
+    assert execution.serialize_tool_result(None) == '{"result": null}'
+    assert math.isnan(payload["price"])
+    assert payload["nested"] is nested
+
+
+def test_pinned_adapter_convert_messages_when_litellm_is_installed(monkeypatch) -> None:
+    """钉上的 LLMToolAdapter._convert_messages。没有 litellm 时跳过，不假装跑过。"""
+    pytest.importorskip("litellm")
+    monkeypatch.setenv("ENV_FILE", "/tmp/empty-dsa.env")
+    Path("/tmp/empty-dsa.env").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(_ROOT / "vendor/daily_stock_analysis"))
+    for name in [key for key in sys.modules if key == "src" or key.startswith("src.")]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    import src.agent.llm_adapter as adapter_mod
+
+    payload = {"price": float("nan"), "label": "NaN", "ok": np.float64(1.25)}
+    bare = adapter_mod.LLMToolAdapter.__new__(adapter_mod.LLMToolAdapter)
+    before = bare._convert_messages([
+        {"role": "tool", "tool_call_id": "c1", "content": dict(payload)},
+    ])
+    with pytest.raises(ValueError):
+        _strict_loads(before[0]["content"])
+
+    json_finite.install()
+    patched = adapter_mod.LLMToolAdapter.__new__(adapter_mod.LLMToolAdapter)
+    converted = patched._convert_messages([
+        {"role": "tool", "tool_call_id": "c1", "content": payload},
+        {"role": "tool", "tool_call_id": "c2", "content": "普通文本 NaN"},
+    ])
+
+    assert _strict_loads(converted[0]["content"]) == {"price": None, "label": "NaN", "ok": 1.25}
+    assert converted[1]["content"] == "普通文本 NaN"
+    assert math.isnan(payload["price"])
+    assert getattr(adapter_mod.LLMToolAdapter._convert_messages, "_tsp_json_finite", False)
 
 
 def test_install_does_not_claim_success_without_dsa(monkeypatch, caplog) -> None:

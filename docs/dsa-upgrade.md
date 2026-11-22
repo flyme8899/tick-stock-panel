@@ -87,7 +87,7 @@ sidecar 由 `backend/app/custom/dsa/dsa_bootstrap.py` 启动，在 `main.py` 之
 | H3 | `etf_job` | `_install_etf_job()` | `etf_job.py` 在 → `install_import_hook()` | 日志「未找到 etf_job.py，DSA 不提供 ETF 轮动入口」 |
 | H4 | `fund_flow_bridge` | `_install_fund_flow_bridge()` | `fund_flow_bridge.py` 在 → `install()` | 日志「未找到 fund_flow_bridge.py，DSA 不读取资金进出」 |
 | H5 | `analysis_bridge` | `_install_analysis_bridge()` | `analysis_bridge.py` 在 → `install()` | 日志「未找到 analysis_bridge.py，DSA 不注入个股上下文」 |
-| H6 | `json_finite` | `_install_json_finite()` | `json_finite.py` 在且 DSA 模块可导入 → `install()` | 日志「未找到 json_finite.py，DSA 不清洗工具消息里的非有限数值」；DSA 模块不在时只记「当前不是 DSA 进程」，不算装上 |
+| H6 | `json_finite` | `_install_json_finite()` | `json_finite.py` 在且两条入口都导入成功 → 日志「已安装 DSA 非有限值 JSON 钩子」 | 文件缺失：「未找到 json_finite.py…」。两条都导入失败才记「当前不是 DSA 进程」。只缺适配器时仍清洗 `serialize_tool_result`，不算整钩已装上 |
 
 钩子抛异常时 `main()` 会 `logger.exception(...)` 后继续启动 DSA——这是「不挡住面板」，**不等于**钩子成功。看日志确认每个钩子落在「已安装」还是「未找到」，两者都要能在日志里找到，不能只凭容器起来了就判定通过。
 

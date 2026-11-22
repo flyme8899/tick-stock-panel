@@ -14,6 +14,7 @@ sidecar 由 ``dsa_bootstrap`` 在 ``main.py`` 之前调用 ``install()``。
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sys
@@ -131,7 +132,8 @@ def _wrap_serialize(original: Callable[[Any], str]) -> Callable[[Any], str]:
             return original(normalize_nonfinite(result))
         numpy = _numpy()
         if numpy is not None and isinstance(result, (numpy.floating, numpy.integer, numpy.bool_)):
-            return original(normalize_nonfinite(result))
+            # 不要把清洗后的 None 送回原函数：原函数把 None 写成 {"result": null}。
+            return json.dumps(normalize_nonfinite(result), allow_nan=False)
         if hasattr(result, "__dict__"):
             return original(_public_view(result))
         return original(result)
@@ -147,18 +149,28 @@ def _patch_method(owner: Any, name: str, wrapper: Callable[[Callable[..., Any]],
     setattr(owner, name, wrapper(current))
 
 
-def install() -> None:
-    """包住两条序列化入口。DSA 模块不在时只记日志，不假装已经装上。"""
+def _install_adapter() -> bool:
     try:
         import src.agent.llm_adapter as adapter
+    except ImportError:
+        logger.info("DSA 适配器未导入，跳过 _convert_messages 清洗")
+        return False
+    if not hasattr(adapter, "LLMToolAdapter"):
+        logger.info("DSA 工具序列化入口不在，跳过 _convert_messages 清洗")
+        return False
+    _patch_method(adapter.LLMToolAdapter, "_convert_messages", _wrap_convert)
+    return True
+
+
+def _install_serialize() -> bool:
+    try:
         import src.agent.tools.execution as execution
     except ImportError:
-        logger.info("当前不是 DSA 进程，跳过非有限值 JSON 钩子")
-        return
-    if not hasattr(adapter, "LLMToolAdapter") or not hasattr(execution, "serialize_tool_result"):
-        logger.info("DSA 工具序列化入口不在，跳过非有限值 JSON 钩子")
-        return
-    _patch_method(adapter.LLMToolAdapter, "_convert_messages", _wrap_convert)
+        logger.info("DSA 工具结果序列化未导入，跳过 serialize_tool_result 清洗")
+        return False
+    if not hasattr(execution, "serialize_tool_result"):
+        logger.info("DSA 工具序列化入口不在，跳过 serialize_tool_result 清洗")
+        return False
     _patch_method(execution, "serialize_tool_result", _wrap_serialize)
     wrapped = execution.serialize_tool_result
     for module_name in _REBIND_MODULES:
@@ -169,4 +181,15 @@ def install() -> None:
         if current is None or getattr(current, _MARKER, False):
             continue
         setattr(module, "serialize_tool_result", wrapped)
-    logger.info("已安装 DSA 非有限值 JSON 钩子")
+    return True
+
+
+def install() -> None:
+    """两条入口分开装。一边导入失败不取消另一边，也不把部分成功说成已装上。"""
+    adapter_ok = _install_adapter()
+    serialize_ok = _install_serialize()
+    if adapter_ok and serialize_ok:
+        logger.info("已安装 DSA 非有限值 JSON 钩子")
+        return
+    if not adapter_ok and not serialize_ok:
+        logger.info("当前不是 DSA 进程，跳过非有限值 JSON 钩子")
