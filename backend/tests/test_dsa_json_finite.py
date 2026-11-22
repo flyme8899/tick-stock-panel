@@ -350,15 +350,22 @@ def test_pinned_adapter_convert_messages_when_litellm_is_installed(monkeypatch) 
     assert getattr(adapter_mod.LLMToolAdapter._convert_messages, "_tsp_json_finite", False)
 
 
-def test_install_does_not_claim_success_without_dsa(monkeypatch, caplog) -> None:
-    for name in (
-        "src",
-        "src.agent",
-        "src.agent.llm_adapter",
-        "src.agent.tools",
-        "src.agent.tools.execution",
-    ):
+def _block_dsa_imports(monkeypatch) -> None:
+    """前面的用例可能已经导入钉上的 src。清掉缓存并拦住再导入。"""
+    for name in [key for key in sys.modules if key == "src" or key.startswith("src.")]:
         monkeypatch.delitem(sys.modules, name, raising=False)
+    real_import = __import__
+
+    def blocked(name, globals=None, locals=None, fromlist=(), level=0):  # noqa: A002
+        if name.startswith("src.agent.llm_adapter") or name.startswith("src.agent.tools"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", blocked)
+
+
+def test_install_does_not_claim_success_without_dsa(monkeypatch, caplog) -> None:
+    _block_dsa_imports(monkeypatch)
 
     with caplog.at_level(logging.INFO, logger="tsp.dsa.json_finite"):
         json_finite.install()
@@ -369,8 +376,7 @@ def test_install_does_not_claim_success_without_dsa(monkeypatch, caplog) -> None
 
 
 def test_bootstrap_loads_real_hook_without_pretending_when_dsa_is_absent(caplog, monkeypatch) -> None:
-    for name in ("src", "src.agent", "src.agent.llm_adapter", "src.agent.tools", "src.agent.tools.execution"):
-        monkeypatch.delitem(sys.modules, name, raising=False)
+    _block_dsa_imports(monkeypatch)
 
     with caplog.at_level(logging.INFO):
         dsa_bootstrap._install_json_finite()
