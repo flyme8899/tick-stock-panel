@@ -138,6 +138,22 @@ def _install_etf_job() -> None:
     module.install_import_hook()
 
 
+def _install_json_finite() -> None:
+    """工具报文里的 NaN/Infinity 收成严格 JSON。失败不挡住启动。"""
+    import importlib.util
+
+    path = Path(__file__).resolve().with_name("json_finite.py")
+    if not path.is_file():
+        logger.info("未找到 json_finite.py，DSA 不清洗工具消息里的非有限数值")
+        return
+    spec = importlib.util.spec_from_file_location("tsp_json_finite", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install()
+
+
 def _install_analysis_bridge() -> None:
     """个股上下文注入和价位登记。失败不挡住启动。"""
     import importlib.util
@@ -191,6 +207,10 @@ def main() -> None:
         _install_analysis_bridge()
     except Exception:
         logger.exception("TSP 个股上下文未安装，继续启动 DSA")
+    try:
+        _install_json_finite()
+    except Exception:
+        logger.exception("非有限值 JSON 钩子未安装，继续启动 DSA")
     if len(sys.argv) < 2:
         sys.argv = ["main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
     else:

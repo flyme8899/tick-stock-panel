@@ -1,4 +1,4 @@
-"""N1：compose 的 dsa 服务必须把五个钩子都只读挂进容器。
+"""N1：compose 的 dsa 服务必须把钩子都只读挂进容器。
 
 ``dsa_bootstrap.py`` 用 ``Path(__file__).with_name("<hook>.py")`` 找钩子，
 容器里 ``/opt/tsp/`` 只有显式挂进去的文件。少挂一行，容器内就走「未找到」
@@ -22,6 +22,7 @@ _HOOKS = {
     "etf_job.py": "/opt/tsp/etf_job.py",
     "fund_flow_bridge.py": "/opt/tsp/fund_flow_bridge.py",
     "analysis_bridge.py": "/opt/tsp/analysis_bridge.py",
+    "json_finite.py": "/opt/tsp/json_finite.py",
 }
 
 
@@ -43,7 +44,7 @@ def test_fund_flow_bridge_mount_is_present(compose_text: str) -> None:
 
 
 def test_hooks_are_mounted_read_only(compose_text: str) -> None:
-    """五个挂载都必须带 ``:ro``，别让容器改宿主代码。"""
+    """挂载都必须带 ``:ro``，别让容器改宿主代码。"""
     for name, target in _HOOKS.items():
         line = f"./{_HOOK_DIR}/{name}:{target}:ro"
         assert line.endswith(":ro"), line

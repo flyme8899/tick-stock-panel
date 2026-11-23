@@ -404,6 +404,31 @@ def _added_dates_bj(entries: list[dict]) -> dict[str, date]:
     return out
 
 
+# 右表选择顺序：有日期证据时取最新一行；都没有时保留当前顺序的第一行。
+_RIGHT_ROW_ORDER = ("as_of", "date", "quote_ts")
+
+
+def _one_row_per_symbol(frame: pl.DataFrame) -> pl.DataFrame:
+    """连接前把右表收成每个 symbol 一行。
+
+    左表是 ``list_symbols()`` 的每一条，这里不去掉。分组关系在条目的
+    ``group_ids`` 上，不在这张行情表里，所以不能靠最终 ``unique(symbol)``
+    把重复行抹掉——那会把上游放大和真正的多条自选混在一起。
+    右表本来就每个 symbol 一行时原样返回，不改顺序。
+    """
+    if frame.is_empty() or "symbol" not in frame.columns:
+        return frame
+    if frame["symbol"].n_unique() == frame.height:
+        return frame
+    order = [column for column in _RIGHT_ROW_ORDER if column in frame.columns]
+    selected = frame
+    if order:
+        selected = selected.sort(
+            order, descending=True, nulls_last=True, maintain_order=True,
+        )
+    return selected.unique(subset=["symbol"], keep="first", maintain_order=True)
+
+
 def _added_base_closes(
     repo,
     added_dates: dict[str, date],
@@ -497,7 +522,7 @@ def watchlist_enriched(
         if df_e.is_empty():
             df = watchlist_df
         else:
-            df = watchlist_df.join(df_e, on="symbol", how="left")
+            df = watchlist_df.join(_one_row_per_symbol(df_e), on="symbol", how="left")
     else:
         df = pl.DataFrame()
 
@@ -508,7 +533,7 @@ def watchlist_enriched(
         etf_watchlist_df = pl.DataFrame({"symbol": etf_symbols})
         if not df_etf_all.is_empty():
             # ETF 同样以自选为主表 LEFT JOIN, 缺失标的指标为 null
-            df_etf = etf_watchlist_df.join(df_etf_all, on="symbol", how="left")
+            df_etf = etf_watchlist_df.join(_one_row_per_symbol(df_etf_all), on="symbol", how="left")
         else:
             df_etf = etf_watchlist_df
         df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
@@ -519,7 +544,7 @@ def watchlist_enriched(
         df_idx_all, index_date = repo.get_enriched_latest_asset("index")
         idx_watchlist_df = pl.DataFrame({"symbol": index_symbols})
         if not df_idx_all.is_empty():
-            df_idx = idx_watchlist_df.join(df_idx_all, on="symbol", how="left")
+            df_idx = idx_watchlist_df.join(_one_row_per_symbol(df_idx_all), on="symbol", how="left")
         else:
             df_idx = idx_watchlist_df
         df = df_idx if df.is_empty() else pl.concat([df, df_idx], how="diagonal_relaxed")
@@ -543,7 +568,13 @@ def watchlist_enriched(
     # JOIN float_shares (仅股票有) + 名称 (股票/ETF 统一走 get_name_map)
     df_i = repo.get_instruments()
     if not df_i.is_empty() and "float_shares" in df_i.columns:
-        df = df.join(df_i.select(["symbol", "float_shares"]), on="symbol", how="left")
+        share_cols = ["symbol", "float_shares"]
+        if "as_of" in df_i.columns:
+            share_cols.append("as_of")
+        shares = _one_row_per_symbol(df_i.select(share_cols))
+        if "as_of" in shares.columns:
+            shares = shares.drop("as_of")
+        df = df.join(shares, on="symbol", how="left")
     name_map = repo.get_name_map(df["symbol"].to_list())
     df = df.with_columns(
         pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name")
@@ -612,12 +643,20 @@ def watchlist_enriched(
     # 「加入日期」与「加入以来」— 与涨跌停价同为读时现算, 不落盘。只在这一处挂一次即
     # 覆盖 stock/etf/index 三分支。pct_since_added 为小数口径 (与 momentum_* 一致)。
     try:
+        # 按 symbol 只保留列表里第一次出现的加入时间，避免同一代码两条自选
+        # 在这里被 JOIN 乘开。左表行数保持不变，分组标签仍在原条目上。
+        seen_added: set[str] = set()
+        added_symbols: list[str] = []
+        added_values: list[str | None] = []
+        for row in entries:
+            symbol = row["symbol"]
+            if symbol in seen_added:
+                continue
+            seen_added.add(symbol)
+            added_symbols.append(symbol)
+            added_values.append(row.get("added_at") or None)
         added_at_df = pl.DataFrame(
-            {
-                "symbol": symbols,
-                # 旧 schema 迁移补的空串归一为 null, 前端只需判断一种「缺失」
-                "added_at": [(r.get("added_at") or None) for r in entries],
-            },
+            {"symbol": added_symbols, "added_at": added_values},
             schema={"symbol": pl.Utf8, "added_at": pl.Utf8},
         )
         with_base = df.join(added_at_df, on="symbol", how="left")

@@ -31,7 +31,7 @@ class _FakeRepo:
         self._etf_date = etf_date
         self._index = index_df
         self._index_date = index_date
-        self._instruments = instruments_df or pl.DataFrame()
+        self._instruments = pl.DataFrame() if instruments_df is None else instruments_df
         self._name_map = name_map or {}
         self._etf_set = etf_set or set()
         self._index_set = index_set or set()
@@ -694,3 +694,186 @@ def test_watchlist_enriched_zero_prev_close_skips_limit_prices(monkeypatch):
     assert row["limit_down_price"] is None
     # prev_close=0 是有限数, 不属于 NaN/Inf 清洗范围, 原样透传
     assert row["prev_close"] == 0.0
+
+
+def _dated(frame: pl.DataFrame, on: date, close: float | None = None) -> pl.DataFrame:
+    out = frame.with_columns(pl.lit(on).alias("date"))
+    if close is not None:
+        out = out.with_columns(pl.lit(close).cast(pl.Float64).alias("close"))
+    return out
+
+
+def test_duplicate_quote_and_shares_collapse_to_one_row_without_touching_groups(monkeypatch):
+    """右表重复不得放大自选行。分组留在条目的 group_ids，端点不改这份列表。"""
+    entry = {
+        "symbol": "600519",
+        "group_ids": ["g1", "g2"],
+        "added_at": "2026-09-10T03:21:07",
+    }
+    entries = [entry]
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols", lambda: entries)
+    older = _dated(_enriched_df([("600519", 10.0, 0.1, 1.0)]), date(2026, 7, 1))
+    newer = _dated(_enriched_df([("600519", 18.0, 0.2, 2.0)]), date(2026, 7, 8))
+    repo = _FakeRepo(
+        enriched_df=pl.concat([older, newer]),
+        enriched_date="2026-07-08",
+        instruments_df=pl.DataFrame({
+            "symbol": ["600519", "600519"],
+            "float_shares": [1.0, 9.0],
+            "as_of": [date(2026, 1, 1), date(2026, 6, 1)],
+        }),
+        name_map={"600519": "贵州茅台"},
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+
+    assert [row["symbol"] for row in res["rows"]] == ["600519"]
+    assert res["rows"][0]["close"] == 18.0
+    assert res["rows"][0]["float_shares"] == 9.0
+    assert entry["group_ids"] == ["g1", "g2"]
+
+
+def test_duplicate_rows_without_dates_keep_the_first(monkeypatch):
+    """没有 as_of/date/quote_ts 时按右表当前顺序留第一行。"""
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols", lambda: [{"symbol": "600519", "group_ids": ["g1"]}])
+    first = _enriched_df([("600519", 10.0, 0.1, 1.0)])
+    second = _enriched_df([("600519", 18.0, 0.2, 2.0)])
+    repo = _FakeRepo(
+        enriched_df=pl.concat([first, second]),
+        enriched_date="2026-07-08",
+        instruments_df=pl.DataFrame({
+            "symbol": ["600519", "600519"],
+            "float_shares": [4.0, 8.0],
+        }),
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+
+    assert len(res["rows"]) == 1
+    assert res["rows"][0]["close"] == 10.0
+    assert res["rows"][0]["float_shares"] == 4.0
+
+
+def test_unique_right_tables_keep_values(monkeypatch):
+    """右表本来就一行时，收盘和流通股本保持原值。"""
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols", lambda: [{"symbol": "000001"}])
+    repo = _FakeRepo(
+        enriched_df=_enriched_df([("000001", 15.0, 0.3, 2e9)]),
+        enriched_date="2026-07-08",
+        instruments_df=pl.DataFrame({"symbol": ["000001"], "float_shares": [3.5]}),
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+
+    assert len(res["rows"]) == 1
+    assert res["rows"][0]["close"] == 15.0
+    assert res["rows"][0]["float_shares"] == 3.5
+
+
+def test_missing_or_empty_instruments_do_not_add_shares(monkeypatch):
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols", lambda: [{"symbol": "600519"}])
+    repo = _FakeRepo(
+        enriched_df=_enriched_df([("600519", 1800.0, 1.2, 1e9)]),
+        enriched_date="2026-07-08",
+        instruments_df=pl.DataFrame({"symbol": ["600519"], "name": ["贵州茅台"]}),
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+
+    assert res["rows"][0]["close"] == 1800.0
+    assert "float_shares" not in res["rows"][0]
+
+    repo_empty = _FakeRepo(
+        enriched_df=_enriched_df([("600519", 1800.0, 1.2, 1e9)]),
+        enriched_date="2026-07-08",
+        instruments_df=pl.DataFrame(),
+    )
+    res_empty = wl_api.watchlist_enriched(_make_request(repo_empty), ext_columns=None)
+    assert res_empty["rows"][0]["symbol"] == "600519"
+    assert "float_shares" not in res_empty["rows"][0]
+
+
+def test_duplicate_etf_and_index_keep_latest_dated_row(monkeypatch):
+    monkeypatch.setattr(
+        wl_api.watchlist,
+        "list_symbols",
+        lambda: [{"symbol": "510300", "group_ids": ["g1", "g2"]}, {"symbol": "000001.SH"}],
+    )
+    etf_old = _dated(_enriched_df([("510300", 4.0, 0.1, 1.0)]), date(2026, 7, 1))
+    etf_new = _dated(_enriched_df([("510300", 4.8, 0.2, 2.0)]), date(2026, 7, 8))
+    idx_old = _dated(_enriched_df([("000001.SH", 3000.0, 0.1, 1.0)]), date(2026, 7, 2))
+    idx_new = _dated(_enriched_df([("000001.SH", 3200.0, 0.2, 2.0)]), date(2026, 7, 8))
+    repo = _FakeRepo(
+        enriched_df=pl.DataFrame(schema={"symbol": pl.Utf8}),
+        enriched_date=None,
+        etf_df=pl.concat([etf_old, etf_new]),
+        etf_date="2026-07-08",
+        etf_set={"510300"},
+        index_df=pl.concat([idx_old, idx_new]),
+        index_date="2026-07-08",
+        index_set={"000001.SH"},
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+    by_symbol = {row["symbol"]: row for row in res["rows"]}
+
+    assert list(by_symbol) == ["510300", "000001.SH"]
+    assert by_symbol["510300"]["close"] == 4.8
+    assert by_symbol["510300"]["asset_type"] == "etf"
+    assert by_symbol["000001.SH"]["close"] == 3200.0
+    assert by_symbol["000001.SH"]["asset_type"] == "index"
+
+
+def test_repeated_symbol_entries_stay_separate_rows(monkeypatch):
+    """同一代码若列表里真有两条，行情去重不能把它们并成一条。"""
+    entries = [
+        {"symbol": "600519", "group_ids": ["g1"], "added_at": "2026-09-01T00:00:00"},
+        {"symbol": "600519", "group_ids": ["g2"], "added_at": "2026-09-02T00:00:00"},
+    ]
+    monkeypatch.setattr(wl_api.watchlist, "list_symbols", lambda: entries)
+    repo = _FakeRepo(
+        enriched_df=pl.concat([
+            _dated(_enriched_df([("600519", 10.0, 0.1, 1.0)]), date(2026, 7, 1)),
+            _dated(_enriched_df([("600519", 18.0, 0.2, 2.0)]), date(2026, 7, 8)),
+        ]),
+        enriched_date="2026-07-08",
+        instruments_df=pl.DataFrame({
+            "symbol": ["600519", "600519"],
+            "float_shares": [1.0, 9.0],
+            "as_of": [date(2020, 1, 1), date(2026, 1, 1)],
+        }),
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+
+    assert len(res["rows"]) == 2
+    assert [row["close"] for row in res["rows"]] == [18.0, 18.0]
+    assert [row["float_shares"] for row in res["rows"]] == [9.0, 9.0]
+    assert [row["added_at"] for row in res["rows"]] == [
+        "2026-09-01T00:00:00",
+        "2026-09-01T00:00:00",
+    ]
+    assert entries[0]["group_ids"] == ["g1"]
+    assert entries[1]["group_ids"] == ["g2"]
+
+
+def test_quote_ts_wins_when_dates_tie() -> None:
+    frame = pl.DataFrame({
+        "symbol": ["A", "A"],
+        "date": [date(2026, 7, 8), date(2026, 7, 8)],
+        "quote_ts": [1, 9],
+        "close": [1.0, 2.0],
+    })
+
+    got = wl_api._one_row_per_symbol(frame)
+
+    assert got.height == 1
+    assert got["close"].to_list() == [2.0]
+
+
+def test_already_unique_frame_is_returned_as_is() -> None:
+    frame = pl.DataFrame({"symbol": ["B", "A"], "close": [2.0, 1.0]})
+
+    got = wl_api._one_row_per_symbol(frame)
+
+    assert got is frame

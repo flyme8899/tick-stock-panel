@@ -142,6 +142,8 @@ sidecar 用 pyarrow 读这份 Parquet。已经建好的 DSA 虚拟环境需要�
 
 同一启动钩子还会加载 `fund_flow_bridge.py`。令牌和主机与资讯桥相同，读取 `GET /api/fund-flow/dsa-context`，把已落盘的主力净流入、板块排名和南向净流入插到大盘复盘新闻前面。没有数据或请求失败时不插入。资金进出本身的开关见 [fund-flow.md](./fund-flow.md)。
 
+同一启动过程还会装上 `json_finite.py`。DSA 模块能导入时，它把工具结果和工具参数里的 `NaN` / `Infinity` 收成 JSON 的 `null`。已经是字符串的内容原样保留，包括普通说明。不改 vendor，也不改钉住的上游提交。
+
 ## 个股上下文
 
 `analysis_bridge.py` 在同一启动钩子里装上。个股分析（含 Agent）读取本地情报之前，会向 `GET /api/dsa/stock-context` 要一段短文本，放进新闻上下文的前面。令牌仍是 `NEWS_DSA_FEED_TOKEN`。没配令牌、TSP 没开或某一段读失败时，分析继续，失败的那段标成缺失。拉取超时 3 秒。TSP 对同一只股票的这段文本缓存约 30 秒。

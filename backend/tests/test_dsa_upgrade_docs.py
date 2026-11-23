@@ -71,7 +71,7 @@ def test_sop_lists_four_pin_sources() -> None:
 def test_sop_names_all_five_hooks() -> None:
     text = _text(_SOP)
 
-    for name in ("quant_evidence", "news_bridge", "etf_job", "fund_flow_bridge", "analysis_bridge"):
+    for name in ("quant_evidence", "news_bridge", "etf_job", "fund_flow_bridge", "analysis_bridge", "json_finite"):
         assert name in text, f"SOP 的钩子矩阵缺 {name}"
 
 

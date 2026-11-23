@@ -1,6 +1,6 @@
-"""H1–H5 钩子矩阵：文件在 / 文件缺 两态都不许把 DSA 拖住。
+"""H1–H6 钩子矩阵：文件在 / 文件缺 两态都不许把 DSA 拖住。
 
-``backend/app/custom/dsa/dsa_bootstrap.py::main()`` 依次装五个钩子：
+``backend/app/custom/dsa/dsa_bootstrap.py::main()`` 依次装六个钩子：
 
 ===========  ==========================  ==================================
 编号          钩子                        装载点
@@ -10,6 +10,7 @@ H2            news_bridge.py              ``install()``
 H3            etf_job.py                  ``install_import_hook()``
 H4            fund_flow_bridge.py         ``install()``
 H5            analysis_bridge.py          ``install()``
+H6            json_finite.py              ``install()``
 ===========  ==========================  ==================================
 
 契约只有两条，这里逐条按住：
@@ -37,6 +38,7 @@ _HOOKS = {
     "H3": "etf_job.py",
     "H4": "fund_flow_bridge.py",
     "H5": "analysis_bridge.py",
+    "H6": "json_finite.py",
 }
 
 # 文件缺失时的原文日志，逐字对齐产品代码。
@@ -45,6 +47,7 @@ _MISSING_LOG = {
     "H3": "未找到 etf_job.py，DSA 不提供 ETF 轮动入口",
     "H4": "未找到 fund_flow_bridge.py，DSA 不读取资金进出",
     "H5": "未找到 analysis_bridge.py，DSA 不注入个股上下文",
+    "H6": "未找到 json_finite.py，DSA 不清洗工具消息里的非有限数值",
 }
 
 # 装完一个钩子后 install 里打的成功日志（H1 在 install() 末尾）。
@@ -54,6 +57,7 @@ _INSTALLED_LOG = {
     "H3": "已注册 ETF 轮动入口",
     "H4": "已安装资金进出桥",
     "H5": "已安装个股上下文与价位登记",
+    "H6": "已安装 DSA 非有限值 JSON 钩子",
 }
 
 _BOOTSTRAP_MODULE = "tsp_hook_probe"
@@ -94,8 +98,8 @@ def test_every_hook_file_exists_in_repo() -> None:
     assert missing == [], f"钩子文件缺失：{missing}"
 
 
-def test_main_installs_all_five_hooks_in_order(monkeypatch, started) -> None:
-    """五个钩子按 H1→H5 顺序装，且每次都是「先文件存在、再调用」。"""
+def test_main_installs_all_hooks_in_order(monkeypatch, started) -> None:
+    """六个钩子按 H1→H6 顺序装，且每次都是「先文件存在、再调用」。"""
     order: list[str] = []
     for code, name in _HOOKS.items():
         original = getattr(dsa_bootstrap, f"_install_{_suffix(code)}", None) or getattr(
@@ -114,10 +118,11 @@ def test_main_installs_all_five_hooks_in_order(monkeypatch, started) -> None:
     monkeypatch.setattr(dsa_bootstrap, "_install_etf_job", record("H3"))
     monkeypatch.setattr(dsa_bootstrap, "_install_fund_flow_bridge", record("H4"))
     monkeypatch.setattr(dsa_bootstrap, "_install_analysis_bridge", record("H5"))
+    monkeypatch.setattr(dsa_bootstrap, "_install_json_finite", record("H6"))
 
     dsa_bootstrap.main()
 
-    assert order == ["H1", "H2", "H3", "H4", "H5"]
+    assert order == ["H1", "H2", "H3", "H4", "H5", "H6"]
     assert started == ["main.py"]
 
 
@@ -128,10 +133,11 @@ def _suffix(code: str) -> str:
         "H3": "etf_job",
         "H4": "fund_flow_bridge",
         "H5": "analysis_bridge",
+        "H6": "json_finite",
     }[code]
 
 
-@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5"])
+@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5", "H6"])
 def test_missing_hook_file_logs_and_skips(monkeypatch, caplog, code, tmp_path: Path) -> None:
     """文件缺：打指定 info，不抛，不出现「已安装」假绿。"""
     _isolate(monkeypatch, tmp_path)
@@ -144,7 +150,7 @@ def test_missing_hook_file_logs_and_skips(monkeypatch, caplog, code, tmp_path: P
     assert not any(_INSTALLED_LOG[code] in message for message in messages)
 
 
-@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5"])
+@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5", "H6"])
 def test_present_hook_file_reaches_install(monkeypatch, caplog, code, tmp_path: Path) -> None:
     """文件在：装载到 ``install()`` / ``install_import_hook()``，并打成功日志。
 
@@ -171,7 +177,7 @@ def test_present_hook_file_reaches_install(monkeypatch, caplog, code, tmp_path: 
     assert _MISSING_LOG[code] not in messages
 
 
-@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5"])
+@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5", "H6"])
 def test_broken_hook_does_not_block_startup(
     monkeypatch, caplog, code, started, tmp_path: Path
 ) -> None:
@@ -187,7 +193,7 @@ def test_broken_hook_does_not_block_startup(
     assert any(record.exc_info for record in failures), "失败必须带异常栈，不能只吞掉"
 
 
-@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5"])
+@pytest.mark.parametrize("code", ["H2", "H3", "H4", "H5", "H6"])
 def test_missing_files_never_pretend_success(
     monkeypatch, caplog, started, tmp_path: Path, code
 ) -> None:
