@@ -223,7 +223,16 @@ class NewsStore:
                 found.update(str(row["source_id"]) for row in rows)
         return found
 
-    def mark_health(self, source: str, *, ok: bool, error: str = "", auth_state: str = "") -> None:
+    def mark_health(
+        self,
+        source: str,
+        *,
+        ok: bool,
+        error: str = "",
+        auth_state: str = "",
+        advance_ok: bool = True,
+    ) -> None:
+        """ok 且 advance_ok 时才推进 last_ok_at。只清错误、不把请求成功写成新稿时传 advance_ok=False。"""
         now = datetime.now(CN_TZ).isoformat(timespec="seconds")
         with self._lock:
             self._conn.execute(
@@ -239,7 +248,7 @@ class NewsStore:
                 """,
                 (
                     source,
-                    now if ok else None,
+                    now if ok and advance_ok else None,
                     "" if ok else error[:300],
                     None if ok else now,
                     auth_state,

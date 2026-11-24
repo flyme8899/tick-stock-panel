@@ -41,9 +41,11 @@ from app.news.etf_flow import (
     backfill_dates,
     backfill_etf_flow,
     choose_flow_article,
+    classify_sogou_page,
     collect_etf_flow,
     day_was_trading,
     etf_wait_seconds,
+    expected_trade_day,
     expects_publication,
     flow_mentions,
     ingest_wechat_url,
@@ -56,8 +58,11 @@ from app.news.etf_flow import (
     parse_sogou_articles,
     parse_sogou_js_redirect,
     parse_vision_response,
+    next_business_day,
     parse_wechat_article,
+    previous_trading_day,
     resolve_wechat_article_url,
+    select_stat_article,
     sogou_begin,
     trade_date_from_title,
     vision_payload,
@@ -1194,9 +1199,12 @@ def test_redirect_stops_before_leaving_allowlist():
 
 
 def test_schedule_includes_saturday_after_friday_and_skips_sunday():
-    assert expects_publication(SATURDAY, True) is True
+    # 缺稿提醒只在交易日早晨。周六不是缺失交易日；昨天开市时仍会安静看一眼。
     assert expects_publication(SATURDAY, False) is False
-    assert expects_publication(MONDAY, None) is False
+    assert expects_publication(SATURDAY, None) is False
+    assert expects_publication(MONDAY, True) is True
+    assert expects_publication(MONDAY, None) is True
+    assert expects_publication(MONDAY, False) is False
     assert expects_publication(datetime(2026, 10, 13, 8, 0, tzinfo=CN_TZ), None) is True
     assert is_check_morning(SATURDAY, False, True) is True
     assert is_check_morning(SUNDAY, False, False) is False
@@ -1425,56 +1433,87 @@ def test_missing_article_alerts_at_deadline_without_numbers(news_db, monkeypatch
         "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
     )
     client = Client(media=_text("netease_media_stale.html"), sogou="<ul class='news-list2'></ul>")
+    saturday = _collect(
+        client,
+        news_db,
+        HARD_END,
+        today_trading=False,
+        yesterday_trading=True,
+    )
+    assert saturday["pending"] is False
+    assert sent == []
+    assert "没发文" not in json.dumps(saturday, ensure_ascii=False)
     early = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 8, 0, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
+        datetime(2026, 10, 12, 8, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
     )
     assert early["pending"] is True
     assert sent == []
     nine = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 9, 0, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
+        datetime(2026, 10, 12, 9, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
     )
     assert nine["pending"] is True
     assert sent == []
-    soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    soft = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 11, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
     assert soft["found"] is False
     assert soft["pending"] is True
     assert len(sent) == 1
     assert "11:00" in sent[0][2]
-    assert "09:00" not in sent[0][2]
-    assert "暂缺" in sent[0][2]
-    assert "仍未采集到" not in sent[0][2]
+    assert "尚未确认" in sent[0][2]
+    assert "没发文" not in sent[0][2]
+    assert "当日文章缺失" not in sent[0][2]
     assert "http" not in sent[0][2]
     rows = {row["source"]: row for row in get_store().health_rows()}
-    assert "暂缺" in rows["etf_flow"]["last_error"]
+    assert "搜狗" in rows["etf_flow"]["last_error"]
     later = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 12, 0, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
+        datetime(2026, 10, 12, 12, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
     )
     assert later["pending"] is True
     assert len(sent) == 1
-    hard = _collect(client, news_db, HARD_END, today_trading=False, yesterday_trading=True)
+    hard = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 15, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
     assert hard["found"] is False
     assert hard["pending"] is False
     assert len(sent) == 2
     message = sent[1][2]
-    assert "仍未采集到" in message
+    assert "仍未确认" in message
     assert "15:00" in message
+    assert "不能据此判断没发文" in message
+    assert "当日文章缺失" not in message
     assert "510300" not in message
     assert "http" not in message
     rows = {row["source"]: row for row in get_store().health_rows()}
-    assert "仍未采集到" in rows["etf_flow"]["last_error"]
-    _collect(client, news_db, HARD_END, today_trading=False, yesterday_trading=True)
+    assert "不能据此判断没发文" not in rows["etf_flow"]["last_error"]
+    assert "网易" in rows["etf_flow"]["last_error"] or "搜狗" in rows["etf_flow"]["last_error"]
+    _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 15, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
     assert len(sent) == 2
 
 
@@ -1511,11 +1550,15 @@ def test_monday_catchup_skips_sogou_and_known_article(news_db):
     client = Client(media=_text("netease_media.html"), article=_text("netease_article.html"))
     first = _collect(client, news_db, MONDAY, today_trading=True, yesterday_trading=False)
     assert first["inserted"] == 1
-    assert not any("sogou.com" in url for url in client.gets)
+    assert any(
+        params and params.get("type") == "2" and "10月9日" in str(params.get("query") or "")
+        for params in client.params
+    )
     posts = len(client.posts)
     article_gets = [url for url in client.gets if "/dy/article/" in url]
     second = _collect(client, news_db, MONDAY, today_trading=True, yesterday_trading=False)
     assert second["found"] is True
+    assert second["inserted"] == 0
     assert len(client.posts) == posts
     assert [url for url in client.gets if "/dy/article/" in url] == article_gets
 
@@ -1657,7 +1700,10 @@ def test_monday_extract_failure_does_not_alert(news_db, monkeypatch):
     )
     assert late["found"] is False
     assert late["pending"] is False
-    assert sent == []
+    assert len(sent) == 1
+    assert "表格" in sent[0][2]
+    assert "没发文" not in sent[0][2]
+    assert "当日文章缺失" not in sent[0][2]
     rows = {row["source"]: row for row in get_store().health_rows()}
     assert rows["etf_flow"]["last_error"]
 
@@ -1879,18 +1925,25 @@ def test_soft_miss_then_recovered_notice(news_db, monkeypatch):
         "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
     )
     client = Client(media=_text("netease_media_stale.html"), sogou="<ul class='news-list2'></ul>")
-    soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    soft = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 11, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
     assert soft["pending"] is True
     assert len(sent) == 1
-    assert "暂缺" in sent[0][2]
+    assert "尚未确认" in sent[0][2]
+    assert "没发文" not in sent[0][2]
     client.media = _text("netease_media.html")
     client.article = _text("netease_article.html")
     saved = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 12, 0, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
+        datetime(2026, 10, 12, 12, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
     )
     assert saved["inserted"] == 1
     assert len(sent) == 2
@@ -1900,9 +1953,9 @@ def test_soft_miss_then_recovered_notice(news_db, monkeypatch):
     again = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 13, 0, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
+        datetime(2026, 10, 12, 13, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
     )
     assert again["found"] is True
     assert again["inserted"] == 0
@@ -1918,7 +1971,13 @@ def test_recovery_when_sogou_clock_is_the_trade_date(news_db, monkeypatch):
         "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
     )
     client = Client(media=_text("netease_media_stale.html"), sogou="<ul></ul>")
-    soft = _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    soft = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 11, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
     assert soft["pending"] is True
     assert len(sent) == 1
     epoch = int(datetime(2026, 10, 9, 7, 40, tzinfo=CN_TZ).timestamp())
@@ -1927,9 +1986,9 @@ def test_recovery_when_sogou_clock_is_the_trade_date(news_db, monkeypatch):
     saved = _collect(
         client,
         news_db,
-        datetime(2026, 10, 10, 12, 0, tzinfo=CN_TZ),
-        today_trading=False,
-        yesterday_trading=True,
+        datetime(2026, 10, 12, 12, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
     )
     assert saved["inserted"] == 1
     assert len(sent) == 2
@@ -1947,7 +2006,13 @@ def test_backfill_after_alert_sends_recovery(news_db, monkeypatch):
         "app.news.etf_flow.send_dingtalk", lambda *args, **kwargs: sent.append(args)
     )
     client = Client(media=_text("netease_media_stale.html"), sogou="<ul></ul>")
-    _collect(client, news_db, DEADLINE, today_trading=False, yesterday_trading=True)
+    _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 11, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
     assert len(sent) == 1
     filler = Client(media=_text("netease_media.html"), article=_text("netease_article.html"))
     summary = backfill_etf_flow(
@@ -2217,3 +2282,273 @@ def test_etf_flow_ingest_api_rejects_foreign_host_and_accepts_url(monkeypatch):
     assert accepted.status_code == 200
     assert accepted.json()["inserted"] == 1
     assert seen["url"] == "https://mp.weixin.qq.com/s/AbCdEfGhIj"
+
+
+# 已核对的发布节奏，只作离线对照，不请求这些地址。
+_KNOWN_PUBLICATION = (
+    ("2026-11-13", "2026-11-16T07:21:00+08:00", "https://mp.weixin.qq.com/s/9xcmKUL6IA6kwUidN7udxA"),
+    ("2026-11-18", "2026-11-19T07:30:00+08:00", "https://mp.weixin.qq.com/s/5Ri_kKOXT9nznTwGG2x1eA"),
+    ("2026-11-19", "2026-11-20T07:30:00+08:00", "https://mp.weixin.qq.com/s/L7AB-TWGapeo_haD5EJZrQ"),
+)
+MONDAY_DUE = datetime(2026, 10, 12, 7, 40, tzinfo=CN_TZ)
+
+
+def test_stat_date_follows_next_business_morning_not_saturday():
+    assert day_was_trading(date(2026, 11, 14)) is False
+    assert previous_trading_day(date(2026, 11, 16)) == date(2026, 11, 13)
+    assert next_business_day(date(2026, 11, 13)) == date(2026, 11, 16)
+    assert expected_trade_day(datetime(2026, 11, 16, 7, 40, tzinfo=CN_TZ)) == date(2026, 11, 13)
+    assert expected_trade_day(datetime(2026, 11, 24, 7, 40, tzinfo=CN_TZ)) == date(2026, 11, 23)
+    for stat, published, url in _KNOWN_PUBLICATION:
+        assert url.startswith("https://mp.weixin.qq.com/s/")
+        moment = datetime.fromisoformat(published)
+        title = (
+            f"{date.fromisoformat(stat).month}月{date.fromisoformat(stat).day}日ETF基金申购和赎回"
+        )
+        assert trade_date_from_title(title, moment) == stat
+        assert next_business_day(date.fromisoformat(stat)) == moment.date()
+        assert moment.date() != date(2026, 11, 14)
+
+
+def test_holiday_expects_the_prior_open_day(monkeypatch):
+    closed = {date(2026, 10, 14)}
+
+    def fake(day):
+        if day in closed:
+            return False
+        return None
+
+    monkeypatch.setattr("app.news.etf_flow._fuyao_contains", fake)
+    thursday = datetime(2026, 10, 15, 7, 40, tzinfo=CN_TZ)
+    assert previous_trading_day(thursday.date()) == date(2026, 10, 13)
+    assert expects_publication(datetime(2026, 10, 14, 8, 0, tzinfo=CN_TZ), False) is False
+    assert is_check_morning(datetime(2026, 10, 14, 8, 0, tzinfo=CN_TZ), False, True) is True
+
+
+def test_sogou_empty_and_html_change_are_not_unpublished(news_db):
+    assert classify_sogou_page("<ul class='news-list2'></ul>") == "empty"
+    changed = "<html><body><div>10月9日ETF基金申购和赎回</div></body></html>"
+    assert classify_sogou_page(changed) == "html_changed"
+    empty = _collect(
+        Client(media=_text("netease_media_stale.html"), sogou="<ul class='news-list2'></ul>"),
+        news_db,
+        MONDAY_DUE,
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert empty["inserted"] == 0
+    assert "sogou_empty" in empty["outcome"]
+    assert "netease_stale" in empty["outcome"]
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 0
+    changed_result = _collect(
+        Client(media=_text("netease_media_stale.html"), sogou=changed),
+        news_db,
+        datetime(2026, 10, 12, 8, 0, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert "sogou_html_changed" in changed_result["outcome"]
+
+
+def test_captcha_keeps_url_and_quota_exhaustion_retries_it(news_db):
+    epoch = int(datetime(2026, 10, 12, 7, 32, tzinfo=CN_TZ).timestamp())
+
+    class CaptchaClient(Client):
+        def get(self, url, params=None, headers=None):
+            if url.startswith("https://weixin.sogou.com/link"):
+                self.gets.append(url)
+                self.params.append(params)
+                return Resp(
+                    "",
+                    url,
+                    status=302,
+                    headers={"location": "https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?id=1"},
+                )
+            return super().get(url, params=params, headers=headers)
+
+    client = CaptchaClient(
+        media=_text("netease_media_stale.html"),
+        sogou=_sogou_hit("10月9日ETF基金申购和赎回", epoch),
+    )
+    saved = _collect(client, news_db, MONDAY_DUE, today_trading=True, yesterday_trading=False)
+    assert saved["inserted"] == 0
+    assert saved["outcome"] == "wechat_captcha"
+    assert "缺少 id" not in json.dumps(saved, ensure_ascii=False)
+    discovered = json.loads(
+        (news_db / "news" / "etf_flow_discovered.json").read_text(encoding="utf-8")
+    )
+    stored_url = discovered["items"]["2026-10-09"]["url"]
+    assert "link" in stored_url
+    searches = [params for params in client.params if params and params.get("type") == "2"]
+    assert len(searches) == 1
+
+    budget = news_db / "news" / "etf_sogou_budget.json"
+    state = json.loads(budget.read_text(encoding="utf-8"))
+    state["count"] = 8
+    state["live_discovery"] = 6
+    state["live_late"] = 2
+    budget.write_text(json.dumps(state), encoding="utf-8")
+    client.wechat = _text("wechat_article.html")
+
+    def article_get(self, url, params=None, headers=None):
+        if url.startswith("https://weixin.sogou.com/link"):
+            self.gets.append(url)
+            self.params.append(params)
+            return Resp("", url, status=302, headers={"location": WECHAT_FINAL})
+        return Client.get(self, url, params=params, headers=headers)
+
+    client.get = article_get.__get__(client, CaptchaClient)
+    retry = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 8, 10, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert retry["inserted"] == 1
+    assert len([params for params in client.params if params and params.get("type") == "2"]) == 1
+    row = get_store()._conn.execute("SELECT source_id, raw_json FROM news_items").fetchone()
+    assert row["source_id"].startswith("wechat:")
+    raw = json.loads(row["raw_json"])
+    assert raw["account"] == "ETF领航者"
+    assert raw["trade_date"] == "2026-10-09"
+    assert raw["discover_via"] == "discovered"
+
+
+def test_stale_netease_and_cross_source_same_stat_day(news_db):
+    older = ArticleRef(
+        "old",
+        "10月8日ETF基金申购和赎回",
+        "https://www.163.com/dy/article/OLDARTICLE123456.html",
+        datetime(2026, 10, 9, 7, 36, tzinfo=CN_TZ),
+        "netease",
+    )
+    friday = ArticleRef(
+        "new",
+        "10月9日ETF基金申购和赎回",
+        "https://www.163.com/dy/article/L8S4S48P0556ADVD.html",
+        datetime(2026, 10, 10, 7, 38, tzinfo=CN_TZ),
+        "netease",
+    )
+    picked = select_stat_article([older], date(2026, 10, 9))
+    assert picked is None
+    picked = select_stat_article([older, friday], date(2026, 10, 9))
+    assert picked is not None and picked.article_id == "new"
+
+    epoch = int(datetime(2026, 10, 12, 7, 32, tzinfo=CN_TZ).timestamp())
+    client = Client(
+        media=_text("netease_media_stale.html"),
+        sogou=_sogou_hit("10月9日ETF基金申购和赎回", epoch),
+        wechat=_text("wechat_article.html"),
+    )
+    first = _collect(client, news_db, MONDAY_DUE, today_trading=True, yesterday_trading=False)
+    assert first["inserted"] == 1
+    posts = len(client.posts)
+    client.sogou = "<ul class='news-list2'></ul>"
+    client.media = _text("netease_media.html")
+    client.article = _text("netease_article.html")
+    second = _collect(
+        client,
+        news_db,
+        datetime(2026, 10, 12, 8, 10, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert second["found"] is True
+    assert second["inserted"] == 0
+    assert len(client.posts) == posts
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 1
+
+
+def test_request_success_does_not_advance_new_article_time(news_db, monkeypatch):
+    clock = {"at": datetime(2026, 10, 12, 8, 0, tzinfo=CN_TZ)}
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            moment = clock["at"]
+            if tz is None:
+                return moment.replace(tzinfo=None)
+            return moment.astimezone(tz)
+
+    monkeypatch.setattr("app.news.store.datetime", Frozen)
+    monkeypatch.setattr("app.news.etf_flow._cn_now", lambda: clock["at"])
+    stale = _collect(
+        Client(media=_text("netease_media_stale.html"), sogou="<ul></ul>"),
+        news_db,
+        clock["at"],
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert stale["inserted"] == 0
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    assert rows.get("etf_flow") is None or not rows["etf_flow"]["last_ok_at"]
+    probe = json.loads((news_db / "news" / "etf_flow_probe.json").read_text(encoding="utf-8"))
+    assert probe["last_request_ok"] is True
+    assert "last_article_at" not in probe
+
+    clock["at"] = datetime(2026, 10, 12, 8, 10, tzinfo=CN_TZ)
+    epoch = int(clock["at"].timestamp())
+    inserted = _collect(
+        Client(
+            media=_text("netease_media.html"),
+            article=_text("netease_article.html"),
+            sogou=_sogou_hit("10月9日ETF基金申购和赎回", epoch),
+            wechat=_text("wechat_article.html"),
+        ),
+        news_db,
+        clock["at"],
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert inserted["inserted"] == 1
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    stamped = rows["etf_flow"]["last_ok_at"]
+    assert stamped.startswith("2026-10-12T08:10")
+    probe = json.loads((news_db / "news" / "etf_flow_probe.json").read_text(encoding="utf-8"))
+    assert probe["last_article_at"].startswith("2026-10-12T08:10")
+
+    clock["at"] = datetime(2026, 10, 12, 9, 0, tzinfo=CN_TZ)
+    again = _collect(
+        Client(media=_text("netease_media.html"), article=_text("netease_article.html")),
+        news_db,
+        clock["at"],
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert again["inserted"] == 0
+    assert again["found"] is True
+    rows = {row["source"]: row for row in get_store().health_rows()}
+    assert rows["etf_flow"]["last_ok_at"] == stamped
+    probe = json.loads((news_db / "news" / "etf_flow_probe.json").read_text(encoding="utf-8"))
+    assert probe["last_article_at"].startswith("2026-10-12T08:10")
+
+
+def test_manual_url_still_ingests_and_dedups_same_stat_day(news_db):
+    published = datetime(2026, 10, 10, 7, 31, tzinfo=CN_TZ)
+    client = Client(media="", wechat=_short_wechat_html(published=published))
+    saved = ingest_wechat_url(
+        "https://mp.weixin.qq.com/s/AbCdEfGhIj",
+        client,
+        now=published + timedelta(hours=3),
+        data_dir=news_db,
+    )
+    assert saved["inserted"] == 1
+    posts = len(client.posts)
+    netease = Client(
+        media=_text("netease_media.html"),
+        article=_text("netease_article.html"),
+        sogou="<ul></ul>",
+    )
+    again = _collect(
+        netease,
+        news_db,
+        MONDAY_DUE,
+        today_trading=True,
+        yesterday_trading=False,
+    )
+    assert again["found"] is True
+    assert again["inserted"] == 0
+    assert netease.posts == []
+    assert len(client.posts) == posts
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 1
