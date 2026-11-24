@@ -2736,3 +2736,88 @@ def test_broad_sogou_search_can_confirm_a_mistitled_article(news_db):
     queries = [params.get("query") for params in client.params if params and params.get("type") == "2"]
     assert "ETF领航者 11月23日ETF基金申购和赎回" in queries
     assert "ETF领航者 ETF基金申购和赎回" in queries
+
+
+def _vision_message(trade_date) -> dict:
+    """线上视觉接口的 chat completion 形状。日期用模型会回的原文，不预填 ISO。"""
+    body = {
+        "trade_date": trade_date,
+        "unit": "亿元",
+        "overview": {"net_1d": 1.5, "net_5d": 2, "net_20d": -1},
+        "broad_index": [],
+        "categories": [{"name": "科技", "net_1d": 1, "net_5d": 1, "net_20d": 1}],
+        "etfs": [{"name": "规模甲", "code": "510300", "net_1d": 1, "net_5d": 1, "net_20d": 1}],
+    }
+    return {"choices": [{"message": {"content": json.dumps(body, ensure_ascii=False)}}]}
+
+
+def test_printed_month_day_survives_vision_parse_and_store(news_db):
+    from app.news.etf_flow import ArticlePage, DateReviewError, _call_vision, _store_page, parse_vision_response
+
+    payload = _vision_message("11月23日")
+    parsed = parse_vision_response(payload)
+    assert parsed["trade_date"] == "11月23日"
+    assert parsed["overview"]["net_1d"] == 1.5
+
+    published = datetime(2026, 11, 24, 7, 30, tzinfo=CN_TZ)
+    images = [f"https://mmbiz.qpic.cn/table{index}.jpg" for index in (1, 2, 3, 5)]
+    client = Client(media="", vision=payload)
+    seen = _call_vision(client, images)
+    assert seen["image_trade_dates"] == ["11月23日"] * 4
+    assert "2026-11-23" not in seen["image_trade_dates"]
+
+    page = ArticlePage(
+        article_id="c7b9e4de756424ae3f82f70033759bff",
+        title="7月3日ETF基金申购和赎回",
+        url=(
+            "https://mp.weixin.qq.com/s?__biz=abc&mid=2247490369"
+            "&idx=1&sn=c7b9e4de756424ae3f82f70033759bff"
+        ),
+        published_at=published,
+        images=images,
+        channel="wechat",
+    )
+    saved = _store_page(Client(media="", vision=payload), page, root=news_db, discover_via="manual_url")
+    assert saved["inserted"] == 1
+    row = get_store()._conn.execute("SELECT title, raw_json FROM news_items").fetchone()
+    assert row["title"] == "7月3日ETF基金申购和赎回"
+    raw = json.loads(row["raw_json"])
+    assert raw["trade_date"] == "2026-11-23"
+    assert raw["stat_decision"]["basis"] == "image_consensus"
+    assert raw["stat_decision"]["image_date_text"] == ["11月23日"] * 4
+    assert raw["stat_decision"]["image_trade_dates"] == ["2026-11-23"] * 4
+    assert raw["stat_decision"]["title_trade_date"] == "2026-07-03"
+    assert "2026-07-03" not in raw["trade_date"]
+
+    blank = _vision_message(None)
+    lone = ArticlePage(
+        article_id="blank-sn",
+        title="7月3日ETF基金申购和赎回",
+        url="https://mp.weixin.qq.com/s?__biz=abc&mid=1&idx=1&sn=blank-sn",
+        published_at=published,
+        images=images[:2],
+        channel="wechat",
+    )
+    with pytest.raises(DateReviewError, match="待核对"):
+        _store_page(Client(media="", vision=blank), lone, root=news_db, discover_via="manual_url")
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 1
+
+    class Split(Client):
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posts.append((url, headers, json))
+            # 每张图请求两次。前两张都回 11月23日，后两张都回 11月20日。
+            image_index = (len(self.posts) - 1) // 2
+            day = "11月23日" if image_index < 2 else "11月20日"
+            return Resp("", url, payload=_vision_message(day))
+
+    clash = ArticlePage(
+        article_id="clash-sn",
+        title="7月3日ETF基金申购和赎回",
+        url="https://mp.weixin.qq.com/s?__biz=abc&mid=1&idx=1&sn=clash-sn",
+        published_at=published,
+        images=images,
+        channel="wechat",
+    )
+    with pytest.raises(DateReviewError, match="待核对"):
+        _store_page(Split(media=""), clash, root=news_db, discover_via="manual_url")
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 1

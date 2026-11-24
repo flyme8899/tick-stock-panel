@@ -205,6 +205,8 @@ VISION_PROMPT = (
     "单位按图中印刷写入 unit（例如亿元、万份），不要把亿元换算成元。\n"
     "净申购用正数，净赎回用负数。看不清就填 null。\n"
     "当日、5日、20日分别写入 net_1d、net_5d、net_20d。\n"
+    "图上印的统计日写入 trade_date。只印了月和日就原样写成「M月D日」，不要补年份；"
+    "印了完整年月日就写成 YYYY-MM-DD。看不清就留空字符串，不要猜。\n"
     "overview 是全市场汇总。broad_index 只放指数名称。categories 是行业或主题。\n"
     "带 6 位基金代码的 ETF 写入 etfs，包括宽基 ETF。code 不是 6 位数字就留空字符串。\n"
     '{"trade_date":"YYYY-MM-DD","unit":"","overview":{"net_1d":null,"net_5d":null,"net_20d":null},'
@@ -415,17 +417,23 @@ def _stat_within_lag(day: date, published: datetime) -> bool:
 
 
 def _coerce_stat_date(value: str, published: datetime) -> str:
-    """只收下不晚于发布日、并且离发布日不太远的日期。不拿发布日减一天来填。"""
-    text = _trade_date(value)
-    if not text:
+    """只收下不晚于发布日、并且离发布日不太远的日期。不拿发布日减一天来填。
+
+    模型若只回了图上的「M月D日」，年份按标题同一套规则从发布日推，不另猜一天。
+    """
+    token = _vision_date_token(value)
+    if not token:
         return ""
-    try:
-        parsed = date.fromisoformat(text)
-    except ValueError:
-        return ""
+    if _trade_date(token):
+        parsed = date.fromisoformat(token)
+    else:
+        iso = trade_date_from_title(f"{token}ETF基金申购和赎回", published)
+        if not iso:
+            return ""
+        parsed = date.fromisoformat(iso)
     if not _stat_within_lag(parsed, published):
         return ""
-    return text
+    return parsed.isoformat()
 
 
 def body_trade_dates(html_text: str, published: datetime) -> list[str]:
@@ -475,10 +483,11 @@ def resolve_stat_date(
     title_date = ""
     if raw_title and _stat_within_lag(date.fromisoformat(raw_title), published):
         title_date = raw_title
+    image_text = [_vision_date_token(raw) for raw in (image_dates or [])]
     images = [
         coerced
-        for raw in (image_dates or [])
-        if (coerced := _coerce_stat_date(str(raw or ""), published))
+        for token in image_text
+        if token and (coerced := _coerce_stat_date(token, published))
     ]
     body = [
         coerced
@@ -492,6 +501,7 @@ def resolve_stat_date(
     decision = {
         "title": title,
         "title_trade_date": raw_title,
+        "image_date_text": [token for token in image_text if token],
         "image_trade_dates": images,
         "body_trade_dates": body,
         "basis": "undated",
@@ -1421,7 +1431,7 @@ def normalize_flow(payload: dict) -> dict:
         else:
             kept_broad.append(row)
     extracted = {
-        "trade_date": _trade_date(payload.get("trade_date")),
+        "trade_date": _vision_date_token(payload.get("trade_date")),
         "unit": _unit(payload.get("unit")),
         "overview": overview,
         "broad_index": kept_broad[:MAX_BROAD],
@@ -1433,11 +1443,34 @@ def normalize_flow(payload: dict) -> dict:
     return _shrink(extracted)
 
 
+def _month_day_key(token: str) -> tuple[int, int] | None:
+    text = _vision_date_token(token)
+    iso = _trade_date(text)
+    if iso:
+        parsed = date.fromisoformat(iso)
+        return parsed.month, parsed.day
+    match = re.fullmatch(r"(\d{1,2})月(\d{1,2})日", text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _agreed_vision_date(left, right) -> str:
+    """两次读图的日期不一致时，这张图不投票。只有月日和完整日期指同一天则保留。"""
+    first = _vision_date_token(left)
+    second = _vision_date_token(right)
+    if not first or not second or first == second:
+        return first or second
+    if _month_day_key(first) and _month_day_key(first) == _month_day_key(second):
+        return first
+    return ""
+
+
 def agree_flow_signs(left: dict, right: dict) -> dict:
     """两次抽取对同一格的正负号相反时，该格留空。只比较符号，不要求数值相等。"""
     overview = _agree_fields(left.get("overview") or {}, right.get("overview") or {})
     extracted = {
-        "trade_date": left.get("trade_date") or right.get("trade_date") or "",
+        "trade_date": _agreed_vision_date(left.get("trade_date"), right.get("trade_date")),
         "unit": left.get("unit") or right.get("unit") or "",
         "overview": overview,
         "broad_index": _agree_rows(left.get("broad_index") or [], right.get("broad_index") or []),
@@ -3522,6 +3555,34 @@ def _trade_date(value) -> str:
     except ValueError:
         return ""
     return text
+
+
+def _vision_date_token(value) -> str:
+    """保留模型从图上读到的日期原文形态。
+
+    申赎图通常只印「M月D日」，不是 YYYY-MM-DD。这里只规范化，不补年份。
+    完整日期收成 ISO；只有月日时收成「M月D日」。对不上这两种就丢掉。
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    text = str(value).strip().replace(" ", "").replace("　", "")
+    if not text or text.lower() in {"null", "none", "n/a", "无", "空"}:
+        return ""
+    iso = _trade_date(text.replace("/", "-").replace(".", "-"))
+    if iso:
+        return iso
+    full = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日", text)
+    if full:
+        return _trade_date(f"{int(full.group(1)):04d}-{int(full.group(2)):02d}-{int(full.group(3)):02d}")
+    month_day = re.fullmatch(r"(\d{1,2})月(\d{1,2})日", text)
+    if not month_day:
+        return ""
+    month, day = int(month_day.group(1)), int(month_day.group(2))
+    try:
+        date(2020, month, day)
+    except ValueError:
+        return ""
+    return f"{month}月{day}日"
 
 
 def _unit(value) -> str:
