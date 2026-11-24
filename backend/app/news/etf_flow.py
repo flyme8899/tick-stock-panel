@@ -6,11 +6,15 @@
 搜出来是空的，不再用于当天采集。网易号列表经常晚几个小时，只在搜狗没有
 这篇、额度用完或搜狗请求失败时兜底。不登录微信。
 
-昨天开市时，07:30–08:30 每 10 分钟看一次，08:30–15:00 每 30 分钟再看。
-11:00 仍缺先发「暂缺」，15:00 仍缺才发失败提醒。已经发过暂缺或失败、
-后来把对应交易日的稿入库（含回补和原文链接）时，再发一条「已补采」。
-今天开市但昨天休市（例如周一）只补抓列表里还没入库的最新一篇，不把
-「今天没有新稿」报成故障。交易日历不可用时，周一到周五视作开市。
+稿按标题里的统计日入库，发布时间通常是下一个交易日早晨，不是自然日次日。
+周五的稿经常周一早晨才出现，周六不是缺失交易日，也不发「没发文」提醒；
+周六若昨天开市，仍会安静看一眼，稿已经出现就入库。周一期待的是上一个
+交易日（通常是周五），网易号里更早的旧稿不能充当天。交易日历不可用时，
+周一到周五视作开市，不凭自然日把节假日猜成开市或休市。
+07:30–08:30 每 10 分钟看一次，08:30–15:00 每 30 分钟再看。交易日早晨
+11:00、15:00 若仍不能确认这篇是否已发布，提醒里写明是搜狗空页、页面
+结构变化、验证码、网易列表过时还是正文错误，不把这些说成没发文。
+已经发过提醒、后来把对应统计日的稿入库（含回补和原文链接）时，再发一条「已补采」。
 
 也可以把 mp.weixin.qq.com 原文链接交进来补采。短链 /s/xxx 没有 sn，
 要先还原成带 __biz/mid/idx/sn 的长链，否则解析会报「缺少 id」。
@@ -180,13 +184,21 @@ _WECHAT_UA = (
     "MicroMessenger/8.0.49.2600(0x28003151) WeChat/arm64 Weixin "
     "NetType/WIFI Language/zh_CN"
 )
-SOFT_MISSING_TEXT = "11:00 暂缺 ETF领航者当日申赎文章，继续采集到 15:00"
-SOFT_MISSING_ALERT = f"TSP 资讯采集：{SOFT_MISSING_TEXT}。"
 SOFT_EXTRACT_ALERT = "TSP 资讯采集：11:00 暂缺 ETF领航者当日申赎表格，继续采集到 15:00。"
-MISSING_TEXT = "15:00 仍未采集到 ETF领航者当日申赎文章"
-MISSING_ALERT = f"TSP 资讯采集：{MISSING_TEXT}。"
 EXTRACT_ALERT = "TSP 资讯采集：15:00 仍未完成 ETF领航者当日申赎表格抽取。"
 RECOVERED_ALERT = "TSP 资讯采集：ETF领航者当日申赎已补采。"
+TRANSPORT_ALERT = "TSP 资讯采集：ETF领航者申赎采集请求失败，不能据此判断没发文。"
+_OUTCOME_TEXT = {
+    "sogou_empty": "搜狗返回 200，但没有文章链接",
+    "sogou_html_changed": "搜狗页面结构变了，没有解析出链接",
+    "sogou_captcha": "搜狗要求验证码",
+    "sogou_quota": "搜狗发现额度已用完",
+    "netease_stale": "网易号列表仍是更早的统计日",
+    "netease_error": "网易号列表没有打开",
+    "wechat_captcha": "已发现链接，但打开后是微信验证码",
+    "unconfirmed": "现有渠道没有看到这篇",
+    "body_error": "正文或地址无效",
+}
 VISION_PROMPT = (
     "你是表格抽取器。下面这张图是公众号「ETF领航者」申赎表中的一张，正文几乎没有文字。\n"
     "只输出一个 JSON 对象，不要解释，不要编造看不清的数字。\n"
@@ -203,11 +215,23 @@ VISION_PROMPT = (
 
 
 class ArticleMissingError(Exception):
-    """列表里还没有应采集的申赎稿。"""
+    """现有渠道没有确认到目标统计日的稿。不是「已经证实没发文」。"""
+
+    def __init__(self, outcome: str = "unconfirmed", detail: str = "") -> None:
+        self.outcome = outcome or "unconfirmed"
+        self.detail = detail or self.outcome
+        super().__init__(self.detail)
 
 
 class ExtractFailedError(Exception):
     """稿件已出现，但图片或视觉结果不能入库。"""
+
+
+class WechatCaptchaError(ExtractFailedError):
+    """微信把正文转到验证码页。链接可以留着以后再试，不能绕过验证码。"""
+
+    def __init__(self, message: str = "微信验证码拦住了正文") -> None:
+        super().__init__(message)
 
 
 class VisionRequestTimeoutError(ExtractFailedError):
@@ -275,14 +299,16 @@ def day_was_trading(day: date) -> bool | None:
     return _fuyao_contains(day)
 
 
-def expects_publication(now: datetime, yesterday_trading: bool | None) -> bool:
-    """昨天开市时，今天早晨应有新稿。未知时把周一到周五当成开市。"""
-    if yesterday_trading is False:
+def expects_publication(now: datetime, today_trading: bool | None) -> bool:
+    """缺稿提醒只发生在交易日早晨。周末和已知休市不是缺失交易日。
+
+    第二个参数是「今天是否开市」，不是昨天。日历未知时，周一到周五视作开市。
+    """
+    if today_trading is False:
         return False
-    if yesterday_trading is True:
+    if today_trading is True:
         return True
-    yesterday = now.astimezone(CN_TZ).date() - timedelta(days=1)
-    return yesterday.weekday() < 5
+    return now.astimezone(CN_TZ).weekday() < 5
 
 
 def is_check_morning(
@@ -290,14 +316,40 @@ def is_check_morning(
     today_trading: bool | None,
     yesterday_trading: bool | None,
 ) -> bool:
-    """期待新稿的日子，以及今天开市的日子（用于补抓）。不看钟点。"""
-    if expects_publication(now, yesterday_trading):
+    """交易日早晨要看上一交易日的稿。休市日不告警；昨天开市时仍安静看一眼。"""
+    if expects_publication(now, today_trading):
         return True
-    if today_trading is False:
-        return False
-    if today_trading is True:
+    if today_trading is False and yesterday_trading is True:
         return True
-    return now.astimezone(CN_TZ).weekday() < 5
+    if today_trading is None and yesterday_trading is None:
+        return now.astimezone(CN_TZ).weekday() < 5
+    return False
+
+
+def previous_trading_day(day: date, *, limit: int = 12) -> date | None:
+    """从 day 的前一天往回找最近一个交易日。周末直接跳过。
+
+    工作日只有日历明确说休市才跳过。日历没接上时，工作日视作开市，
+    不把节假日猜成休市，也不把周六猜成交易日。
+    """
+    cursor = day
+    for _ in range(limit):
+        cursor -= timedelta(days=1)
+        flag = day_was_trading(cursor)
+        if flag is True or (flag is None and cursor.weekday() < 5):
+            return cursor
+    return None
+
+
+def next_business_day(day: date, *, limit: int = 12) -> date | None:
+    """统计日之后的第一个交易日早晨。周五的下一交易日是周一，不是周六。"""
+    cursor = day
+    for _ in range(limit):
+        cursor += timedelta(days=1)
+        flag = day_was_trading(cursor)
+        if flag is True or (flag is None and cursor.weekday() < 5):
+            return cursor
+    return None
 
 
 def _fuyao_contains(day: date) -> bool | None:
@@ -359,8 +411,55 @@ def flow_title_for(day: date) -> str:
 
 
 def expected_trade_day(now: datetime) -> date:
-    """昨天开市时，今早这篇的标题日期就是昨天。"""
+    """今早这篇的统计日是上一个交易日，不是自然日昨天。"""
+    found = previous_trading_day(now.astimezone(CN_TZ).date())
+    if found is not None:
+        return found
     return now.astimezone(CN_TZ).date() - timedelta(days=1)
+
+
+def select_stat_article(refs: list[ArticleRef], stat_day: date) -> ArticleRef | None:
+    """只收标题统计日正好是 stat_day 的稿。更早的列表项不能冒充这一天。"""
+    wanted = stat_day.isoformat()
+    matched = [
+        ref
+        for ref in refs
+        if trade_date_from_title(ref.title, ref.published_at) == wanted
+    ]
+    if not matched:
+        return None
+    matched.sort(key=lambda ref: ref.published_at, reverse=True)
+    return matched[0]
+
+
+def newest_flow_stat(refs: list[ArticleRef]) -> str:
+    days = [
+        day
+        for ref in refs
+        if (day := trade_date_from_title(ref.title, ref.published_at))
+    ]
+    return max(days) if days else ""
+
+
+def classify_sogou_page(html_text: str) -> str:
+    """搜狗 HTTP 200 但没有解析出目标稿时，区分空结果和页面结构变化。
+
+    返回 empty、html_changed 或 captcha。已经解析出稿件时不要调用。
+    """
+    text = html_text or ""
+    if "antispider" in text or "请输入验证码" in text:
+        return "captcha"
+    plain = _plain(text)
+    has_title = bool(_FLOW_TITLE.search(plain))
+    has_link = "weixin.sogou.com/link" in text or "/link?" in text
+    recognizable = "news-list" in text or "all-time-y2" in text or "<ul" in text.lower()
+    if has_title and not has_link:
+        return "html_changed"
+    if has_title and has_link:
+        return "html_changed"
+    if recognizable:
+        return "empty"
+    return "html_changed"
 
 
 def choose_flow_article(
@@ -587,6 +686,8 @@ def index_flow_refs(refs: list[ArticleRef]) -> dict[str, ArticleRef]:
 
 MISSING_SOURCE = "源缺失"
 _BACKFILL_NAME = "etf_flow_backfill.json"
+_DISCOVERED_NAME = "etf_flow_discovered.json"
+_PROBE_NAME = "etf_flow_probe.json"
 _DATE_TEXT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -1314,6 +1415,132 @@ def _consume_live_sogou(root: Path, now: datetime) -> bool:
     return True
 
 
+def _outcome_detail(outcomes: list[str], *, newest: str = "") -> str:
+    parts: list[str] = []
+    for item in outcomes:
+        text = _OUTCOME_TEXT.get(item, item)
+        if item == "netease_stale" and newest:
+            text = f"网易号列表仍停在统计日 {newest}"
+        if text and text not in parts:
+            parts.append(text)
+    return "；".join(parts) or _OUTCOME_TEXT["unconfirmed"]
+
+
+def _unconfirmed_alert(stat: date, detail: str, *, hard: bool) -> str:
+    label = f"{stat.month}月{stat.day}日"
+    if hard:
+        return (
+            f"TSP 资讯采集：15:00 仍未确认 ETF领航者{label}申赎是否已发布"
+            f"（{detail}）。不能据此判断没发文。"
+        )
+    return (
+        f"TSP 资讯采集：11:00 尚未确认 ETF领航者{label}申赎是否已发布"
+        f"（{detail}），继续采集到 15:00。"
+    )
+
+
+def _discovered_path(root: Path) -> Path:
+    return root / "news" / _DISCOVERED_NAME
+
+
+def _probe_path(root: Path) -> Path:
+    return root / "news" / _PROBE_NAME
+
+
+def _load_discovered(root: Path) -> dict[str, dict]:
+    payload = _load_budget(_discovered_path(root))
+    raw = payload.get("items")
+    if not isinstance(raw, dict):
+        return {}
+    found: dict[str, dict] = {}
+    for key, value in raw.items():
+        if _DATE_TEXT.match(str(key)) and isinstance(value, dict):
+            found[str(key)] = value
+    return found
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("ETF领航者状态写不进去: %s", _public_error(exc))
+
+
+def _remember_url(
+    root: Path,
+    ref: ArticleRef,
+    stat: str,
+    *,
+    via: str,
+    error: str = "",
+) -> None:
+    """发现到的地址按统计日留下。重试正文不再占用搜狗发现额度。"""
+    if not stat or not ref.url:
+        return
+    items = _load_discovered(root)
+    previous = items.get(stat) or {}
+    items[stat] = {
+        "trade_date": stat,
+        "account": ACCOUNT,
+        "title": ref.title,
+        "url": ref.url,
+        "channel": ref.channel,
+        "article_id": ref.article_id,
+        "via": via or str(previous.get("via") or ref.channel),
+        "discovered_at": str(previous.get("discovered_at") or _cn_now().isoformat(timespec="seconds")),
+        "last_error": error,
+    }
+    _write_json(_discovered_path(root), {"items": items})
+
+
+def _discovered_ref(root: Path, stat: str) -> ArticleRef | None:
+    raw = _load_discovered(root).get(stat)
+    if not raw:
+        return None
+    url = str(raw.get("url") or "")
+    title = str(raw.get("title") or "")
+    if not url or not title:
+        return None
+    published = parse_time(raw.get("discovered_at")) or _cn_now()
+    return ArticleRef(
+        article_id=str(raw.get("article_id") or ""),
+        title=title,
+        url=url,
+        published_at=published,
+        channel=str(raw.get("channel") or "wechat"),
+    )
+
+
+def _note_probe(
+    root: Path,
+    *,
+    request_ok: bool,
+    outcome: str,
+    stat: str = "",
+    article: bool = False,
+) -> None:
+    """请求是否成功写在探针文件。只有真正新增一行才写 last_article_at。"""
+    path = _probe_path(root)
+    state = _load_budget(path)
+    now = _cn_now().isoformat(timespec="seconds")
+    state["last_request_at"] = now
+    state["last_request_ok"] = bool(request_ok)
+    state["last_outcome"] = outcome
+    if stat:
+        state["stat_date"] = stat
+    if article:
+        state["last_article_at"] = now
+        state["last_article_trade_date"] = stat
+    _write_json(path, state)
+
+
+def _looks_like_wechat_captcha(url: str, html_text: str) -> bool:
+    """只认验证码页。环境异常页仍走原来的补采回退，这里不把它们算进去。"""
+    blob = f"{url or ''}\n{(html_text or '')[:8000]}".lower()
+    return "wappoc_appmsgcaptcha" in blob or "appmsgcaptcha" in blob
+
+
 def collect_etf_flow(
     client: httpx.Client | None = None,
     *,
@@ -1327,76 +1554,110 @@ def collect_etf_flow(
     if _clock(now) < POLL_START:
         return _result(skipped=True)
     today_flag, yesterday_flag = _trading_flags(now, today_trading, yesterday_trading)
-    expect = expects_publication(now, yesterday_flag)
+    expect = expects_publication(now, today_flag)
     if not is_check_morning(now, today_flag, yesterday_flag):
         return _result(skipped=True)
     if not vision_api_key():
         _mark_err("未配置 VISION_AI_API_KEY")
         return _result(skipped=True, error="未配置 VISION_AI_API_KEY")
+    stat = expected_trade_day(now)
     if _collection_satisfied(now, expect):
-        _mark_ok()
+        _mark_present()
         _note_stored_recovery(root)
         return _result(found=True)
     own = client is None
     client = client or _page_client()
     try:
-        return _pull(client, now, root, expect)
-    except ArticleMissingError:
-        return _missing(now, root, expect)
+        return _pull(client, now, root, expect, stat)
+    except ArticleMissingError as exc:
+        return _missing(now, root, expect, stat, exc.outcome, exc.detail)
+    except WechatCaptchaError as exc:
+        return _captcha_result(now, root, expect, stat, exc)
     except ExtractFailedError as exc:
         message = _public_error(exc) or "表格抽取失败"
         logger.warning("ETF领航者表格抽取失败: %s", message)
         _mark_err(message)
+        _note_probe(root, request_ok=True, outcome="body_error", stat=stat.isoformat())
+        # 稿已经出现但表格没抽出来。这和「没发文」不是一回事，休市日也不把它说成缺交易日。
         if _hard_deadline(now):
-            # 只在「今天应有新稿」时提醒。周一补抓失败记健康检查，不把旧稿抽失败报成当日缺稿。
-            if expect:
-                _alert(root, now.date(), EXTRACT_ALERT, kind="hard")
-            return _result(error=message)
-        if expect and _soft_due(now):
+            _alert(root, now.date(), EXTRACT_ALERT, kind="hard")
+            return _result(error=message, outcome="body_error")
+        if _soft_due(now):
             _alert(root, now.date(), SOFT_EXTRACT_ALERT, kind="soft")
-        return _result(error=message, pending=True)
+        return _result(error=message, pending=True, outcome="body_error")
     except Exception as exc:  # noqa: BLE001 — 单源失败不能拖垮其他资讯轮询
         message = _public_error(exc) or "采集失败"
         logger.warning("ETF领航者采集失败: %s", message)
         _mark_err(message)
+        _note_probe(root, request_ok=False, outcome="body_error", stat=stat.isoformat())
         if expect and _hard_deadline(now):
-            _alert(root, now.date(), MISSING_ALERT, kind="hard")
-            return _result(error=message)
+            _alert(root, now.date(), TRANSPORT_ALERT, kind="hard")
+            return _result(error=message, outcome="body_error")
         if expect and _soft_due(now):
-            _alert(root, now.date(), SOFT_MISSING_ALERT, kind="soft")
-        return _result(error=message, pending=not _hard_deadline(now))
+            _alert(root, now.date(), TRANSPORT_ALERT, kind="soft")
+        return _result(error=message, pending=not _hard_deadline(now), outcome="body_error")
     finally:
         if own:
             client.close()
 
 
-def _pull(client, now: datetime, root: Path, expect: bool) -> dict:
-    ref, reason = _resolve_ref(client, now, root, expect)
+def _captcha_result(
+    now: datetime,
+    root: Path,
+    expect: bool,
+    stat: date,
+    exc: WechatCaptchaError,
+) -> dict:
+    detail = _OUTCOME_TEXT["wechat_captcha"]
+    logger.warning("ETF领航者微信验证码拦住正文：%s", _public_error(exc))
+    _note_probe(root, request_ok=True, outcome="wechat_captcha", stat=stat.isoformat())
+    if not expect:
+        return _result(pending=not _hard_deadline(now), outcome="wechat_captcha")
+    _mark_err(detail)
+    if _hard_deadline(now):
+        _alert(root, now.date(), _unconfirmed_alert(stat, detail, hard=True), kind="hard")
+        return _result(outcome="wechat_captcha")
+    if _soft_due(now):
+        _alert(root, now.date(), _unconfirmed_alert(stat, detail, hard=False), kind="soft")
+    return _result(pending=True, outcome="wechat_captcha")
+
+
+def _pull(client, now: datetime, root: Path, expect: bool, stat: date) -> dict:
+    ref, reason = _resolve_ref(client, now, root, expect, stat)
     try:
-        result = _ingest_ref(client, ref)
-    except ExtractFailedError as exc:
-        # 搜狗链接没还原成微信原文时，DeepSeek 已经在 _ingest_ref 里试过。
-        # 还是无效就改看网易号，避免这一轮直接失败。
-        if reason != "sogou" or "微信文章地址无效" not in str(exc):
-            raise
-        logger.warning("ETF领航者微信原文地址无效，改看网易号: %s", _public_error(exc))
-        alt = _netease_today(client, now, expect)
+        result = _ingest_ref(client, ref, root=root, stat_day=stat, discover_via=reason)
+    except WechatCaptchaError:
+        _remember_url(root, ref, stat.isoformat(), via=reason or ref.channel, error="wechat_captcha")
+        alt = _netease_for_stat(client, stat)
         if alt is None:
             raise
-        result = _ingest_ref(client, alt)
+        result = _ingest_ref(client, alt, root=root, stat_day=stat, discover_via="netease")
+    except ExtractFailedError as exc:
+        # 搜狗链接没还原成微信原文时，改看同一统计日的网易号。旧稿不拿来顶上。
+        if reason not in {"sogou", "discovered"} or "微信文章地址无效" not in str(exc):
+            raise
+        logger.warning("ETF领航者微信原文地址无效，改看网易号: %s", _public_error(exc))
+        alt = _netease_for_stat(client, stat)
+        if alt is not None:
+            result = _ingest_ref(client, alt, root=root, stat_day=stat, discover_via="netease")
+        elif reason == "discovered":
+            found, note = _search_live_sogou(client, now, root, stat)
+            if found is None:
+                raise ArticleMissingError(note or "body_error", _outcome_detail([note or "body_error"])) from exc
+            _remember_url(root, found, stat.isoformat(), via="sogou")
+            result = _ingest_ref(client, found, root=root, stat_day=stat, discover_via="sogou")
+        else:
+            raise ArticleMissingError("body_error", _outcome_detail(["body_error"])) from exc
     _note_stored_recovery(root)
     return result
 
 
-def _netease_today(client, now: datetime, expect: bool) -> ArticleRef | None:
-    """搜狗原文打不开时，网易号列表里仍可能有同一天的稿。"""
+def _netease_for_stat(client, stat: date) -> ArticleRef | None:
+    """只收标题统计日正好是 stat 的网易稿。"""
     refs, error = _netease_refs(client)
     if error is not None and not refs:
         return None
-    chosen, why = choose_flow_article(refs, day=now.date(), expect=expect)
-    if chosen is not None and (why == "today" or not expect):
-        return chosen
-    return None
+    return select_stat_article(refs, stat)
 
 
 # 微信正文页被风控挡住时的特征词。只用于「判断要不要再试一次」，不参与解析。
@@ -1475,10 +1736,13 @@ def ingest_wechat_url(
         html_text, final = _fetch(client, target, allow_hosts={WECHAT_HOST})
         if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
             raise ExtractFailedError("微信文章地址无效")
+        if _looks_like_wechat_captcha(final, html_text):
+            raise WechatCaptchaError()
 
         # 微信对数据中心 IP 时常回一个「环境异常」页：HTTP 200、正文完整、就是没有
         # 发布时间。读不出 publish 就等于拿不到 trade_date，往下走必然失败，所以在
         # 这里再试一次 curl_cffi —— **仅一次**，命中就用它的 HTML 续跑原流程。
+        # 验证码页不走这次回退，也不交给付费的 DeepSeek Fetch。
         # 反过来，如果页面看起来被挡、但 httpx 已经读出了发布时间，就不再重拉：
         # 结果已经能用，多一次外部请求只会增加失败面。
         if wechat_published_at(html_text) is None or _wechat_html_looks_blocked(html_text):
@@ -1513,7 +1777,7 @@ def ingest_wechat_url(
             channel="wechat",
         )
         page = parse_wechat_article(html_text, resolved, ref)
-        result = _store_page(client, page)
+        result = _store_page(client, page, root=root, discover_via="manual_url")
         _mark_manual_backfill(root, page)
         _note_stored_recovery(root)
         return result
@@ -1544,18 +1808,32 @@ def _normalize_wechat_input(url: str) -> str:
     return text.split("#", 1)[0]
 
 
-def _ingest_ref(client, ref: ArticleRef) -> dict:
+def _ingest_ref(
+    client,
+    ref: ArticleRef,
+    *,
+    root: Path | None = None,
+    stat_day: date | None = None,
+    discover_via: str = "",
+) -> dict:
+    stat = trade_date_from_title(ref.title, ref.published_at)
+    if stat_day is not None and stat and stat != stat_day.isoformat():
+        raise ArticleMissingError("netease_stale", _outcome_detail(["netease_stale"], newest=stat))
+    if stat and stat in _stored_flow_dates():
+        return _result(found=True, duplicate=1)
     if ref.channel == "netease" and ref.article_id and _known(f"netease:{ref.article_id}"):
-        _mark_ok()
-        return _result(found=True)
+        return _result(found=True, duplicate=1)
     try:
         page = _load_page(client, ref)
+    except WechatCaptchaError:
+        raise
     except Exception as exc:
         # 标题不对说明拿到的不是申赎稿，不能拿列表标题去兜底。
+        # 验证码不交给 DeepSeek Fetch：那是收费接口，也绕不过验证码。
         page = None if "标题" in str(exc) else _fallback_page(ref, exc)
         if page is None:
             raise
-    return _store_page(client, page)
+    return _store_page(client, page, root=root, discover_via=discover_via or ref.channel)
 
 
 def _fallback_page(ref: ArticleRef, exc: BaseException) -> ArticlePage | None:
@@ -1564,7 +1842,7 @@ def _fallback_page(ref: ArticleRef, exc: BaseException) -> ArticlePage | None:
     列表里的搜狗 ``/link`` 不是微信长链。跳转脚本恢复出的地址挂在异常上。
     没有 __biz/mid/sn 时，改用 src/signature 临时链。
     """
-    if ref.channel != "wechat" or not fallback_ready():
+    if isinstance(exc, WechatCaptchaError) or ref.channel != "wechat" or not fallback_ready():
         return None
     carried = str(getattr(exc, "article_url", "") or "")
     url = sanitize_wechat_url(ref.url) or sanitize_wechat_url(carried)
@@ -1677,19 +1955,29 @@ def _fetch_check(url: str, root: Path) -> int:
     return 0
 
 
-def _store_page(client, page: ArticlePage) -> dict:
+def _store_page(
+    client,
+    page: ArticlePage,
+    *,
+    root: Path | None = None,
+    discover_via: str = "",
+) -> dict:
     source_id = f"{page.channel}:{page.article_id}"
-    if _known(source_id):
-        _mark_ok()
-        return _result(found=True)
+    stat = trade_date_from_title(page.title, page.published_at)
+    # 同一统计日、同一公众号只留一行。网易 docid 和微信 sn 不能各算一篇。
+    if (stat and stat in _stored_flow_dates()) or _known(source_id):
+        return _result(found=True, duplicate=1)
     extracted, via = _extract_page(client, page)
     stocks, sectors = flow_mentions(extracted)
     images = page.images[:MAX_STORED_IMAGES]
+    trade_date = str(extracted.get("trade_date") or stat or "")
     raw = _fit_raw(
         {
             "article_id": page.article_id,
             "channel": page.channel,
-            "trade_date": extracted.get("trade_date") or "",
+            "account": ACCOUNT,
+            "discover_via": discover_via or page.channel,
+            "trade_date": trade_date,
             "images": images,
             "via": via,
             "extracted": extracted,
@@ -1715,44 +2003,86 @@ def _store_page(client, page: ArticlePage) -> dict:
             )
         ]
     )
-    _mark_ok()
+    inserted = int(saved.get("inserted") or 0)
+    if inserted:
+        _mark_ok()
+        if root is not None and trade_date:
+            _note_probe(
+                root,
+                request_ok=True,
+                outcome="inserted",
+                stat=trade_date,
+                article=True,
+            )
     return _result(
         found=True,
-        inserted=int(saved.get("inserted") or 0),
+        inserted=inserted,
         duplicate=int(saved.get("duplicate") or 0),
     )
 
 
-def _resolve_ref(client, now: datetime, root: Path, expect: bool) -> tuple[ArticleRef, str]:
-    """期待新稿时先按标题搜搜狗，网易号只在搜不到时兜底。"""
+def _resolve_ref(
+    client,
+    now: datetime,
+    root: Path,
+    expect: bool,
+    stat: date,
+) -> tuple[ArticleRef, str]:
+    """已发现的链接先重试正文，不占搜狗额度。没有链接时才搜标题。
+
+    网易号只收同一统计日。列表更旧时记成过时，不用来冒充这一天。
+    ``expect`` 只决定稍后要不要告警，不改变选稿。
+    """
+    del expect
+    saved = _discovered_ref(root, stat.isoformat())
+    if saved is not None:
+        return saved, "discovered"
     sogou_error: Exception | None = None
-    if expect:
-        try:
-            found = _search_live_sogou(client, now, root, expected_trade_day(now))
-        except Exception as exc:  # noqa: BLE001 — 搜狗失败改看网易号
-            sogou_error = exc
-            found = None
-        if found is not None:
-            return found, "sogou"
+    sogou_note = ""
+    try:
+        found, sogou_note = _search_live_sogou(client, now, root, stat)
+    except Exception as exc:  # noqa: BLE001 — 搜狗失败改看网易号
+        sogou_error = exc
+        found = None
+        sogou_note = "sogou_error"
+    if found is not None:
+        _remember_url(root, found, stat.isoformat(), via="sogou")
+        return found, "sogou"
     refs, netease_error = _netease_refs(client)
-    chosen, reason = choose_flow_article(refs, day=now.date(), expect=expect)
-    if chosen is not None and (reason == "today" or not expect):
-        return chosen, reason
+    chosen = select_stat_article(refs, stat)
+    if chosen is not None:
+        _remember_url(root, chosen, stat.isoformat(), via="netease")
+        return chosen, "netease"
+    notes = [item for item in (sogou_note,) if item and item not in {"sogou_hit", "sogou_error"}]
+    newest = newest_flow_stat(refs)
+    if newest and newest < stat.isoformat():
+        notes.append("netease_stale")
+    elif netease_error is not None:
+        notes.append("netease_error")
+    if not notes:
+        notes.append("unconfirmed")
+    detail = _outcome_detail(notes, newest=newest)
     if netease_error is not None and sogou_error is not None:
-        raise RuntimeError(
-            f"{_public_error(netease_error)}；{_public_error(sogou_error)}"
-        ) from sogou_error
-    if sogou_error is not None:
+        raise RuntimeError(f"{_public_error(netease_error)}；{_public_error(sogou_error)}") from sogou_error
+    if sogou_error is not None and "netease_stale" not in notes and chosen is None and not refs:
         raise sogou_error
-    if netease_error is not None:
+    if netease_error is not None and not notes:
         raise netease_error
-    raise ArticleMissingError()
+    raise ArticleMissingError("+".join(notes), detail)
 
 
-def _search_live_sogou(client, now: datetime, root: Path, trade_day: date) -> ArticleRef | None:
-    """按「公众号 + 标题」搜文章。额度用完时返回 None，不当成故障。"""
+def _search_live_sogou(
+    client,
+    now: datetime,
+    root: Path,
+    trade_day: date,
+) -> tuple[ArticleRef | None, str]:
+    """按「公众号 + 标题」搜文章。额度用完时不发请求。
+
+    返回 (稿件, 结果类别)。类别用来区分 200 空页、页面改版、验证码和额度。
+    """
     if not _consume_live_sogou(root, now):
-        return None
+        return None, "sogou_quota"
     title = flow_title_for(trade_day)
     html_text, _final = _fetch(
         client,
@@ -1761,15 +2091,26 @@ def _search_live_sogou(client, now: datetime, root: Path, trade_day: date) -> Ar
         params={"type": "2", "query": f"{ACCOUNT} {title}", "ie": "utf8"},
     )
     wanted = trade_day.isoformat()
+    try:
+        parsed = parse_sogou_articles(html_text, now)
+    except RuntimeError as exc:
+        if "验证码" in str(exc):
+            return None, "sogou_captcha"
+        raise
     matches = [
         ref
-        for ref in parse_sogou_articles(html_text, now)
+        for ref in parsed
         if trade_date_from_title(ref.title, ref.published_at) == wanted
     ]
-    if not matches:
-        return None
-    matches.sort(key=lambda ref: ref.published_at, reverse=True)
-    return matches[0]
+    if matches:
+        matches.sort(key=lambda ref: ref.published_at, reverse=True)
+        return matches[0], "sogou_hit"
+    kind = classify_sogou_page(html_text)
+    if kind == "captcha":
+        return None, "sogou_captcha"
+    if kind == "html_changed":
+        return None, "sogou_html_changed"
+    return None, "sogou_empty"
 
 
 def _netease_refs(client) -> tuple[list[ArticleRef], Exception | None]:
@@ -1798,9 +2139,17 @@ def _load_page(client, ref: ArticleRef) -> ArticlePage:
         raise _invalid_wechat(recovered) from exc
     if (urlparse(final).hostname or "").lower() != WECHAT_HOST:
         raise _invalid_wechat(_recovered_url(client))
+    if _looks_like_wechat_captcha(final, html_text):
+        exc = WechatCaptchaError()
+        _attach_article_url(exc, ref.url or _recovered_url(client))
+        raise exc
     try:
         page = parse_wechat_article(html_text, resolve_wechat_article_url(html_text, final), ref)
     except ExtractFailedError as exc:
+        if "缺少 id" in str(exc) and _looks_like_wechat_captcha(final, html_text):
+            captcha = WechatCaptchaError()
+            _attach_article_url(captcha, ref.url or _recovered_url(client))
+            raise captcha from exc
         _attach_article_url(exc, _recovered_url(client) or final)
         raise
     # 搜狗时间有时是标题里的交易日。页面上的发布时间才是告警日那天的早晨。
@@ -2004,18 +2353,29 @@ def _post_vision(client, body: dict, key: str) -> dict:
     raise VisionRequestTimeoutError("视觉模型请求失败")
 
 
-def _missing(now: datetime, root: Path, expect: bool) -> dict:
+def _missing(
+    now: datetime,
+    root: Path,
+    expect: bool,
+    stat: date,
+    outcome: str,
+    detail: str,
+) -> dict:
+    """交易日早晨才提醒。文案写明卡在哪一步，不把未确认说成没发文。"""
+    text = detail or _OUTCOME_TEXT["unconfirmed"]
+    level = logging.WARNING if expect else logging.INFO
+    logger.log(level, "ETF领航者申赎尚未确认是否发布：%s", text)
+    _note_probe(root, request_ok=True, outcome=outcome or "unconfirmed", stat=stat.isoformat())
+    if not expect:
+        return _result(pending=not _hard_deadline(now), outcome=outcome)
     if _hard_deadline(now):
-        if not expect:
-            return _result()
-        logger.warning("ETF领航者当日文章缺失")
-        _mark_err(MISSING_TEXT)
-        _alert(root, now.date(), MISSING_ALERT, kind="hard")
-        return _result()
-    if expect and _soft_due(now):
-        _mark_err(SOFT_MISSING_TEXT)
-        _alert(root, now.date(), SOFT_MISSING_ALERT, kind="soft")
-    return _result(pending=True)
+        _mark_err(text)
+        _alert(root, now.date(), _unconfirmed_alert(stat, text, hard=True), kind="hard")
+        return _result(outcome=outcome)
+    if _soft_due(now):
+        _mark_err(text)
+        _alert(root, now.date(), _unconfirmed_alert(stat, text, hard=False), kind="soft")
+    return _result(pending=True, outcome=outcome)
 
 
 def _fetch(
@@ -2351,24 +2711,34 @@ def _alert_sent(root: Path, day: date, kind: str) -> bool:
 
 
 def _article_alert_day(title: str, published: datetime) -> date:
-    """告警记在发布日早晨。搜狗若把标题里的交易日当成发布时间，告警日是次日。"""
+    """告警记在发布日早晨。搜狗若把标题里的交易日当成发布时间，告警日是下一交易日。"""
+    days = _recovery_days(title, published)
+    return min(days) if days else published.astimezone(CN_TZ).date()
+
+
+def _recovery_days(title: str, published: datetime) -> set[date]:
+    """提醒文件可能记在实际发布日，也可能记在统计日之后的下一个交易日早晨。"""
     if published.tzinfo is None:
         published = published.replace(tzinfo=CN_TZ)
     published_day = published.astimezone(CN_TZ).date()
+    days = {published_day}
     trade = trade_date_from_title(title, published)
     if not trade:
-        return published_day
+        return days
     trade_day = date.fromisoformat(trade)
+    due = next_business_day(trade_day)
+    if due is not None:
+        days.add(due)
     if published_day <= trade_day:
-        return trade_day + timedelta(days=1)
-    return published_day
+        days.add(trade_day + timedelta(days=1))
+    return days
 
 
 def _note_stored_recovery(root: Path) -> None:
-    """暂缺或失败之后，对应交易日的稿已经入库，就补发一条不带数字的「已补采」。
+    """暂缺或失败之后，对应统计日的稿已经入库，就补发一条不带数字的「已补采」。
 
-    回补和原文链接不经过当轮 ``inserted`` 判断。列表时间落在交易日而不是
-    发布日早晨时，仍按标题对上告警文件。
+    回补和原文链接不经过当轮 ``inserted`` 判断。告警若记在下一交易日早晨，
+    列表时间落在统计日或发布日时仍能对上。
     """
     from app.news.service import get_store
 
@@ -2376,17 +2746,15 @@ def _note_stored_recovery(root: Path) -> None:
         published = parse_time(row["published_at"])
         if published is None:
             continue
-        day = _article_alert_day(str(row["title"] or ""), published)
-        if not (_alert_sent(root, day, "soft") or _alert_sent(root, day, "hard")):
-            continue
-        _alert(root, day, RECOVERED_ALERT, kind="recovered")
+        for day in _recovery_days(str(row["title"] or ""), published):
+            if not (_alert_sent(root, day, "soft") or _alert_sent(root, day, "hard")):
+                continue
+            _alert(root, day, RECOVERED_ALERT, kind="recovered")
 
 
 def _collection_satisfied(now: datetime, expect: bool) -> bool:
-    if _published_on(now.date()):
-        return True
-    if not expect:
-        return False
+    """目标统计日已经有这一公众号的稿，才算这一轮不用再抓。"""
+    del expect
     return expected_trade_day(now).isoformat() in _stored_flow_dates()
 
 
@@ -2444,6 +2812,7 @@ def _result(
     inserted: int = 0,
     duplicate: int = 0,
     error: str = "",
+    outcome: str = "",
 ) -> dict:
     payload = {
         "found": found,
@@ -2455,17 +2824,9 @@ def _result(
         payload["skipped"] = True
     if error:
         payload["error"] = error
+    if outcome:
+        payload["outcome"] = outcome
     return payload
-
-
-def _published_on(day: date) -> bool:
-    from app.news.service import get_store
-
-    for row in get_store().recent_for_feed(SOURCE, 8):
-        published = parse_time(row["published_at"])
-        if published is not None and _on_day(published, day):
-            return True
-    return False
 
 
 def _known(source_id: str) -> bool:
@@ -2477,7 +2838,14 @@ def _known(source_id: str) -> bool:
 def _mark_ok() -> None:
     from app.news.service import get_store
 
-    get_store().mark_health(SOURCE, ok=True, auth_state="ok")
+    get_store().mark_health(SOURCE, ok=True, auth_state="ok", advance_ok=True)
+
+
+def _mark_present() -> None:
+    """统计日已经在库里。清掉上一轮错误，但不把 last_ok_at 推进成「又入库了一篇」。"""
+    from app.news.service import get_store
+
+    get_store().mark_health(SOURCE, ok=True, auth_state="ok", advance_ok=False)
 
 
 def _mark_err(message: str) -> None:
