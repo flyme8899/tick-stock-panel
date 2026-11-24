@@ -1890,8 +1890,11 @@ def test_discovery_polls_today_title_until_the_sogou_cap(news_db):
         )
         assert saved["pending"] is True
     queries = [params for params in client.params if params and params.get("type") == "2"]
+    dated = [item for item in queries if "10月9日ETF基金申购和赎回" in str(item.get("query") or "")]
+    broad = [item for item in queries if item.get("query") == "ETF领航者 ETF基金申购和赎回"]
     assert len(queries) == 6
-    assert all("10月9日ETF基金申购和赎回" in str(item.get("query") or "") for item in queries)
+    assert len(dated) == 5
+    assert len(broad) == 1
     assert not any(params and params.get("type") == "1" for params in client.params)
     for hour, minute in ((8, 30), (9, 0)):
         saved = _collect(
@@ -1983,6 +1986,12 @@ def test_recovery_when_sogou_clock_is_the_trade_date(news_db, monkeypatch):
     epoch = int(datetime(2026, 10, 9, 7, 40, tzinfo=CN_TZ).timestamp())
     client.sogou = _sogou_hit("10月9日ETF基金申购和赎回", epoch)
     client.wechat = _text("wechat_article.html")
+    budget = json.loads((news_db / "news" / "etf_sogou_budget.json").read_text(encoding="utf-8"))
+    budget["broad"] = True
+    budget["broad_pending"] = False
+    (news_db / "news" / "etf_sogou_budget.json").write_text(
+        json.dumps(budget), encoding="utf-8"
+    )
     saved = _collect(
         client,
         news_db,
@@ -2343,9 +2352,9 @@ def test_sogou_empty_and_html_change_are_not_unpublished(news_db):
     changed_result = _collect(
         Client(media=_text("netease_media_stale.html"), sogou=changed),
         news_db,
-        datetime(2026, 10, 12, 8, 0, tzinfo=CN_TZ),
+        datetime(2026, 10, 13, 8, 0, tzinfo=CN_TZ),
         today_trading=True,
-        yesterday_trading=False,
+        yesterday_trading=True,
     )
     assert "sogou_html_changed" in changed_result["outcome"]
 
@@ -2552,3 +2561,178 @@ def test_manual_url_still_ingests_and_dedups_same_stat_day(news_db):
     assert netease.posts == []
     assert len(client.posts) == posts
     assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 1
+
+
+def _vision_on(day: str) -> dict:
+    payload = json.loads(_text("vision_ok.json"))
+    message = payload["choices"][0]["message"]
+    message["content"] = message["content"].replace("1999-01-01", day)
+    return payload
+
+
+def test_resolve_stat_date_covers_title_images_and_calendar_edges():
+    from app.news.etf_flow import resolve_stat_date
+
+    published = datetime(2026, 10, 10, 7, 38, tzinfo=CN_TZ)
+    agreed = resolve_stat_date(
+        "10月9日ETF基金申购和赎回",
+        published,
+        ["2026-10-09", "2026-10-09"],
+        [],
+    )
+    assert agreed["trade_date"] == "2026-10-09"
+    assert agreed["basis"] == "title_and_images"
+    assert agreed["review"] is False
+
+    one_image = resolve_stat_date(
+        "10月9日ETF基金申购和赎回",
+        published,
+        ["2026-10-08"],
+        [],
+    )
+    assert one_image["trade_date"] == "2026-10-09"
+    assert one_image["basis"] == "title"
+    assert one_image["image_trade_dates"] == ["2026-10-08"]
+
+    missing = resolve_stat_date("10月9日ETF基金申购和赎回", published, ["", "not-a-date"], [])
+    assert missing["trade_date"] == "2026-10-09"
+    assert missing["basis"] == "title"
+
+    conflict = resolve_stat_date(
+        "10月9日ETF基金申购和赎回",
+        published,
+        ["2026-10-08", "2026-10-08", "2026-10-07", "2026-10-07"],
+        [],
+    )
+    assert conflict["review"] is True
+    assert conflict["trade_date"] == ""
+
+    monday = datetime(2026, 11, 16, 7, 21, tzinfo=CN_TZ)
+    friday = resolve_stat_date("11月13日ETF基金申购和赎回", monday, [], [])
+    assert friday["trade_date"] == "2026-11-13"
+    assert friday["trade_date"] != "2026-11-15"
+
+    new_year = datetime(2026, 1, 2, 7, 40, tzinfo=CN_TZ)
+    rolled = resolve_stat_date("12月31日ETF基金申购和赎回", new_year, ["2026-12-31", "2026-12-31"], [])
+    assert rolled["trade_date"] == "2025-12-31"
+    assert rolled["basis"] == "title"
+
+    holiday_publish = datetime(2026, 10, 8, 7, 30, tzinfo=CN_TZ)
+    holiday = resolve_stat_date("9月30日ETF基金申购和赎回", holiday_publish, [], [])
+    assert holiday["trade_date"] == "2026-09-30"
+    assert holiday["trade_date"] != "2026-10-07"
+
+
+def test_wrong_july_title_keeps_november_image_date_and_audit(news_db):
+    from app.news.etf_flow import ArticlePage, DateReviewError, _store_page, _stored_flow_dates
+
+    published = datetime(2026, 11, 24, 7, 30, tzinfo=CN_TZ)
+    page = ArticlePage(
+        article_id="c7b9e4de756424ae3f82f70033759bff",
+        title="7月3日ETF基金申购和赎回",
+        url=(
+            "https://mp.weixin.qq.com/s?__biz=abc&mid=2247490369"
+            "&idx=1&sn=c7b9e4de756424ae3f82f70033759bff"
+        ),
+        published_at=published,
+        images=[
+            "https://mmbiz.qpic.cn/table1.jpg",
+            "https://mmbiz.qpic.cn/table2.jpg",
+            "https://mmbiz.qpic.cn/table3.jpg",
+            "https://mmbiz.qpic.cn/table5.jpg",
+        ],
+        channel="wechat",
+    )
+    client = Client(media="", vision=_vision_on("2026-11-23"))
+    saved = _store_page(client, page, root=news_db, discover_via="manual_url")
+    assert saved["inserted"] == 1
+    row = get_store()._conn.execute(
+        "SELECT title, raw_json FROM news_items"
+    ).fetchone()
+    assert row["title"] == "7月3日ETF基金申购和赎回"
+    raw = json.loads(row["raw_json"])
+    assert raw["trade_date"] == "2026-11-23"
+    assert raw["stat_decision"]["basis"] == "image_consensus"
+    assert raw["stat_decision"]["title_trade_date"] == "2026-07-03"
+    assert raw["stat_decision"]["image_trade_dates"].count("2026-11-23") == 4
+    assert "2026-11-23" in _stored_flow_dates()
+    assert "2026-07-03" not in _stored_flow_dates()
+
+    bare = ArticlePage(
+        article_id="another-sn",
+        title="7月3日ETF基金申购和赎回",
+        url="https://mp.weixin.qq.com/s?__biz=abc&mid=1&idx=1&sn=another-sn",
+        published_at=published,
+        images=["https://mmbiz.qpic.cn/table1.jpg", "https://mmbiz.qpic.cn/table2.jpg"],
+        channel="wechat",
+    )
+    with pytest.raises(DateReviewError, match="待核对"):
+        _store_page(
+            Client(media="", vision=_vision_on("1999-01-01")),
+            bare,
+            root=news_db,
+            discover_via="manual_url",
+        )
+    assert get_store()._conn.execute("SELECT COUNT(*) FROM news_items").fetchone()[0] == 1
+
+
+def test_neighbor_article_links_do_not_replace_this_mid():
+    html = """
+    <a id="js_preview_article_prev" href="https://mp.weixin.qq.com/s?__biz=abc&amp;mid=111&amp;idx=1&amp;sn=aaaaaaaa">上一篇</a>
+    <h1 id="activity-name">11月20日ETF基金申购和赎回</h1>
+    <script>var mid = "2247490359"; var sn = "e1f08dab755711062595f0552c8a6f2f";</script>
+    <div id="js_content">统计日见配图</div>
+    <a id="js_preview_article_next" href="https://mp.weixin.qq.com/s?__biz=abc&amp;mid=999&amp;idx=1&amp;sn=bbbbbbbb">下一篇 7月3日</a>
+    """
+    resolved = resolve_wechat_article_url(html, "https://mp.weixin.qq.com/s/xR91IFVkRvK-iPR5OsuVfA")
+    assert "mid=2247490359" in resolved
+    assert "sn=e1f08dab755711062595f0552c8a6f2f" in resolved
+    assert "mid=111" not in resolved
+    assert "mid=999" not in resolved
+    published = datetime(2026, 11, 23, 7, 21, tzinfo=CN_TZ)
+    from app.news.etf_flow import body_trade_dates
+
+    assert body_trade_dates(html, published) == []
+
+
+def test_broad_sogou_search_can_confirm_a_mistitled_article(news_db):
+    published = datetime(2026, 11, 24, 7, 40, tzinfo=CN_TZ)
+    epoch = int(published.timestamp())
+    wrong = _sogou_hit("7月3日ETF基金申购和赎回", epoch)
+
+    class Switch(Client):
+        def get(self, url, params=None, headers=None):
+            query = str((params or {}).get("query") or "")
+            if "7月" in query or query == "ETF领航者 ETF基金申购和赎回":
+                self.sogou = wrong if "ETF基金申购和赎回" == query.split(" ", 1)[-1] else "<ul></ul>"
+                if query == "ETF领航者 ETF基金申购和赎回":
+                    self.sogou = wrong
+                elif "11月23日" in query:
+                    self.sogou = "<ul class='news-list2'></ul>"
+            return super().get(url, params=params, headers=headers)
+
+    client = Switch(
+        media=_text("netease_media_stale.html"),
+        sogou="<ul class='news-list2'></ul>",
+        wechat=_text("wechat_article.html").replace("10月9日", "7月3日"),
+        vision=_vision_on("2026-11-23"),
+    )
+    morning = datetime(2026, 11, 24, 7, 30, tzinfo=CN_TZ)
+    first = _collect(client, news_db, morning, today_trading=True, yesterday_trading=True)
+    assert first["inserted"] == 0
+    later = _collect(
+        client,
+        news_db,
+        datetime(2026, 11, 24, 7, 40, tzinfo=CN_TZ),
+        today_trading=True,
+        yesterday_trading=True,
+    )
+    assert later["inserted"] == 1
+    row = get_store()._conn.execute("SELECT title, raw_json FROM news_items").fetchone()
+    assert row["title"] == "7月3日ETF基金申购和赎回"
+    raw = json.loads(row["raw_json"])
+    assert raw["trade_date"] == "2026-11-23"
+    assert raw["stat_decision"]["basis"] == "image_consensus"
+    queries = [params.get("query") for params in client.params if params and params.get("type") == "2"]
+    assert "ETF领航者 11月23日ETF基金申购和赎回" in queries
+    assert "ETF领航者 ETF基金申购和赎回" in queries

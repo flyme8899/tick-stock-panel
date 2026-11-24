@@ -234,6 +234,13 @@ class WechatCaptchaError(ExtractFailedError):
         super().__init__(message)
 
 
+class DateReviewError(ExtractFailedError):
+    """标题和配图日期对不上，或配图之间互相冲突。先不入库。"""
+
+    def __init__(self, message: str = "标题日期和配图日期对不上，未入库，待核对") -> None:
+        super().__init__(message)
+
+
 class VisionRequestTimeoutError(ExtractFailedError):
     """单张图的视觉请求超时，重试后仍失败。其余图片可以继续。"""
 
@@ -259,6 +266,7 @@ class ArticlePage:
     published_at: datetime
     images: list[str]
     channel: str
+    body_dates: tuple[str, ...] = ()
 
 
 def _clock(now: datetime) -> dt_time:
@@ -385,24 +393,172 @@ def trade_date_from_title(title: str, published: datetime) -> str:
     return guessed.isoformat()
 
 
-def apply_trade_date(title: str, published: datetime, extracted: dict) -> dict:
-    """标题里的月日是交易日，优先于模型自己填的日期。
+# 统计日应落在发布日当天或之前的这段日子里。周五稿周一见是 3 天，长假大约两周。
+# 更早的日期（例如把 11 月稿标成 7 月 3 日）不能单靠标题写进库。
+MAX_STAT_LAG_DAYS = 21
+DATE_REVIEW_ALERT = (
+    "TSP 资讯采集：ETF领航者标题日期和配图日期对不上，未入库，待人工核对。"
+    "不能据此判断没发文。"
+)
+_NEIGHBOR_BLOCK = re.compile(
+    r"<(?:div|section|a)\b[^>]*\b(?:id|class)\s*=\s*['\"][^'\"]*"
+    r"(?:pre_article|next_article|preview_article)[^'\"]*['\"][^>]*>.*?</(?:div|section|a)>",
+    re.I | re.S,
+)
 
-    标题推不出日期时，丢掉晚于发布日的模型日期，避免把尚未发生的交易日记进资讯。
-    """
-    out = dict(extracted)
-    derived = trade_date_from_title(title, published)
-    if derived:
-        out["trade_date"] = derived
-        return out
-    model = str(out.get("trade_date") or "")
+
+def _stat_within_lag(day: date, published: datetime) -> bool:
     publish_day = published.astimezone(CN_TZ).date()
+    if day > publish_day:
+        return False
+    return (publish_day - day).days <= MAX_STAT_LAG_DAYS
+
+
+def _coerce_stat_date(value: str, published: datetime) -> str:
+    """只收下不晚于发布日、并且离发布日不太远的日期。不拿发布日减一天来填。"""
+    text = _trade_date(value)
+    if not text:
+        return ""
     try:
-        parsed = date.fromisoformat(model) if model else None
+        parsed = date.fromisoformat(text)
     except ValueError:
-        parsed = None
-    if parsed is None or parsed > publish_day:
-        out["trade_date"] = ""
+        return ""
+    if not _stat_within_lag(parsed, published):
+        return ""
+    return text
+
+
+def body_trade_dates(html_text: str, published: datetime) -> list[str]:
+    """只从正文区域读日期。上一篇/下一篇链接里的月日不算这篇的统计日。"""
+    text = _NEIGHBOR_BLOCK.sub(" ", html_text or "")
+    region = _region(
+        text,
+        'id="js_content"',
+        ('id="js_tags"', 'id="js_pc_qr_code"', 'class="rich_media_tool"'),
+    )
+    if not region:
+        region = ""
+        match = re.search(r'<div class="post_body">(.*?)</div>', text, re.S)
+        if match:
+            region = match.group(1)
+    plain = re.sub(r"<[^>]+>", " ", region)
+    found: list[str] = []
+    for match in re.finditer(r"(20\d{2})-(\d{2})-(\d{2})", plain):
+        coerced = _coerce_stat_date(
+            f"{match.group(1)}-{match.group(2)}-{match.group(3)}",
+            published,
+        )
+        if coerced:
+            found.append(coerced)
+    for match in re.finditer(r"(\d{1,2})月(\d{1,2})日", plain):
+        synthetic = f"{match.group(1)}月{match.group(2)}日ETF基金申购和赎回"
+        coerced = _coerce_stat_date(trade_date_from_title(synthetic, published), published)
+        if coerced:
+            found.append(coerced)
+    return found
+
+
+def resolve_stat_date(
+    title: str,
+    published: datetime,
+    image_dates: list[str] | None = None,
+    body_dates: list[str] | None = None,
+) -> dict:
+    """决定统计日，并留下标题、配图和正文各自看到的日期。
+
+    至少两张配图写成同一个合法日期时，这个日期可以盖过错误标题。
+    只有一张图给出不同日期时，当成模型幻觉，不盖过落在发布窗口里的标题。
+    配图彼此冲突，或标题离发布日太远又没有配图共识时，待核，不写日期。
+    不用「发布日减一天」。
+    """
+    raw_title = trade_date_from_title(title, published)
+    title_date = ""
+    if raw_title and _stat_within_lag(date.fromisoformat(raw_title), published):
+        title_date = raw_title
+    images = [
+        coerced
+        for raw in (image_dates or [])
+        if (coerced := _coerce_stat_date(str(raw or ""), published))
+    ]
+    body = [
+        coerced
+        for raw in (body_dates or [])
+        if (coerced := _coerce_stat_date(str(raw or ""), published))
+    ]
+    counts: dict[str, int] = {}
+    for item in images:
+        counts[item] = counts.get(item, 0) + 1
+    consensus = [day for day, count in counts.items() if count >= 2]
+    decision = {
+        "title": title,
+        "title_trade_date": raw_title,
+        "image_trade_dates": images,
+        "body_trade_dates": body,
+        "basis": "undated",
+        "trade_date": "",
+        "review": False,
+    }
+    if len(consensus) > 1:
+        decision["basis"] = "image_conflict"
+        decision["review"] = True
+        return decision
+    if len(consensus) == 1:
+        chosen = consensus[0]
+        if body and any(item != chosen for item in body):
+            decision["basis"] = "body_conflict"
+            decision["review"] = True
+            return decision
+        if title_date and title_date != chosen:
+            decision["basis"] = "image_consensus"
+        elif title_date == chosen and body:
+            decision["basis"] = "title_images_body"
+        elif title_date == chosen:
+            decision["basis"] = "title_and_images"
+        elif body:
+            decision["basis"] = "images_and_body"
+        else:
+            decision["basis"] = "image_consensus"
+        decision["trade_date"] = chosen
+        return decision
+    if title_date:
+        decision["trade_date"] = title_date
+        decision["basis"] = "title"
+        return decision
+    distinct = list(dict.fromkeys(images))
+    if len(distinct) == 1:
+        decision["trade_date"] = distinct[0]
+        decision["basis"] = "vision_single"
+        return decision
+    if len(distinct) > 1:
+        decision["basis"] = "image_conflict"
+        decision["review"] = True
+        return decision
+    if raw_title and not title_date:
+        decision["basis"] = "title_too_far"
+        decision["review"] = True
+    return decision
+
+
+def apply_trade_date(title: str, published: datetime, extracted: dict) -> dict:
+    """统计日以配图共识为准；标题只在没有可信冲突时使用。
+
+    调用方传入 ``image_trade_dates`` 时按每张图计票。没传时，把抽取结果里的
+    单个 ``trade_date`` 当作一张图的日期，因此一张图改不了标题。
+    """
+    image_dates = extracted.get("image_trade_dates")
+    if not isinstance(image_dates, list):
+        image_dates = [str(extracted.get("trade_date") or "")]
+    body_dates = extracted.get("body_trade_dates")
+    if not isinstance(body_dates, list):
+        body_dates = []
+    decision = resolve_stat_date(title, published, image_dates, body_dates)
+    out = {
+        key: value
+        for key, value in extracted.items()
+        if key not in {"image_trade_dates", "body_trade_dates", "_stat_decision"}
+    }
+    out["trade_date"] = "" if decision["review"] else decision["trade_date"]
+    out["_stat_decision"] = decision
     return out
 
 
@@ -523,6 +679,7 @@ def parse_netease_article(html_text: str, ref: ArticleRef) -> ArticlePage:
         published_at=ref.published_at,
         images=images[:MAX_STORED_IMAGES],
         channel="netease",
+        body_dates=tuple(body_trade_dates(html_text, ref.published_at)),
     )
 
 
@@ -857,16 +1014,25 @@ def _search_wechat_archive(
 
 
 def _stored_flow_dates() -> set[str]:
+    """已入库的统计日。优先用当初判定写下的 trade_date，标题写错时不再算成另一个日子。"""
     from app.news.service import get_store
 
     found: set[str] = set()
-    for title, published_at in get_store().source_titles(SOURCE):
+    for title, published_at, raw_text in get_store().source_flow_rows(SOURCE):
+        try:
+            payload = json.loads(raw_text) if raw_text else {}
+        except json.JSONDecodeError:
+            payload = {}
+        day = _trade_date(payload.get("trade_date")) if isinstance(payload, dict) else ""
+        if day:
+            found.add(day)
+            continue
         published = parse_time(published_at)
         if published is None:
             continue
-        day = trade_date_from_title(title, published)
-        if day:
-            found.add(day)
+        titled = trade_date_from_title(title, published)
+        if titled:
+            found.add(titled)
     return found
 
 
@@ -975,6 +1141,7 @@ def parse_wechat_article(html_text: str, final_url: str, ref: ArticleRef) -> Art
         published_at=ref.published_at,
         images=_image_urls(fragment)[:MAX_STORED_IMAGES],
         channel="wechat",
+        body_dates=tuple(body_trade_dates(html_text, ref.published_at)),
     )
 
 
@@ -1011,11 +1178,16 @@ def resolve_wechat_article_url(html_text: str, final_url: str) -> str:
     params = _wechat_query_params(final_url)
     text = html.unescape(html_text or "")
     text = text.replace("\\u0026", "&").replace("\\/", "/")
-    for match in re.finditer(r"https://mp\.weixin\.qq\.com/s\?[^\"'\s<>\\]+", text, re.I):
+    # 先用这篇自己的 var mid/sn。上一篇、下一篇链接里的 mid 只补空缺，不能盖过。
+    for key, value in _wechat_js_params(_NEIGHBOR_BLOCK.sub(" ", text)).items():
+        _fill_param(params, key, value)
+    for match in re.finditer(
+        r"https://mp\.weixin\.qq\.com/s\?[^\"'\s<>\\]+",
+        _NEIGHBOR_BLOCK.sub(" ", text),
+        re.I,
+    ):
         for key, value in _wechat_query_params(match.group(0)).items():
             _fill_param(params, key, value)
-    for key, value in _wechat_js_params(text).items():
-        _fill_param(params, key, value)
     if not params.get("sn") and not (params.get("mid") or "").isdigit():
         return (final_url or "").split("#", 1)[0][:500]
     if params.get("mid") and not params.get("idx"):
@@ -1489,6 +1661,7 @@ def _remember_url(
         "article_id": ref.article_id,
         "via": via or str(previous.get("via") or ref.channel),
         "discovered_at": str(previous.get("discovered_at") or _cn_now().isoformat(timespec="seconds")),
+        "published_at": ref.published_at.astimezone(CN_TZ).isoformat(timespec="seconds"),
         "last_error": error,
     }
     _write_json(_discovered_path(root), {"items": items})
@@ -1502,7 +1675,11 @@ def _discovered_ref(root: Path, stat: str) -> ArticleRef | None:
     title = str(raw.get("title") or "")
     if not url or not title:
         return None
-    published = parse_time(raw.get("discovered_at")) or _cn_now()
+    published = (
+        parse_time(raw.get("published_at"))
+        or parse_time(raw.get("discovered_at"))
+        or _cn_now()
+    )
     return ArticleRef(
         article_id=str(raw.get("article_id") or ""),
         title=title,
@@ -1573,6 +1750,8 @@ def collect_etf_flow(
         return _missing(now, root, expect, stat, exc.outcome, exc.detail)
     except WechatCaptchaError as exc:
         return _captcha_result(now, root, expect, stat, exc)
+    except DateReviewError as exc:
+        return _date_review(now, root, expect, stat, exc)
     except ExtractFailedError as exc:
         message = _public_error(exc) or "表格抽取失败"
         logger.warning("ETF领航者表格抽取失败: %s", message)
@@ -1622,10 +1801,38 @@ def _captcha_result(
     return _result(pending=True, outcome="wechat_captcha")
 
 
+def _date_review(
+    now: datetime,
+    root: Path,
+    expect: bool,
+    stat: date,
+    exc: DateReviewError,
+) -> dict:
+    detail = _public_error(exc) or "标题日期和配图日期对不上，未入库，待核对"
+    logger.warning("ETF领航者统计日待核：%s", detail)
+    _note_probe(root, request_ok=True, outcome="date_review", stat=stat.isoformat())
+    if not expect:
+        return _result(pending=not _hard_deadline(now), outcome="date_review")
+    _mark_err(detail)
+    if _hard_deadline(now):
+        _alert(root, now.date(), DATE_REVIEW_ALERT, kind="hard")
+        return _result(outcome="date_review")
+    if _soft_due(now):
+        _alert(root, now.date(), DATE_REVIEW_ALERT, kind="soft")
+    return _result(pending=True, outcome="date_review")
+
+
 def _pull(client, now: datetime, root: Path, expect: bool, stat: date) -> dict:
     ref, reason = _resolve_ref(client, now, root, expect, stat)
     try:
-        result = _ingest_ref(client, ref, root=root, stat_day=stat, discover_via=reason)
+        result = _ingest_ref(
+            client,
+            ref,
+            root=root,
+            stat_day=stat,
+            discover_via=reason,
+            allow_title_mismatch=reason == "sogou_broad",
+        )
     except WechatCaptchaError:
         _remember_url(root, ref, stat.isoformat(), via=reason or ref.channel, error="wechat_captcha")
         alt = _netease_for_stat(client, stat)
@@ -1815,9 +2022,15 @@ def _ingest_ref(
     root: Path | None = None,
     stat_day: date | None = None,
     discover_via: str = "",
+    allow_title_mismatch: bool = False,
 ) -> dict:
     stat = trade_date_from_title(ref.title, ref.published_at)
-    if stat_day is not None and stat and stat != stat_day.isoformat():
+    if (
+        stat_day is not None
+        and stat
+        and stat != stat_day.isoformat()
+        and not allow_title_mismatch
+    ):
         raise ArticleMissingError("netease_stale", _outcome_detail(["netease_stale"], newest=stat))
     if stat and stat in _stored_flow_dates():
         return _result(found=True, duplicate=1)
@@ -1833,7 +2046,13 @@ def _ingest_ref(
         page = None if "标题" in str(exc) else _fallback_page(ref, exc)
         if page is None:
             raise
-    return _store_page(client, page, root=root, discover_via=discover_via or ref.channel)
+    return _store_page(
+        client,
+        page,
+        root=root,
+        discover_via=discover_via or ref.channel,
+        expected_stat="" if stat_day is None or not allow_title_mismatch else stat_day.isoformat(),
+    )
 
 
 def _fallback_page(ref: ArticleRef, exc: BaseException) -> ArticlePage | None:
@@ -1870,6 +2089,7 @@ def _extract_page(client, page: ArticlePage) -> tuple[dict, str]:
         if not page.images:
             raise ExtractFailedError("文章没有可抽取的表格图片")
         extracted = _call_vision(client, page.images)
+        extracted["body_trade_dates"] = list(page.body_dates)
         return apply_trade_date(page.title, page.published_at, extracted), "vision"
     except ExtractFailedError as exc:
         fallback = _fetch_fallback(client, page, reason=_public_error(exc))
@@ -1939,6 +2159,14 @@ def _fetch_check(url: str, root: Path) -> int:
         print(_public_error(exc))
         return 1
     extracted = apply_trade_date(title, _cn_now(), extracted)
+    decision = extracted.get("_stat_decision")
+    # 这条命令没有文章发布时间，不能把早于今天的标题当成「离发布日太远」。
+    if (
+        isinstance(decision, dict)
+        and decision.get("basis") == "title_too_far"
+        and decision.get("title_trade_date")
+    ):
+        extracted["trade_date"] = decision["title_trade_date"]
     print(
         json.dumps(
             {
@@ -1961,23 +2189,39 @@ def _store_page(
     *,
     root: Path | None = None,
     discover_via: str = "",
+    expected_stat: str = "",
 ) -> dict:
     source_id = f"{page.channel}:{page.article_id}"
     stat = trade_date_from_title(page.title, page.published_at)
-    # 同一统计日、同一公众号只留一行。网易 docid 和微信 sn 不能各算一篇。
-    if (stat and stat in _stored_flow_dates()) or _known(source_id):
+    # 同一篇文章或标题已经对上的统计日直接跳过，避免再打视觉模型。
+    # 标题离发布日太远时不能靠它跳过，否则错标题会挡住真正的统计日。
+    title_reliable = bool(stat) and _stat_within_lag(date.fromisoformat(stat), page.published_at)
+    if _known(source_id) or (title_reliable and stat in _stored_flow_dates()):
         return _result(found=True, duplicate=1)
     extracted, via = _extract_page(client, page)
+    decision = extracted.pop("_stat_decision", None)
+    if not isinstance(decision, dict):
+        decision = {}
+    if decision.get("review") or (expected_stat and extracted.get("trade_date") != expected_stat):
+        raise DateReviewError(
+            "标题日期和配图日期对不上，未入库，待核对："
+            f"标题 {decision.get('title_trade_date') or '无'}，"
+            f"判定 {extracted.get('trade_date') or '无'}"
+        )
     stocks, sectors = flow_mentions(extracted)
     images = page.images[:MAX_STORED_IMAGES]
-    trade_date = str(extracted.get("trade_date") or stat or "")
+    trade_date = str(extracted.get("trade_date") or "")
+    if trade_date and trade_date in _stored_flow_dates():
+        return _result(found=True, duplicate=1)
     raw = _fit_raw(
         {
             "article_id": page.article_id,
             "channel": page.channel,
             "account": ACCOUNT,
             "discover_via": discover_via or page.channel,
+            "title": page.title,
             "trade_date": trade_date,
+            "stat_decision": decision,
             "images": images,
             "via": via,
             "extracted": extracted,
@@ -2037,6 +2281,23 @@ def _resolve_ref(
     saved = _discovered_ref(root, stat.isoformat())
     if saved is not None:
         return saved, "discovered"
+    if _broad_ready(root, now):
+        broad = _search_broad_sogou(client, now, root, stat)
+        if broad is not None:
+            _remember_url(root, broad, stat.isoformat(), via="sogou_broad")
+            return broad, "sogou_broad"
+        refs, netease_error = _netease_refs(client)
+        chosen = select_stat_article(refs, stat)
+        if chosen is not None:
+            _remember_url(root, chosen, stat.isoformat(), via="netease")
+            return chosen, "netease"
+        notes = ["sogou_empty"]
+        newest = newest_flow_stat(refs)
+        if newest and newest < stat.isoformat():
+            notes.append("netease_stale")
+        elif netease_error is not None:
+            notes.append("netease_error")
+        raise ArticleMissingError("+".join(notes), _outcome_detail(notes, newest=newest))
     sogou_error: Exception | None = None
     sogou_note = ""
     try:
@@ -2048,6 +2309,8 @@ def _resolve_ref(
     if found is not None:
         _remember_url(root, found, stat.isoformat(), via="sogou")
         return found, "sogou"
+    if sogou_note == "sogou_empty":
+        _mark_broad_pending(root, now)
     refs, netease_error = _netease_refs(client)
     chosen = select_stat_article(refs, stat)
     if chosen is not None:
@@ -2111,6 +2374,74 @@ def _search_live_sogou(
     if kind == "html_changed":
         return None, "sogou_html_changed"
     return None, "sogou_empty"
+
+
+def _budget_state(root: Path) -> dict:
+    return _load_budget(root / "news" / "etf_sogou_budget.json")
+
+
+def _broad_ready(root: Path, now: datetime) -> bool:
+    """上一轮日期搜索是空的，并且已经隔开最小间隔，才用这一轮名额做一次不带日期的搜索。"""
+    state = _budget_state(root)
+    today = now.astimezone(CN_TZ).date().isoformat()
+    if state.get("date") != today or not state.get("broad_pending") or state.get("broad"):
+        return False
+    last = parse_time(state.get("last_at"))
+    if last is None:
+        return False
+    return now.astimezone(CN_TZ) - last >= SOGOU_MIN_GAP
+
+
+def _mark_broad_pending(root: Path, now: datetime) -> None:
+    path = root / "news" / "etf_sogou_budget.json"
+    state = _load_budget(path)
+    today = now.astimezone(CN_TZ).date().isoformat()
+    if state.get("date") != today or state.get("broad"):
+        return
+    state["broad_pending"] = True
+    _write_json(path, state)
+
+
+def _mark_broad_used(root: Path, now: datetime) -> None:
+    path = root / "news" / "etf_sogou_budget.json"
+    state = _load_budget(path)
+    today = now.astimezone(CN_TZ).date().isoformat()
+    if state.get("date") != today:
+        return
+    state["broad"] = True
+    state["broad_pending"] = False
+    _write_json(path, state)
+
+
+def _search_broad_sogou(client, now: datetime, root: Path, stat: date) -> ArticleRef | None:
+    """日期标题没搜到时，隔一轮再用一次额度搜不带日期的申赎稿。
+
+    只留下发布时间落在今天的一篇。标题对不上目标统计日时仍交给配图判定，
+    对不上就不入库。搜狗不返回这篇，或额度不够，就维持未确认。
+    """
+    del stat
+    if not _consume_live_sogou(root, now):
+        return None
+    _mark_broad_used(root, now)
+    html_text, _final = _fetch(
+        client,
+        SOGOU_SEARCH_URL,
+        allow_hosts={"weixin.sogou.com"},
+        params={"type": "2", "query": f"{ACCOUNT} ETF基金申购和赎回", "ie": "utf8"},
+    )
+    try:
+        parsed = parse_sogou_articles(html_text, now)
+    except RuntimeError:
+        return None
+    today = [
+        ref
+        for ref in parsed
+        if _on_day(ref.published_at, now.astimezone(CN_TZ).date())
+        and _FLOW_TITLE.search(_plain(ref.title))
+    ]
+    if len(today) != 1:
+        return None
+    return today[0]
 
 
 def _netease_refs(client) -> tuple[list[ArticleRef], Exception | None]:
@@ -2196,9 +2527,11 @@ def _call_vision(client, images: list[str]) -> dict:
             raise ExtractFailedError("视觉模型没有返回内容")
         raise ExtractFailedError("视觉模型没有抽出申赎数字")
     try:
-        return merge_flows(parts)
+        merged = merge_flows(parts)
     except (ValueError, KeyError, TypeError) as exc:
         raise ExtractFailedError("视觉模型没有抽出申赎数字") from exc
+    merged["image_trade_dates"] = [str(part.get("trade_date") or "") for part in parts]
+    return merged
 
 
 def vision_model_chain() -> list[str]:
