@@ -206,6 +206,18 @@ class NewsStore:
             ))
         return [(str(row["title"] or ""), str(row["published_at"] or "")) for row in rows]
 
+    def source_flow_rows(self, source: str) -> list[tuple[str, str, str]]:
+        """标题、发布时间和原文 JSON。有 trade_date 时以它为统计日。"""
+        with self._lock:
+            rows = list(self._conn.execute(
+                "SELECT title, published_at, raw_json FROM news_items WHERE source = ?",
+                (source,),
+            ))
+        return [
+            (str(row["title"] or ""), str(row["published_at"] or ""), str(row["raw_json"] or ""))
+            for row in rows
+        ]
+
     def existing_ids(self, source: str, source_ids: list[str]) -> set[str]:
         """已经入库的 source_id。调用方据此跳过抽取，避免重复消耗额度。"""
         wanted = [item for item in source_ids if item]
